@@ -31,6 +31,9 @@ const BUILT_IN_MENUS: [&str; 4] = ["File", "Edit", "Window", "Help"];
 const SETTINGS_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 /// Time the interface thread spends each frame answering calls of other threads.
 const CALL_BUDGET: Duration = Duration::from_millis(4);
+/// The same while the window is minimised: eframe then wakes the editor at most every 100 ms, and
+/// nothing is drawn, so most of that time can go to the calls.
+const MINIMISED_CALL_BUDGET: Duration = Duration::from_millis(80);
 /// After a call, how long to wait for the next one of a thread calling in a loop.
 const CALL_IDLE: Duration = Duration::from_micros(500);
 
@@ -498,13 +501,13 @@ impl Shell {
         }
     }
 
-    /// Answers the queued calls for at most `CALL_BUDGET` (T4), then delivers the answers due to
+    /// Answers the queued calls for at most `budget` (T4), then delivers the answers due to
     /// features. Returns whether the time ran out with calls perhaps still waiting.
-    fn serve_calls(&mut self) -> bool {
+    fn serve_calls(&mut self, budget: Duration) -> bool {
         let Some(requests) = self.requests.take() else {
             return false;
         };
-        let out_of_time = router::serve(&requests, CALL_BUDGET, CALL_IDLE, |request| self.answer(request));
+        let out_of_time = router::serve(&requests, budget, CALL_IDLE, |request| self.answer(request));
         self.requests = Some(requests);
         self.apply_reported();
         for (caller, call, result) in std::mem::take(&mut self.replies) {
@@ -768,7 +771,9 @@ impl eframe::App for Shell {
         self.collect_from_threads();
         self.apply_pending();
         self.apply_reported();
-        if self.serve_calls() {
+        let minimised = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+        let budget = if minimised { MINIMISED_CALL_BUDGET } else { CALL_BUDGET };
+        if self.serve_calls(budget) {
             // Calls were left for the next frame: it must come even if nothing else asks for it.
             ctx.request_repaint();
         }

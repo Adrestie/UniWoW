@@ -442,7 +442,7 @@ Acceptance:
 As built: the interface thread serves the calls of other threads for 4 ms per frame, waiting up
 to 0.5 ms after each call for the next one of a thread calling in a loop. Measured on a 32-thread
 processor: 3.7 million calls per second to a command running on the calling thread, 24,000 per
-second to a command running on the interface thread. `Editor::call` refuses, with an error, to wait
+second to a command running on the interface thread. While the window is minimised, eframe wakes the editor at most every 100 ms and nothing is drawn: the interface thread then serves calls for 80 ms per wake. Measured from Lua (fourth and fifth reviews): about 52,500 calls per second to `cube.paint` while minimised, against 5,400 with the 4 ms budget and 26,000 to 39,000 with the window shown. `Editor::call` refuses, with an error, to wait
 on the interface thread for a command of the interface thread, which would wait for itself.
 
 ### Milestone 3: C interface, native modules and Lua scripts (done)
