@@ -177,7 +177,7 @@ the same runtime.
 | Feature loader | Section 4 |
 | Features panel | Lists features, version, state, refusal or failure reason; enable or disable |
 | Commands and history | Undo, redo, unsaved-changes tracking |
-| Events | Publish and subscribe, typed |
+| Events | Publish and subscribe, typed by serialisation: the topic is a string and the payload JSON, written with `Context::publish_as` and read with `Event::decode` into a type each feature declares on its own side. No Rust type is shared between features |
 | Services | Registry of interface implementations provided by features |
 | Selection | Current selection, any type |
 | Project | Open, save; content defined in a later step |

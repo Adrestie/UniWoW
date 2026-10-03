@@ -33,6 +33,15 @@ impl<'a> Context<'a> {
         self.host.publish(self.feature, topic, payload);
     }
 
+    /// Publishes `payload` serialised to JSON. Subscribers read it back with `Event::decode` into a
+    /// type of their own: features share no Rust type, only the shape of the JSON.
+    pub fn publish_as<T: serde::Serialize>(&mut self, topic: &str, payload: &T) {
+        match serde_json::to_value(payload) {
+            Ok(value) => self.publish(topic, value),
+            Err(error) => log::error!("'{topic}' not published: {error}"),
+        }
+    }
+
     /// Queues an undoable command on this feature.
     pub fn execute(&mut self, command: impl Command + 'static) {
         self.host.execute(self.feature, Box::new(command));

@@ -9,8 +9,9 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use uniwow_api::serde::{Deserialize, Serialize};
 use uniwow_api::viewport;
-use uniwow_api::{Command, Context, DockArea, Event, FEATURE_FAILED_TOPIC, Feature, Registrar, egui, log, serde_json};
+use uniwow_api::{Command, Context, DockArea, Event, FEATURE_FAILED_TOPIC, Feature, Registrar, egui, log};
 
 use layer::CubeLayer;
 
@@ -117,13 +118,9 @@ impl Feature for CubeFeature {
             }
             return;
         }
-        let color = event
-            .payload
-            .get("color")
-            .and_then(|c| serde_json::from_value::<[f32; 3]>(c.clone()).ok());
-        match color {
-            Some(color) => self.paint(ctx, color, &format!("requested by {}", event.source)),
-            None => log::warn!("'{}' ignored: no valid colour in {}", event.topic, event.payload),
+        match event.decode::<Paint>() {
+            Ok(paint) => self.paint(ctx, paint.color, &format!("requested by {}", event.source)),
+            Err(error) => log::warn!("ignored: {error}"),
         }
     }
 }
@@ -132,11 +129,27 @@ impl CubeFeature {
     fn paint(&mut self, ctx: &mut Context, color: [f32; 3], reason: &str) {
         let old = self.params.borrow().color;
         ctx.execute(SetColor { old, new: color });
-        ctx.publish(
-            "sample.cube_painted",
-            serde_json::json!({ "color": color, "reason": reason }),
-        );
+        let painted = Painted {
+            color,
+            reason: reason.to_owned(),
+        };
+        ctx.publish_as("sample.cube_painted", &painted);
     }
+}
+
+/// Payload of `sample.paint`, as this feature reads it. The publisher declares its own type.
+#[derive(Deserialize)]
+#[serde(crate = "uniwow_api::serde")]
+struct Paint {
+    color: [f32; 3],
+}
+
+/// Payload of `sample.cube_painted`.
+#[derive(Serialize)]
+#[serde(crate = "uniwow_api::serde")]
+struct Painted {
+    color: [f32; 3],
+    reason: String,
 }
 
 fn to_color32(c: [f32; 3]) -> egui::Color32 {

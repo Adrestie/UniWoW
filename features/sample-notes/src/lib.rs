@@ -4,7 +4,8 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use uniwow_api::{Context, DockArea, Event, Feature, Registrar, egui, serde_json};
+use uniwow_api::serde::Serialize;
+use uniwow_api::{Context, DockArea, Event, Feature, Registrar, egui};
 
 const MAX_EVENTS: usize = 200;
 
@@ -36,10 +37,20 @@ impl Feature for NotesFeature {
         }
         ui.horizontal_wrapped(|ui| {
             if ui.button("Paint the cube gold").clicked() {
-                ctx.publish("sample.paint", serde_json::json!({ "color": [1.0, 0.72, 0.18] }));
+                ctx.publish_as(
+                    "sample.paint",
+                    &Paint {
+                        color: [1.0, 0.72, 0.18],
+                    },
+                );
             }
             if ui.button("Random colour").clicked() {
-                ctx.publish("sample.paint", serde_json::json!({ "color": self.random_color() }));
+                ctx.publish_as(
+                    "sample.paint",
+                    &Paint {
+                        color: self.random_color(),
+                    },
+                );
             }
         });
         ui.horizontal(|ui| {
@@ -77,6 +88,13 @@ impl NotesFeature {
         let channel = |shift: u32| ((seed.rotate_left(shift).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 56) as f32) / 255.0;
         [channel(0), channel(21), channel(42)]
     }
+}
+
+/// Payload of `sample.paint`, as this feature writes it. Whoever answers declares its own type.
+#[derive(Serialize)]
+#[serde(crate = "uniwow_api::serde")]
+struct Paint {
+    color: [f32; 3],
 }
 
 uniwow_api::export_feature!(NotesFeature::default());
