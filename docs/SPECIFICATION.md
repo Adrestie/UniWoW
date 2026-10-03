@@ -222,11 +222,11 @@ Threads:
 | Id | Rule |
 |---|---|
 | T1 | The interface thread draws, applies the undoable commands and owns the state of each feature. It never waits for slow work. |
-| T2 | The kernel keeps a pool of worker threads, one per processor core. `Context::spawn` runs a job there, with progress and cancel; its result comes back to the feature on the interface thread. A Jobs panel lists the jobs running. |
+| T2 | The kernel keeps a pool of worker threads, one per processor core, for computations. `Context::spawn` runs a job there, with progress and cancel; its result comes back to the feature on the interface thread. Work that waits, such as a script, runs with `Context::spawn_thread` on a thread of its own, so that waiting never holds a thread of the pool; it is otherwise a job like the others. A Jobs panel lists the jobs running. |
 | T3 | Service interfaces are shared between threads (`Send + Sync`, held in an `Arc`), so that jobs, scripts and native modules call them directly. An interface tied to the interface thread says so explicitly. |
 | T4 | Each named command declares where it runs: on the interface thread when it changes a feature's state (through an undoable command), or on the calling thread when it only reads or synchronises itself. The second kind answers at once, without waiting for a frame. |
 | T5 | The GPU device and queue can be used from any thread: jobs create and upload buffers and textures; only drawing happens on the interface thread. |
-| T6 | Scripts run on worker threads. Each run of a Lua script has its own Lua state, so several run in parallel. Python scripts run on worker threads too, but standard CPython lets one thread at a time execute Python code (the GIL): their parallel work comes from the commands they call. |
+| T6 | Each run of a script has a named thread of its own (T2), never the interface thread. Each run of a Lua script has its own Lua state, so several run in parallel. Python scripts run on worker threads too, but standard CPython lets one thread at a time execute Python code (the GIL): their parallel work comes from the commands they call. |
 | T7 | Every function of the C interface can be called from any thread; native modules may create their own threads. |
 
 ---

@@ -92,7 +92,18 @@ impl Pool {
         &self.running
     }
 
+    /// Runs a job on the pool, for computations.
     pub fn spawn(&mut self, owner: &str, label: &str, job: JobFn, editor: Editor) -> JobId {
+        self.start(owner, label, job, editor, false)
+    }
+
+    /// Runs a job on a thread of its own, for work that waits, such as a script: waiting there
+    /// never holds a thread of the pool (T2, T6).
+    pub fn spawn_thread(&mut self, owner: &str, label: &str, job: JobFn, editor: Editor) -> JobId {
+        self.start(owner, label, job, editor, true)
+    }
+
+    fn start(&mut self, owner: &str, label: &str, job: JobFn, editor: Editor, own_thread: bool) -> JobId {
         self.next_id += 1;
         let id = JobId(self.next_id);
         let progress = Arc::new(AtomicU32::new(0f32.to_bits()));
@@ -109,8 +120,10 @@ impl Pool {
         let finished = self.finished.clone();
         let wake = self.wake.clone();
         let bridge = self.bridge.clone();
+        let thread_name = format!("uniwow {owner}: {label}");
         let owner = owner.to_owned();
         let label = label.to_owned();
+        let (job_owner, job_label) = (owner.clone(), label.clone());
         let task: Task = Box::new(move || {
             let context = JobContext::new(progress, cancelled.clone(), editor);
             let outcome = match guarded_as(&owner, || job(&context)) {
@@ -134,8 +147,17 @@ impl Pool {
                 wake.request_repaint();
             }
         });
-        if self.sender.send(task).is_err() {
-            uniwow_api::log::error!("job '{}' could not be queued: no worker thread", self.next_id);
+        if own_thread {
+            if let Err(error) = std::thread::Builder::new().name(thread_name).spawn(task) {
+                self.finished.lock().unwrap_or_else(|e| e.into_inner()).push(Finished {
+                    id,
+                    owner: job_owner,
+                    label: job_label,
+                    outcome: JobOutcome::Panicked(format!("its thread could not start: {error}")),
+                });
+            }
+        } else if self.sender.send(task).is_err() {
+            uniwow_api::log::error!("job '{job_label}' of '{job_owner}' could not be queued: no worker thread");
         }
         id
     }
@@ -290,6 +312,27 @@ mod tests {
         pool.cancel(id);
         let finished = wait_for(&mut pool, 1);
         assert!(matches!(finished[0].outcome, JobOutcome::Cancelled));
+    }
+
+    #[test]
+    fn a_job_on_its_own_thread_leaves_the_pool_free() {
+        let mut pool = Pool::new(1, None, None);
+        let waiting = pool.spawn_thread(
+            "lua",
+            "events.lua",
+            Box::new(|context| {
+                while !context.is_cancelled() {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Box::new(())
+            }),
+            editor(),
+        );
+        let computed = pool.spawn("notes", "add", Box::new(|_| Box::new(40 + 2)), editor());
+        let finished = wait_for(&mut pool, 1);
+        assert_eq!(finished[0].id, computed, "the only pool thread was free");
+        pool.cancel(waiting);
+        assert!(matches!(wait_for(&mut pool, 1)[0].outcome, JobOutcome::Cancelled));
     }
 
     #[test]

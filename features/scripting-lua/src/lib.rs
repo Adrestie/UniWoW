@@ -1,5 +1,5 @@
 //! Lua 5.1 scripts (rules S1 to S9): a console, the scripts of `scripts\lua-5.1\` beside the
-//! executable, each run on a worker thread in a Lua state of its own, and Stop.
+//! executable, each run on a thread of its own in a Lua state of its own, and Stop.
 
 mod loading;
 mod output;
@@ -88,12 +88,14 @@ impl ScriptingLua {
         ui.weak(scripts_dir().display().to_string());
         ui.separator();
         let mut start = None;
-        // The list takes the height left once the running section below has its own.
+        // The list takes the height the running section below leaves, and at least half of it:
+        // with many runs, that section scrolls instead.
         let row = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
         let running_height = (1 + self.running.len().max(1)) as f32 * row + 2.0 * ui.spacing().item_spacing.y + 1.0;
+        let available = ui.available_height();
         egui::ScrollArea::vertical()
             .id_salt("lua-script-list")
-            .max_height((ui.available_height() - running_height).max(row))
+            .max_height((available - running_height).max(available / 2.0).max(row))
             .show(ui, |ui| {
                 if self.scripts.is_empty() {
                     ui.weak("No script.");
@@ -120,14 +122,16 @@ impl ScriptingLua {
             ui.weak("Nothing.");
         }
         let mut stop = None;
-        for (job, run) in &self.running {
-            ui.horizontal(|ui| {
-                if ui.button("Stop").clicked() {
-                    stop = Some(JobId(*job));
-                }
-                ui.label(format!("{} ({:.1} s)", run.name, run.started.elapsed().as_secs_f64()));
-            });
-        }
+        egui::ScrollArea::vertical().id_salt("lua-running").show(ui, |ui| {
+            for (job, run) in &self.running {
+                ui.horizontal(|ui| {
+                    if ui.button("Stop").clicked() {
+                        stop = Some(JobId(*job));
+                    }
+                    ui.label(format!("{} ({:.1} s)", run.name, run.started.elapsed().as_secs_f64()));
+                });
+            }
+        });
         if let Some(job) = stop {
             ctx.cancel(job);
         }
@@ -172,7 +176,8 @@ impl ScriptingLua {
         let output = self.output.clone();
         let run_name = name.clone();
         let editor = ctx.editor().derive(&name);
-        let job = ctx.spawn(&name, move |context| {
+        // A run may wait for events as long as it likes: it does not hold a thread of the pool.
+        let job = ctx.spawn_thread(&name, move |context| {
             run::run(source, editor, context.cancellation(), output, &run_name)
         });
         self.running.insert(

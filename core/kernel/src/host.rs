@@ -100,6 +100,11 @@ impl Host for KernelHost {
         self.pool.spawn(owner, label, job, editor)
     }
 
+    fn spawn_thread(&mut self, owner: &str, label: &str, job: JobFn) -> JobId {
+        let editor = self.editor(owner);
+        self.pool.spawn_thread(owner, label, job, editor)
+    }
+
     fn call(&mut self, caller: &str, name: &str, arguments: serde_json::Value) -> CallId {
         self.next_call += 1;
         let id = CallId(self.next_call);

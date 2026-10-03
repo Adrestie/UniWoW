@@ -1,4 +1,4 @@
-//! One run of Lua code on a worker thread, in a Lua state of its own (rule T6), with the `uniwow`
+//! One run of Lua code on a thread of its own, in a Lua state of its own (rule T6), with the `uniwow`
 //! module translating Lua values to and from the JSON of the generic interface (rule S1).
 
 use std::cell::RefCell;
