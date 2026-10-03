@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use uniwow_api::viewport;
-use uniwow_api::{Command, Context, DockArea, Event, Feature, Registrar, egui, log, serde_json};
+use uniwow_api::{Command, Context, DockArea, Event, FEATURE_FAILED_TOPIC, Feature, Registrar, egui, log, serde_json};
 
 use layer::CubeLayer;
 
@@ -49,7 +49,9 @@ impl Default for CubeFeature {
 
 impl Feature for CubeFeature {
     fn register(&mut self, reg: &mut Registrar) {
-        reg.panel("cube", "Cube", DockArea::Right).subscribe("sample.paint");
+        reg.panel("cube", "Cube", DockArea::Right)
+            .subscribe("sample.paint")
+            .subscribe(FEATURE_FAILED_TOPIC);
     }
 
     fn init(&mut self, ctx: &mut Context) {
@@ -108,6 +110,13 @@ impl Feature for CubeFeature {
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut Context) {
+        if event.topic == FEATURE_FAILED_TOPIC {
+            // The failed feature may be the viewport: its service is then withdrawn.
+            if self.drawn && ctx.service::<viewport::Handle>(viewport::SERVICE).is_none() {
+                self.drawn = false;
+            }
+            return;
+        }
         let color = event
             .payload
             .get("color")

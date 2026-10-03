@@ -132,20 +132,12 @@ impl Shell {
     fn resolve_requirements(&mut self) {
         loop {
             let mut changed = false;
-            for slot in &mut self.slots {
-                let Some(manifest) = slot.manifest.as_ref().filter(|_| slot.state.is_running()) else {
-                    continue;
-                };
-                let missing = manifest
-                    .requires
-                    .iter()
-                    .find(|s| !self.host.services.contains_key(*s))
-                    .cloned();
-                if let Some(service) = missing {
-                    slot.state = State::Blocked(format!(
-                        "requires the service '{service}', which no running feature provides"
-                    ));
-                    self.host.services.retain(|_, s| s.provider != slot.id);
+            for index in 0..self.slots.len() {
+                if let Some(service) = self.missing_requirement(index) {
+                    self.block(
+                        index,
+                        format!("requires the service '{service}', which no running feature provides"),
+                    );
                     changed = true;
                 }
             }
@@ -153,6 +145,23 @@ impl Shell {
                 break;
             }
         }
+    }
+
+    /// The first service a running feature requires and nobody provides.
+    fn missing_requirement(&self, index: usize) -> Option<String> {
+        let slot = &self.slots[index];
+        let manifest = slot.manifest.as_ref().filter(|_| slot.state.is_running())?;
+        manifest
+            .requires
+            .iter()
+            .find(|s| !self.host.services.contains_key(*s))
+            .cloned()
+    }
+
+    fn block(&mut self, index: usize, reason: String) {
+        let id = self.slots[index].id.clone();
+        self.slots[index].state = State::Blocked(reason);
+        self.host.services.retain(|_, s| s.provider != id);
     }
 
     /// Running features, providers of a service before the features that require or use it.
@@ -187,6 +196,17 @@ impl Shell {
 
     fn init_all(&mut self) {
         for index in self.init_order() {
+            if !self.slots[index].state.is_running() {
+                continue;
+            }
+            // A provider may have failed in its own init since the requirements were resolved.
+            if let Some(service) = self.missing_requirement(index) {
+                self.block(
+                    index,
+                    format!("requires the service '{service}', whose provider failed"),
+                );
+                continue;
+            }
             if let Err(message) = call_feature(&mut self.slots[index], &mut self.host, |f, ctx| f.init(ctx)) {
                 fail(&mut self.slots, &mut self.host, index, format!("init: {message}"));
             }
@@ -850,11 +870,12 @@ fn call_feature<R>(
     guarded(|| f(feature, &mut ctx))
 }
 
-/// Disables a feature that failed and tells the others.
+/// Disables a feature that failed, withdraws its services and tells the others.
 fn fail(slots: &mut [Slot], host: &mut KernelHost, index: usize, message: String) {
     let slot = &mut slots[index];
     log::error!("feature '{}' failed: {message}", slot.id);
     slot.state = State::Failed(message);
+    host.services.retain(|_, s| s.provider != slot.id);
     host.publish(KERNEL, FEATURE_FAILED_TOPIC, serde_json::json!({ "id": slot.id }));
 }
 

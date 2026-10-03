@@ -90,7 +90,7 @@ Rules:
 | F1 | A feature talks to another only through the core: commands, events, services by interface. Example: the quest editor issues "open creature 1234"; the feature registered for creatures handles it. If no such feature is loaded, the link is shown disabled. |
 | F2 | Every modification goes through an undoable command (single undo history). |
 | F3 | A feature owns its project data section and its settings; no other feature reads them directly. |
-| F4 | A missing required service: the feature is not loaded and the reason is shown. A missing used service: the feature loads without the parts that need it. |
+| F4 | A missing required service: the feature is not loaded and the reason is shown. A missing used service: the feature loads without the parts that need it. A feature that fails withdraws its services; requirements are checked again just before each `init`, so a feature whose provider failed meanwhile is not initialised. |
 | F5 | A feature that runs code on behalf of another, such as the viewport drawing a layer, catches its failures and reports the culprit with `Context::report_failure`. The kernel disables the culprit as if it had panicked, naming the reporter. |
 
 ---
