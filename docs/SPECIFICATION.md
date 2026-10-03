@@ -327,7 +327,7 @@ Rules:
 | S6 | Native code runs inside the editor and can end its process: a crash there is not an error that can be caught. Lua scripts cannot load C modules, nor precompiled Lua chunks, which the bytecode checks of Lua 5.1 cannot keep from corrupting the memory: `string.dump` is removed, and every way of loading Lua code (scripts, console, `load`, `loadstring`, `loadfile`, `dofile`, `require`) accepts source text only. The compiled packages a Python script imports and the native modules carry this risk, which is accepted. |
 | S7 | Scripts and native modules have full access to the machine, like editor scripts in Unity: one received from someone else is checked before it is used. |
 | S8 | Each language stays optional: without `scripting-python.dll`, or without the Python files, the editor starts with Lua only, and the other way round. In particular the runtime must not require the Python DLL to start. |
-| S9 | One interpreter per language. Scripts are stored by language and version: `scripts\lua-5.1\…`, `scripts\python-3.xx\…`, the Python version being the one shipped. Native modules go in `modules\`. |
+| S9 | One interpreter per language. Scripts are stored by language and version, then by tool: `scripts\lua-5.1\<tool>\<script>.lua`, `scripts\python-3.xx\<tool>\<script>.py`, the Python version being the one shipped. A script may also sit directly in the folder of its language. A script loads the other files of its tool. Native modules go in `modules\`. |
 | S10 | A native module exports one C entry point. It receives the table of functions of the C interface and returns its description (name, version, the version of `uniwow.h` it was built with) and the named commands it offers, implemented in its own language with the same JSON form. They join the catalogue as delegated commands of `native-modules` (F6): a feature's own command of the same name keeps its name, and the Modules panel shows the module's one as refused. |
 
 Risks to verify first, before any other work on scripting: the runtime's exported symbol count with PyO3 and mlua inside it; starting the editor without the Python DLL while PyO3 is part of the runtime (delayed loading); the embeddable Python distribution beside the executable; a C++ module and a C# NativeAOT module calling the C interface from several threads. Verified for milestone 4: see section 9.
@@ -568,6 +568,11 @@ Content:
 - **Distribution**: `cargo xtask build` downloads the official embeddable package of the pinned
   version (3.14.8, SHA-256 checked) into its cache and unpacks it into
   `out\<profile>\interpreters\python-3.14\`, adding `scripts\python-3.14\` to its `python314._pth`.
+- **Scripts by tool (S9)**, for Lua and Python: the panels list the scripts as a tree, grouped by
+  tool folder, with those placed directly in the folder of the language. A script loads the other
+  files of its tool: `require` in Lua looks in its tool folder first; in Python the tool folder is
+  a package (`from . import helper`). The Lua samples move into a `samples` tool, and the Python
+  samples go there too.
 - **Sample C# module** in `modules-src\sample-csharp\` (.NET 10, NativeAOT): `cs.sum`, and
   `cs.paint_from_threads`, whose threads each paint the cube twice through `cube.paint`, each
   thread's paints as one undo entry. Built by `cargo xtask build` with `dotnet publish`; without the
@@ -586,6 +591,7 @@ Acceptance:
 | A Python script with an error | The message and the line are shown; the feature keeps running |
 | A loop, and a loop catching `BaseException`, then Stop | Both end within a second |
 | A Python script waiting for the events of a topic | It prints them as they are published |
+| A tool folder in `scripts\lua-5.1\` and one in `scripts\python-3.14\`, each with a script using another file of its tool | Listed under their tool; each runs and loads the other file |
 | Two Python scripts at once; a Python and a Lua script at once | The Python ones take turns; the Lua one runs in parallel with them |
 | Calls per second from Python, for both kinds of command | Measured and recorded here |
 | The C# module | Listed as running; `cs.sum` answers; after `cs.paint_from_threads`, each thread's paints are one undo entry |
