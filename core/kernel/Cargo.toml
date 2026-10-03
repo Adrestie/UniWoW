@@ -1,0 +1,11 @@
+[package]
+name = "uniwow-kernel"
+description = "UniWoW kernel: feature loader and core services"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+uniwow-api.workspace = true
+libloading.workspace = true
+blake3.workspace = true
+toml.workspace = true

@@ -1,0 +1,16 @@
+use uniwow_api::{Context, DockArea, Feature, Registrar, egui};
+
+#[derive(Default)]
+struct {{struct}};
+
+impl Feature for {{struct}} {
+    fn register(&mut self, reg: &mut Registrar) {
+        reg.panel("main", "{{name}}", DockArea::Right);
+    }
+
+    fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, _ctx: &mut Context) {
+        ui.label("{{name}} is running.");
+    }
+}
+
+uniwow_api::export_feature!({{struct}}::default());

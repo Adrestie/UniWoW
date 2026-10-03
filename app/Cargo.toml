@@ -1,0 +1,13 @@
+[package]
+name = "uniwow-app"
+description = "UniWoW executable"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "UniWoW"
+path = "src/main.rs"
+
+[dependencies]
+uniwow-api.workspace = true
+uniwow-kernel.workspace = true

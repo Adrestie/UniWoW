@@ -1,0 +1,17 @@
+[package]
+name = "uniwow-api"
+description = "Contracts between the UniWoW kernel and its features"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+eframe.workspace = true
+egui_dock.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true

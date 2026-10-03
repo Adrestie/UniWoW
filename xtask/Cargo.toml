@@ -1,0 +1,12 @@
+[package]
+name = "xtask"
+description = "UniWoW developer commands"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+blake3.workspace = true

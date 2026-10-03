@@ -1,0 +1,18 @@
+[package]
+name = "uniwow-feature-viewport"
+description = "3D window with an orbit camera and a ground grid; provides the viewport service"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+uniwow-api.workspace = true
+
+[package.metadata.uniwow]
+id = "viewport"
+name = "Viewport"
+category = "World"
+requires = []
+uses = []

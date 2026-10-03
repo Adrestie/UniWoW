@@ -1,0 +1,19 @@
+[package]
+name = "uniwow-feature-{{id}}"
+description = "{{name}}"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+uniwow-api.workspace = true
+
+[package.metadata.uniwow]
+id = "{{id}}"
+name = "{{name}}"
+category = "Other"
+# Services the feature cannot work without, and services it uses when present.
+requires = []
+uses = []

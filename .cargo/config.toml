@@ -1,0 +1,6 @@
+# Every crate links the Rust standard library as a DLL, so that the runtime and the features share one copy.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "prefer-dynamic"]
+
+[alias]
+xtask = "run --quiet --package xtask --"

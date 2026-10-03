@@ -1,0 +1,18 @@
+[package]
+name = "uniwow-feature-sample-cube"
+description = "Sample: a cube drawn through the viewport service, recoloured by undoable commands and by events"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+uniwow-api.workspace = true
+
+[package.metadata.uniwow]
+id = "sample-cube"
+name = "Sample cube"
+category = "Samples"
+requires = []
+uses = ["viewport"]

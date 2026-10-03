@@ -1,0 +1,18 @@
+[package]
+name = "uniwow-feature-sample-notes"
+description = "Sample: lists the events it receives and asks for the cube to be repainted, without knowing the cube feature"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+uniwow-api.workspace = true
+
+[package.metadata.uniwow]
+id = "sample-notes"
+name = "Sample notes"
+category = "Samples"
+requires = []
+uses = []

@@ -1,6 +1,6 @@
 # UniWoW — Architecture and feature catalogue
 
-Status: **validated**. Open questions in section 10. No code yet.
+Status: **validated**. Milestone 1 built, awaiting validation. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -37,9 +37,11 @@ xtask          developer commands: new-feature, build, build-feature, run, check
 
 Crates are prefixed `uniwow-` (`uniwow-api`, `uniwow-kernel`, `uniwow-feature-<id>`…).
 
-`core/api`, `core/kernel`, `libs/*` and the shared dependencies (Rust standard library, egui,
-wgpu) are built as shared DLLs: the **runtime**. Every feature DLL links to the runtime, so
-each of these exists once in memory.
+`core/api`, `libs/*` and the shared dependencies (egui, wgpu…) are built into one shared DLL,
+`uniwow_api.dll`; the Rust standard library is shared as `std-<hash>.dll`. Together they are the
+**runtime**. Every feature DLL links to the runtime, so each of these exists once in memory.
+`core/kernel` is linked into the executable: features never link to it, so changing the kernel
+does not affect them.
 
 Allowed dependencies (enforced by `xtask check`):
 
@@ -57,7 +59,7 @@ the core or on a feature.
 
 ## 3. Feature contract
 
-A feature is one Rust crate in `features/<id>/`, built as `<id>.dll`. It exposes one type
+A feature is one Rust crate in `features/<id>/` (crate type `cdylib`), deployed as `<id>.dll`. It exposes one type
 implementing the `Feature` trait of `core/api`, exported by an entry point macro:
 
 - **info**: id, display name, version, category, description.
@@ -99,7 +101,8 @@ Output layout:
 
 ```
 UniWoW.exe
-runtime DLLs                   standard library, core, egui, wgpu, libs
+uniwow_api.dll                 runtime: core/api, libs, egui, wgpu
+std-<hash>.dll                 Rust standard library
 features\<id>\<id>.dll
 features\<id>\feature.toml     generated at build: id, name, version, runtime fingerprint
 ```
@@ -119,7 +122,8 @@ At start, the kernel:
    feature is disabled and reported in the Features panel and the log (R6).
 
 Enabling or disabling a feature from the Features panel takes effect at the next start. A
-loaded feature is never unloaded while the editor runs.
+loaded feature is never unloaded while the editor runs. Until the project model exists, this
+choice and the panel layout are stored per user, in `%APPDATA%\UniWoW\settings.json`.
 
 Developer commands:
 
@@ -134,7 +138,11 @@ cargo xtask run                  builds what changed, then starts the editor
 |---|---|
 | Code of one feature | That feature only (`build-feature`) |
 | New feature | That feature only |
-| `core/api`, `core/kernel`, `libs/*`, shared dependency versions or compiler | Runtime and every feature (`build`), because the fingerprint changes |
+| `core/kernel` | The executable only; features stay compatible |
+| `core/api`, `libs/*`, shared dependency versions or compiler | Runtime and every feature (`build`), because the fingerprint changes |
+
+The fingerprint is the BLAKE3 hash of `uniwow_api.dll`. Any rebuild of the runtime, even without
+a change of interface, therefore asks for the features to be rebuilt; `cargo xtask build` does it.
 
 ### Constraint accepted with this choice
 
@@ -158,7 +166,7 @@ the same runtime.
 
 | Service | Role |
 |---|---|
-| Shell | Main window, menus, dockable layout (egui_dock), layouts saved per user |
+| Shell | Main window, menus, dockable layout (egui_dock), layouts saved per user. Panels of absent features leave the layout; a returning panel rejoins its area, or the default layout is rebuilt when its whole area had disappeared |
 | Feature loader | Section 4 |
 | Features panel | Lists features, version, state, refusal or failure reason; enable or disable |
 | Commands and history | Undo, redo, unsaved-changes tracking |
@@ -291,14 +299,16 @@ Acceptance:
 |---|---|
 | Remove `features\viewport\` from the output, start the editor | The editor starts without any 3D window; the cube feature is listed as running without its 3D part |
 | Put it back, start the editor | The 3D window is back with the grid and the cube |
-| `cargo xtask new-feature third`, `cargo xtask build-feature third`, start the editor | A third panel appears; `UniWoW.exe` and the runtime DLLs are unchanged (same hash) |
+| `cargo xtask new-feature third`, `cargo xtask build-feature third`, start the editor | A third panel appears; `UniWoW.exe` and the runtime DLLs are unchanged (same hash); only `features/third/` and `Cargo.lock` (generated list of the workspace members) change |
 | Rebuild a feature while the editor is open | The build succeeds; the new version is loaded at the next start |
 | Change `core/api`, rebuild the runtime only, start the editor | Every feature is refused with "built for another runtime"; no crash |
 | A sample feature panics while drawing | That feature is shown as failed in the Features panel; the rest keeps working |
 | A sample feature depends on the other in its Cargo.toml | `cargo xtask check` fails and names the offending dependency |
 
-Risk to verify first: a Windows DLL exports at most 65,535 symbols, and Rust shared libraries
-export many. The runtime may need splitting into several DLLs.
+Risk verified first: a Windows DLL exports at most 65,535 symbols. Unoptimised, the runtime
+exceeds it (LNK1189). The `dev` profile is therefore built with `opt-level = 2`, which stops the
+sharing of generic instantiations: 17,764 exported symbols, 27% of the limit. `cargo xtask check`
+reports the count and fails from 50,000; the runtime would then have to be split.
 
 ---
 
