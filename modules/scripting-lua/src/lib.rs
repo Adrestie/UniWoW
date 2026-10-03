@@ -15,6 +15,12 @@ use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, Registrar, egui};
 use output::{Kind, Output};
 use run::Source;
 
+/// Scripts listed together: those placed directly in the language folder, or those of one tool.
+struct Group {
+    tool: Option<String>,
+    scripts: Vec<String>,
+}
+
 struct Running {
     name: String,
     started: Instant,
@@ -23,7 +29,8 @@ struct Running {
 #[derive(Default)]
 struct ScriptingLua {
     output: Arc<Output>,
-    scripts: Vec<String>,
+    /// The scripts of the language folder, then those of each tool folder (S9).
+    scripts: Vec<Group>,
     line: String,
     /// By job number, so in starting order.
     running: BTreeMap<u64, Running>,
@@ -65,17 +72,22 @@ impl Module for ScriptingLua {
 
 impl ScriptingLua {
     fn refresh(&mut self) {
-        self.scripts = std::fs::read_dir(scripts_dir())
-            .map(|entries| {
-                entries
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.path())
-                    .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("lua")))
-                    .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        self.scripts.sort();
+        let root = scripts_dir();
+        let mut tools: Vec<String> = entries(&root)
+            .filter(|p| p.is_dir())
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        tools.sort();
+        self.scripts = std::iter::once(Group {
+            tool: None,
+            scripts: lua_files(&root),
+        })
+        .chain(tools.into_iter().map(|tool| Group {
+            scripts: lua_files(&root.join(&tool)),
+            tool: Some(tool),
+        }))
+        .filter(|group| !group.scripts.is_empty())
+        .collect();
     }
 
     fn scripts_ui(&mut self, ui: &mut egui::Ui, ctx: &mut Context) {
@@ -100,19 +112,38 @@ impl ScriptingLua {
                 if self.scripts.is_empty() {
                     ui.weak("No script.");
                 }
-                for script in &self.scripts {
-                    ui.horizontal(|ui| {
-                        if ui.button("Run").clicked() {
-                            start = Some(script.clone());
+                let mut rows = |ui: &mut egui::Ui, tool: &Option<String>, scripts: &[String]| {
+                    for script in scripts {
+                        ui.horizontal(|ui| {
+                            if ui.button("Run").clicked() {
+                                start = Some((tool.clone(), script.clone()));
+                            }
+                            ui.label(script);
+                        });
+                    }
+                };
+                for group in &self.scripts {
+                    match &group.tool {
+                        None => rows(ui, &group.tool, &group.scripts),
+                        Some(tool) => {
+                            egui::CollapsingHeader::new(tool)
+                                .default_open(true)
+                                .show(ui, |ui| rows(ui, &group.tool, &group.scripts));
                         }
-                        ui.label(script);
-                    });
+                    }
                 }
             });
-        if let Some(script) = start {
-            match std::fs::read(scripts_dir().join(&script)) {
-                Ok(text) => self.start(ctx, Source::Script { name: script, text }),
-                Err(error) => self.output.push(Kind::Error, format!("{script}: {error}")),
+        if let Some((tool, script)) = start {
+            let folder = tool.as_ref().map_or_else(scripts_dir, |tool| scripts_dir().join(tool));
+            let name = tool
+                .as_ref()
+                .map_or_else(|| script.clone(), |tool| format!("{tool}/{script}"));
+            match std::fs::read(folder.join(&script)) {
+                Ok(text) => {
+                    let tool = tool.map(|_| folder);
+                    self.start(ctx, Source::Script { name, text, tool });
+                }
+                Err(error) => self.output.push(Kind::Error, format!("{name}: {error}")),
             }
         }
 
@@ -188,6 +219,25 @@ impl ScriptingLua {
             },
         );
     }
+}
+
+/// The entries of a folder, none when it cannot be read.
+fn entries(folder: &std::path::Path) -> impl Iterator<Item = PathBuf> {
+    std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+}
+
+/// The `.lua` files of a folder, sorted.
+fn lua_files(folder: &std::path::Path) -> Vec<String> {
+    let mut files: Vec<String> = entries(folder)
+        .filter(|p| p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("lua")))
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    files.sort();
+    files
 }
 
 /// `scripts\lua-5.1\` beside the executable.

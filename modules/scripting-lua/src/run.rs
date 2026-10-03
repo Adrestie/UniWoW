@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,7 +59,12 @@ impl Stop {
 
 pub enum Source {
     /// A script file: its name and its content.
-    Script { name: String, text: Vec<u8> },
+    /// `tool` is the folder of its tool, where `require` looks first (S9).
+    Script {
+        name: String,
+        text: Vec<u8>,
+        tool: Option<PathBuf>,
+    },
     /// One console line: evaluated as an expression whose values are printed, or else as a
     /// statement.
     Console(String),
@@ -107,8 +113,16 @@ fn execute(source: &Source, editor: &Editor, cancelled: &Arc<AtomicBool>, output
         })?,
     )?;
     let package: Table = globals.get("package")?;
-    let folder = crate::scripts_dir();
-    package.set("path", format!("{0}\\?.lua;{0}\\?\\init.lua", folder.display()))?;
+    let mut folders = Vec::new();
+    if let Source::Script { tool: Some(tool), .. } = source {
+        folders.push(tool.clone());
+    }
+    folders.push(crate::scripts_dir());
+    let path: Vec<String> = folders
+        .iter()
+        .map(|folder| format!("{0}\\?.lua;{0}\\?\\init.lua", folder.display()))
+        .collect();
+    package.set("path", path.join(";"))?;
     let subscriptions = Rc::new(RefCell::new(HashSet::new()));
     globals.set("uniwow", module(&lua, editor, &stop, &subscriptions)?)?;
 
@@ -124,7 +138,7 @@ fn execute(source: &Source, editor: &Editor, cancelled: &Arc<AtomicBool>, output
         subscriptions: subscriptions.clone(),
     };
     match source {
-        Source::Script { name, text } => match loading::load_text(&lua, text, &format!("@{name}"))? {
+        Source::Script { name, text, .. } => match loading::load_text(&lua, text, &format!("@{name}"))? {
             Ok(function) => function.call::<()>(()),
             Err(message) => Err(mlua::Error::runtime(message)),
         },
@@ -459,6 +473,7 @@ mod tests {
         Source::Script {
             name: "test.lua".to_owned(),
             text: text.as_bytes().to_vec(),
+            tool: None,
         }
     }
 
@@ -525,6 +540,23 @@ mod tests {
     }
 
     #[test]
+    fn a_script_loads_the_other_files_of_its_tool() {
+        let tool = std::env::temp_dir().join(format!("uniwow-tool-{}", std::process::id()));
+        std::fs::create_dir_all(&tool).expect("tool folder");
+        std::fs::write(tool.join("palette.lua"), "return { red = 'red from the tool' }").expect("helper");
+        let (_, printed) = execute(
+            Source::Script {
+                name: "tool/paint.lua".to_owned(),
+                text: b"print(require('palette').red)".to_vec(),
+                tool: Some(tool.clone()),
+            },
+            Arc::default(),
+        );
+        std::fs::remove_dir_all(&tool).expect("cleaned");
+        assert_eq!(printed[0], "red from the tool", "{printed:?}");
+    }
+
+    #[test]
     fn precompiled_chunks_are_refused() {
         let bytecode = uniwow_api::mlua::Lua::new()
             .load("return 1")
@@ -535,6 +567,7 @@ mod tests {
             Source::Script {
                 name: "test.lua".to_owned(),
                 text: bytecode.clone(),
+                tool: None,
             },
             Arc::default(),
         );
