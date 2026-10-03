@@ -10,6 +10,7 @@ pub trait Host {
     fn gpu(&self) -> Option<&egui_wgpu::RenderState>;
     fn setting(&self, feature: &str, key: &str) -> Option<serde_json::Value>;
     fn set_setting(&mut self, feature: &str, key: &str, value: serde_json::Value);
+    fn report_failure(&mut self, reporter: &str, culprit: &str, message: &str);
 }
 
 /// Access to the kernel for one feature, passed to every `Feature` method after `register`.
@@ -54,5 +55,11 @@ impl<'a> Context<'a> {
 
     pub fn set_setting(&mut self, key: &str, value: serde_json::Value) {
         self.host.set_setting(self.feature, key, value);
+    }
+
+    /// Reports that the feature `culprit` misbehaved in code this feature runs on its behalf, such
+    /// as a viewport layer. The kernel disables it as if it had panicked, naming this feature.
+    pub fn report_failure(&mut self, culprit: &str, message: &str) {
+        self.host.report_failure(self.feature, culprit, message);
     }
 }

@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use uniwow_api::egui_dock::tab_viewer::OnCloseResponse;
 use uniwow_api::egui_dock::{DockArea, DockState, Node, NodeIndex, Style, SurfaceIndex, TabPath, TabViewer, Tree};
@@ -68,6 +69,12 @@ impl Shell {
             settings: Settings::load(),
             ..Default::default()
         };
+        // wgpu panics on errors nobody captured; log them instead, the editor must keep running.
+        if let Some(gpu) = &host.gpu {
+            gpu.device.on_uncaptured_error(Arc::new(|error| {
+                log::error!("GPU error not captured by any feature: {error}");
+            }));
+        }
         let discovery = loader::discover(&exe_dir, &host.settings.disabled_features);
         let mut shell = Self {
             host,
@@ -87,6 +94,7 @@ impl Shell {
             default_layout(&shell.panel_entries(), &shell.host.settings.closed_panels)
         });
         shell.apply_pending();
+        shell.apply_reported();
         shell.log_summary();
         shell
     }
@@ -183,6 +191,7 @@ impl Shell {
                 fail(&mut self.slots, &mut self.host, index, format!("init: {message}"));
             }
             self.apply_pending();
+            self.apply_reported();
         }
     }
 
@@ -296,6 +305,17 @@ impl Shell {
                     );
                 }
             }
+        }
+    }
+
+    /// Disables the features that another feature reported as failed.
+    fn apply_reported(&mut self) {
+        for reported in std::mem::take(&mut self.host.reported) {
+            let Some(index) = self.running_index(&reported.culprit) else {
+                continue;
+            };
+            let message = format!("reported by '{}': {}", reported.reporter, reported.message);
+            fail(&mut self.slots, &mut self.host, index, message);
         }
     }
 
@@ -559,7 +579,9 @@ impl eframe::App for Shell {
         }
 
         self.apply_pending();
+        self.apply_reported();
         self.dispatch_events();
+        self.apply_reported();
         if !self.host.events.is_empty() {
             ctx.request_repaint();
         }

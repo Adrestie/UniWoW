@@ -79,6 +79,7 @@ Extension points a feature may contribute to:
 | Asset handlers, per file type | open or preview `.blp`, `.m2` |
 | Settings page | brush defaults |
 | Services implementing an interface defined in core/api | "viewport", "creature lookup" |
+| Viewport layers, through the viewport service | terrain, cube; each layer records into its own render bundle |
 | Event subscriptions | "project saved", "tile changed" |
 | Project data section owned by the feature | spawn edits not yet deployed |
 
@@ -90,6 +91,7 @@ Rules:
 | F2 | Every modification goes through an undoable command (single undo history). |
 | F3 | A feature owns its project data section and its settings; no other feature reads them directly. |
 | F4 | A missing required service: the feature is not loaded and the reason is shown. A missing used service: the feature loads without the parts that need it. |
+| F5 | A feature that runs code on behalf of another, such as the viewport drawing a layer, catches its failures and reports the culprit with `Context::report_failure`. The kernel disables the culprit as if it had panicked, naming the reporter. |
 
 ---
 
@@ -176,7 +178,7 @@ the same runtime.
 | Project | Open, save; content defined in a later step |
 | Settings | Global, per project, per feature |
 | Jobs | Background tasks with progress and cancel |
-| Log | Log panel shared by all features |
+| Log | Log panel shared by all features. GPU errors captured by no feature are logged instead of stopping the editor |
 | Inspector host | Shows the selection with the inspector registered for its type |
 
 The 3D view is not a core service: it is the `viewport` feature (section 7).
@@ -207,7 +209,7 @@ without touching the core.
 
 | Id | Feature |
 |---|---|
-| viewport | 3D window: camera, picking, gizmos. Provides the "viewport" service to which the features below add their drawing and tools |
+| viewport | 3D window: camera, picking, gizmos. Provides the "viewport" service to which the features below add their drawing and tools. Each layer records into its own render bundle, with the target's formats and sample count, inside a validation error scope; the viewport also catches the panic of `RenderBundleEncoder::finish`, which wgpu 30 raises on an invalid command instead of reporting it to the scope. A faulty layer is removed and its feature reported (F5); the grid and the other layers stay |
 | maps | Map list (Map.dbc), WDT and WDL, create or duplicate a map, tile management, minimap tiles |
 | terrain | Draws terrain in the viewport; height sculpting, texture painting (layers, alpha maps), holes, vertex shading, area painting, chunk flags |
 | liquids | Draws and edits water, lava, slime: create, heights, types |
@@ -304,6 +306,7 @@ Acceptance:
 | Change `core/api`, rebuild the runtime only, start the editor | Every feature is refused with "built for another runtime"; no crash |
 | A sample feature panics while drawing | That feature is shown as failed in the Features panel; the rest keeps working |
 | A sample feature depends on the other in its Cargo.toml | `cargo xtask check` fails and names the offending dependency |
+| `sample-faulty` draws without its bind group, or with a pipeline of the wrong colour format | The viewport and the grid stay; only `sample-faulty` is marked as failed, reported by `viewport` |
 
 Risk verified first: a Windows DLL exports at most 65,535 symbols. Unoptimised, the runtime
 exceeds it (LNK1189). The `dev` profile is therefore built with `opt-level = 2`, which stops the

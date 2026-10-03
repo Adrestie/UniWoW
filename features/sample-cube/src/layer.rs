@@ -56,8 +56,14 @@ impl CubeLayer {
 }
 
 impl Layer for CubeLayer {
-    fn draw(&mut self, gpu: &egui_wgpu::RenderState, target: &Target, view: &View, pass: &mut wgpu::RenderPass<'_>) {
-        let resources = self.gpu.get_or_insert_with(|| create(&gpu.device, target));
+    fn draw<'a>(
+        &'a mut self,
+        gpu: &egui_wgpu::RenderState,
+        target: &Target,
+        view: &View,
+        bundle: &mut wgpu::RenderBundleEncoder<'a>,
+    ) {
+        let resources = &*self.gpu.get_or_insert_with(|| create(&gpu.device, target));
         let params = self.params.borrow();
         let angle = view.time * params.speed * std::f32::consts::TAU / 10.0;
         let model = Mat4::from_translation(Vec3::new(0.0, 0.0, 1.0)) * Mat4::from_rotation_z(angle);
@@ -69,10 +75,10 @@ impl Layer for CubeLayer {
         gpu.queue
             .write_buffer(&resources.globals, 0, bytemuck::cast_slice(&globals));
 
-        pass.set_pipeline(&resources.pipeline);
-        pass.set_bind_group(0, &resources.bind_group, &[]);
-        pass.set_vertex_buffer(0, resources.vertices.slice(..));
-        pass.draw(0..36, 0..1);
+        bundle.set_pipeline(&resources.pipeline);
+        bundle.set_bind_group(0, &resources.bind_group, &[]);
+        bundle.set_vertex_buffer(0, resources.vertices.slice(..));
+        bundle.draw(0..36, 0..1);
     }
 }
 

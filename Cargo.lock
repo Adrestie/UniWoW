@@ -3344,6 +3344,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "uniwow-feature-sample-faulty"
+version = "0.1.0"
+dependencies = [
+ "uniwow-api",
+]
+
+[[package]]
 name = "uniwow-feature-sample-notes"
 version = "0.1.0"
 dependencies = [

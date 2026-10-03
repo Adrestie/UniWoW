@@ -4,13 +4,16 @@
 mod camera;
 mod grid;
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::pin::pin;
 use std::rc::Rc;
+use std::task::{Poll, Waker};
 use std::time::Instant;
 
 use uniwow_api::viewport::{self, Layer, Target, View};
-use uniwow_api::{Context, DockArea, Event, FEATURE_FAILED_TOPIC, Feature, Registrar, egui, egui_wgpu, log, wgpu};
+use uniwow_api::{Context, DockArea, Event, FEATURE_FAILED_TOPIC, Feature, Registrar, egui, egui_wgpu, wgpu};
 
 use camera::OrbitCamera;
 use grid::Grid;
@@ -86,7 +89,7 @@ impl Feature for ViewportFeature {
     }
 
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
-        let Some(gpu) = ctx.gpu() else {
+        let Some(gpu) = ctx.gpu().cloned() else {
             ui.label("No GPU device is available.");
             return;
         };
@@ -96,8 +99,8 @@ impl Feature for ViewportFeature {
 
         let pixels = size * ui.ctx().pixels_per_point();
         let pixels = [pixels.x.round().max(1.0) as u32, pixels.y.round().max(1.0) as u32];
-        self.ensure_targets(gpu, pixels);
-        self.render(gpu, pixels);
+        self.ensure_targets(&gpu, pixels);
+        self.render(&gpu, pixels, ctx);
 
         let targets = self.targets.as_ref().expect("created above");
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -197,13 +200,14 @@ impl ViewportFeature {
         });
     }
 
-    fn render(&mut self, gpu: &egui_wgpu::RenderState, size: [u32; 2]) {
+    fn render(&mut self, gpu: &egui_wgpu::RenderState, size: [u32; 2], ctx: &mut Context) {
         let view = View {
             view_proj: self.camera.view_proj(size[0] as f32 / size[1] as f32),
             eye: self.camera.eye(),
             size,
             time: self.start.elapsed().as_secs_f32(),
         };
+        let bundles = self.record_layers(gpu, &view, ctx);
         let targets = self.targets.as_ref().expect("created before rendering");
         let grid = self.grid.get_or_insert_with(|| Grid::new(&gpu.device, &TARGET));
         grid.update(&gpu.queue, &view);
@@ -236,22 +240,93 @@ impl ViewportFeature {
                 multiview_mask: None,
             });
             grid.draw(&mut pass);
-
-            // Layers may add layers while drawing: take the list out, then put it back in front.
-            let mut layers = std::mem::take(&mut *self.layers.borrow_mut());
-            layers.retain_mut(|(owner, layer)| {
-                let drawn = catch_unwind(AssertUnwindSafe(|| layer.draw(gpu, &TARGET, &view, &mut pass)));
-                if drawn.is_err() {
-                    log::error!("the layer of '{owner}' failed and was removed");
-                }
-                drawn.is_ok()
-            });
-            let mut shared = self.layers.borrow_mut();
-            layers.append(&mut shared);
-            *shared = layers;
+            pass.execute_bundles(bundles.iter());
         }
         gpu.queue.submit([encoder.finish()]);
     }
+
+    /// Records each layer into its own render bundle, inside a validation error scope. A layer
+    /// that panics or records invalid commands is removed and its feature reported; the bundles of
+    /// the others are returned.
+    fn record_layers(
+        &mut self,
+        gpu: &egui_wgpu::RenderState,
+        view: &View,
+        ctx: &mut Context,
+    ) -> Vec<wgpu::RenderBundle> {
+        // Layers may add layers while drawing: take the list out, then put it back in front.
+        let mut layers = std::mem::take(&mut *self.layers.borrow_mut());
+        let mut bundles = Vec::new();
+        layers.retain_mut(|(owner, layer)| {
+            let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let mut encoder = gpu
+                .device
+                .create_render_bundle_encoder(&wgpu::RenderBundleEncoderDescriptor {
+                    label: Some(owner.as_str()),
+                    color_formats: &[Some(TARGET.color_format)],
+                    depth_stencil: Some(wgpu::RenderBundleDepthStencil {
+                        format: TARGET.depth_format,
+                        depth_read_only: false,
+                        stencil_read_only: true,
+                    }),
+                    sample_count: TARGET.sample_count,
+                    multiview: None,
+                });
+            let layer: &mut dyn Layer = layer.as_mut();
+            let recording = &mut encoder;
+            // Moved into the closure: the bundle borrows the layer's resources for its whole life.
+            let drawn = catch_unwind(AssertUnwindSafe(move || {
+                let layer = layer;
+                layer.draw(gpu, &TARGET, view, recording)
+            }));
+            // wgpu 30 validates the recorded commands here and panics on an invalid one instead of
+            // reporting it to the error scope, so the panic is caught too.
+            let label = owner.as_str();
+            let finished = catch_unwind(AssertUnwindSafe(move || {
+                encoder.finish(&wgpu::RenderBundleDescriptor { label: Some(label) })
+            }));
+            let error = resolved(scope.pop()).flatten();
+            let failure = match (drawn, finished, error) {
+                (Err(payload), _, _) => Err(format!("its viewport layer panicked: {}", panic_text(payload))),
+                (Ok(()), Err(payload), _) => Err(format!(
+                    "its viewport layer recorded invalid GPU commands: {}",
+                    panic_text(payload)
+                )),
+                (Ok(()), Ok(_), Some(error)) => Err(format!("its viewport layer caused a GPU error: {error}")),
+                (Ok(()), Ok(bundle), None) => Ok(bundle),
+            };
+            match failure {
+                Ok(bundle) => {
+                    bundles.push(bundle);
+                    true
+                }
+                Err(message) => {
+                    ctx.report_failure(owner, &message);
+                    false
+                }
+            }
+        });
+        let mut shared = self.layers.borrow_mut();
+        layers.append(&mut shared);
+        *shared = layers;
+        bundles
+    }
+}
+
+/// The value of a future that is already complete, as error scopes are on native backends.
+fn resolved<F: Future>(future: F) -> Option<F::Output> {
+    match pin!(future).poll(&mut std::task::Context::from_waker(Waker::noop())) {
+        Poll::Ready(value) => Some(value),
+        Poll::Pending => None,
+    }
+}
+
+fn panic_text(payload: Box<dyn Any + Send>) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic without message".to_owned())
 }
 
 uniwow_api::export_feature!(ViewportFeature::default());

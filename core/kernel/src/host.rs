@@ -10,6 +10,13 @@ pub struct Service {
     pub value: Box<dyn Any>,
 }
 
+/// A failure of `culprit` noticed by `reporter`, handled like a panic of `culprit`.
+pub struct Reported {
+    pub reporter: String,
+    pub culprit: String,
+    pub message: String,
+}
+
 /// Kernel state reachable from features through `Context`.
 #[derive(Default)]
 pub struct KernelHost {
@@ -21,6 +28,7 @@ pub struct KernelHost {
     pub gpu: Option<egui_wgpu::RenderState>,
     pub settings: Settings,
     pub settings_changed: bool,
+    pub reported: Vec<Reported>,
 }
 
 impl Host for KernelHost {
@@ -55,5 +63,13 @@ impl Host for KernelHost {
             .or_default()
             .insert(key.to_owned(), value);
         self.settings_changed = true;
+    }
+
+    fn report_failure(&mut self, reporter: &str, culprit: &str, message: &str) {
+        self.reported.push(Reported {
+            reporter: reporter.to_owned(),
+            culprit: culprit.to_owned(),
+            message: message.to_owned(),
+        });
     }
 }

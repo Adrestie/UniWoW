@@ -37,6 +37,16 @@ pub struct View {
 }
 
 pub trait Layer {
-    /// Draws into the viewport's pass. Create pipelines lazily from `gpu.device` and `target`.
-    fn draw(&mut self, gpu: &egui_wgpu::RenderState, target: &Target, view: &View, pass: &mut wgpu::RenderPass<'_>);
+    /// Records the layer's drawing into its own render bundle, created by the viewport with the
+    /// formats and sample count of `target`; create pipelines lazily from `gpu.device` to match.
+    ///
+    /// The viewport validates the bundle on its own: a layer that panics or records an invalid
+    /// command is removed and its feature reported as failed, without affecting the others.
+    fn draw<'a>(
+        &'a mut self,
+        gpu: &egui_wgpu::RenderState,
+        target: &Target,
+        view: &View,
+        bundle: &mut wgpu::RenderBundleEncoder<'a>,
+    );
 }
