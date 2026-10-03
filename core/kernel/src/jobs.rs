@@ -7,6 +7,7 @@ use std::time::Instant;
 use uniwow_api::{Editor, JobContext, JobFn, JobId, JobOutcome, egui};
 
 use crate::guard::guarded_as;
+use crate::router::{Bridge, Request};
 
 type Task = Box<dyn FnOnce() + Send>;
 
@@ -45,11 +46,13 @@ pub struct Pool {
     next_id: u64,
     /// Repaints the window when a job ends, so that its result is handed back at once.
     wake: Option<egui::Context>,
+    /// Told when a job ends, so that the undo groups it left open on its thread are closed.
+    bridge: Option<Arc<Bridge>>,
 }
 
 impl Pool {
     /// Starts `threads` workers. They end with the process; a job running at exit is abandoned.
-    pub fn new(threads: usize, wake: Option<egui::Context>) -> Self {
+    pub fn new(threads: usize, wake: Option<egui::Context>, bridge: Option<Arc<Bridge>>) -> Self {
         let (sender, receiver) = mpsc::channel::<Task>();
         let receiver = Arc::new(Mutex::new(receiver));
         for index in 0..threads {
@@ -77,6 +80,7 @@ impl Pool {
             running: Vec::new(),
             next_id: 0,
             wake,
+            bridge,
         }
     }
 
@@ -104,6 +108,7 @@ impl Pool {
 
         let finished = self.finished.clone();
         let wake = self.wake.clone();
+        let bridge = self.bridge.clone();
         let owner = owner.to_owned();
         let label = label.to_owned();
         let task: Task = Box::new(move || {
@@ -113,6 +118,12 @@ impl Pool {
                 Ok(value) => JobOutcome::Done(value),
                 Err(message) => JobOutcome::Panicked(message),
             };
+            // Queued after every request of the job, so served after them.
+            if let Some(bridge) = bridge {
+                bridge.queue(Request::ThreadEnded {
+                    thread: std::thread::current().id(),
+                });
+            }
             finished.lock().unwrap_or_else(|e| e.into_inner()).push(Finished {
                 id,
                 owner,
@@ -203,7 +214,7 @@ mod tests {
 
     #[test]
     fn a_job_returns_its_value() {
-        let mut pool = Pool::new(2, None);
+        let mut pool = Pool::new(2, None, None);
         let id = pool.spawn("test", "add", Box::new(|_| Box::new(40 + 2)), editor());
         let finished = wait_for(&mut pool, 1);
         assert_eq!(finished.len(), 1);
@@ -216,7 +227,7 @@ mod tests {
     #[test]
     fn jobs_run_in_parallel() {
         // Each job waits for the other at the barrier: only parallel execution lets both end.
-        let mut pool = Pool::new(2, None);
+        let mut pool = Pool::new(2, None, None);
         let barrier = Arc::new(Barrier::new(2));
         for _ in 0..2 {
             let barrier = barrier.clone();
@@ -235,7 +246,7 @@ mod tests {
 
     #[test]
     fn a_panic_becomes_the_outcome() {
-        let mut pool = Pool::new(1, None);
+        let mut pool = Pool::new(1, None, None);
         pool.spawn("test", "boom", Box::new(|_| panic!("job failed")), editor());
         let finished = wait_for(&mut pool, 1);
         assert!(matches!(&finished[0].outcome, JobOutcome::Panicked(m) if m == "job failed"));
@@ -243,7 +254,7 @@ mod tests {
 
     #[test]
     fn a_cancelled_job_ends_as_cancelled() {
-        let mut pool = Pool::new(1, None);
+        let mut pool = Pool::new(1, None, None);
         let id = pool.spawn(
             "test",
             "loop",
@@ -263,7 +274,7 @@ mod tests {
 
     #[test]
     fn progress_is_visible_while_the_job_runs() {
-        let mut pool = Pool::new(1, None);
+        let mut pool = Pool::new(1, None, None);
         let gate = Arc::new(Barrier::new(2));
         let inside = gate.clone();
         pool.spawn(

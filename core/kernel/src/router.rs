@@ -30,10 +30,12 @@ pub enum ReplyTo {
     Kernel(u64),
 }
 
-/// What other threads ask of the interface thread, served in the order they asked.
+/// What other threads ask of the interface thread, served in the order they asked. `thread` is
+/// the thread that asked: undo groups belong to a caller on one thread (S4).
 pub enum Request {
     Call {
         caller: String,
+        thread: ThreadId,
         name: String,
         arguments: Value,
         reply: ReplyTo,
@@ -50,11 +52,22 @@ pub enum Request {
     },
     BeginGroup {
         caller: String,
+        thread: ThreadId,
         label: String,
     },
     EndGroup {
         caller: String,
+        thread: ThreadId,
     },
+    /// A job's thread finished its job: the groups it left open are closed.
+    ThreadEnded {
+        thread: ThreadId,
+    },
+}
+
+/// The feature part of a caller: `scripting-lua#paint.lua #3` → `scripting-lua`.
+pub fn feature_of(caller: &str) -> &str {
+    caller.split('#').next().unwrap_or(caller)
 }
 
 struct Subscription {
@@ -181,6 +194,7 @@ impl EditorBackend for Bridge {
         let (reply, answer) = mpsc::channel();
         self.queue(Request::Call {
             caller: caller.to_owned(),
+            thread: std::thread::current().id(),
             name: name.to_owned(),
             arguments,
             reply: ReplyTo::Thread(reply),
@@ -265,6 +279,7 @@ impl EditorBackend for Bridge {
     fn begin_group(&self, caller: &str, label: &str) {
         self.queue(Request::BeginGroup {
             caller: caller.to_owned(),
+            thread: std::thread::current().id(),
             label: label.to_owned(),
         });
     }
@@ -272,6 +287,7 @@ impl EditorBackend for Bridge {
     fn end_group(&self, caller: &str) {
         self.queue(Request::EndGroup {
             caller: caller.to_owned(),
+            thread: std::thread::current().id(),
         });
     }
 }

@@ -3,6 +3,7 @@
 //! The kernel is linked into the executable. Features never depend on it: they only see the
 //! contracts of `uniwow-api`.
 
+mod groups;
 mod guard;
 mod history;
 mod host;

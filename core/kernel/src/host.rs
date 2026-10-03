@@ -105,6 +105,7 @@ impl Host for KernelHost {
         let id = CallId(self.next_call);
         self.bridge.queue(Request::Call {
             caller: caller.to_owned(),
+            thread: std::thread::current().id(),
             name: name.to_owned(),
             arguments,
             reply: ReplyTo::Feature(caller.to_owned(), id),

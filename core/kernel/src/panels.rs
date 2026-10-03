@@ -109,6 +109,7 @@ impl CommandsPanel {
                                 self.answer = None;
                                 bridge.queue(Request::Call {
                                     caller: "kernel".to_owned(),
+                                    thread: std::thread::current().id(),
                                     name: command.name.clone(),
                                     arguments,
                                     reply: ReplyTo::Kernel(self.next_call),

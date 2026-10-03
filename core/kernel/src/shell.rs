@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
+use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
 use uniwow_api::egui_dock::tab_viewer::OnCloseResponse;
@@ -10,8 +11,9 @@ use uniwow_api::{
     egui, log, serde_json,
 };
 
+use crate::groups::{Closed, Ended, Groups};
 use crate::guard::{guarded, guarded_as};
-use crate::history::{self, History, Part};
+use crate::history::{self, History};
 use crate::host::{KernelHost, Service};
 use crate::jobs::Pool;
 use crate::layout::{self, PanelEntry, Tab};
@@ -20,7 +22,7 @@ use crate::logger;
 use crate::order;
 use crate::panels::{self, CommandsPanel};
 use crate::requirements::{self, Need};
-use crate::router::{self, Bridge, Entry, ReplyTo, Request};
+use crate::router::{self, Bridge, Entry, ReplyTo, Request, feature_of};
 use crate::settings::Settings;
 
 const KERNEL: &str = "kernel";
@@ -47,8 +49,9 @@ pub struct Shell {
     /// Answers to `Context::call`, delivered after the calls are served.
     replies: Vec<(String, CallId, Result<serde_json::Value, String>)>,
     commands_panel: CommandsPanel,
-    /// Undo groups open per caller (S4): their commands become one entry when the group ends.
-    groups: HashMap<String, (String, Vec<Part>)>,
+    /// Undo groups open per caller and thread (S4): their commands become one entry when the
+    /// group ends.
+    groups: Groups,
 }
 
 /// Whether the dock could be drawn this session.
@@ -68,7 +71,7 @@ impl Shell {
             .unwrap_or_default();
         let (bridge, requests) = Bridge::new(Some(cc.egui_ctx.clone()));
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-        let pool = Pool::new(threads, Some(cc.egui_ctx.clone()));
+        let pool = Pool::new(threads, Some(cc.egui_ctx.clone()), Some(bridge.clone()));
         let host = KernelHost::new(cc.wgpu_render_state.clone(), Settings::load(), pool, bridge);
         // wgpu panics on errors nobody captured; log them instead, the editor must keep running.
         if let Some(gpu) = &host.gpu {
@@ -90,7 +93,7 @@ impl Shell {
             requests: Some(requests),
             replies: Vec::new(),
             commands_panel: CommandsPanel::default(),
-            groups: HashMap::new(),
+            groups: Groups::default(),
         };
         shell.register_all();
         shell.resolve_requirements();
@@ -327,9 +330,9 @@ impl Shell {
         self.apply_pending_for(None);
     }
 
-    /// Applies the queued undoable commands. Those applied for a caller with an open undo group go
-    /// into the group instead of the history.
-    fn apply_pending_for(&mut self, caller: Option<&str>) {
+    /// Applies the queued undoable commands. Those applied for a caller with an undo group open on
+    /// the calling thread go into the group instead of the history.
+    fn apply_pending_for(&mut self, caller: Option<(&str, ThreadId)>) {
         for (owner, mut command) in std::mem::take(&mut self.host.pending) {
             let Some(index) = self.running_index(&owner) else {
                 continue;
@@ -339,8 +342,8 @@ impl Shell {
                 .as_deref_mut()
                 .expect("running features are loaded");
             match guarded_as(&owner, || command.apply(feature)) {
-                Ok(()) => match caller.and_then(|c| self.groups.get_mut(c)) {
-                    Some((_, parts)) => parts.push(Part { owner, command }),
+                Ok(()) => match caller.and_then(|(caller, thread)| self.groups.parts_of(caller, thread)) {
+                    Some(parts) => parts.push(history::Part { owner, command }),
                     None => self.history.push(owner, command),
                 },
                 Err(message) => {
@@ -363,14 +366,19 @@ impl Shell {
     }
 
     /// Reverts the last entry, its commands in reverse order. A command whose revert fails makes
-    /// its feature fail; the other commands of the entry are reverted all the same.
+    /// its feature fail; the other commands of the entry are reverted all the same. Refused while
+    /// an undo group is open.
     fn undo(&mut self) {
+        if let Some(reason) = self.groups.blocking_undo() {
+            log::warn!("Undo ignored: {reason}");
+            return;
+        }
         let running = self.running_ids();
         let Some(entry) = self.history.take_undo(|id| running.contains(id)) else {
             return;
         };
         let parts = self.replay(entry.parts.into_iter().rev().collect(), true);
-        let parts: Vec<Part> = parts.into_iter().rev().collect();
+        let parts: Vec<history::Part> = parts.into_iter().rev().collect();
         if !parts.is_empty() {
             self.history.undone.push(history::Entry {
                 label: entry.label,
@@ -380,6 +388,10 @@ impl Shell {
     }
 
     fn redo(&mut self) {
+        if let Some(reason) = self.groups.blocking_undo() {
+            log::warn!("Redo ignored: {reason}");
+            return;
+        }
         let running = self.running_ids();
         let Some(entry) = self.history.take_redo(|id| running.contains(id)) else {
             return;
@@ -394,7 +406,7 @@ impl Shell {
     }
 
     /// Reverts or applies `parts` in the given order and returns those that succeeded.
-    fn replay(&mut self, parts: Vec<Part>, revert: bool) -> Vec<Part> {
+    fn replay(&mut self, parts: Vec<history::Part>, revert: bool) -> Vec<history::Part> {
         let mut done = Vec::new();
         for mut part in parts {
             // An earlier part may have made this feature fail.
@@ -432,17 +444,22 @@ impl Shell {
         let id = slot.id.clone();
         self.host.services.retain(|_, s| s.provider != id);
         self.sync_running();
-        let mut purged = self.history.purge(&id);
-        for (_, parts) in self.groups.values_mut() {
-            let before = parts.len();
-            parts.retain(|part| part.owner != id);
-            purged += before - parts.len();
-        }
+        let purged = self.history.purge(&id) + self.groups.purge(&id);
         if purged > 0 {
             log::warn!("{purged} changes of '{id}' can no longer be undone");
         }
+        // Its scripts or modules will not end their groups: what they changed elsewhere stays
+        // undoable.
+        for closed in self.groups.close_feature(&id) {
+            log::warn!("undo group '{}' closed: '{id}' failed", closed.label);
+            self.push_closed(closed);
+        }
         self.host
             .publish(KERNEL, FEATURE_FAILED_TOPIC, serde_json::json!({ "id": id }));
+    }
+
+    fn push_closed(&mut self, closed: Closed) {
+        self.history.push_group(closed.label, closed.parts);
     }
 
     /// Moves what other threads left for the interface thread: events and failures of commands.
@@ -499,11 +516,12 @@ impl Shell {
         match request {
             Request::Call {
                 caller,
+                thread,
                 name,
                 arguments,
                 reply,
             } => {
-                let result = self.run_command(&caller, &name, arguments);
+                let result = self.run_command(&caller, thread, &name, arguments);
                 if let Err(error) = &result {
                     log::warn!("call of '{name}' by '{caller}' failed: {error}");
                 }
@@ -522,20 +540,16 @@ impl Shell {
             Request::SetSetting { caller, key, value } => {
                 self.host.set_setting(feature_of(&caller), &key, value);
             }
-            Request::BeginGroup { caller, label } => match self.groups.entry(caller) {
-                std::collections::hash_map::Entry::Occupied(open) => {
-                    log::warn!(
-                        "'{}' opened an undo group inside another one; it continues the first",
-                        open.key()
-                    );
-                }
-                std::collections::hash_map::Entry::Vacant(free) => {
-                    free.insert((label, Vec::new()));
-                }
+            Request::BeginGroup { caller, thread, label } => self.groups.begin(&caller, thread, &label),
+            Request::EndGroup { caller, thread } => match self.groups.end(&caller, thread) {
+                Ended::Closed(closed) => self.push_closed(closed),
+                Ended::StillOpen => {}
+                Ended::NotOpen => log::warn!("'{caller}' ended an undo group it had not opened"),
             },
-            Request::EndGroup { caller } => {
-                if let Some((label, parts)) = self.groups.remove(&caller) {
-                    self.history.push_group(label, parts);
+            Request::ThreadEnded { thread } => {
+                for closed in self.groups.close_thread(thread) {
+                    log::warn!("undo group '{}' closed: its job ended without ending it", closed.label);
+                    self.push_closed(closed);
                 }
             }
         }
@@ -544,6 +558,7 @@ impl Shell {
     fn run_command(
         &mut self,
         caller: &str,
+        thread: ThreadId,
         name: &str,
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
@@ -560,7 +575,7 @@ impl Shell {
         });
         match outcome {
             Ok(result) => {
-                self.apply_pending_for(Some(caller));
+                self.apply_pending_for(Some((caller, thread)));
                 result
             }
             Err(panic) => {
@@ -640,11 +655,22 @@ impl Shell {
                 self.feature_items(ui, "File", &mut actions);
             });
             ui.menu_button("Edit", |ui| {
-                if history_button(ui, "Undo", "Ctrl+Z", self.history.undo_label()) {
+                let blocked = self.groups.blocking_undo();
+                if history_button(ui, "Undo", "Ctrl+Z", self.history.undo_label(), blocked.as_deref()) {
                     actions.push(MenuAction::Undo);
                 }
-                if history_button(ui, "Redo", "Ctrl+Y", self.history.redo_label()) {
+                if history_button(ui, "Redo", "Ctrl+Y", self.history.redo_label(), blocked.as_deref()) {
                     actions.push(MenuAction::Redo);
+                }
+                // A group a module's thread never ended would block Undo for good.
+                let open = self.groups.list();
+                if !open.is_empty() {
+                    ui.separator();
+                }
+                for (id, label) in open {
+                    if ui.button(format!("Close the undo group '{label}'")).clicked() {
+                        actions.push(MenuAction::CloseGroup(id));
+                    }
                 }
                 self.feature_items(ui, "Edit", &mut actions);
             });
@@ -701,6 +727,14 @@ impl Shell {
             }
             ui.separator();
             ui.label(format!("{} changes in history", self.history.done.len()));
+            let open: Vec<String> = self.groups.list().into_iter().map(|(_, label)| label).collect();
+            if !open.is_empty() {
+                ui.separator();
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!("Undo groups open: {}", open.join(", ")),
+                );
+            }
         });
     }
 }
@@ -708,6 +742,7 @@ impl Shell {
 enum MenuAction {
     Undo,
     Redo,
+    CloseGroup(u64),
     SetPanelOpen(Tab, bool),
     Feature(usize, String),
 }
@@ -822,6 +857,12 @@ impl eframe::App for Shell {
             match action {
                 MenuAction::Undo => self.undo(),
                 MenuAction::Redo => self.redo(),
+                MenuAction::CloseGroup(id) => {
+                    if let Some(closed) = self.groups.close(id) {
+                        log::info!("undo group '{}' closed from the Edit menu", closed.label);
+                        self.push_closed(closed);
+                    }
+                }
                 MenuAction::SetPanelOpen(tab, open) => self.set_panel_open(&tab, open),
                 MenuAction::Feature(index, action) => {
                     if self.slots[index].state.is_running()
@@ -995,13 +1036,19 @@ fn log_panel(ui: &mut egui::Ui) {
         });
 }
 
-/// An Undo or Redo entry of the Edit menu; returns whether it was clicked.
-fn history_button(ui: &mut egui::Ui, verb: &str, shortcut: &str, label: Option<String>) -> bool {
-    let text = label
-        .as_ref()
-        .map_or_else(|| verb.to_owned(), |label| format!("{verb} {label}"));
-    ui.add_enabled(label.is_some(), egui::Button::new(text).shortcut_text(shortcut))
-        .clicked()
+/// An Undo or Redo entry of the Edit menu, greyed with the reason when `blocked`; returns whether
+/// it was clicked.
+fn history_button(ui: &mut egui::Ui, verb: &str, shortcut: &str, label: Option<String>, blocked: Option<&str>) -> bool {
+    let text = match (&label, blocked) {
+        (_, Some(reason)) => format!("{verb} ({reason})"),
+        (Some(label), None) => format!("{verb} {label}"),
+        (None, None) => verb.to_owned(),
+    };
+    ui.add_enabled(
+        label.is_some() && blocked.is_none(),
+        egui::Button::new(text).shortcut_text(shortcut),
+    )
+    .clicked()
 }
 
 /// Calls the feature of `slot` with a context, catching panics.
@@ -1014,11 +1061,6 @@ fn call_feature<R>(
     let feature = feature.as_deref_mut().expect("running features are loaded");
     let mut ctx = Context::new(host, id);
     guarded_as(id, || f(feature, &mut ctx))
-}
-
-/// The feature part of a caller: `scripting-lua#run-3` → `scripting-lua`.
-fn feature_of(caller: &str) -> &str {
-    caller.split('#').next().unwrap_or(caller)
 }
 
 fn state_text(state: &State) -> String {
