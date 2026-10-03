@@ -33,6 +33,16 @@ pub struct Shell {
     features_dir: PathBuf,
     restart_needed: bool,
     last_settings_save: Instant,
+    panels: PanelsHealth,
+}
+
+/// Whether the dock could be drawn this session.
+enum PanelsHealth {
+    Drawn,
+    /// Drawing panicked once and the layout was reset to the default one.
+    Reset,
+    /// Drawing panicked again after the reset: a fixed message replaces the panels, with the reason.
+    Broken(String),
 }
 
 impl Shell {
@@ -62,6 +72,7 @@ impl Shell {
             features_dir: exe_dir.join("features"),
             restart_needed: false,
             last_settings_save: Instant::now(),
+            panels: PanelsHealth::Drawn,
         };
         shell.register_all();
         shell.resolve_requirements();
@@ -493,6 +504,13 @@ impl eframe::App for Shell {
         };
         let mut shown = Ok(());
         egui::CentralPanel::default().show(ui, |ui| {
+            if let PanelsHealth::Broken(reason) = &self.panels {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!("The panels cannot be displayed: {reason}. See the log."),
+                );
+                return;
+            }
             shown = guarded(|| {
                 DockArea::new(&mut self.dock)
                     .style(Style::from_egui(ui.style()))
@@ -500,10 +518,20 @@ impl eframe::App for Shell {
             });
         });
         let Viewer { failures, closed, .. } = viewer;
-        // A layout egui_dock cannot draw would otherwise stop the editor at every start.
+        // A layout egui_dock cannot draw would otherwise stop the editor at every start. The reset is
+        // tried once; a panel that panics at every frame then leaves a fixed message instead.
         if let Err(message) = shown {
-            log::error!("the panel layout could not be drawn and was reset: {message}");
-            self.dock = layout::default_layout(&self.panel_entries(), &self.host.settings.closed_panels);
+            match self.panels {
+                PanelsHealth::Drawn => {
+                    log::error!("the panels could not be drawn, the layout was reset: {message}");
+                    self.dock = layout::default_layout(&self.panel_entries(), &self.host.settings.closed_panels);
+                    self.panels = PanelsHealth::Reset;
+                }
+                _ => {
+                    log::error!("the panels still cannot be drawn and are no longer shown: {message}");
+                    self.panels = PanelsHealth::Broken(message);
+                }
+            }
         }
 
         for (index, message) in failures {
