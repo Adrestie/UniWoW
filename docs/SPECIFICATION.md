@@ -1,8 +1,8 @@
-# WoW Editor — Architecture and feature catalogue
+# UniWoW — Architecture and feature catalogue
 
 Status: **validated**. Open questions in section 10. No code yet.
 
-The editor is a standalone desktop application (outside the game client) used to modify a
+UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
 scripts, packaging. Written in Rust, user interface with egui, 3D rendering with wgpu.
 
@@ -34,6 +34,8 @@ features/*     one crate per feature, built as one DLL (section 7)
 client-bridge  C++ WXL module running inside the client (outside the Cargo workspace)
 xtask          developer commands: new-feature, build, build-feature, run, check
 ```
+
+Crates are prefixed `uniwow-` (`uniwow-api`, `uniwow-kernel`, `uniwow-feature-<id>`…).
 
 `core/api`, `core/kernel`, `libs/*` and the shared dependencies (Rust standard library, egui,
 wgpu) are built as shared DLLs: the **runtime**. Every feature DLL links to the runtime, so
@@ -96,7 +98,7 @@ Rules:
 Output layout:
 
 ```
-editor.exe
+UniWoW.exe
 runtime DLLs                   standard library, core, egui, wgpu, libs
 features\<id>\<id>.dll
 features\<id>\feature.toml     generated at build: id, name, version, runtime fingerprint
@@ -289,7 +291,7 @@ Acceptance:
 |---|---|
 | Remove `features\viewport\` from the output, start the editor | The editor starts without any 3D window; the cube feature is listed as running without its 3D part |
 | Put it back, start the editor | The 3D window is back with the grid and the cube |
-| `cargo xtask new-feature third`, `cargo xtask build-feature third`, start the editor | A third panel appears; `editor.exe` and the runtime DLLs are unchanged (same hash) |
+| `cargo xtask new-feature third`, `cargo xtask build-feature third`, start the editor | A third panel appears; `UniWoW.exe` and the runtime DLLs are unchanged (same hash) |
 | Rebuild a feature while the editor is open | The build succeeds; the new version is loaded at the next start |
 | Change `core/api`, rebuild the runtime only, start the editor | Every feature is refused with "built for another runtime"; no crash |
 | A sample feature panics while drawing | That feature is shown as failed in the Features panel; the rest keeps working |
@@ -302,7 +304,6 @@ export many. The runtime may need splitting into several DLLs.
 
 ## 10. Open questions
 
-- Name of the tool (crate prefix).
 - Project model: what a project contains, where it is stored, how it maps to a WoW-mods module.
 - Installations targeted: client with WXL, server, database connection.
 - Order of the features after milestone 1.
