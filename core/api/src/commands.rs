@@ -27,6 +27,9 @@ pub struct CommandSpec {
     /// JSON Schema of the result.
     pub result: Value,
     pub runs_on: RunsOn,
+    /// Offered on behalf of someone else (a module, a script): a command a feature declares
+    /// itself under the same name wins over it.
+    pub delegated: bool,
 }
 
 /// A command of the catalogue, as listed to callers.

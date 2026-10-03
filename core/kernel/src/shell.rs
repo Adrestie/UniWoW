@@ -111,6 +111,8 @@ impl Shell {
     }
 
     fn register_all(&mut self) {
+        // Name conflicts are settled once every feature has declared its commands.
+        let mut declared = Vec::new();
         for slot in &mut self.slots {
             let Some(feature) = slot.feature.as_deref_mut().filter(|_| slot.state.is_running()) else {
                 continue;
@@ -124,32 +126,7 @@ impl Shell {
             slot.panels = reg.panels;
             slot.menu_items = reg.menu_items;
             slot.subscriptions = reg.subscriptions;
-            let mut catalogue = self.host.bridge.catalogue.write().unwrap_or_else(|e| e.into_inner());
-            for spec in reg.commands {
-                if let Some(existing) = catalogue.get(&spec.name) {
-                    log::warn!(
-                        "command '{}' of '{}' ignored: already offered by '{}'",
-                        spec.name,
-                        slot.id,
-                        existing.info.owner
-                    );
-                    continue;
-                }
-                let handler = match spec.runs_on {
-                    RunsOn::Interface => None,
-                    RunsOn::Caller(handler) => Some(handler),
-                };
-                let info = CommandInfo {
-                    name: spec.name.clone(),
-                    owner: slot.id.clone(),
-                    description: spec.description,
-                    arguments: spec.arguments,
-                    result: spec.result,
-                    on_caller: handler.is_some(),
-                };
-                catalogue.insert(spec.name, Entry { info, handler });
-            }
-            drop(catalogue);
+            declared.extend(reg.commands.into_iter().map(|spec| (slot.id.clone(), spec)));
             for (id, value) in reg.services {
                 if let Some(existing) = self.host.services.get(&id) {
                     log::warn!(
@@ -162,6 +139,22 @@ impl Shell {
                 let provider = slot.id.clone();
                 self.host.services.insert(id, Service { provider, value });
             }
+        }
+        let mut catalogue = self.host.bridge.catalogue.write().unwrap_or_else(|e| e.into_inner());
+        for (owner, spec) in router::choose_commands(declared) {
+            let handler = match spec.runs_on {
+                RunsOn::Interface => None,
+                RunsOn::Caller(handler) => Some(handler),
+            };
+            let info = CommandInfo {
+                name: spec.name.clone(),
+                owner,
+                description: spec.description,
+                arguments: spec.arguments,
+                result: spec.result,
+                on_caller: handler.is_some(),
+            };
+            catalogue.insert(spec.name, Entry { info, handler });
         }
     }
 

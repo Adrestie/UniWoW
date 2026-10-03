@@ -49,7 +49,8 @@ impl Feature for NativeModules {
                             continue;
                         }
                         let handler = command.handler;
-                        reg.command_on_caller(
+                        // Offered for the module: a feature's own command of that name wins.
+                        reg.command_on_caller_delegated(
                             &command.name,
                             &command.description,
                             command.arguments,

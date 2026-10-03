@@ -110,7 +110,7 @@ Rules:
 | F3 | A feature owns its project data section and its settings; no other feature reads them directly. |
 | F4 | A missing required service: the feature is not loaded and the reason is shown. A missing used service: the feature loads without the parts that need it. A feature that fails withdraws its services; requirements are checked again just before each `init`, so a feature whose provider failed meanwhile is not initialised. |
 | F5 | A feature that runs code on behalf of another, such as the viewport drawing a layer, catches its failures and reports the culprit with `Context::report_failure`. The kernel disables the culprit as if it had panicked, naming the reporter. |
-| F6 | Every action a feature offers to others is a named command. The kernel keeps their catalogue and routes the calls; the same catalogue serves the features, the scripts and native modules (S1). |
+| F6 | Every action a feature offers to others is a named command. The kernel keeps their catalogue and routes the calls; the same catalogue serves the features, the scripts and native modules (S1). A feature may also offer commands on behalf of others, such as modules or scripts: they are delegated. Once every feature has registered, a name declared twice keeps the command a feature declares itself over a delegated one, and the first registered between two of the same kind; each one set aside is logged with the one that wins. |
 
 ---
 
@@ -328,7 +328,7 @@ Rules:
 | S7 | Scripts and native modules have full access to the machine, like editor scripts in Unity: one received from someone else is checked before it is used. |
 | S8 | Each language stays optional: without `scripting-python.dll`, or without the Python files, the editor starts with Lua only, and the other way round. In particular the runtime must not require the Python DLL to start. |
 | S9 | One interpreter per language. Scripts are stored by language and version: `scripts\lua-5.1\…`, `scripts\python-3.xx\…`, the Python version being the one shipped. Native modules go in `modules\`. |
-| S10 | A native module exports one C entry point. It receives the table of functions of the C interface and returns its description (name, version, the version of `uniwow.h` it was built with) and the named commands it offers, implemented in its own language with the same JSON form. |
+| S10 | A native module exports one C entry point. It receives the table of functions of the C interface and returns its description (name, version, the version of `uniwow.h` it was built with) and the named commands it offers, implemented in its own language with the same JSON form. They join the catalogue as delegated commands of `native-modules` (F6): a feature's own command of the same name keeps its name, and the Modules panel shows the module's one as refused. |
 
 Risks to verify first, before any other work on scripting: the runtime's exported symbol count with PyO3 and mlua inside it; starting the editor without the Python DLL while PyO3 is part of the runtime (delayed loading); the embeddable Python distribution beside the executable; a C++ module and a C# NativeAOT module calling the C interface from several threads.
 

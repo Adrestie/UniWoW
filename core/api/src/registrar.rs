@@ -77,7 +77,7 @@ impl Registrar {
         arguments: serde_json::Value,
         result: serde_json::Value,
     ) -> &mut Self {
-        self.add_command(name, description, arguments, result, RunsOn::Interface)
+        self.add_command(name, description, arguments, result, RunsOn::Interface, false)
     }
 
     /// Declares a named command running on the calling thread, at once, through `handler`.
@@ -89,7 +89,21 @@ impl Registrar {
         result: serde_json::Value,
         handler: CommandHandler,
     ) -> &mut Self {
-        self.add_command(name, description, arguments, result, RunsOn::Caller(handler))
+        self.add_command(name, description, arguments, result, RunsOn::Caller(handler), false)
+    }
+
+    /// Like `command_on_caller`, for a command offered on behalf of someone else, such as a
+    /// module or a script: a command another feature declares itself under the same name wins
+    /// over it, whatever the order the features register in.
+    pub fn command_on_caller_delegated(
+        &mut self,
+        name: &str,
+        description: &str,
+        arguments: serde_json::Value,
+        result: serde_json::Value,
+        handler: CommandHandler,
+    ) -> &mut Self {
+        self.add_command(name, description, arguments, result, RunsOn::Caller(handler), true)
     }
 
     fn add_command(
@@ -99,6 +113,7 @@ impl Registrar {
         arguments: serde_json::Value,
         result: serde_json::Value,
         runs_on: RunsOn,
+        delegated: bool,
     ) -> &mut Self {
         self.commands.push(CommandSpec {
             name: name.to_owned(),
@@ -106,6 +121,7 @@ impl Registrar {
             arguments,
             result,
             runs_on,
+            delegated,
         });
         self
     }
