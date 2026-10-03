@@ -1,6 +1,6 @@
 # WoW Editor — Architecture and feature catalogue
 
-Status: **draft, awaiting validation**. No code yet.
+Status: **validated**. Open questions in section 10. No code yet.
 
 The editor is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
