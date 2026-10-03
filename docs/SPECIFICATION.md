@@ -15,24 +15,29 @@ Players are expected to run the client with WarcraftXL (WXL).
 | Id | Requirement |
 |---|---|
 | R1 | Every feature is separate from the core. The core contains no code specific to any feature and never names one. |
-| R2 | Adding a feature is simple: one command creates it, nothing in the core is edited by hand. |
-| R3 | The core detects the features present and loads them. |
-| R4 | Removing a feature (deleting its folder) leaves the core and every other feature building and running. |
-| R5 | A feature that fails is disabled and reported; the editor keeps running. |
+| R2 | Every feature is a DLL. The core detects the feature DLLs present at start and loads them. |
+| R3 | A feature can be added, rebuilt or removed without recompiling the editor. |
+| R4 | Removing a feature's DLL leaves the editor starting and working without it. Example: without the viewport DLL, the editor starts without any 3D window; without the terrain DLL, the 3D window shows no terrain. |
+| R5 | Adding a feature is simple: one command creates it, one command builds it. |
+| R6 | A feature that fails, or that was built for another version of the core, is refused or disabled and reported; the editor keeps running. |
 
 ---
 
 ## 2. Layers
 
 ```
-app            thin executable: starts the core
-core/api       contracts offered to features (traits, extension points, registration macro)
+app            small executable: loads the runtime, then the features
+core/api       contracts offered to features (traits, extension points, entry point macro)
 core/kernel    feature loader and core services (section 5)
 libs/*         shared libraries without user interface (section 6)
-features/*     one folder per feature (section 7)
+features/*     one crate per feature, built as one DLL (section 7)
 client-bridge  C++ WXL module running inside the client (outside the Cargo workspace)
-xtask          developer commands: new-feature, build, run, check
+xtask          developer commands: new-feature, build, build-feature, run, check
 ```
+
+`core/api`, `core/kernel`, `libs/*` and the shared dependencies (Rust standard library, egui,
+wgpu) are built as shared DLLs: the **runtime**. Every feature DLL links to the runtime, so
+each of these exists once in memory.
 
 Allowed dependencies (enforced by `xtask check`):
 
@@ -50,10 +55,12 @@ the core or on a feature.
 
 ## 3. Feature contract
 
-A feature is one Rust crate in `features/<id>/`. It exposes one type implementing the `Feature`
-trait of `core/api`, declared with a registration macro:
+A feature is one Rust crate in `features/<id>/`, built as `<id>.dll`. It exposes one type
+implementing the `Feature` trait of `core/api`, exported by an entry point macro:
 
-- **info**: id, display name, version, category, description, API version it was built for.
+- **info**: id, display name, version, category, description.
+- **requires / uses**: services the feature cannot work without, and services it uses when
+  present.
 - **register**: declares what the feature contributes (list below). Called once at load.
 - **init / shutdown**: start and stop, with access to core services.
 
@@ -61,15 +68,13 @@ Extension points a feature may contribute to:
 
 | Extension point | Example |
 |---|---|
-| Panels (dockable windows) | DBC table view, asset browser |
+| Panels (dockable windows) | DBC table view, asset browser, 3D view |
 | Menu entries and shortcuts | Map > New map |
 | Commands | "open creature <id>", "paint texture" |
 | Inspectors, per selection type | creature inspector, doodad inspector |
-| Viewport layers (drawing and picking) | terrain, spawns, liquids |
-| Viewport tools | sculpt brush, placement gizmo |
 | Asset handlers, per file type | open or preview `.blp`, `.m2` |
 | Settings page | brush defaults |
-| Services implementing an interface defined in core/api | "creature lookup" |
+| Services implementing an interface defined in core/api | "viewport", "creature lookup" |
 | Event subscriptions | "project saved", "tile changed" |
 | Project data section owned by the feature | spawn edits not yet deployed |
 
@@ -80,51 +85,70 @@ Rules:
 | F1 | A feature talks to another only through the core: commands, events, services by interface. Example: the quest editor issues "open creature 1234"; the feature registered for creatures handles it. If no such feature is loaded, the link is shown disabled. |
 | F2 | Every modification goes through an undoable command (single undo history). |
 | F3 | A feature owns its project data section and its settings; no other feature reads them directly. |
-| F4 | A consumer of a service handles its absence (R4). |
+| F4 | A missing required service: the feature is not loaded and the reason is shown. A missing used service: the feature loads without the parts that need it. |
 
 ---
 
 ## 4. Discovery and loading
 
-### Retained mechanism: compiled-in features, discovered automatically
+### Retained mechanism: one DLL per feature, loaded at start
 
-Build time:
+Output layout:
 
-1. The workspace includes `features/*` by pattern: a new folder is part of the build without
-   editing the workspace.
-2. `cargo xtask build` scans `features/` and regenerates the list of features linked into the
-   editor (a generated file, never edited by hand, not part of the core's code).
-3. Each feature registers itself through the macro; the core enumerates what is registered.
+```
+editor.exe
+runtime DLLs                   standard library, core, egui, wgpu, libs
+features\<id>\<id>.dll
+features\<id>\feature.toml     generated at build: id, name, version, runtime fingerprint
+```
 
-Run time:
+At start, the kernel:
 
-4. The kernel enumerates registered features, rejects those built for another API version,
-   orders initialization so that service providers start before their consumers, collects
-   contributions, then calls `init`.
-5. Each feature can be enabled or disabled per project from the **Features** panel, without
-   rebuilding.
-6. A failure (error or panic) in `register`, `init` or while drawing a panel disables that
-   feature only and is shown in the Features panel and the log (R5).
+1. Scans `features\*\feature.toml`. A folder without a manifest or without its DLL is ignored
+   and listed.
+2. Compares each manifest's **runtime fingerprint** with its own. The fingerprint identifies
+   the compiler version and the runtime build. A mismatch refuses the feature with the reason
+   ("built for another runtime, rebuild it") instead of loading it.
+3. Copies each accepted DLL to a temporary folder and loads the copy, so that a feature can be
+   rebuilt while the editor is open.
+4. Calls the entry point, checks required services, orders initialization so that service
+   providers start before their consumers, collects contributions, then calls `init`.
+5. Catches any failure (error or panic) in `register`, `init` or while drawing a panel: that
+   feature is disabled and reported in the Features panel and the log (R6).
 
-Adding a feature:
+Enabling or disabling a feature from the Features panel takes effect at the next start. A
+loaded feature is never unloaded while the editor runs.
+
+Developer commands:
 
 ```
 cargo xtask new-feature <id>     creates features/<id>/ from a template (one empty panel)
-cargo xtask run                  rebuilds and starts the editor; the feature is loaded
+cargo xtask build-feature <id>   builds that feature only, against the current runtime
+cargo xtask build                builds the runtime, the executable and every feature
+cargo xtask run                  builds what changed, then starts the editor
 ```
 
-Copying an existing feature folder into `features/` and running `cargo xtask run` works the same.
+| Change | Rebuild |
+|---|---|
+| Code of one feature | That feature only (`build-feature`) |
+| New feature | That feature only |
+| `core/api`, `core/kernel`, `libs/*`, shared dependency versions or compiler | Runtime and every feature (`build`), because the fingerprint changes |
 
-### Alternative not retained: DLL plugins loaded at run time
+### Constraint accepted with this choice
 
-The core would scan a `features/` folder next to the executable and load each DLL.
+Rust has no stable binary interface between separately compiled DLLs. Feature DLLs are
+therefore only compatible with the runtime they were built against, with the same compiler.
+The fingerprint (step 2) turns an incompatibility into a refusal with a message instead of a
+crash. A feature DLL taken from another machine works only if built with the same compiler and
+the same runtime.
 
-- Gain: add or replace a feature without rebuilding the editor.
-- Cost: Rust has no stable binary interface. Every DLL must be built with exactly the same
-  compiler and dependency versions as the editor, otherwise behaviour is undefined (crashes
-  without a clear message). egui and wgpu types cross the boundary. Loading is `unsafe`.
-  Bevy deprecated its equivalent mechanism (0.14) and points to safer alternatives.
-- Since features are built in the same workspace anyway, the gain is small.
+### Alternatives not retained
+
+| Alternative | Reason |
+|---|---|
+| Features compiled into the editor | Adding or removing a feature requires recompiling the editor (R3). |
+| Stable C interface between DLLs (abi_stable, stabby) | egui and wgpu types cannot cross it: features could not draw their own panels or 3D. |
+| One process per feature | Sharing the 3D view and the panels between processes is too heavy. |
 
 ---
 
@@ -134,17 +158,18 @@ The core would scan a `features/` folder next to the executable and load each DL
 |---|---|
 | Shell | Main window, menus, dockable layout (egui_dock), layouts saved per user |
 | Feature loader | Section 4 |
-| Features panel | Lists features, version, state, errors; enable or disable |
+| Features panel | Lists features, version, state, refusal or failure reason; enable or disable |
 | Commands and history | Undo, redo, unsaved-changes tracking |
 | Events | Publish and subscribe, typed |
-| Services | Registry of interface implementations |
+| Services | Registry of interface implementations provided by features |
 | Selection | Current selection, any type |
 | Project | Open, save; content defined in a later step |
 | Settings | Global, per project, per feature |
 | Jobs | Background tasks with progress and cancel |
 | Log | Log panel shared by all features |
-| Viewport host | 3D views, camera, picking, gizmos; drawing comes from feature layers |
 | Inspector host | Shows the selection with the inspector registered for its type |
+
+The 3D view is not a core service: it is the `viewport` feature (section 7).
 
 ---
 
@@ -155,7 +180,7 @@ The core would scan a `features/` folder next to the executable and load each DL
 | formats | Read and write MPQ, DBC, ADT, WDT, WDL, WMO, M2, BLP. Based on warcraft-rs (MIT/Apache) where its writing is verified, own code otherwise |
 | defs | DBC layouts for build 12340 (WoWDBDefs) |
 | vfs | Client archive chain in the 3.3.5a load order, plus the project's own files on top |
-| render | wgpu renderer: terrain, M2, WMO, liquids, sky |
+| gpu | Generic GPU helpers on wgpu (device, shaders, buffers, camera math). Drawing of each kind of object belongs to the feature that owns it |
 | db | MySQL access to the AzerothCore databases |
 | server-link | SOAP client, server process control |
 | client-link | Protocol with the WXL client module |
@@ -165,19 +190,20 @@ The core would scan a `features/` folder next to the executable and load each DL
 
 ## 7. Feature catalogue
 
-Each line is one feature, in its own folder. The list is open: new features are added through
-section 4 without touching the core.
+Each line is one feature, one DLL. The list is open: new features are added through section 4
+without touching the core.
 
 ### World
 
 | Id | Feature |
 |---|---|
+| viewport | 3D window: camera, picking, gizmos. Provides the "viewport" service to which the features below add their drawing and tools |
 | maps | Map list (Map.dbc), WDT and WDL, create or duplicate a map, tile management, minimap tiles |
-| terrain | Height sculpting, texture painting (layers, alpha maps), holes, vertex shading, area painting, chunk flags |
-| liquids | Water, lava, slime: create, edit heights and types |
-| placement | Place, move, rotate, scale M2 doodads and WMOs in tiles, with gizmos and snapping |
+| terrain | Draws terrain in the viewport; height sculpting, texture painting (layers, alpha maps), holes, vertex shading, area painting, chunk flags |
+| liquids | Draws and edits water, lava, slime: create, heights, types |
+| placement | Draws M2 doodads and WMOs in tiles; place, move, rotate, scale, with gizmos and snapping |
 | environment | Lighting and sky (Light tables, skyboxes), zone music and ambience |
-| spawns | Server creatures and game objects placed in the 3D view, waypoints, formations |
+| spawns | Server creatures and game objects placed in the viewport, waypoints, formations |
 | server-map-data | Regenerate .map, vmaps and mmaps for changed tiles (AzerothCore extractors), in the background |
 
 ### Data
@@ -246,11 +272,14 @@ E:\WoW-editor
 
 Content:
 
-- Workspace, `xtask` (new-feature, build, run, check).
+- Workspace, `xtask` (new-feature, build, build-feature, run, check).
+- Runtime built as shared DLLs; executable loading feature DLLs as in section 4.
 - Kernel: shell with dockable panels, feature loader, Features panel, commands and undo,
-  events, settings, log panel.
-- Empty 3D viewport drawn by wgpu inside egui: camera and grid only.
-- Two sample features created from the template, communicating only through an event.
+  events, services, settings, log panel.
+- `viewport` feature: empty 3D window drawn by wgpu inside egui (camera and grid), providing
+  the viewport service.
+- Two sample features created from the template: one draws a cube through the viewport
+  service, both communicate only through an event.
 
 No WoW file is handled in this milestone.
 
@@ -258,11 +287,16 @@ Acceptance:
 
 | Check | Expected result |
 |---|---|
-| `cargo xtask new-feature third`, then `cargo xtask run` | A third panel appears; no core file changed (`git status` shows only `features/third/`) |
-| Delete `features/third/`, then `cargo xtask run` | The editor builds and starts without it |
+| Remove `features\viewport\` from the output, start the editor | The editor starts without any 3D window; the cube feature is listed as running without its 3D part |
+| Put it back, start the editor | The 3D window is back with the grid and the cube |
+| `cargo xtask new-feature third`, `cargo xtask build-feature third`, start the editor | A third panel appears; `editor.exe` and the runtime DLLs are unchanged (same hash) |
+| Rebuild a feature while the editor is open | The build succeeds; the new version is loaded at the next start |
+| Change `core/api`, rebuild the runtime only, start the editor | Every feature is refused with "built for another runtime"; no crash |
 | A sample feature panics while drawing | That feature is shown as failed in the Features panel; the rest keeps working |
-| Disable a feature in the Features panel | Its panels disappear; the choice persists |
 | A sample feature depends on the other in its Cargo.toml | `cargo xtask check` fails and names the offending dependency |
+
+Risk to verify first: a Windows DLL exports at most 65,535 symbols, and Rust shared libraries
+export many. The runtime may need splitting into several DLLs.
 
 ---
 
