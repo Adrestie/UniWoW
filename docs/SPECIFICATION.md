@@ -90,7 +90,7 @@ Extension points a feature may contribute to:
 |---|---|
 | Panels (dockable windows) | DBC table view, asset browser, 3D view |
 | Menu entries and shortcuts | Map > New map |
-| Commands | "open creature <id>", "paint texture" |
+| Named commands: called by name with JSON arguments and a JSON result, each declared with a description and the schema of its arguments and result. Not to be confused with the undoable `Command` of the history | "open creature <id>", "paint texture" |
 | Inspectors, per selection type | creature inspector, doodad inspector |
 | Asset handlers, per file type | open or preview `.blp`, `.m2` |
 | Settings page | brush defaults |
@@ -108,6 +108,7 @@ Rules:
 | F3 | A feature owns its project data section and its settings; no other feature reads them directly. |
 | F4 | A missing required service: the feature is not loaded and the reason is shown. A missing used service: the feature loads without the parts that need it. A feature that fails withdraws its services; requirements are checked again just before each `init`, so a feature whose provider failed meanwhile is not initialised. |
 | F5 | A feature that runs code on behalf of another, such as the viewport drawing a layer, catches its failures and reports the culprit with `Context::report_failure`. The kernel disables the culprit as if it had panicked, naming the reporter. |
+| F6 | Every action a feature offers to others is a named command. The kernel keeps their catalogue and routes the calls; the same catalogue serves the features, the scripts and native modules (S1). |
 
 ---
 
@@ -303,8 +304,8 @@ Both languages follow the same rules:
 
 | Id | Rule |
 |---|---|
-| S1 | Scripts see the editor through one `uniwow` module, defined once in `libs/scripting` and adapted to each language: run a named command, publish and receive events, read and write settings, log. Scripts can do only what the kernel and the features expose. |
-| S2 | Named commands ("open creature 1234", section 3) must exist in the kernel first: they are what scripts mostly call. |
+| S1 | One generic interface, the same for every language: list the named commands with their descriptions and schemas, call one by name, publish and receive events, read and write settings, log. Every value crosses it as JSON. It is defined once, independently of any language, and also offered as a C interface (`extern "C"` functions taking and returning UTF-8 JSON, header `uniwow.h`), so that a module written in C++, or in any language able to call C, reaches the same commands without depending on the Rust ABI. The Lua and Python `uniwow` modules only translate their values to and from JSON on top of this interface: they add no command of their own, so every language always has the same access. |
+| S2 | Named commands (F6) must exist in the kernel first: they are what scripts and native modules mostly call. |
 | S3 | A script runs outside the interface thread, so that a long script does not freeze the editor; each call to the editor goes through a queue served at the next frame. A running script can be stopped. |
 | S4 | Every change one run of a script makes forms a single undo entry. The kernel learns to group commands. |
 | S5 | A Lua or Python error is shown in the console with its line; it does not make the feature fail. |
