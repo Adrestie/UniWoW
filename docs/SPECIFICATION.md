@@ -1,6 +1,6 @@
 # UniWoW — Architecture and feature catalogue
 
-Status: **validated**. Milestone 1 built, awaiting validation. Open questions in section 10.
+Status: **validated**. Milestone 1 built and validated. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
