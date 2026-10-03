@@ -90,7 +90,11 @@ impl Feature for CubeFeature {
 
         let before = self.params.borrow().speed;
         let mut speed = before;
-        let response = ui.add(egui::Slider::new(&mut speed, 0.0..=4.0).text("Rotation speed"));
+        // A typed value is taken on Enter or when the box loses focus, not at every character.
+        let slider = egui::Slider::new(&mut speed, 0.0..=4.0)
+            .text("Rotation speed")
+            .update_while_editing(false);
+        let response = ui.add(slider);
         if response.changed() {
             // The value before the first change, whatever changed it: mouse, keyboard or typing.
             self.speed_before_edit.get_or_insert(before);
