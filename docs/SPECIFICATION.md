@@ -156,8 +156,16 @@ cargo xtask run                  builds what changed, then starts the editor
 |---|---|
 | Code of one feature | That feature only (`build-feature`) |
 | New feature | That feature only |
-| `core/kernel` | The executable only; features stay compatible |
+| `core/kernel` or `app` | The executable only; features stay compatible, as long as the change enables no option of a crate the runtime uses (below) |
 | `core/api`, `libs/*`, shared dependency versions or compiler | Runtime and every feature (`build`), because the fingerprint changes |
+
+The kernel and the app are built in the same `cargo build --workspace` as the runtime, and Cargo
+merges the options each package asks of a shared crate. If the kernel or the app enabled an option
+of a crate the runtime also uses, the runtime would be rebuilt and every feature refused.
+`cargo xtask check` reads the resolved dependency graph and refuses a direct dependency of
+`core/kernel` or `app` on a crate of the runtime's dependency tree, naming it; such a crate is
+reached through `uniwow-api` instead. A crate reached only through another dependency is not seen
+by the check: `build-feature` then detects the changed runtime and asks for a full build.
 
 The fingerprint is the BLAKE3 hash of `uniwow_api.dll`. The MSVC linker runs with `/Brepro`,
 which removes the link date and makes the PDB identifier depend on the content: relinking

@@ -59,6 +59,26 @@ pub fn problems(ws: &Workspace) -> Vec<String> {
             ));
         }
     }
+    // The kernel and the app are built together with the runtime: an option they enable on a crate
+    // the runtime also uses would rebuild the runtime. Only their direct dependencies are visible here.
+    if let Some(api) = api {
+        let runtime = ws.normal_tree(&api.id);
+        for package in ws
+            .packages
+            .iter()
+            .filter(|p| matches!(p.layer, Layer::Kernel | Layer::App))
+        {
+            let direct = ws.resolve.get(&package.id).into_iter().flatten();
+            for edge in direct.filter(|e| e.normal && !ws.is_member(&e.id) && runtime.contains(&e.id)) {
+                problems.push(format!(
+                    "{} depends directly on {}, which the runtime also uses: an option enabled there would \
+                     rebuild the runtime; reach it through uniwow-api",
+                    package.name, edge.name
+                ));
+            }
+        }
+    }
+
     for package in &ws.packages {
         for dependency in &package.dependencies {
             if package.layer == Layer::Feature {
@@ -141,6 +161,7 @@ mod tests {
 
     fn package(name: &str, dir: &str, dependencies: Vec<Value>, crate_type: &str, id: Option<&str>) -> Value {
         json!({
+            "id": name,
             "name": name,
             "version": "0.1.0",
             "description": "",
@@ -165,6 +186,30 @@ mod tests {
 
     /// A valid workspace plus `extra` packages.
     fn workspace(extra: Vec<Value>) -> Workspace {
+        workspace_resolved(extra, json!(null))
+    }
+
+    /// A resolved graph node: `id` and its normal dependencies, named as their ids.
+    fn node(id: &str, dependencies: &[&str]) -> Value {
+        let deps: Vec<Value> = dependencies
+            .iter()
+            .map(|d| json!({ "name": d, "pkg": d, "dep_kinds": [{ "kind": null, "target": null }] }))
+            .collect();
+        json!({ "id": id, "deps": deps })
+    }
+
+    fn runtime_graph(kernel_dependencies: &[&str]) -> Value {
+        let mut kernel = vec!["uniwow-api"];
+        kernel.extend_from_slice(kernel_dependencies);
+        json!({ "nodes": [
+            node("uniwow-api", &["eframe", "uniwow-gpu"]),
+            node("eframe", &["egui", "libloading 0.8"]),
+            node("egui", &["serde"]),
+            node("uniwow-kernel", &kernel),
+        ] })
+    }
+
+    fn workspace_resolved(extra: Vec<Value>, resolve: Value) -> Workspace {
         let mut packages = vec![
             package(
                 "uniwow-api",
@@ -194,6 +239,7 @@ mod tests {
             "workspace_root": ROOT,
             "target_directory": format!("{ROOT}/target"),
             "packages": packages,
+            "resolve": resolve,
         }))
     }
 
@@ -288,6 +334,29 @@ mod tests {
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(
             found[0].starts_with("uniwow-extra is not a normal dependency of uniwow-api"),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn the_kernel_may_use_crates_the_runtime_does_not_use() {
+        let found = problems(&workspace_resolved(
+            vec![],
+            runtime_graph(&["libloading 0.9", "blake3"]),
+        ));
+        assert_eq!(found, Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_kernel_may_not_depend_directly_on_a_crate_of_the_runtime() {
+        let found = problems(&workspace_resolved(vec![], runtime_graph(&["serde", "libloading 0.8"])));
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(
+            found[0].starts_with("uniwow-kernel depends directly on serde"),
+            "{found:?}"
+        );
+        assert!(
+            found[1].starts_with("uniwow-kernel depends directly on libloading 0.8"),
             "{found:?}"
         );
     }
