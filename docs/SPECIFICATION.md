@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 4 built and validated; milestone 5 proposed; milestones 6 and 7 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 4 built and validated; milestone 5 proposed; milestones 6 to 9 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -246,6 +246,7 @@ the same runtime.
 | Events | Publish and subscribe, typed by serialisation: the topic is a string and the payload JSON, written with `Context::publish_as` and read with `Event::decode` into a type each module declares on its own side. No Rust type is shared between modules. Events may be published from any thread; they are delivered on the interface thread |
 | Services | Registry of interface implementations provided by modules |
 | Selection | Current selection, any type |
+| Animatable properties | Registry of the properties modules let be animated: path, type, range, reading and writing; written without history during playback (milestone 6) |
 | Project | Open, save; content defined in a later step |
 | Settings | Global, per project, per module. Written atomically (temporary file, then rename), at most once per second and at exit |
 | Jobs | Pool of worker threads, one per processor core: background jobs with progress and cancel (T2) |
@@ -330,6 +331,12 @@ added through section 4 without touching the core.
 |---|---|
 | interface | Client interface files (FrameXML, GlueXML, addons, AIO): tree, open in an external editor, reload in the client |
 | scripts | ALE Lua scripts and C++ server modules: open in an external editor, build, errors in the log, reload or restart |
+
+### Animation
+
+| Id | Module |
+|---|---|
+| timeline | Sequences in two modes, as the Timeline and Animation windows of Unity. Montage: tracks of clips moved, trimmed, cut and snapped. Animation: keys on the animatable properties declared by the modules, dopesheet, curves with tangents, playback and recording. Sequences saved as files until the project model exists |
 
 ### Run
 
@@ -623,7 +630,7 @@ As built:
 
 An interface API modelled on Qt, defined once in the core for every module that is not written in
 Rust, offered here to compiled modules with classes for C++ and C#; Lua and Python modules receive
-the same objects, with classes in their language, in milestones 6 and 7.
+the same objects, with classes in their language, in milestones 8 and 9.
 
 Measures taken first, with egui 0.36.2 as the editor uses it:
 
@@ -673,10 +680,11 @@ Content:
   version 2 is refused with the reason; `sample-cpp` moves to version 3. Beside it,
   `sdk/uniwow.hpp`, header-only C++ classes (`uniwow::PushButton`, signals connected to lambdas),
   and `sdk/UniWoW.cs`, the same classes for C#.
-- **Sample C++ timeline** in `examples/modules/sample-timeline/`, on the graphics scene: tracks of
-  clips, a clip dragged along its track as one undo entry, zoom and scroll outside the history, Add
-  clip, the selected clip shown under the view; commands `timeline.clips`, `timeline.add_clip` and
-  `timeline.fill` (many clips at once, to measure).
+- **Sample C++ module on the graphics scene** in `examples/modules/sample-scene/`: a board of
+  coloured cards, each card dragged as one undo entry, a click on a card painting the cube in its
+  colour through `cube.paint`, zoom and scroll outside the history, Add card, the selected card
+  shown under the view; commands `scene.cards`, `scene.add_card` and `scene.fill` (many cards at
+  once, to measure). The Timeline is a Rust module of its own (milestones 6 and 7).
 - **Sample C# module** in `examples/modules/sample-csharp/` (.NET 10, NativeAOT): `cs.sum`,
   `cs.paint_from_threads` (each thread's paints as one undo entry), and a panel: a counter changed
   by buttons, a slider and a spin box, each change undoable, with a `PaintArea` drawing its history
@@ -689,35 +697,63 @@ Acceptance:
 
 | Check | Expected result |
 |---|---|
-| Start the editor | `sample-timeline` and `sample-csharp` listed as compiled and running; their panels in the dock and in the Window menu |
-| Drag a clip of the timeline | It follows the pointer along its track; one undo entry when dropped; Ctrl+Z puts it back, Ctrl+Y moves it again |
-| Scroll and zoom the timeline | The view moves; nothing enters the history |
-| Add clip, then Ctrl+Z | A clip appears, then goes |
-| `timeline.fill` with 10,000 clips | The interface stays fluid while a clip is dragged and while zooming; the frame time is measured and recorded here |
+| Start the editor | `sample-scene` and `sample-csharp` listed as compiled and running; their panels in the dock and in the Window menu |
+| Drag a card | It follows the pointer; one undo entry when dropped; Ctrl+Z puts it back, Ctrl+Y moves it again |
+| Click a card | The cube takes its colour |
+| Scroll and zoom the board | The view moves; nothing enters the history |
+| Add card, then Ctrl+Z | A card appears, then goes |
+| `scene.fill` with 10,000 cards | The interface stays fluid while a card is dragged and while zooming; the frame time is measured and recorded here |
 | The C# panel: buttons, slider, spin box | The counter changes, the widgets agree, each change is one undo entry; the bars are painted again |
 | Resize the C# panel | The bars are painted again at the new size |
 | A slot of a module waiting two seconds | The interface stays fluid meanwhile; the next signals wait their turn |
 | `cs.paint_from_threads` | Each thread's paints form one undo entry |
-| A Lua script adding three clips | One undo entry |
+| A Lua script adding three cards | One undo entry |
 | A module built with `uniwow.h` version 2 | Refused with the reason; the rest runs |
 | A module failing to apply an undo value | It fails, its changes leave the history, its panel says so; the rest runs |
-| Remove `modules\sample-timeline\`, start | The editor starts without it; its panel is gone |
+| Remove `modules\sample-scene\`, start | The editor starts without it; its panel is gone |
 | Tests, `cargo xtask check`, CI with the C# module built | Green |
 
-### Milestone 6: Lua modules (outline)
+### Milestone 6: animatable properties and the Timeline in Montage mode (outline)
+
+- **Animatable properties**, a contract of the core open to every module, as Unity animates any
+  field of a component: a module declares the properties it lets be animated, each with a path, a
+  type (number, vector, colour, boolean) and its range, and how they are read and written. Writing
+  one while a sequence plays enters no history. The sample cube declares its colour and its speed.
+- **`timeline` module** (Rust, egui, like the viewport), Montage mode: sequences of tracks holding
+  clips; a clip moved along its track or to another one, trimmed at either end, cut in two at the
+  playhead; edges snapping to the playhead, to the other clips and to the frames; each change one
+  undo entry. Sequences opened and saved as files (readable JSON, one sequence per file) until the
+  project model exists (section 10).
+
+Specified in detail when milestone 5 is done.
+
+### Milestone 7: the Timeline in Animation mode (outline)
+
+As the Animation window of Unity, on the properties of milestone 6:
+
+- **Dopesheet**: one row per animated property, keys as diamonds; keys added, moved, deleted,
+  selected with a box, copied and pasted, snapping to the frames.
+- **Playback**: playhead dragged by hand, play, pause, loop, frame rate; the interpolated values
+  applied to the properties while it plays, outside the history.
+- **Curves**: the curve of each property, its keys' tangents edited (auto, linear, constant, free).
+- **Recording**: while recording, changing a property by hand sets a key at the playhead.
+
+Specified in detail when milestone 6 is done.
+
+### Milestone 8: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
 hosts them through a contract of the core open to the module of any language: their own Lua state
 kept while the editor runs, commands, events, settings, the interface objects of milestone 5 with
-Lua classes, undo. Specified in detail
-when milestone 5 is done.
+Lua classes, undo. Specified in detail when milestone 7 is done.
 
-### Milestone 7: Python (outline)
+### Milestone 9: Python (outline)
 
 Python scripts, console and modules, with the behaviour of Lua: the host built apart and reaching
 the editor through `uniwow.h`, the embeddable distribution in `interpreters\python-3.14\`, scripts
 by tool in `scripts\python-3.14\` (the tool folder is a package), Stop even when a script catches
-exceptions, the editor starting without Python. Specified in detail when milestone 6 is done.
+exceptions, the editor starting without Python, the interface objects with Python classes.
+Specified in detail when milestone 8 is done.
 
 Risks verified first:
 
