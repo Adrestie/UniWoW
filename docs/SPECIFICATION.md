@@ -352,7 +352,9 @@ E:\WoW-editor
 
 ---
 
-## 9. Milestone 1: proof of the architecture
+## 9. Milestones
+
+### Milestone 1: proof of the architecture (done)
 
 Content:
 
@@ -385,6 +387,54 @@ Risk verified first: a Windows DLL exports at most 65,535 symbols. Unoptimised, 
 exceeds it (LNK1189). The `dev` profile is therefore built with `opt-level = 2`, which stops the
 sharing of generic instantiations: 17,764 exported symbols, 27% of the limit. `cargo xtask check`
 reports the count and fails from 50,000; the runtime would then have to be split.
+
+### Milestone 2: threads, jobs and named commands (proposed)
+
+The common base of speed (R7, R8) and of scripting (S1, S2): the threading model and the catalogue
+of commands, before any other feature is written on the milestone 1 contract.
+
+Content:
+
+- **Contract**: service interfaces become shared between threads (`Arc`, `Send + Sync`, T3); the
+  viewport service and its layers follow, and so do the samples. Features themselves stay on the
+  interface thread (T1).
+- **Jobs (T2)**: a pool of worker threads, one per processor core. `Context::spawn` runs a job with
+  progress and cancel; its result, or the message of its panic, comes back to the feature on the
+  interface thread. A panic in a job does not make the feature fail; the feature decides. A Jobs
+  panel lists the running jobs, with their progress and a Cancel button.
+- **Named commands (F6, T4)**: a feature declares each command with its name, description, the
+  schema of its arguments and result, and where it runs: on the interface thread (it may change
+  state, through an undoable command) or on the calling thread (a `Send + Sync` handler). A panic
+  in a command handler makes its feature fail.
+- **Editor handle**: the generic interface of S1 in Rust, a `Send + Sync` handle any thread can hold:
+  list the commands, call one by name (JSON in, JSON out), publish events, log. From a worker
+  thread, a call blocks until its answer: at once for a calling-thread command; for an
+  interface-thread command, the interface thread serves the pending calls during a time budget of
+  a few milliseconds each frame, so that successive calls are not limited to one per frame. From
+  the interface thread, a call to an interface-thread command is answered at the end of the frame.
+  The C interface over this handle comes with scripting (milestone 3).
+- **Events from any thread (T3)**, delivered on the interface thread.
+- **Commands panel**: the catalogue with descriptions and schemas, and a field to call a command
+  with JSON arguments and see its answer.
+- **Samples**: `sample-cube` offers `cube.paint` (interface thread, undoable) and `cube.color`
+  (calling thread, reading only) and builds its GPU buffers in a job (T5); `sample-notes` starts a
+  long computation job and a measuring job that calls both commands in a loop and shows how many
+  calls per second each kind reaches.
+
+Acceptance:
+
+| Check | Expected result |
+|---|---|
+| Start the long computation job | The 3D view stays fluid (the cube keeps turning); the Jobs panel shows its progress |
+| Cancel it from the Jobs panel | It stops; the feature receives its cancellation |
+| Start as many computation jobs as there are cores | Every core works (Task Manager); the interface stays fluid |
+| A job panics | The feature receives the panic message as the job's result; it keeps running |
+| Commands panel: call `cube.paint` with a colour | The cube is painted; Ctrl+Z undoes it |
+| Commands panel: call an unknown command, or with invalid arguments | A clear error is shown; nothing else happens |
+| The measuring job | Calls per second for both kinds are shown; calling-thread calls are not bounded by the frame rate, interface-thread calls exceed one per frame |
+| A job publishes an event | It is delivered on the interface thread and listed by `sample-notes` |
+| The cube's GPU buffers are built in a job | The cube is drawn as before |
+| `cargo test`, `cargo xtask check`, CI | Green; new tests cover the pool, the cancellation and the routing of commands |
 
 ---
 
