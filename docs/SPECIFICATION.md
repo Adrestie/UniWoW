@@ -388,7 +388,7 @@ exceeds it (LNK1189). The `dev` profile is therefore built with `opt-level = 2`,
 sharing of generic instantiations: 17,764 exported symbols, 27% of the limit. `cargo xtask check`
 reports the count and fails from 50,000; the runtime would then have to be split.
 
-### Milestone 2: threads, jobs and named commands (proposed)
+### Milestone 2: threads, jobs and named commands (validated, in progress)
 
 The common base of speed (R7, R8) and of scripting (S1, S2): the threading model and the catalogue
 of commands, before any other feature is written on the milestone 1 contract.
