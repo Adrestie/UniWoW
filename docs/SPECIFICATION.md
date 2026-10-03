@@ -60,6 +60,12 @@ of a crate the runtime also uses makes Cargo rebuild the runtime, which changes 
 makes every feature incompatible. A crate a feature needs is added to the runtime (`core/api` or
 `libs/*`). `cargo xtask check` names any other dependency.
 
+Every crate of `libs/*` is a normal dependency of `uniwow-api`, so that it is compiled once, into
+the runtime: a feature using it receives it through `uniwow_api.dll`, without its own copy of the
+code or of its global state, and the library's own dependencies are those of the runtime.
+`cargo xtask check` refuses a library that `uniwow-api` does not include, whether a feature uses
+it or not.
+
 ---
 
 ## 3. Feature contract

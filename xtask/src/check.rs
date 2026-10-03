@@ -43,6 +43,22 @@ pub fn run() -> Result {
 /// Every breach of the dependency and naming rules in the workspace.
 pub fn problems(ws: &Workspace) -> Vec<String> {
     let mut problems = Vec::new();
+    // Each library is compiled once, into the runtime: otherwise every feature using it would carry
+    // its own copy, with its own globals, and its dependencies could rebuild the runtime.
+    let api = ws.packages.iter().find(|p| p.layer == Layer::Api);
+    for library in ws.packages.iter().filter(|p| p.layer == Layer::Lib) {
+        let in_runtime = api.is_some_and(|api| {
+            api.dependencies
+                .iter()
+                .any(|d| d.kind == "normal" && d.path.is_some() && d.name == library.name)
+        });
+        if !in_runtime {
+            problems.push(format!(
+                "{} is not a normal dependency of uniwow-api: every crate of libs/ must be part of the runtime",
+                library.name
+            ));
+        }
+    }
     for package in &ws.packages {
         for dependency in &package.dependencies {
             if package.layer == Layer::Feature {
@@ -153,7 +169,10 @@ mod tests {
             package(
                 "uniwow-api",
                 "core/api",
-                vec![registry_dependency("eframe", None)],
+                vec![
+                    registry_dependency("eframe", None),
+                    path_dependency("uniwow-gpu", "libs/gpu", None),
+                ],
                 "dylib",
                 None,
             ),
@@ -240,6 +259,35 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert!(
             found[0].contains("uniwow-app (App) depends on uniwow-feature-viewport"),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_library_outside_the_runtime_is_refused_even_unused() {
+        let found = problems(&workspace(vec![package(
+            "uniwow-extra",
+            "libs/extra",
+            vec![],
+            "lib",
+            None,
+        )]));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].starts_with("uniwow-extra is not a normal dependency of uniwow-api"),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_library_outside_the_runtime_is_refused_when_a_feature_uses_it() {
+        let found = problems(&workspace(vec![
+            package("uniwow-extra", "libs/extra", vec![], "lib", None),
+            feature("cube", vec![path_dependency("uniwow-extra", "libs/extra", None)]),
+        ]));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].starts_with("uniwow-extra is not a normal dependency of uniwow-api"),
             "{found:?}"
         );
     }
