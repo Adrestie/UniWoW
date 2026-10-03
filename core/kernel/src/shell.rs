@@ -1,11 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use uniwow_api::egui_dock::tab_viewer::OnCloseResponse;
-use uniwow_api::egui_dock::{DockArea, DockState, Node, NodeIndex, Style, SurfaceIndex, TabPath, TabViewer, Tree};
-use uniwow_api::serde::{Deserialize, Serialize};
+use uniwow_api::egui_dock::{DockArea, DockState, Style, TabViewer};
 use uniwow_api::{
     Context, DockArea as Area, FEATURE_FAILED_TOPIC, Feature, Host, Registrar, eframe, egui, log, serde_json,
 };
@@ -13,44 +12,17 @@ use uniwow_api::{
 use crate::guard::{guarded, guarded_as};
 use crate::history::{History, Step};
 use crate::host::{KernelHost, Service};
+use crate::layout::{self, PanelEntry, Tab};
 use crate::loader::{self, Slot, State};
 use crate::logger;
 use crate::order;
+use crate::requirements::{self, Need};
 use crate::settings::Settings;
 
 const KERNEL: &str = "kernel";
 const BUILT_IN_MENUS: [&str; 4] = ["File", "Edit", "Window", "Help"];
 /// Settings changed by features are written at most this often, and once more at exit.
 const SETTINGS_SAVE_INTERVAL: Duration = Duration::from_secs(1);
-
-/// A dock tab: one panel of one feature, or of the kernel.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(crate = "uniwow_api::serde")]
-pub struct Tab {
-    feature: String,
-    panel: String,
-}
-
-impl Tab {
-    fn new(feature: &str, panel: &str) -> Self {
-        Self {
-            feature: feature.to_owned(),
-            panel: panel.to_owned(),
-        }
-    }
-
-    /// `feature/panel`, as stored in the settings.
-    fn key(&self) -> String {
-        format!("{}/{}", self.feature, self.panel)
-    }
-}
-
-struct PanelEntry {
-    tab: Tab,
-    title: String,
-    area: Area,
-    open_by_default: bool,
-}
 
 pub struct Shell {
     host: KernelHost,
@@ -97,7 +69,7 @@ impl Shell {
         // A damaged saved layout must never prevent the editor from starting.
         shell.dock = guarded(|| shell.restore_layout()).unwrap_or_else(|message| {
             log::warn!("saved layout discarded: {message}");
-            default_layout(&shell.panel_entries(), &shell.host.settings.closed_panels)
+            layout::default_layout(&shell.panel_entries(), &shell.host.settings.closed_panels)
         });
         shell.apply_pending();
         shell.apply_reported();
@@ -136,20 +108,30 @@ impl Shell {
 
     /// Blocks the features whose required services are missing, until nothing changes.
     fn resolve_requirements(&mut self) {
-        loop {
-            let mut changed = false;
-            for index in 0..self.slots.len() {
-                if let Some(service) = self.missing_requirement(index) {
-                    self.block(
-                        index,
-                        format!("requires the service '{service}', which no running feature provides"),
-                    );
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
+        let running: Vec<usize> = (0..self.slots.len())
+            .filter(|&i| self.slots[i].state.is_running() && self.slots[i].manifest.is_some())
+            .collect();
+        let blocked = {
+            let needs: Vec<Need> = running
+                .iter()
+                .map(|&i| Need {
+                    id: &self.slots[i].id,
+                    requires: &self.slots[i].manifest.as_ref().expect("filtered above").requires,
+                })
+                .collect();
+            let providers: HashMap<String, String> = self
+                .host
+                .services
+                .iter()
+                .map(|(service, s)| (service.clone(), s.provider.clone()))
+                .collect();
+            requirements::blocked(&needs, &providers)
+        };
+        for (need, service) in blocked {
+            self.block(
+                running[need],
+                format!("requires the service '{service}', which no running feature provides"),
+            );
         }
     }
 
@@ -262,51 +244,9 @@ impl Shell {
         entries
     }
 
-    /// The saved layout without the panels of absent features, plus the panels of features that
-    /// came back, unless the user closed them.
     fn restore_layout(&self) -> DockState<Tab> {
-        let entries = self.panel_entries();
-        let closed = &self.host.settings.closed_panels;
-        let saved = self
-            .host
-            .settings
-            .layout
-            .clone()
-            .and_then(|v| serde_json::from_value::<DockState<Tab>>(v).ok());
-        let Some(mut dock) = saved else {
-            return default_layout(&entries, closed);
-        };
-        let known: HashSet<Tab> = entries.iter().map(|e| e.tab.clone()).collect();
-        // One tab at a time, as when the user closes them: removing many at once with
-        // `retain_tabs` can leave the tree broken.
-        let absent: Vec<Tab> = dock
-            .iter_all_tabs()
-            .map(|(_, tab)| tab.clone())
-            .filter(|tab| !known.contains(tab))
-            .collect();
-        for tab in absent {
-            if let Some(path) = dock.find_tab(&tab) {
-                dock.remove_tab(path);
-            }
-        }
-        if dock.main_surface().num_tabs() == 0 || !is_consistent(dock.main_surface()) {
-            return default_layout(&entries, closed);
-        }
-        let returning: Vec<&PanelEntry> = entries
-            .iter()
-            .filter(|e| e.open_by_default && !closed.contains(&e.tab.key()) && dock.find_tab(&e.tab).is_none())
-            .collect();
-        // A whole area came back: the saved arrangement no longer fits, start from the default one.
-        if returning
-            .iter()
-            .any(|e| area_leaf(&dock, &entries, e.area, &e.tab).is_none())
-        {
-            return default_layout(&entries, closed);
-        }
-        for entry in returning {
-            place(&mut dock, &entries, entry);
-        }
-        dock
+        let settings = &self.host.settings;
+        layout::restore(settings.layout.clone(), &self.panel_entries(), &settings.closed_panels)
     }
 
     fn apply_pending(&mut self) {
@@ -347,18 +287,14 @@ impl Shell {
     /// Reverts the last command. An entry whose feature is not running stays where it is: the
     /// Edit menu shows why it cannot be undone.
     fn undo(&mut self) {
-        let Some(entry) = self.history.done.last() else {
+        let running = self.running_ids();
+        let Some(mut entry) = self.history.take_undo(|id| running.contains(id)) else {
+            if let Step::Blocked(reason) = self.history.undo_step(|id| running.contains(id)) {
+                log::warn!("cannot undo: {reason}");
+            }
             return;
         };
-        let Some(index) = self.running_index(&entry.owner) else {
-            log::warn!(
-                "cannot undo '{}': '{}' is not running",
-                entry.command.label(),
-                entry.owner
-            );
-            return;
-        };
-        let mut entry = self.history.done.pop().expect("checked above");
+        let index = self.running_index(&entry.owner).expect("taken only when running");
         let feature = self.slots[index]
             .feature
             .as_deref_mut()
@@ -373,18 +309,14 @@ impl Shell {
     }
 
     fn redo(&mut self) {
-        let Some(entry) = self.history.undone.last() else {
+        let running = self.running_ids();
+        let Some(mut entry) = self.history.take_redo(|id| running.contains(id)) else {
+            if let Step::Blocked(reason) = self.history.redo_step(|id| running.contains(id)) {
+                log::warn!("cannot redo: {reason}");
+            }
             return;
         };
-        let Some(index) = self.running_index(&entry.owner) else {
-            log::warn!(
-                "cannot redo '{}': '{}' is not running",
-                entry.command.label(),
-                entry.owner
-            );
-            return;
-        };
-        let mut entry = self.history.undone.pop().expect("checked above");
+        let index = self.running_index(&entry.owner).expect("taken only when running");
         let feature = self.slots[index]
             .feature
             .as_deref_mut()
@@ -396,6 +328,14 @@ impl Shell {
                 fail(&mut self.slots, &mut self.host, index, format!("redo: {message}"));
             }
         }
+    }
+
+    fn running_ids(&self) -> HashSet<String> {
+        self.slots
+            .iter()
+            .filter(|s| s.state.is_running())
+            .map(|s| s.id.clone())
+            .collect()
     }
 
     /// Delivers the events published this frame. Events published meanwhile wait for the next one.
@@ -433,7 +373,7 @@ impl Shell {
             if self.dock.find_tab(tab).is_none()
                 && let Some(entry) = entries.iter().find(|e| &e.tab == tab)
             {
-                place(&mut self.dock, &entries, entry);
+                layout::place(&mut self.dock, &entries, entry);
             }
         } else {
             self.host.settings.closed_panels.insert(tab.key());
@@ -572,7 +512,7 @@ impl eframe::App for Shell {
         // A layout egui_dock cannot draw would otherwise stop the editor at every start.
         if let Err(message) = shown {
             log::error!("the panel layout could not be drawn and was reset: {message}");
-            self.dock = default_layout(&self.panel_entries(), &self.host.settings.closed_panels);
+            self.dock = layout::default_layout(&self.panel_entries(), &self.host.settings.closed_panels);
         }
 
         for (index, message) in failures {
@@ -800,96 +740,6 @@ fn history_button(ui: &mut egui::Ui, verb: &str, shortcut: &str, step: &Step) ->
         return false;
     }
     response.clicked()
-}
-
-fn default_layout(entries: &[PanelEntry], closed: &std::collections::BTreeSet<String>) -> DockState<Tab> {
-    let tabs_in = |area: Area| -> Vec<Tab> {
-        entries
-            .iter()
-            .filter(|e| e.area == area && e.open_by_default && !closed.contains(&e.tab.key()))
-            .map(|e| e.tab.clone())
-            .collect()
-    };
-    let mut groups = [Area::Center, Area::Right, Area::Bottom, Area::Left].map(|area| (area, tabs_in(area)));
-    // The first non-empty group fills the window; the others are split off around it.
-    let Some(first) = groups.iter().position(|(_, tabs)| !tabs.is_empty()) else {
-        return DockState::new(Vec::new());
-    };
-    let mut dock = DockState::new(std::mem::take(&mut groups[first].1));
-    let tree = dock.main_surface_mut();
-    for (area, tabs) in groups {
-        if tabs.is_empty() {
-            continue;
-        }
-        match area {
-            Area::Right => {
-                tree.split_right(NodeIndex::root(), 0.75, tabs);
-            }
-            Area::Bottom => {
-                tree.split_below(NodeIndex::root(), 0.68, tabs);
-            }
-            Area::Left => {
-                tree.split_left(NodeIndex::root(), 0.22, tabs);
-            }
-            Area::Center => {}
-        }
-    }
-    dock
-}
-
-/// Every split has two non-empty children and every other non-empty node hangs from a split.
-fn is_consistent(tree: &Tree<Tab>) -> bool {
-    let nodes: Vec<&Node<Tab>> = tree.iter().collect();
-    let empty = |i: usize| nodes.get(i).is_none_or(|n| n.is_empty());
-    nodes.iter().enumerate().all(|(i, node)| {
-        if node.is_parent() {
-            !empty(2 * i + 1) && !empty(2 * i + 2)
-        } else {
-            node.is_empty() || i == 0 || nodes[(i - 1) / 2].is_parent()
-        }
-    })
-}
-
-/// The leaf holding another panel of `area`, on the main surface.
-fn area_leaf(dock: &DockState<Tab>, entries: &[PanelEntry], area: Area, except: &Tab) -> Option<TabPath> {
-    entries
-        .iter()
-        .filter(|e| e.area == area && &e.tab != except)
-        .find_map(|e| dock.find_tab(&e.tab))
-        .filter(|path| path.surface == SurfaceIndex::main())
-}
-
-/// Puts a panel next to a panel of the same area, or on its side of the window.
-fn place(dock: &mut DockState<Tab>, entries: &[PanelEntry], entry: &PanelEntry) {
-    if dock.main_surface().num_tabs() == 0 {
-        dock.push_to_first_leaf(entry.tab.clone());
-        return;
-    }
-    if let Some(path) = area_leaf(dock, entries, entry.area, &entry.tab) {
-        dock[path.surface][path.node].append_tab(entry.tab.clone());
-        return;
-    }
-    let right = area_leaf(dock, entries, Area::Right, &entry.tab);
-    let tabs = vec![entry.tab.clone()];
-    let tree = dock.main_surface_mut();
-    match entry.area {
-        Area::Left => {
-            tree.split_left(NodeIndex::root(), 0.22, tabs);
-        }
-        Area::Right => {
-            tree.split_right(NodeIndex::root(), 0.75, tabs);
-        }
-        Area::Bottom => {
-            tree.split_below(NodeIndex::root(), 0.68, tabs);
-        }
-        Area::Center => match right {
-            // The fraction is the share of the left node, here the centre panel.
-            Some(path) => {
-                tree.split_left(path.node, 0.75, tabs);
-            }
-            None => dock.push_to_first_leaf(entry.tab.clone()),
-        },
-    }
 }
 
 /// Calls the feature of `slot` with a context, catching panics.

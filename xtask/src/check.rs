@@ -105,3 +105,158 @@ fn origin(dependency: &Dependency) -> String {
         (None, None) => "unknown source".to_owned(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::problems;
+    use crate::workspace::Workspace;
+
+    const ROOT: &str = "/ws";
+
+    fn path_dependency(name: &str, path: &str, kind: Option<&str>) -> Value {
+        json!({ "name": name, "kind": kind, "path": format!("{ROOT}/{path}"), "source": null })
+    }
+
+    fn registry_dependency(name: &str, kind: Option<&str>) -> Value {
+        json!({ "name": name, "kind": kind, "source": "registry+https://github.com/rust-lang/crates.io-index" })
+    }
+
+    fn package(name: &str, dir: &str, dependencies: Vec<Value>, crate_type: &str, id: Option<&str>) -> Value {
+        json!({
+            "name": name,
+            "version": "0.1.0",
+            "description": "",
+            "manifest_path": format!("{ROOT}/{dir}/Cargo.toml"),
+            "dependencies": dependencies,
+            "targets": [{ "kind": [crate_type], "crate_types": [crate_type] }],
+            "metadata": id.map(|id| json!({ "uniwow": { "id": id } })),
+        })
+    }
+
+    fn feature(id: &str, dependencies: Vec<Value>) -> Value {
+        let mut all = vec![path_dependency("uniwow-api", "core/api", None)];
+        all.extend(dependencies);
+        package(
+            &format!("uniwow-feature-{id}"),
+            &format!("features/{id}"),
+            all,
+            "cdylib",
+            Some(id),
+        )
+    }
+
+    /// A valid workspace plus `extra` packages.
+    fn workspace(extra: Vec<Value>) -> Workspace {
+        let mut packages = vec![
+            package(
+                "uniwow-api",
+                "core/api",
+                vec![registry_dependency("eframe", None)],
+                "dylib",
+                None,
+            ),
+            package(
+                "uniwow-kernel",
+                "core/kernel",
+                vec![
+                    path_dependency("uniwow-api", "core/api", None),
+                    registry_dependency("libloading", None),
+                ],
+                "lib",
+                None,
+            ),
+            package("uniwow-gpu", "libs/gpu", vec![], "lib", None),
+            feature("viewport", vec![path_dependency("uniwow-gpu", "libs/gpu", None)]),
+        ];
+        packages.extend(extra);
+        Workspace::from_metadata(&json!({
+            "workspace_root": ROOT,
+            "target_directory": format!("{ROOT}/target"),
+            "packages": packages,
+        }))
+    }
+
+    #[test]
+    fn a_valid_workspace_passes() {
+        assert_eq!(problems(&workspace(vec![])), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_feature_may_not_use_a_crates_io_crate() {
+        let found = problems(&workspace(vec![feature(
+            "cube",
+            vec![registry_dependency("rand", None)],
+        )]));
+        assert_eq!(found.len(), 1);
+        assert!(found[0].contains("uniwow-feature-cube depends on rand"), "{found:?}");
+        assert!(found[0].contains("crates.io"), "{found:?}");
+    }
+
+    #[test]
+    fn dev_and_build_dependencies_are_checked_too() {
+        let found = problems(&workspace(vec![feature(
+            "cube",
+            vec![
+                registry_dependency("rand", Some("dev")),
+                registry_dependency("cc", Some("build")),
+            ],
+        )]));
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found[0].contains("rand (dev dependency"), "{found:?}");
+        assert!(found[1].contains("cc (build dependency"), "{found:?}");
+    }
+
+    #[test]
+    fn a_feature_may_not_depend_on_another_feature() {
+        let found = problems(&workspace(vec![feature(
+            "cube",
+            vec![path_dependency("uniwow-feature-viewport", "features/viewport", None)],
+        )]));
+        assert_eq!(found.len(), 1);
+        assert!(found[0].contains("depends on uniwow-feature-viewport"), "{found:?}");
+    }
+
+    #[test]
+    fn a_feature_may_not_use_a_path_outside_the_layers() {
+        let found = problems(&workspace(vec![feature(
+            "cube",
+            vec![path_dependency("helper", "tools/helper", None)],
+        )]));
+        assert_eq!(found.len(), 1);
+        assert!(found[0].contains("depends on helper"), "{found:?}");
+    }
+
+    #[test]
+    fn the_kernel_may_not_depend_on_a_feature() {
+        let found = problems(&workspace(vec![package(
+            "uniwow-app",
+            "app",
+            vec![path_dependency("uniwow-feature-viewport", "features/viewport", None)],
+            "bin",
+            None,
+        )]));
+        assert_eq!(found.len(), 1);
+        assert!(
+            found[0].contains("uniwow-app (App) depends on uniwow-feature-viewport"),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn feature_names_ids_and_crate_types_are_checked() {
+        let wrong = package(
+            "cube",
+            "features/cube",
+            vec![path_dependency("uniwow-api", "core/api", None)],
+            "lib",
+            Some("other"),
+        );
+        let found = problems(&workspace(vec![wrong]));
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert!(found.iter().any(|p| p.contains("must be named uniwow-feature-cube")));
+        assert!(found.iter().any(|p| p.contains("id must be \"cube\"")));
+        assert!(found.iter().any(|p| p.contains("crate-type must be")));
+    }
+}

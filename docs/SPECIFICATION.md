@@ -64,14 +64,19 @@ makes every feature incompatible. A crate a feature needs is added to the runtim
 
 ## 3. Feature contract
 
-A feature is one Rust crate in `features/<id>/` (crate type `cdylib`), deployed as `<id>.dll`. It exposes one type
-implementing the `Feature` trait of `core/api`, exported by an entry point macro:
+A feature is one Rust crate in `features/<id>/` (crate type `cdylib`), deployed as `<id>.dll`.
 
-- **info**: id, display name, version, category, description.
-- **requires / uses**: services the feature cannot work without, and services it uses when
-  present.
+What describes it is declared in its `Cargo.toml`, not in code: id, display name, category, and
+the services it **requires** (cannot work without) or **uses** (when present) under
+`[package.metadata.uniwow]`; version and description under `[package]`. `cargo xtask build`
+copies them into `feature.toml`, which the kernel reads before loading the DLL.
+
+Its behaviour is one type implementing the `Feature` trait of `core/api`, exported by an entry
+point macro:
+
 - **register**: declares what the feature contributes (list below). Called once at load.
 - **init / shutdown**: start and stop, with access to core services.
+- **panel_ui, on_event, on_menu**: draw its panels, receive its events, handle its menu items.
 
 Extension points a feature may contribute to:
 
@@ -288,6 +293,7 @@ E:\WoW-editor
   client-bridge/        C++ (WXL SDK), own build
   xtask/
   docs/
+  .github/workflows/    CI on Windows: fmt, clippy -D warnings, cargo test, xtask build and check
 ```
 
 ---

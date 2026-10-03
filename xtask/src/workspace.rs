@@ -72,17 +72,22 @@ impl Workspace {
             return Err(String::from_utf8_lossy(&output.stderr).into_owned());
         }
         let metadata: Value = serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+        Ok(Self::from_metadata(&metadata))
+    }
+
+    /// Reads the output of `cargo metadata --format-version 1 --no-deps`.
+    pub fn from_metadata(metadata: &Value) -> Self {
         let root = PathBuf::from(metadata["workspace_root"].as_str().unwrap_or_default());
         let target_dir = PathBuf::from(metadata["target_directory"].as_str().unwrap_or_default());
         let packages = metadata["packages"]
             .as_array()
             .map(|packages| packages.iter().map(|p| package(&root, p)).collect())
             .unwrap_or_default();
-        Ok(Self {
+        Self {
             root,
             target_dir,
             packages,
-        })
+        }
     }
 
     pub fn features(&self) -> Vec<&Package> {

@@ -1,0 +1,82 @@
+{
+ "focused_surface": 0,
+ "surfaces": [
+  {
+   "Main": {
+    "collapsed": false,
+    "collapsed_leaf_count": 0,
+    "focused_node": 11,
+    "nodes": [
+     {
+      "Vertical": {
+       "collapsed_leaf_count": 0,
+       "fraction": 0.6800000071525574,
+       "fully_collapsed": false,
+       "rect": {
+        "max": {
+         "x": 1392.0,
+         "y": 869.0
+        },
+        "min": {
+         "x": 8.0,
+         "y": 31.0
+        }
+       }
+      }
+     },
+     "Empty",
+     "Empty",
+     "Empty",
+     "Empty",
+     "Empty",
+     {
+      "Leaf": {
+       "active": 0,
+       "collapsed": false,
+       "rect": {
+        "max": {
+         "x": 1392.0,
+         "y": 869.0
+        },
+        "min": {
+         "x": 313.0,
+         "y": 601.0
+        }
+       },
+       "scroll": 0.0,
+       "tab_bar_hidden": false,
+       "tabs": [
+        {
+         "feature": "kernel",
+         "panel": "features"
+        },
+        {
+         "feature": "kernel",
+         "panel": "log"
+        }
+       ],
+       "viewport": {
+        "max": {
+         "x": 1392.0,
+         "y": 869.0
+        },
+        "min": {
+         "x": 313.0,
+         "y": 625.0
+        }
+       }
+      }
+     },
+     "Empty",
+     "Empty",
+     "Empty",
+     "Empty",
+     "Empty",
+     "Empty",
+     "Empty",
+     "Empty"
+    ]
+   }
+  }
+ ]
+}
