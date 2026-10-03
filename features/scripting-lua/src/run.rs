@@ -8,10 +8,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use uniwow_api::mlua::chunk::ChunkMode;
 use uniwow_api::mlua::{self, HookTriggers, Lua, LuaSerdeExt, MultiValue, Table, VmState};
 use uniwow_api::serde_json::Value;
 use uniwow_api::{Editor, log};
 
+use crate::loading;
 use crate::output::{Kind, Output};
 
 /// Lua instructions between two checks of the cancellation.
@@ -55,8 +57,8 @@ impl Stop {
 }
 
 pub enum Source {
-    /// A script file: its name and its text.
-    Script { name: String, text: String },
+    /// A script file: its name and its content.
+    Script { name: String, text: Vec<u8> },
     /// One console line: evaluated as an expression whose values are printed, or else as a
     /// statement.
     Console(String),
@@ -80,8 +82,10 @@ pub fn run(source: Source, editor: Editor, cancelled: Arc<AtomicBool>, output: A
 }
 
 fn execute(source: &Source, editor: &Editor, cancelled: &Arc<AtomicBool>, output: &Arc<Output>) -> mlua::Result<()> {
-    // The safe subset of the standard libraries: C modules cannot be loaded (rule S6).
+    // The safe subset of the standard libraries: C modules cannot be loaded, and Lua code is
+    // loaded from source text only (rule S6).
     let lua = Lua::new();
+    loading::install(&lua)?;
     let stop = Stop(cancelled.clone());
     // A global hook also runs in the coroutines, which a hook of the main thread does not reach.
     let hook = stop.clone();
@@ -113,7 +117,10 @@ fn execute(source: &Source, editor: &Editor, cancelled: &Arc<AtomicBool>, output
         Source::Console(line) => format!("Lua console: {}", shorten(line)),
     });
     let result = match source {
-        Source::Script { name, text } => lua.load(text.as_str()).set_name(format!("@{name}")).exec(),
+        Source::Script { name, text } => match loading::load_text(&lua, text, &format!("@{name}"))? {
+            Ok(function) => function.call::<()>(()),
+            Err(message) => Err(mlua::Error::runtime(message)),
+        },
         Source::Console(line) => evaluate(&lua, line, output),
     };
     editor.end_group();
@@ -125,10 +132,10 @@ fn execute(source: &Source, editor: &Editor, cancelled: &Arc<AtomicBool>, output
 }
 
 fn evaluate(lua: &Lua, line: &str, output: &Output) -> mlua::Result<()> {
-    let expression = lua.load(format!("return {line}")).set_name("=console");
-    let values: MultiValue = match expression.into_function() {
+    let chunk = |code: String| lua.load(code).set_name("=console").set_mode(ChunkMode::Text);
+    let values: MultiValue = match chunk(format!("return {line}")).into_function() {
         Ok(function) => function.call(())?,
-        Err(_) => lua.load(line).set_name("=console").call(())?,
+        Err(_) => chunk(line.to_owned()).call(())?,
     };
     if values.is_empty() {
         return Ok(());
@@ -431,7 +438,7 @@ mod tests {
     fn script(text: &str) -> Source {
         Source::Script {
             name: "test.lua".to_owned(),
-            text: text.to_owned(),
+            text: text.as_bytes().to_vec(),
         }
     }
 
@@ -495,6 +502,49 @@ mod tests {
             Arc::default(),
         );
         assert_eq!(printed, ["3\tthree\t{\"name\":\"red\"}"]);
+    }
+
+    #[test]
+    fn precompiled_chunks_are_refused() {
+        let bytecode = uniwow_api::mlua::Lua::new()
+            .load("return 1")
+            .into_function()
+            .expect("compiles")
+            .dump(false);
+        let (_, printed) = execute(
+            Source::Script {
+                name: "test.lua".to_owned(),
+                text: bytecode.clone(),
+            },
+            Arc::default(),
+        );
+        assert!(printed[0].contains(crate::loading::REFUSED), "{printed:?}");
+
+        let folder = std::env::temp_dir().join(format!("uniwow-lua-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).expect("folder");
+        std::fs::write(folder.join("compiled.lua"), &bytecode).expect("bytecode");
+        std::fs::write(folder.join("source.lua"), "return 'from source'").expect("source");
+        let code = format!(
+            r#"local folder = [[{}]]
+            package.path = folder .. "/?.lua"
+            print(string.dump)
+            print(loadstring("\27LuaQ"))
+            print(loadfile(folder .. "/compiled.lua"))
+            print(pcall(dofile, folder .. "/compiled.lua"))
+            print(pcall(require, "compiled"))
+            print(require("source"), loadstring("return 1 + 1")())"#,
+            folder.display()
+        );
+        let (_, printed) = execute(script(&code), Arc::default());
+        std::fs::remove_dir_all(&folder).expect("cleaned");
+        assert_eq!(printed[0], "nil", "string.dump is removed");
+        let all = printed.join("\n");
+        // loadstring, loadfile, dofile and require.
+        assert_eq!(all.matches(crate::loading::REFUSED).count(), 4, "{printed:?}");
+        assert!(
+            printed.contains(&"from source\t2".to_owned()),
+            "source text still loads"
+        );
     }
 
     #[test]

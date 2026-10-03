@@ -1,6 +1,7 @@
 //! Lua 5.1 scripts (rules S1 to S9): a console, the scripts of `scripts\lua-5.1\` beside the
 //! executable, each run on a worker thread in a Lua state of its own, and Stop.
 
+mod loading;
 mod output;
 mod run;
 
@@ -107,7 +108,7 @@ impl ScriptingLua {
                 }
             });
         if let Some(script) = start {
-            match std::fs::read_to_string(scripts_dir().join(&script)) {
+            match std::fs::read(scripts_dir().join(&script)) {
                 Ok(text) => self.start(ctx, Source::Script { name: script, text }),
                 Err(error) => self.output.push(Kind::Error, format!("{script}: {error}")),
             }
