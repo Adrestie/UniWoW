@@ -4,6 +4,11 @@ use std::any::Any;
 ///
 /// Queued with `Context::execute`, applied by the kernel once the current call into the
 /// feature has returned, then kept in the single undo history.
+///
+/// `apply` reads the value it replaces at that moment and keeps it for `revert`. Several commands
+/// can be queued before any is applied (events, answers and jobs handled in the same pass): each
+/// applies over the result of the one before, so a value read when the command was created would
+/// be out of date, and undoing would restore a wrong state.
 pub trait Command {
     /// Shown in the Edit menu, e.g. "Set cube colour".
     fn label(&self) -> String;

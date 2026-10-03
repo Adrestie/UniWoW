@@ -155,9 +155,12 @@ impl Feature for CubeFeature {
         if !response.dragged()
             && let Some(old) = self.speed_before_edit.take()
         {
-            let new = lock(&self.params).speed;
+            let mut params = lock(&self.params);
+            let new = params.speed;
             if new != old {
-                ctx.execute(SetSpeed { old, new });
+                // The command reads the value it replaces when applied: the one before the edit.
+                params.speed = old;
+                ctx.execute(SetSpeed::new(new));
             }
         }
         ui.separator();
@@ -195,8 +198,7 @@ impl Feature for CubeFeature {
 
 impl CubeFeature {
     fn paint(&mut self, ctx: &mut Context, color: [f32; 3], reason: &str) {
-        let old = lock(&self.params).color;
-        ctx.execute(SetColor { old, new: color });
+        ctx.execute(SetColor::new(color));
         let painted = Painted {
             color,
             reason: reason.to_owned(),
@@ -230,9 +232,16 @@ fn cube(feature: &mut dyn Any) -> &mut CubeFeature {
         .expect("commands of this feature are applied to it")
 }
 
+/// Paints the cube. The colour it replaces is read when applied (see `Command`).
 struct SetColor {
-    old: [f32; 3],
     new: [f32; 3],
+    old: Option<[f32; 3]>,
+}
+
+impl SetColor {
+    fn new(color: [f32; 3]) -> Self {
+        Self { new: color, old: None }
+    }
 }
 
 impl Command for SetColor {
@@ -241,17 +250,28 @@ impl Command for SetColor {
     }
 
     fn apply(&mut self, feature: &mut dyn Any) {
-        lock(&cube(feature).params).color = self.new;
+        let mut params = lock(&cube(feature).params);
+        self.old = Some(params.color);
+        params.color = self.new;
     }
 
     fn revert(&mut self, feature: &mut dyn Any) {
-        lock(&cube(feature).params).color = self.old;
+        if let Some(old) = self.old {
+            lock(&cube(feature).params).color = old;
+        }
     }
 }
 
+/// Sets the rotation speed. The speed it replaces is read when applied (see `Command`).
 struct SetSpeed {
-    old: f32,
     new: f32,
+    old: Option<f32>,
+}
+
+impl SetSpeed {
+    fn new(speed: f32) -> Self {
+        Self { new: speed, old: None }
+    }
 }
 
 impl Command for SetSpeed {
@@ -260,12 +280,39 @@ impl Command for SetSpeed {
     }
 
     fn apply(&mut self, feature: &mut dyn Any) {
-        lock(&cube(feature).params).speed = self.new;
+        let mut params = lock(&cube(feature).params);
+        self.old = Some(params.speed);
+        params.speed = self.new;
     }
 
     fn revert(&mut self, feature: &mut dyn Any) {
-        lock(&cube(feature).params).speed = self.old;
+        if let Some(old) = self.old {
+            lock(&cube(feature).params).speed = old;
+        }
     }
 }
 
 uniwow_api::export_feature!(CubeFeature::default());
+
+#[cfg(test)]
+mod tests {
+    use uniwow_api::Command;
+
+    use super::{CubeFeature, PRESETS, SetColor, lock};
+
+    #[test]
+    fn paints_applied_in_one_pass_undo_back_to_where_they_started() {
+        let mut cube = CubeFeature::default();
+        let start = lock(&cube.params).color;
+        let (red, gold) = (PRESETS[0].1, PRESETS[3].1);
+        // Both queued before either is applied, as when two events arrive in the same frame.
+        let mut first = SetColor::new(red);
+        let mut second = SetColor::new(gold);
+        first.apply(&mut cube);
+        second.apply(&mut cube);
+        second.revert(&mut cube);
+        assert_eq!(lock(&cube.params).color, red, "one undo gives the first paint back");
+        first.revert(&mut cube);
+        assert_eq!(lock(&cube.params).color, start, "two undos give the starting colour");
+    }
+}
