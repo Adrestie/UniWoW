@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 
 use uniwow_api::{CREATE_SYMBOL, CreateFn, MenuItemSpec, Module, PACKAGE_SYMBOL, PackageFn, PanelSpec, RUNTIME_DLL};
 
+use crate::compiled;
 use crate::guard::guarded_as;
-use crate::manifest::{self, Manifest};
+use crate::manifest::{self, Kind, Manifest};
 
 pub enum State {
     Running,
@@ -37,6 +38,8 @@ pub struct Slot {
     pub panels: Vec<PanelSpec>,
     pub menu_items: Vec<MenuItemSpec>,
     pub subscriptions: Vec<String>,
+    /// The commands it declared, with the reason of those the catalogue set aside (F6).
+    pub commands: Vec<(String, Option<String>)>,
 }
 
 impl Slot {
@@ -50,6 +53,7 @@ impl Slot {
             panels: Vec::new(),
             menu_items: Vec::new(),
             subscriptions: Vec::new(),
+            commands: Vec::new(),
         }
     }
 
@@ -106,14 +110,21 @@ pub fn discover(exe_dir: &Path, disabled: &BTreeSet<String>) -> Discovery {
             State::Ignored(format!("another folder already provides the id '{id}'"))
         } else if disabled.contains(&id) {
             State::Disabled
-        } else if runtime_fingerprint.as_deref() != Some(manifest.runtime.as_str()) {
+        } else if manifest.kind == Kind::Rust && runtime_fingerprint.as_deref() != Some(manifest.runtime.as_str()) {
             State::Refused("built for another runtime: rebuild it".to_owned())
         } else {
             State::Running
         };
+        let kind = manifest.kind;
         let mut slot = Slot::new(id, folder, Some(manifest), state);
         if slot.state.is_running() {
-            match load(&dll, &shadow_dir, &slot) {
+            let loaded = match kind {
+                Kind::Rust => load(&dll, &shadow_dir, &slot),
+                Kind::Compiled => compiled::load(&dll)
+                    .map(|module| Box::new(module) as Box<dyn Module>)
+                    .map_err(State::Refused),
+            };
+            match loaded {
                 Ok(module) => slot.module = Some(module),
                 Err(state) => slot.state = state,
             }

@@ -1,0 +1,8 @@
+# Written by the module's author, beside the DLL.
+id = "sample-cpp"
+name = "Sample C++ module"
+version = "0.1.0"
+kind = "compiled"
+category = "Samples"
+description = "One command of its own, and a thread of its own painting the cube through the C interface"
+dll = "sample-cpp.dll"

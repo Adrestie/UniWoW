@@ -1,31 +1,30 @@
-//! The C interface of `sdk/uniwow.h`, implemented over an `Editor` handle, and the loading of a
-//! module DLL.
+//! The C interface of `sdk/uniwow.h` over an `Editor`: what a compiled module receives, and the
+//! start of a compiled module once the kernel has loaded its DLL.
 
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::os::windows::ffi::OsStrExt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use uniwow_api::serde_json::{self, Value, json};
-use uniwow_api::{Editor, log};
+use serde_json::{Value, json};
+
+use crate::Editor;
 
 const API_VERSION: u32 = 2;
-const INIT_SYMBOL: &[u8] = b"uniwow_module_init\0";
-/// Makes `LoadLibraryExW` look for the DLLs a module needs in the module's own folder.
-const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x8;
+/// The name under which a compiled module exports its entry point.
+pub const INIT_SYMBOL: &[u8] = b"uniwow_module_init\0";
 
 // The functions a module gives are "C-unwind": a C++ exception reaching the editor through them
 // ends the process in a defined way, instead of being undefined behaviour.
 type Reply = extern "C-unwind" fn(*mut c_void, *const c_char);
 type Handler = extern "C-unwind" fn(*mut c_void, *const c_char, Reply, *mut c_void) -> i32;
-type InitFn = unsafe extern "C-unwind" fn(*const Api, *mut ModuleInfo, Reply, *mut c_void) -> i32;
+/// The entry point of a compiled module.
+pub type InitFn = unsafe extern "C-unwind" fn(*const Api, *mut ModuleInfo, Reply, *mut c_void) -> i32;
 
 /// The table of `uniwow.h`. A reply function a module passes may be NULL: the text is then
 /// ignored.
 #[repr(C)]
-struct Api {
+pub struct Api {
     version: u32,
     context: *mut c_void,
     commands: extern "C" fn(*mut c_void, Option<Reply>, *mut c_void),
@@ -51,8 +50,9 @@ struct CommandEntry {
     user: *mut c_void,
 }
 
+/// What the entry point of a compiled module fills in.
 #[repr(C)]
-struct ModuleInfo {
+pub struct ModuleInfo {
     name: *const c_char,
     version: *const c_char,
     commands: *const CommandEntry,
@@ -63,33 +63,24 @@ struct ModuleInfo {
     command_size: u32,
 }
 
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn LoadLibraryExW(file: *const u16, reserved: *mut c_void, flags: u32) -> *mut c_void;
-    fn GetModuleHandleW(name: *const u16) -> *mut c_void;
-    fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
-    fn GetLastError() -> u32;
-}
-
 /// What the C functions know of the module calling them. Lives until the process ends.
 pub struct ModuleContext {
-    /// Name used for the module's `Editor`, e.g. `native-modules#sample-cpp`.
-    pub name: String,
+    /// The module's `Editor`, set when the module starts (`Module::init`).
     pub editor: OnceLock<Editor>,
 }
 
-/// A command handler of a module.
+/// A command handler of a compiled module.
 #[derive(Clone, Copy)]
-pub struct NativeHandler {
+pub struct CompiledHandler {
     handler: Handler,
     user: *mut c_void,
 }
 
 // SAFETY: uniwow.h requires every command handler to be callable from any thread, several at once.
-unsafe impl Send for NativeHandler {}
-unsafe impl Sync for NativeHandler {}
+unsafe impl Send for CompiledHandler {}
+unsafe impl Sync for CompiledHandler {}
 
-impl NativeHandler {
+impl CompiledHandler {
     pub fn invoke(&self, arguments: &Value) -> Result<Value, String> {
         let arguments = c_text(&arguments.to_string());
         let mut answer = String::new();
@@ -101,58 +92,28 @@ impl NativeHandler {
     }
 }
 
-pub struct ModuleCommand {
+/// A command a compiled module offers.
+pub struct OfferedCommand {
     pub name: String,
     pub description: String,
     pub arguments: Value,
     pub result: Value,
-    pub handler: NativeHandler,
+    pub handler: CompiledHandler,
 }
 
-pub struct Loaded {
+/// A compiled module whose entry point accepted to start.
+pub struct Started {
+    /// Name and version the module gives itself.
     pub name: String,
     pub version: String,
     pub context: &'static ModuleContext,
-    pub commands: Vec<ModuleCommand>,
+    pub commands: Vec<OfferedCommand>,
 }
 
-/// Loads a module DLL and calls its entry point. A loaded module is never unloaded.
-pub fn load(path: &Path) -> Result<Loaded, String> {
-    let wide = |text: &std::ffi::OsStr| -> Vec<u16> { text.encode_wide().chain(std::iter::once(0)).collect() };
-    let file = path.file_name().unwrap_or_default();
-    // Windows would hand back the DLL of that name already in the process instead of the module.
-    // SAFETY: a NUL-terminated wide name.
-    if !unsafe { GetModuleHandleW(wide(file).as_ptr()) }.is_null() {
-        return Err(format!(
-            "a DLL named {} is already loaded in the editor: rename the module",
-            file.to_string_lossy()
-        ));
-    }
-    // SAFETY: a NUL-terminated absolute wide path.
-    let module = unsafe {
-        LoadLibraryExW(
-            wide(path.as_os_str()).as_ptr(),
-            std::ptr::null_mut(),
-            LOAD_WITH_ALTERED_SEARCH_PATH,
-        )
-    };
-    if module.is_null() {
-        // SAFETY: no other call in between.
-        return Err(format!("could not be loaded (Windows error {})", unsafe {
-            GetLastError()
-        }));
-    }
-    // SAFETY: a valid module handle and a NUL-terminated name.
-    let init = unsafe { GetProcAddress(module, INIT_SYMBOL.as_ptr().cast()) };
-    if init.is_null() {
-        return Err("no uniwow_module_init entry point: not a UniWoW module".to_owned());
-    }
-    // SAFETY: uniwow.h fixes the signature of the entry point.
-    let init: InitFn = unsafe { std::mem::transmute::<*mut c_void, InitFn>(init) };
-
-    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+/// Calls the entry point of a compiled module with the table of the C interface, and reads what
+/// it offers. The table and the context live until the process ends, as the module does.
+pub fn start(init: InitFn) -> Result<Started, String> {
     let context: &'static ModuleContext = Box::leak(Box::new(ModuleContext {
-        name: stem.into_owned(),
         editor: OnceLock::new(),
     }));
     let api: &'static Api = Box::leak(Box::new(Api {
@@ -212,19 +173,19 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
                 .and_then(|t| serde_json::from_str(&t).ok())
                 .unwrap_or(json!({}))
         };
-        commands.push(ModuleCommand {
+        commands.push(OfferedCommand {
             name: read(entry.name).map_err(|e| format!("command {index}: {e}"))?,
             description: read(entry.description).unwrap_or_default(),
             arguments: schema(entry.arguments_schema),
             result: schema(entry.result_schema),
-            handler: NativeHandler {
+            handler: CompiledHandler {
                 handler,
                 user: entry.user,
             },
         });
     }
-    Ok(Loaded {
-        name: read(info.name).unwrap_or_else(|_| context.name.clone()),
+    Ok(Started {
+        name: read(info.name).unwrap_or_default(),
         version: read(info.version).unwrap_or_default(),
         context,
         commands,
@@ -433,4 +394,99 @@ extern "C" fn api_end_group(context: *mut c_void) {
             log::warn!("a compiled module could not end an undo group: {error}");
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::{c_char, c_void};
+
+    use serde_json::json;
+
+    use super::{API_VERSION, Api, CommandEntry, ModuleInfo, Reply, start};
+
+    extern "C-unwind" fn echo(_user: *mut c_void, arguments: *const c_char, reply: Reply, context: *mut c_void) -> i32 {
+        reply(context, arguments);
+        0
+    }
+
+    /// Fills `info` as a module would, with one command, then lets `adjust` spoil it.
+    fn fill(info: *mut ModuleInfo, adjust: impl FnOnce(&mut ModuleInfo)) -> i32 {
+        let commands: &'static [CommandEntry] = Box::leak(Box::new([CommandEntry {
+            name: c"test.echo".as_ptr(),
+            description: c"Answers its arguments".as_ptr(),
+            arguments_schema: c"{}".as_ptr(),
+            result_schema: c"{}".as_ptr(),
+            handler: Some(echo),
+            user: std::ptr::null_mut(),
+        }]));
+        // SAFETY: the editor gives a valid `info`.
+        let info = unsafe { &mut *info };
+        info.name = c"test".as_ptr();
+        info.version = c"1.0".as_ptr();
+        info.commands = commands.as_ptr();
+        info.command_count = 1;
+        info.header_version = API_VERSION;
+        info.command_size = std::mem::size_of::<CommandEntry>() as u32;
+        adjust(info);
+        0
+    }
+
+    unsafe extern "C-unwind" fn good(
+        _api: *const Api,
+        info: *mut ModuleInfo,
+        _error: Reply,
+        _context: *mut c_void,
+    ) -> i32 {
+        fill(info, |_| {})
+    }
+
+    unsafe extern "C-unwind" fn older_header(
+        _api: *const Api,
+        info: *mut ModuleInfo,
+        _error: Reply,
+        _context: *mut c_void,
+    ) -> i32 {
+        fill(info, |info| info.header_version = 1)
+    }
+
+    unsafe extern "C-unwind" fn other_command_size(
+        _api: *const Api,
+        info: *mut ModuleInfo,
+        _error: Reply,
+        _context: *mut c_void,
+    ) -> i32 {
+        fill(info, |info| info.command_size += 8)
+    }
+
+    unsafe extern "C-unwind" fn refuses(
+        _api: *const Api,
+        _info: *mut ModuleInfo,
+        error: Reply,
+        context: *mut c_void,
+    ) -> i32 {
+        error(context, c"no licence file".as_ptr());
+        1
+    }
+
+    #[test]
+    fn a_module_starts_and_its_commands_answer() {
+        let started = start(good).expect("starts");
+        assert_eq!((started.name.as_str(), started.version.as_str()), ("test", "1.0"));
+        assert_eq!(started.commands.len(), 1);
+        assert_eq!(started.commands[0].name, "test.echo");
+        assert_eq!(
+            started.commands[0].handler.invoke(&json!({ "a": 1 })),
+            Ok(json!({ "a": 1 }))
+        );
+    }
+
+    #[test]
+    fn a_module_built_with_another_header_is_refused_with_the_reason() {
+        let older = start(older_header).err().expect("refused");
+        assert!(older.contains("version 1 of uniwow.h"), "{older}");
+        let size = start(other_command_size).err().expect("refused");
+        assert!(size.contains("uniwow_command"), "{size}");
+        let refused = start(refuses).err().expect("refused");
+        assert!(refused.contains("no licence file"), "{refused}");
+    }
 }

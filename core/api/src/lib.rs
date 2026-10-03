@@ -17,6 +17,7 @@ pub use serde_json;
 /// Lua 5.1 (`libs/lua`), part of the runtime.
 pub use uniwow_lua::mlua;
 
+pub mod capi;
 mod command;
 mod commands;
 mod context;

@@ -143,8 +143,32 @@ impl Shell {
                 self.host.services.insert(id, Service { provider, value });
             }
         }
+        let names: Vec<(String, String)> = declared
+            .iter()
+            .map(|(owner, spec)| (owner.clone(), spec.name.clone()))
+            .collect();
+        let kept = router::choose_commands(declared);
+        // Each module keeps the list of its commands, those set aside with the module that won.
+        let winners: HashMap<&str, &str> = kept
+            .iter()
+            .map(|(owner, spec)| (spec.name.as_str(), owner.as_str()))
+            .collect();
+        for slot in &mut self.slots {
+            slot.commands = names
+                .iter()
+                .filter(|(owner, _)| *owner == slot.id)
+                .map(|(_, name)| {
+                    let refused = winners
+                        .get(name.as_str())
+                        .filter(|winner| **winner != slot.id)
+                        .map(|winner| format!("offered by '{winner}'"));
+                    (name.clone(), refused)
+                })
+                .collect();
+        }
+        drop(winners);
         let mut catalogue = self.host.bridge.catalogue.write().unwrap_or_else(|e| e.into_inner());
-        for (owner, spec) in router::choose_commands(declared) {
+        for (owner, spec) in kept {
             let handler = match spec.runs_on {
                 RunsOn::Interface => None,
                 RunsOn::Caller(handler) => Some(handler),
@@ -1001,8 +1025,8 @@ impl Viewer<'_> {
         }
         ui.separator();
         egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
-            egui::Grid::new("modules").striped(true).num_columns(7).show(ui, |ui| {
-                for header in ["On", "Module", "Category", "Id", "Version", "State", "Folder"] {
+            egui::Grid::new("modules").striped(true).num_columns(8).show(ui, |ui| {
+                for header in ["On", "Module", "Kind", "Category", "Id", "Version", "State", "Commands"] {
                     ui.strong(header);
                 }
                 ui.end_row();
@@ -1019,11 +1043,16 @@ impl Viewer<'_> {
                         *self.restart_needed = true;
                     }
                     let name = ui.label(slot.name());
-                    if let Some(manifest) = &slot.manifest
-                        && !manifest.description.is_empty()
-                    {
-                        name.on_hover_text(&manifest.description);
+                    let folder = slot.folder.display().to_string();
+                    match &slot.manifest {
+                        Some(manifest) if !manifest.description.is_empty() => {
+                            name.on_hover_text(format!("{}\n{folder}", manifest.description));
+                        }
+                        _ => {
+                            name.on_hover_text(folder);
+                        }
                     }
+                    ui.label(slot.manifest.as_ref().map_or("", |m| m.kind.name()));
                     ui.label(slot.manifest.as_ref().map_or("", |m| m.category.as_str()));
                     ui.label(&slot.id);
                     ui.label(slot.manifest.as_ref().map_or("", |m| m.version.as_str()));
@@ -1034,7 +1063,15 @@ impl Viewer<'_> {
                         _ => ui.visuals().error_fg_color,
                     };
                     ui.colored_label(color, state_text(&slot.state));
-                    ui.label(slot.folder.file_name().unwrap_or_default().to_string_lossy());
+                    let error = ui.visuals().error_fg_color;
+                    ui.horizontal_wrapped(|ui| {
+                        for (command, refused) in &slot.commands {
+                            match refused {
+                                None => ui.label(command),
+                                Some(reason) => ui.colored_label(error, format!("{command} (refused: {reason})")),
+                            };
+                        }
+                    });
                     ui.end_row();
                 }
             });

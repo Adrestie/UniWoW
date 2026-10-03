@@ -108,10 +108,10 @@ fn build(release: bool) -> Result<String> {
         deploy_module(&profile, package, &runtime)?;
     }
     remove_stale(&profile, &rust_modules)?;
-    let compiled = build_modules(&ws, &profile)?;
+    let examples = build_examples(&ws, &profile)?;
     let scripts = deploy_scripts(&ws, &profile)?;
     println!(
-        "{} ready with {} Rust modules, {compiled} compiled modules and {scripts} scripts (runtime {})",
+        "{} ready with {} Rust modules, {examples} example modules and {scripts} scripts (runtime {})",
         profile.out.display(),
         rust_modules.len(),
         &runtime[..12]
@@ -119,10 +119,11 @@ fn build(release: bool) -> Result<String> {
     Ok(runtime)
 }
 
-/// Compiles each `modules-src/<name>` folder (its `.cpp` and `.c` files) into
-/// `out/<profile>/modules/<name>.dll` with the MSVC compiler found on the machine.
-fn build_modules(ws: &Workspace, profile: &Profile) -> Result<usize> {
-    let mut folders: Vec<PathBuf> = match std::fs::read_dir(ws.root.join("modules-src")) {
+/// Builds and installs the sample modules of `examples/modules/<id>/` as their author would: their
+/// C and C++ sources compiled with the MSVC compiler found on the machine into the DLL their
+/// `module.toml` names, both copied into `out/<profile>/modules/<id>/`.
+fn build_examples(ws: &Workspace, profile: &Profile) -> Result<usize> {
+    let mut folders: Vec<PathBuf> = match std::fs::read_dir(ws.root.join("examples").join("modules")) {
         Ok(entries) => entries
             .filter_map(|e| e.ok())
             .map(|e| e.path())
@@ -144,7 +145,16 @@ fn build_modules(ws: &Workspace, profile: &Profile) -> Result<usize> {
         }
         sources.sort();
         let name = folder.file_name().expect("folder").to_string_lossy().into_owned();
-        let work = profile.target.join("modules").join(&name);
+        let manifest_path = folder.join("module.toml");
+        let manifest: toml::Table = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| format!("{}: {e}", manifest_path.display()))
+            .and_then(|text| toml::from_str(&text).map_err(|e| format!("{}: {e}", manifest_path.display())))?;
+        let dll = manifest
+            .get("dll")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("{}: no dll", manifest_path.display()))?
+            .to_owned();
+        let work = profile.target.join("examples").join(&name);
         std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
         let compiler = cc::windows_registry::find_tool("x86_64-pc-windows-msvc", "cl.exe")
             .ok_or("no MSVC compiler found: install the Visual Studio C++ build tools")?;
@@ -164,7 +174,7 @@ fn build_modules(ws: &Workspace, profile: &Profile) -> Result<usize> {
             ])
             .arg(format!("/I{}", ws.root.join("sdk").display()))
             .args(&sources)
-            .arg(format!("/Fe:{name}.dll"))
+            .arg(format!("/Fe:{dll}"))
             .args(["/link", "/Brepro"])
             .output()
             .map_err(|e| format!("could not start the MSVC compiler: {e}"))?;
@@ -174,12 +184,10 @@ fn build_modules(ws: &Workspace, profile: &Profile) -> Result<usize> {
                 String::from_utf8_lossy(&output.stdout).trim()
             ));
         }
-        let destination = profile.out.join("modules");
+        let destination = profile.out.join("modules").join(&name);
         std::fs::create_dir_all(&destination).map_err(|e| e.to_string())?;
-        copy_if_changed(
-            &work.join(format!("{name}.dll")),
-            &destination.join(format!("{name}.dll")),
-        )?;
+        copy_if_changed(&work.join(&dll), &destination.join(&dll))?;
+        copy_if_changed(&manifest_path, &destination.join("module.toml"))?;
         built += 1;
     }
     Ok(built)
@@ -304,6 +312,7 @@ fn deploy_runtime(profile: &Profile) -> Result<String> {
 #[derive(Serialize)]
 struct ModuleManifest<'a> {
     id: &'a str,
+    kind: &'a str,
     package: &'a str,
     name: &'a str,
     version: &'a str,
@@ -330,6 +339,7 @@ fn deploy_module(profile: &Profile, package: &Package, runtime: &str) -> Result 
     copy_if_changed(&source, &folder.join(&dll))?;
     let manifest = ModuleManifest {
         id: &id,
+        kind: "rust",
         package: &package.name,
         name: package.meta_str("name").unwrap_or(&id),
         version: &package.version,
