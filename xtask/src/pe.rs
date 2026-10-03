@@ -42,7 +42,7 @@ pub fn exported_names_in(data: &[u8]) -> Result<u32, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{exported_names, exported_names_in};
+    use super::exported_names_in;
 
     /// A minimal 64-bit PE image with one section holding an export directory.
     fn image(functions: u32, names: u32, with_exports: bool) -> Vec<u8> {
@@ -92,6 +92,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn kernel32_exports_over_a_thousand_symbols() {
+        use super::exported_names;
+
         let windows = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
         let kernel32 = std::path::Path::new(&windows).join("System32").join("kernel32.dll");
         let count = exported_names(&kernel32).expect("kernel32.dll is a PE file");
