@@ -297,8 +297,8 @@ without touching the core.
 
 | Id | Feature |
 |---|---|
-| scripting-lua | Lua interpreter (mlua, Lua compiled into the runtime, nothing to install): console panel, script runner, the `uniwow` module |
-| scripting-python | CPython interpreter (PyO3, with the official embeddable Python of Windows shipped beside the editor): the same console, runner and `uniwow` module |
+| scripting-lua | Lua 5.1, the dialect of the 3.3.5 client and of ALE scripts (mlua): console panel, script runner, the `uniwow` module |
+| scripting-python | CPython, the latest stable version when the feature is built (PyO3, official embeddable Python of Windows): the same console, runner and `uniwow` module |
 
 Both languages follow the same rules:
 
@@ -312,8 +312,10 @@ Both languages follow the same rules:
 | S6 | Native code a script loads runs inside the editor and can end its process: a crash there is not an error that can be caught. Lua scripts cannot load C modules. Python scripts may import compiled packages placed by the user; this risk is accepted, and running Python in a separate process remains possible later. |
 | S7 | Scripts have full access to the machine, like editor scripts in Unity: a script received from someone else is read before it is run. |
 | S8 | Each language stays optional: without `scripting-python.dll`, or without the Python files, the editor starts with Lua only, and the other way round. In particular the runtime must not require the Python DLL to start. |
+| S9 | Interpreters and scripts are stored by language and version, the version being the one the loaded interpreter reports: `interpreters\lua-5.1\`, `interpreters\python-3.xx\` beside the executable, and `scripts\lua-5.1\…`, `scripts\python-3.xx\…`. Scripts written for another version stay in their own folder. |
+| S10 | The interpreter can be replaced without recompiling the editor, within the same C interface: for Lua, any interpreter offering the Lua 5.1 C interface (PUC Lua 5.1.5 by default, or LuaJIT) by replacing `lua51.dll`; for Python, any CPython from the minimum version on, through the stable ABI (`python3.dll`) by replacing the folder. Another Lua generation (5.4) has a different C interface: it needs a rebuild of the runtime. |
 
-Risks to verify first, before any other work on scripting: the runtime's exported symbol count with PyO3 and mlua inside it; starting the editor without the Python DLL while PyO3 is part of the runtime (delayed loading of the DLL); the embeddable Python distribution beside the executable.
+Risks to verify first, before any other work on scripting: the runtime's exported symbol count with PyO3 and mlua inside it; mlua using a Lua 5.1 loaded from `lua51.dll` instead of compiled in, and the swap for LuaJIT's `lua51.dll`; PyO3 embedding CPython through the stable ABI, then the swap for another CPython version; starting the editor without either DLL (delayed loading); the embeddable Python distribution beside the executable.
 
 ---
 
@@ -376,5 +378,3 @@ reports the count and fails from 50,000; the runtime would then have to be split
 - Project model: what a project contains, where it is stored, how it maps to a WoW-mods module.
 - Installations targeted: client with WXL, server, database connection.
 - Order of the features after milestone 1.
-- Lua version for scripting: 5.1, the dialect of the 3.3.5 client and of ALE scripts, or a later one.
-- Python version shipped, and where scripts and their packages are stored.
