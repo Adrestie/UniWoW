@@ -18,8 +18,12 @@ pub enum Layer {
 
 pub struct Dependency {
     pub name: String,
-    /// Set for dependencies inside the repository.
+    /// `normal`, `dev` or `build`.
+    pub kind: String,
+    /// Set for dependencies given by path, inside the repository or not.
     pub path: Option<PathBuf>,
+    /// Where a dependency not given by path comes from, e.g. `registry+https://…` or `git+https://…`.
+    pub source: Option<String>,
 }
 
 pub struct Package {
@@ -100,10 +104,11 @@ fn package(root: &Path, value: &Value) -> Package {
         .as_array()
         .map(|deps| {
             deps.iter()
-                .filter(|d| d["kind"].is_null())
                 .map(|d| Dependency {
                     name: d["name"].as_str().unwrap_or_default().to_owned(),
+                    kind: d["kind"].as_str().unwrap_or("normal").to_owned(),
                     path: d["path"].as_str().map(PathBuf::from),
+                    source: d["source"].as_str().map(str::to_owned),
                 })
                 .collect()
         })

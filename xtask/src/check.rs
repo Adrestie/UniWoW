@@ -1,4 +1,4 @@
-use crate::workspace::{Layer, Workspace};
+use crate::workspace::{Dependency, Layer, Workspace};
 use crate::{Result, pe};
 
 /// Windows refuses to link a DLL exporting more than this many symbols.
@@ -17,10 +17,49 @@ fn allowed(from: Layer) -> &'static [Layer] {
 
 pub fn run() -> Result {
     let ws = Workspace::load()?;
-    let mut problems = Vec::new();
+    let mut problems = problems(&ws);
 
+    for profile in ["debug", "release"] {
+        let dll = ws.target_dir.join(profile).join(crate::RUNTIME_DLL);
+        if let Ok(count) = pe::exported_names(&dll) {
+            let percent = count as f32 * 100.0 / EXPORT_LIMIT as f32;
+            println!("runtime ({profile}): {count} exported symbols, {percent:.0}% of the Windows limit");
+            if count >= EXPORT_WARNING {
+                problems.push(format!(
+                    "the {profile} runtime exports {count} symbols, close to the limit of {EXPORT_LIMIT}: split it"
+                ));
+            }
+        }
+    }
+
+    if problems.is_empty() {
+        println!("check passed: {} packages", ws.packages.len());
+        Ok(())
+    } else {
+        Err(problems.join("\n"))
+    }
+}
+
+/// Every breach of the dependency and naming rules in the workspace.
+pub fn problems(ws: &Workspace) -> Vec<String> {
+    let mut problems = Vec::new();
     for package in &ws.packages {
         for dependency in &package.dependencies {
+            if package.layer == Layer::Feature {
+                // Strict: any other crate, even one already inside the runtime, may enable an option
+                // that makes Cargo rebuild the runtime, which changes its fingerprint.
+                let inside = dependency.path.as_ref().map(|p| ws.layer_of(p));
+                if !matches!(inside, Some(Layer::Api | Layer::Lib)) {
+                    problems.push(format!(
+                        "{} depends on {} ({} dependency, {}): a feature may only depend on uniwow-api and libs/*",
+                        package.name,
+                        dependency.name,
+                        dependency.kind,
+                        origin(dependency)
+                    ));
+                }
+                continue;
+            }
             let Some(path) = &dependency.path else {
                 continue;
             };
@@ -54,24 +93,15 @@ pub fn run() -> Result {
             }
         }
     }
+    problems
+}
 
-    for profile in ["debug", "release"] {
-        let dll = ws.target_dir.join(profile).join(crate::RUNTIME_DLL);
-        if let Ok(count) = pe::exported_names(&dll) {
-            let percent = count as f32 * 100.0 / EXPORT_LIMIT as f32;
-            println!("runtime ({profile}): {count} exported symbols, {percent:.0}% of the Windows limit");
-            if count >= EXPORT_WARNING {
-                problems.push(format!(
-                    "the {profile} runtime exports {count} symbols, close to the limit of {EXPORT_LIMIT}: split it"
-                ));
-            }
-        }
-    }
-
-    if problems.is_empty() {
-        println!("check passed: {} packages", ws.packages.len());
-        Ok(())
-    } else {
-        Err(problems.join("\n"))
+fn origin(dependency: &Dependency) -> String {
+    match (&dependency.path, &dependency.source) {
+        (Some(path), _) => format!("path {}", path.display()),
+        (None, Some(source)) if source.starts_with("registry+") => "crates.io".to_owned(),
+        (None, Some(source)) if source.starts_with("git+") => format!("git {}", &source[4..]),
+        (None, Some(source)) => source.clone(),
+        (None, None) => "unknown source".to_owned(),
     }
 }

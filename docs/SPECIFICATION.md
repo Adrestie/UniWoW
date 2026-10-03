@@ -55,6 +55,11 @@ Allowed dependencies (enforced by `xtask check`):
 A feature never depends on another feature, nor on `core/kernel`. A library never depends on
 the core or on a feature.
 
+A feature depends on nothing else, not even through dev or build dependencies: enabling an option
+of a crate the runtime also uses makes Cargo rebuild the runtime, which changes its fingerprint and
+makes every feature incompatible. A crate a feature needs is added to the runtime (`core/api` or
+`libs/*`). `cargo xtask check` names any other dependency.
+
 ---
 
 ## 3. Feature contract

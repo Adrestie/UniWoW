@@ -8,6 +8,9 @@ edition.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
+# Only uniwow-api and the crates of libs/ are allowed, here and in dev or build dependencies
+# (cargo xtask check). Any other crate, even one the runtime already contains, can make Cargo
+# rebuild the runtime and so make every feature incompatible. Ask for it to be added to the runtime.
 uniwow-api.workspace = true
 
 [package.metadata.uniwow]
