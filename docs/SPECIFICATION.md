@@ -20,6 +20,8 @@ Players are expected to run the client with WarcraftXL (WXL).
 | R4 | Removing a feature's DLL leaves the editor starting and working without it. Example: without the viewport DLL, the editor starts without any 3D window; without the terrain DLL, the 3D window shows no terrain. |
 | R5 | Adding a feature is simple: one command creates it, one command builds it. |
 | R6 | A feature that fails, or that was built for another version of the core, is refused or disabled and reported; the editor keeps running. |
+| R7 | Speed: the editor uses every processor core. Long or heavy work (reading archives, parsing files, building meshes, extraction, database queries) never runs on the interface thread. |
+| R8 | Features, scripts and native modules may use threads themselves, through what the kernel offers (section 5, threads). |
 
 ---
 
@@ -204,16 +206,28 @@ the same runtime.
 | Feature loader | Section 4 |
 | Features panel | Lists features, version, state, refusal or failure reason; enable or disable |
 | Commands and history | Undo, redo, unsaved-changes tracking. When a feature fails, all its entries leave the history, done and undone, with a warning in the log; the others stay valid since a command only changes its own feature's state (F3) |
-| Events | Publish and subscribe, typed by serialisation: the topic is a string and the payload JSON, written with `Context::publish_as` and read with `Event::decode` into a type each feature declares on its own side. No Rust type is shared between features |
+| Events | Publish and subscribe, typed by serialisation: the topic is a string and the payload JSON, written with `Context::publish_as` and read with `Event::decode` into a type each feature declares on its own side. No Rust type is shared between features. Events may be published from any thread; they are delivered on the interface thread |
 | Services | Registry of interface implementations provided by features |
 | Selection | Current selection, any type |
 | Project | Open, save; content defined in a later step |
 | Settings | Global, per project, per feature. Written atomically (temporary file, then rename), at most once per second and at exit |
-| Jobs | Background tasks with progress and cancel |
+| Jobs | Pool of worker threads, one per processor core: background jobs with progress and cancel (T2) |
 | Log | Log panel shared by all features. GPU errors captured by no feature are logged instead of stopping the editor |
 | Inspector host | Shows the selection with the inspector registered for its type |
 
 The 3D view is not a core service: it is the `viewport` feature (section 7).
+
+Threads:
+
+| Id | Rule |
+|---|---|
+| T1 | The interface thread draws, applies the undoable commands and owns the state of each feature. It never waits for slow work. |
+| T2 | The kernel keeps a pool of worker threads, one per processor core. `Context::spawn` runs a job there, with progress and cancel; its result comes back to the feature on the interface thread. A Jobs panel lists the jobs running. |
+| T3 | Service interfaces are shared between threads (`Send + Sync`, held in an `Arc`), so that jobs, scripts and native modules call them directly. An interface tied to the interface thread says so explicitly. |
+| T4 | Each named command declares where it runs: on the interface thread when it changes a feature's state (through an undoable command), or on the calling thread when it only reads or synchronises itself. The second kind answers at once, without waiting for a frame. |
+| T5 | The GPU device and queue can be used from any thread: jobs create and upload buffers and textures; only drawing happens on the interface thread. |
+| T6 | Scripts run on worker threads. Each run of a Lua script has its own Lua state, so several run in parallel. Python scripts run on worker threads too, but standard CPython lets one thread at a time execute Python code (the GIL): their parallel work comes from the commands they call. |
+| T7 | Every function of the C interface can be called from any thread; native modules may create their own threads. |
 
 ---
 
@@ -293,29 +307,30 @@ without touching the core.
 |---|---|
 | package | Build an installable WoW-mods module (installer.json): files in the right patch archive, DBC copied from client to server, install and uninstall SQL, id ranges checked |
 
-### Scripting
+### Scripting and native modules
 
 | Id | Feature |
 |---|---|
-| scripting-lua | Lua 5.1, the dialect of the 3.3.5 client and of ALE scripts (mlua): console panel, script runner, the `uniwow` module |
-| scripting-python | CPython, the latest stable version when the feature is built (PyO3, official embeddable Python of Windows): the same console, runner and `uniwow` module |
+| scripting-lua | Lua 5.1, the dialect of the 3.3.5 client and of ALE scripts, compiled into the runtime (mlua): console panel, script runner, the `uniwow` module |
+| scripting-python | CPython, the latest stable version when the feature is built, embedded (PyO3) with the official embeddable distribution of Windows in `interpreters\python-3.xx\`: the same console, runner and `uniwow` module |
+| native-modules | Loads the compiled modules of `modules\`: DLLs written in C++, in C# compiled with NativeAOT, or in any language able to export a C function. Each receives the C interface (S1) |
 
-Both languages follow the same rules:
+Rules:
 
 | Id | Rule |
 |---|---|
-| S1 | One generic interface, the same for every language: list the named commands with their descriptions and schemas, call one by name, publish and receive events, read and write settings, log. Every value crosses it as JSON. It is defined once, independently of any language, and also offered as a C interface (`extern "C"` functions taking and returning UTF-8 JSON, header `uniwow.h`), so that a module written in C++, or in any language able to call C, reaches the same commands without depending on the Rust ABI. The Lua and Python `uniwow` modules only translate their values to and from JSON on top of this interface: they add no command of their own, so every language always has the same access. |
+| S1 | One generic interface, the same for every language: list the named commands with their descriptions and schemas, call one by name, publish and receive events, read and write settings, log. Every value crosses it as JSON. It is defined once, independently of any language, and also offered as a C interface (`extern "C"` functions taking and returning UTF-8 JSON, header `uniwow.h`), so that compiled code reaches the same commands without depending on the Rust ABI. The Lua and Python `uniwow` modules only translate their values to and from JSON on top of this interface: they add no command of their own, so every language always has the same access. |
 | S2 | Named commands (F6) must exist in the kernel first: they are what scripts and native modules mostly call. |
-| S3 | A script runs outside the interface thread, so that a long script does not freeze the editor; each call to the editor goes through a queue served at the next frame. A running script can be stopped. |
+| S3 | Scripts never run on the interface thread (T6). A call that changes a feature's state is applied on the interface thread at the next frame; a call to a command running on the calling thread answers at once (T4). A running script can be stopped. |
 | S4 | Every change one run of a script makes forms a single undo entry. The kernel learns to group commands. |
 | S5 | A Lua or Python error is shown in the console with its line; it does not make the feature fail. |
-| S6 | Native code a script loads runs inside the editor and can end its process: a crash there is not an error that can be caught. Lua scripts cannot load C modules. Python scripts may import compiled packages placed by the user; this risk is accepted, and running Python in a separate process remains possible later. |
-| S7 | Scripts have full access to the machine, like editor scripts in Unity: a script received from someone else is read before it is run. |
+| S6 | Native code runs inside the editor and can end its process: a crash there is not an error that can be caught. Lua scripts cannot load C modules. The compiled packages a Python script imports and the native modules carry this risk, which is accepted. |
+| S7 | Scripts and native modules have full access to the machine, like editor scripts in Unity: one received from someone else is checked before it is used. |
 | S8 | Each language stays optional: without `scripting-python.dll`, or without the Python files, the editor starts with Lua only, and the other way round. In particular the runtime must not require the Python DLL to start. |
-| S9 | Interpreters and scripts are stored by language and version, the version being the one the loaded interpreter reports: `interpreters\lua-5.1\`, `interpreters\python-3.xx\` beside the executable, and `scripts\lua-5.1\…`, `scripts\python-3.xx\…`. Scripts written for another version stay in their own folder. |
-| S10 | The interpreter can be replaced without recompiling the editor, within the same C interface: for Lua, any interpreter offering the Lua 5.1 C interface (PUC Lua 5.1.5 by default, or LuaJIT) by replacing `lua51.dll`; for Python, any CPython from the minimum version on, through the stable ABI (`python3.dll`) by replacing the folder. Another Lua generation (5.4) has a different C interface: it needs a rebuild of the runtime. |
+| S9 | One interpreter per language. Scripts are stored by language and version: `scripts\lua-5.1\…`, `scripts\python-3.xx\…`, the Python version being the one shipped. Native modules go in `modules\`. |
+| S10 | A native module exports one C entry point. It receives the table of functions of the C interface and returns its description (name, version) and the named commands it offers, implemented in its own language with the same JSON form. |
 
-Risks to verify first, before any other work on scripting: the runtime's exported symbol count with PyO3 and mlua inside it; mlua using a Lua 5.1 loaded from `lua51.dll` instead of compiled in, and the swap for LuaJIT's `lua51.dll`; PyO3 embedding CPython through the stable ABI, then the swap for another CPython version; starting the editor without either DLL (delayed loading); the embeddable Python distribution beside the executable.
+Risks to verify first, before any other work on scripting: the runtime's exported symbol count with PyO3 and mlua inside it; starting the editor without the Python DLL while PyO3 is part of the runtime (delayed loading); the embeddable Python distribution beside the executable; a C++ module and a C# NativeAOT module calling the C interface from several threads.
 
 ---
 
