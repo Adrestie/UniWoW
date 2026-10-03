@@ -1,8 +1,10 @@
 use uniwow_api::{Command, log};
 
-/// One undoable command and the feature it belongs to.
+/// One undoable command, the feature it belongs to, and its label, read once under guard when
+/// the command was applied.
 pub struct Part {
     pub owner: String,
+    pub label: String,
     pub command: Box<dyn Command>,
 }
 
@@ -22,9 +24,8 @@ pub struct History {
 }
 
 impl History {
-    pub fn push(&mut self, owner: String, command: Box<dyn Command>) {
-        let label = command.label();
-        self.push_group(label, vec![Part { owner, command }]);
+    pub fn push(&mut self, part: Part) {
+        self.push_group(part.label.clone(), vec![part]);
     }
 
     /// Records several commands as one entry; nothing when there is none.
@@ -82,7 +83,7 @@ fn take(entries: &mut Vec<Entry>, running: impl Fn(&str) -> bool) -> Option<Entr
             if !keep {
                 log::warn!(
                     "'{}' dropped from the history: '{}' is not running",
-                    part.command.label(),
+                    part.label,
                     part.owner
                 );
             }
@@ -118,6 +119,7 @@ mod tests {
     fn part(owner: &str, label: &'static str) -> Part {
         Part {
             owner: owner.to_owned(),
+            label: label.to_owned(),
             command: Box::new(Named(label)),
         }
     }
@@ -126,11 +128,7 @@ mod tests {
         entries
             .iter()
             .map(|e| {
-                let parts: Vec<String> = e
-                    .parts
-                    .iter()
-                    .map(|p| format!("{}:{}", p.owner, p.command.label()))
-                    .collect();
+                let parts: Vec<String> = e.parts.iter().map(|p| format!("{}:{}", p.owner, p.label)).collect();
                 format!("{}[{}]", e.label, parts.join(","))
             })
             .collect()
@@ -147,7 +145,7 @@ mod tests {
     #[test]
     fn the_last_command_is_undone_then_redone() {
         let mut history = History::default();
-        history.push("cube".to_owned(), Box::new(Named("paint")));
+        history.push(part("cube", "paint"));
         assert_eq!(history.undo_label().as_deref(), Some("paint"));
         let entry = history.take_undo(|_| true).expect("one entry");
         history.undone.push(entry);
@@ -158,10 +156,10 @@ mod tests {
     #[test]
     fn a_new_command_clears_redo() {
         let mut history = History::default();
-        history.push("cube".to_owned(), Box::new(Named("paint")));
+        history.push(part("cube", "paint"));
         let entry = history.take_undo(|_| true).expect("one entry");
         history.undone.push(entry);
-        history.push("cube".to_owned(), Box::new(Named("speed")));
+        history.push(part("cube", "speed"));
         assert!(history.undone.is_empty());
     }
 
@@ -176,10 +174,10 @@ mod tests {
     #[test]
     fn the_purge_removes_only_the_failed_feature_and_keeps_the_order() {
         let mut history = History::default();
-        history.push("cube".to_owned(), Box::new(Named("a")));
+        history.push(part("cube", "a"));
         history.push_group("script".to_owned(), vec![part("cube", "b"), part("terrain", "c")]);
-        history.push("cube".to_owned(), Box::new(Named("d")));
-        history.push("terrain".to_owned(), Box::new(Named("e")));
+        history.push(part("cube", "d"));
+        history.push(part("terrain", "e"));
         let undone = history.take_undo(|_| true).expect("e");
         history.undone.push(undone);
         history.undone.push(Entry {
@@ -198,8 +196,8 @@ mod tests {
     #[test]
     fn commands_of_a_stopped_feature_are_dropped_by_the_guard() {
         let mut history = History::default();
-        history.push("terrain".to_owned(), Box::new(Named("b")));
-        history.push("cube".to_owned(), Box::new(Named("c")));
+        history.push(part("terrain", "b"));
+        history.push(part("cube", "c"));
         let taken = history.take_undo(|id| id != "cube").expect("terrain's entry");
         assert_eq!(taken.label, "b");
         assert!(history.done.is_empty());

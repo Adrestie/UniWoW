@@ -30,7 +30,7 @@ pub fn jobs_panel(ui: &mut egui::Ui, pool: &Pool) {
             if job.is_cancelled() {
                 ui.weak("cancelling…");
             } else if ui.button("Cancel").clicked() {
-                pool.cancel(job.id);
+                pool.cancel(&job.owner, job.id);
             }
             ui.end_row();
         }

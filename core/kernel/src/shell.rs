@@ -342,12 +342,23 @@ impl Shell {
                 .as_deref_mut()
                 .expect("running features are loaded");
             match guarded_as(&owner, || command.apply(feature)) {
-                Ok(()) => match caller.and_then(|(caller, thread)| self.groups.parts_of(caller, thread)) {
-                    Some(parts) => parts.push(history::Part { owner, command }),
-                    None => self.history.push(owner, command),
-                },
+                Ok(()) => {
+                    // A label is feature code too: if it panics, the feature fails.
+                    let label = match guarded_as(&owner, || command.label()) {
+                        Ok(label) => label,
+                        Err(message) => {
+                            self.fail(index, format!("label of a command: {message}"));
+                            continue;
+                        }
+                    };
+                    let part = history::Part { owner, label, command };
+                    match caller.and_then(|(caller, thread)| self.groups.parts_of(caller, thread)) {
+                        Some(parts) => parts.push(part),
+                        None => self.history.push(part),
+                    }
+                }
                 Err(message) => {
-                    let label = command.label();
+                    let label = guarded_as(&owner, || command.label()).unwrap_or_else(|_| "?".to_owned());
                     self.fail(index, format!("command '{label}': {message}"));
                 }
             }
@@ -428,7 +439,7 @@ impl Shell {
                 Ok(()) => done.push(part),
                 Err(message) => {
                     let verb = if revert { "undo" } else { "redo" };
-                    self.fail(index, format!("{verb} of '{}': {message}", part.command.label()));
+                    self.fail(index, format!("{verb} of '{}': {message}", part.label));
                 }
             }
         }
@@ -494,12 +505,12 @@ impl Shell {
     }
 
     /// Answers the queued calls for at most `CALL_BUDGET` (T4), then delivers the answers due to
-    /// features.
-    fn serve_calls(&mut self) {
+    /// features. Returns whether the time ran out with calls perhaps still waiting.
+    fn serve_calls(&mut self) -> bool {
         let Some(requests) = self.requests.take() else {
-            return;
+            return false;
         };
-        router::serve(&requests, CALL_BUDGET, CALL_IDLE, |request| self.answer(request));
+        let out_of_time = router::serve(&requests, CALL_BUDGET, CALL_IDLE, |request| self.answer(request));
         self.requests = Some(requests);
         self.apply_reported();
         for (caller, call, result) in std::mem::take(&mut self.replies) {
@@ -512,6 +523,7 @@ impl Shell {
                 self.fail(index, format!("reply: {message}"));
             }
         }
+        out_of_time
     }
 
     fn answer(&mut self, request: Request) {
@@ -523,6 +535,8 @@ impl Shell {
                 arguments,
                 reply,
             } => {
+                // What the caller published before calling goes first.
+                self.collect_from_threads();
                 let result = self.run_command(&caller, thread, &name, arguments);
                 if let Err(error) = &result {
                     log::warn!("call of '{name}' by '{caller}' failed: {error}");
@@ -753,9 +767,15 @@ impl eframe::App for Shell {
     /// The work of the kernel. eframe calls it before each `ui`, and also while the window is
     /// minimised whenever a repaint is requested, as other threads do when they need the kernel.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Before the calls and jobs: an event a thread published before a call is delivered
+        // before the events that call causes.
+        self.collect_from_threads();
         self.apply_pending();
         self.apply_reported();
-        self.serve_calls();
+        if self.serve_calls() {
+            // Calls were left for the next frame: it must come even if nothing else asks for it.
+            ctx.request_repaint();
+        }
         self.deliver_jobs();
         self.collect_from_threads();
         self.apply_reported();
@@ -815,8 +835,10 @@ impl eframe::App for Shell {
             if let PanelsHealth::Broken(reason) = &self.panels {
                 ui.colored_label(
                     ui.visuals().error_fg_color,
-                    format!("The panels cannot be displayed: {reason}. See the log."),
+                    format!("The panels cannot be displayed: {reason}. The log follows."),
                 );
+                ui.separator();
+                log_panel(ui);
                 return;
             }
             shown = guarded(|| {

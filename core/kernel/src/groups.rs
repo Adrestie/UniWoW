@@ -166,6 +166,7 @@ mod tests {
     fn part(label: &'static str) -> Part {
         Part {
             owner: "cube".to_owned(),
+            label: label.to_owned(),
             command: Box::new(Named(label)),
         }
     }
@@ -177,7 +178,7 @@ mod tests {
     }
 
     fn labels(parts: &[Part]) -> Vec<String> {
-        parts.iter().map(|p| p.command.label()).collect()
+        parts.iter().map(|p| p.label.clone()).collect()
     }
 
     #[test]
@@ -257,6 +258,7 @@ mod tests {
         parts.push(part("painted"));
         parts.push(Part {
             owner: "scripting-lua".to_owned(),
+            label: "own".to_owned(),
             command: Box::new(Named("own")),
         });
         assert_eq!(groups.purge("scripting-lua"), 1);

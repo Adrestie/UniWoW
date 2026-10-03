@@ -318,32 +318,32 @@ impl EditorBackend for Bridge {
 }
 
 /// Serves queued calls for at most `budget`. After a call, it waits up to `idle` for the next one,
-/// so that a thread calling in a loop gets many answers within one frame. Returns how many calls
-/// were served.
+/// so that a thread calling in a loop gets many answers within one frame. Returns whether the
+/// budget ran out, calls perhaps still waiting.
 pub fn serve(
     receiver: &mpsc::Receiver<Request>,
     budget: Duration,
     idle: Duration,
     mut handle: impl FnMut(Request),
-) -> usize {
+) -> bool {
     let deadline = Instant::now() + budget;
-    let mut served = 0;
+    let mut served = false;
     loop {
         let request = match receiver.try_recv() {
             Ok(request) => request,
-            Err(mpsc::TryRecvError::Empty) if served > 0 => {
+            Err(mpsc::TryRecvError::Empty) if served => {
                 let left = deadline.saturating_duration_since(Instant::now());
                 match receiver.recv_timeout(idle.min(left)) {
                     Ok(request) => request,
-                    Err(_) => return served,
+                    Err(_) => return false,
                 }
             }
-            Err(_) => return served,
+            Err(_) => return false,
         };
         handle(request);
-        served += 1;
+        served = true;
         if Instant::now() >= deadline {
-            return served;
+            return true;
         }
     }
 }
@@ -467,7 +467,8 @@ mod tests {
         // Wait for the first call, then serve: the 49 others arrive within the same budget.
         let (mut served, mut rounds) = (0, 0);
         while served < 50 {
-            let count = serve(
+            let mut count = 0;
+            serve(
                 &receiver,
                 Duration::from_secs(2),
                 Duration::from_millis(200),
@@ -478,6 +479,7 @@ mod tests {
                     } = request
                     {
                         reply.send(Ok(Value::Null)).unwrap();
+                        count += 1;
                     }
                 },
             );

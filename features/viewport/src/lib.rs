@@ -30,11 +30,30 @@ const BACKGROUND: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 
-type Layers = Arc<Mutex<Vec<(String, Box<dyn Layer>)>>>;
+/// The layers, and the owners whose layers were removed while the list was out being drawn.
+#[derive(Default)]
+struct LayerList {
+    layers: Vec<(String, Box<dyn Layer>)>,
+    /// Set while `record_layers` has the layers out.
+    drawing: bool,
+    /// Removed again from the drawn layers when they come back.
+    removed: Vec<String>,
+}
+
+type Layers = Arc<Mutex<LayerList>>;
 
 /// The layer list, even if a panic left its lock poisoned: layers are taken out while drawn.
-fn lock(layers: &Layers) -> MutexGuard<'_, Vec<(String, Box<dyn Layer>)>> {
+fn lock(layers: &Layers) -> MutexGuard<'_, LayerList> {
     layers.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Removes the layers of `owner`, including those out being drawn at this moment.
+fn remove(layers: &Layers, owner: &str) {
+    let mut list = lock(layers);
+    list.layers.retain(|(o, _)| o != owner);
+    if list.drawing {
+        list.removed.push(owner.to_owned());
+    }
 }
 
 /// Implementation of the service, sharing the layer list with the feature.
@@ -44,11 +63,11 @@ struct Service {
 
 impl viewport::Viewport for Service {
     fn add_layer(&self, owner: &str, layer: Box<dyn Layer>) {
-        lock(&self.layers).push((owner.to_owned(), layer));
+        lock(&self.layers).layers.push((owner.to_owned(), layer));
     }
 
     fn remove_layers(&self, owner: &str) {
-        lock(&self.layers).retain(|(o, _)| o != owner);
+        remove(&self.layers, owner);
     }
 
     fn target(&self) -> Target {
@@ -115,7 +134,7 @@ impl Feature for ViewportFeature {
         ui.painter().image(targets.texture_id, rect, uv, egui::Color32::WHITE);
         let caption = format!(
             "{} layers · drag: orbit · right drag: pan · wheel: zoom",
-            lock(&self.layers).len()
+            lock(&self.layers).layers.len()
         );
         ui.painter().text(
             rect.left_bottom() + egui::vec2(8.0, -8.0),
@@ -131,7 +150,7 @@ impl Feature for ViewportFeature {
         if event.topic == FEATURE_FAILED_TOPIC
             && let Some(id) = event.payload.get("id").and_then(|v| v.as_str())
         {
-            lock(&self.layers).retain(|(owner, _)| owner != id);
+            remove(&self.layers, id);
         }
     }
 
@@ -262,8 +281,13 @@ impl ViewportFeature {
         view: &View,
         ctx: &mut Context,
     ) -> Vec<wgpu::RenderBundle> {
-        // Layers may add layers while drawing: take the list out, then put it back in front.
-        let mut layers = std::mem::take(&mut *lock(&self.layers));
+        // Layers may be added or removed meanwhile, by a layer or by another thread: take the
+        // list out, then put it back in front, without the layers removed in between.
+        let mut layers = {
+            let mut list = lock(&self.layers);
+            list.drawing = true;
+            std::mem::take(&mut list.layers)
+        };
         let mut bundles = Vec::new();
         layers.retain_mut(|(owner, layer)| {
             let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -314,9 +338,12 @@ impl ViewportFeature {
                 }
             }
         });
-        let mut shared = lock(&self.layers);
-        layers.append(&mut shared);
-        *shared = layers;
+        let mut list = lock(&self.layers);
+        list.drawing = false;
+        let removed = std::mem::take(&mut list.removed);
+        layers.retain(|(owner, _)| !removed.contains(owner));
+        layers.append(&mut list.layers);
+        list.layers = layers;
         bundles
     }
 }

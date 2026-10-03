@@ -129,8 +129,8 @@ impl Host for KernelHost {
         id
     }
 
-    fn cancel(&mut self, job: JobId) {
-        self.pool.cancel(job);
+    fn cancel(&mut self, owner: &str, job: JobId) {
+        self.pool.cancel(owner, job);
     }
 
     fn editor(&self, caller: &str) -> Editor {

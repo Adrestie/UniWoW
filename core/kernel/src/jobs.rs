@@ -162,10 +162,13 @@ impl Pool {
         id
     }
 
-    /// Asks a job to stop; it ends as cancelled even if it returns a value.
-    pub fn cancel(&self, id: JobId) {
-        if let Some(job) = self.running.iter().find(|j| j.id == id) {
-            job.cancelled.store(true, Ordering::Relaxed);
+    /// Asks a job of `owner` to stop; it ends as cancelled even if it returns a value. A job of
+    /// another feature is left alone.
+    pub fn cancel(&self, owner: &str, id: JobId) {
+        match self.running.iter().find(|j| j.id == id) {
+            Some(job) if job.owner == owner => job.cancelled.store(true, Ordering::Relaxed),
+            Some(job) => uniwow_api::log::warn!("'{owner}' cannot cancel the job '{}' of '{}'", job.label, job.owner),
+            None => {}
         }
     }
 
@@ -309,7 +312,7 @@ mod tests {
             editor(),
         );
         std::thread::sleep(Duration::from_millis(20));
-        pool.cancel(id);
+        pool.cancel("test", id);
         let finished = wait_for(&mut pool, 1);
         assert!(matches!(finished[0].outcome, JobOutcome::Cancelled));
     }
@@ -331,8 +334,29 @@ mod tests {
         let computed = pool.spawn("notes", "add", Box::new(|_| Box::new(40 + 2)), editor());
         let finished = wait_for(&mut pool, 1);
         assert_eq!(finished[0].id, computed, "the only pool thread was free");
-        pool.cancel(waiting);
+        pool.cancel("lua", waiting);
         assert!(matches!(wait_for(&mut pool, 1)[0].outcome, JobOutcome::Cancelled));
+    }
+
+    #[test]
+    fn a_feature_cannot_cancel_the_job_of_another() {
+        let mut pool = Pool::new(1, None, None);
+        let id = pool.spawn(
+            "notes",
+            "loop",
+            Box::new(|context| {
+                while !context.is_cancelled() {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Box::new(())
+            }),
+            editor(),
+        );
+        pool.cancel("lua", id);
+        assert!(!pool.running()[0].is_cancelled());
+        pool.cancel("notes", id);
+        assert!(pool.running()[0].is_cancelled());
+        wait_for(&mut pool, 1);
     }
 
     #[test]
