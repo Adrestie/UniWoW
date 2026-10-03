@@ -2,7 +2,7 @@
 //! queue through which they reach the interface thread (T4).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, mpsc};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
@@ -40,16 +40,6 @@ pub enum Request {
         arguments: Value,
         reply: ReplyTo,
     },
-    Setting {
-        caller: String,
-        key: String,
-        reply: mpsc::Sender<Option<Value>>,
-    },
-    SetSetting {
-        caller: String,
-        key: String,
-        value: Value,
-    },
     BeginGroup {
         caller: String,
         thread: ThreadId,
@@ -85,6 +75,11 @@ pub struct Bridge {
     pub events: Mutex<Vec<Event>>,
     /// Failures of commands run on other threads, applied at the next frame.
     pub failures: Mutex<Vec<Reported>>,
+    /// Settings by space (a feature id, or `feature#module`) then key. Shared, so that any
+    /// thread reads them at once, the interface thread included.
+    pub settings: RwLock<BTreeMap<String, BTreeMap<String, Value>>>,
+    /// Set when a setting changes; the interface thread then saves them.
+    pub settings_changed: AtomicBool,
     subscriptions: Mutex<HashMap<u64, Subscription>>,
     next_subscription: AtomicU64,
     requests: mpsc::Sender<Request>,
@@ -101,6 +96,8 @@ impl Bridge {
             running: RwLock::default(),
             events: Mutex::default(),
             failures: Mutex::default(),
+            settings: RwLock::default(),
+            settings_changed: AtomicBool::new(false),
             subscriptions: Mutex::default(),
             next_subscription: AtomicU64::new(1),
             requests,
@@ -128,6 +125,16 @@ impl Bridge {
             Ok(())
         } else {
             Err(format!("'{feature}' is not running: '{caller}' can no longer act"))
+        }
+    }
+
+    /// Refuses settings of another feature than the caller's.
+    fn settings_of(&self, caller: &str, space: &str) -> Result<(), String> {
+        self.active(caller)?;
+        if feature_of(space) == feature_of(caller) {
+            Ok(())
+        } else {
+            Err(format!("'{caller}' cannot reach the settings of '{space}'"))
         }
     }
 
@@ -271,27 +278,22 @@ impl EditorBackend for Bridge {
             .remove(&subscription);
     }
 
-    fn setting(&self, caller: &str, key: &str) -> Result<Option<Value>, String> {
-        self.active(caller)?;
-        if self.on_interface_thread() {
-            return Err("on the interface thread, read settings with Context::setting".to_owned());
-        }
-        let (reply, answer) = mpsc::channel();
-        self.queue(Request::Setting {
-            caller: caller.to_owned(),
-            key: key.to_owned(),
-            reply,
-        });
-        answer.recv().map_err(|_| "no answer: the editor is closing".to_owned())
+    fn setting(&self, caller: &str, space: &str, key: &str) -> Result<Option<Value>, String> {
+        self.settings_of(caller, space)?;
+        let settings = self.settings.read().unwrap_or_else(|e| e.into_inner());
+        Ok(settings.get(space).and_then(|space| space.get(key)).cloned())
     }
 
-    fn set_setting(&self, caller: &str, key: &str, value: Value) -> Result<(), String> {
-        self.active(caller)?;
-        self.queue(Request::SetSetting {
-            caller: caller.to_owned(),
-            key: key.to_owned(),
-            value,
-        });
+    fn set_setting(&self, caller: &str, space: &str, key: &str, value: Value) -> Result<(), String> {
+        self.settings_of(caller, space)?;
+        self.settings
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(space.to_owned())
+            .or_default()
+            .insert(key.to_owned(), value);
+        self.settings_changed.store(true, Ordering::Relaxed);
+        self.wake();
         Ok(())
     }
 
@@ -535,7 +537,7 @@ mod tests {
         );
         assert!(bridge.publish(script, "topic", json!({})).is_err());
         assert!(bridge.subscribe(script, "topic").is_err());
-        assert!(bridge.set_setting(script, "key", json!(1)).is_err());
+        assert!(bridge.set_setting(script, "lua", "key", json!(1)).is_err());
         assert!(bridge.begin_group(script, "group").is_err());
         assert!(bridge.end_group(script).is_err());
         assert!(
@@ -545,9 +547,19 @@ mod tests {
     }
 
     #[test]
-    fn a_setting_cannot_be_awaited_on_the_interface_thread() {
+    fn settings_are_read_at_once_from_any_thread_in_their_own_space() {
+        // This thread stands for the interface thread.
         let (bridge, _receiver) = bridge();
-        assert!(bridge.setting("cube", "key").is_err());
+        bridge.running.write().unwrap().insert("modules".to_owned());
+        bridge.set_setting("modules#a", "modules#a", "size", json!(1)).unwrap();
+        bridge.set_setting("modules#b", "modules#b", "size", json!(2)).unwrap();
+        assert_eq!(bridge.setting("modules#a", "modules#a", "size"), Ok(Some(json!(1))));
+        assert_eq!(bridge.setting("modules#b", "modules#b", "size"), Ok(Some(json!(2))));
+        assert_eq!(bridge.setting("modules", "modules", "size"), Ok(None));
+        assert!(
+            bridge.setting("modules#a", "cube", "size").is_err(),
+            "not another feature's"
+        );
     }
 
     #[test]

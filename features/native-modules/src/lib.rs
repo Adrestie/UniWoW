@@ -4,15 +4,24 @@
 
 mod capi;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use uniwow_api::{Context, DockArea, Feature, Registrar, egui, log};
 
+const FEATURE: &str = "native-modules";
+
+/// A command a module offers, and why it is refused, if it is.
+struct Offered {
+    name: String,
+    refused: Option<String>,
+}
+
 struct Module {
     file: String,
-    /// Name, version and command names, or why the module was refused.
-    state: Result<(String, String, Vec<String>), String>,
+    /// Name, version and commands, or why the module was refused.
+    state: Result<(String, String, Vec<Offered>), String>,
 }
 
 #[derive(Default)]
@@ -24,12 +33,21 @@ struct NativeModules {
 impl Feature for NativeModules {
     fn register(&mut self, reg: &mut Registrar) {
         reg.panel("modules", "Modules", DockArea::Bottom);
+        // Command name → the module that offers it.
+        let mut offered_by: HashMap<String, String> = HashMap::new();
         for path in module_files() {
             let file = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
             let state = match capi::load(&path) {
                 Ok(loaded) => {
-                    let mut names = Vec::new();
+                    let mut commands = Vec::new();
                     for command in loaded.commands {
+                        if let Some(first) = offered_by.get(&command.name) {
+                            commands.push(Offered {
+                                name: command.name,
+                                refused: Some(format!("already offered by the module '{first}'")),
+                            });
+                            continue;
+                        }
                         let handler = command.handler;
                         reg.command_on_caller(
                             &command.name,
@@ -38,11 +56,15 @@ impl Feature for NativeModules {
                             command.result,
                             Arc::new(move |arguments| handler.invoke(&arguments)),
                         );
-                        names.push(command.name);
+                        offered_by.insert(command.name.clone(), loaded.name.clone());
+                        commands.push(Offered {
+                            name: command.name,
+                            refused: None,
+                        });
                     }
                     self.contexts.push(loaded.context);
                     log::info!("module '{}' {} loaded from {file}", loaded.name, loaded.version);
-                    Ok((loaded.name, loaded.version, names))
+                    Ok((loaded.name, loaded.version, commands))
                 }
                 Err(reason) => {
                     log::warn!("module {file} refused: {reason}");
@@ -56,7 +78,24 @@ impl Feature for NativeModules {
     fn init(&mut self, ctx: &mut Context) {
         let editor = ctx.editor();
         for context in &self.contexts {
-            let _ = context.editor.set(editor.derive(&context.name));
+            let _ = context.editor.set(editor.derive_with_settings(&context.name));
+        }
+        // A name another feature offered first stays that feature's: the kernel kept it.
+        let owners: HashMap<String, String> = editor.commands().into_iter().map(|c| (c.name, c.owner)).collect();
+        for module in &mut self.modules {
+            let Ok((_, _, commands)) = &mut module.state else {
+                continue;
+            };
+            for command in commands.iter_mut().filter(|c| c.refused.is_none()) {
+                if let Some(owner) = owners.get(&command.name).filter(|owner| *owner != FEATURE) {
+                    log::warn!(
+                        "command '{}' of {} refused: offered by '{owner}'",
+                        command.name,
+                        module.file
+                    );
+                    command.refused = Some(format!("already offered by '{owner}'"));
+                }
+            }
         }
     }
 
@@ -67,6 +106,7 @@ impl Feature for NativeModules {
             ui.weak("No module.");
             return;
         }
+        let error = ui.visuals().error_fg_color;
         egui::Grid::new("modules").striped(true).num_columns(5).show(ui, |ui| {
             for header in ["File", "State", "Module", "Version", "Commands or reason"] {
                 ui.strong(header);
@@ -79,13 +119,22 @@ impl Feature for NativeModules {
                         ui.colored_label(egui::Color32::from_rgb(90, 170, 90), "running");
                         ui.label(name);
                         ui.label(version);
-                        ui.label(commands.join(", "));
+                        ui.horizontal_wrapped(|ui| {
+                            for command in commands {
+                                match &command.refused {
+                                    None => ui.label(&command.name),
+                                    Some(reason) => {
+                                        ui.colored_label(error, format!("{} (refused: {reason})", command.name))
+                                    }
+                                };
+                            }
+                        });
                     }
                     Err(reason) => {
-                        ui.colored_label(ui.visuals().error_fg_color, "refused");
+                        ui.colored_label(error, "refused");
                         ui.label("");
                         ui.label("");
-                        ui.colored_label(ui.visuals().error_fg_color, reason);
+                        ui.colored_label(error, reason);
                     }
                 }
                 ui.end_row();

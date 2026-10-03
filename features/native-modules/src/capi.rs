@@ -11,24 +11,30 @@ use std::time::Duration;
 use uniwow_api::serde_json::{self, Value, json};
 use uniwow_api::{Editor, log};
 
-const API_VERSION: u32 = 1;
+const API_VERSION: u32 = 2;
 const INIT_SYMBOL: &[u8] = b"uniwow_module_init\0";
+/// Makes `LoadLibraryExW` look for the DLLs a module needs in the module's own folder.
+const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x8;
 
-type Reply = extern "C" fn(*mut c_void, *const c_char);
-type Handler = extern "C" fn(*mut c_void, *const c_char, Reply, *mut c_void) -> i32;
-type InitFn = unsafe extern "C" fn(*const Api, *mut ModuleInfo, Reply, *mut c_void) -> i32;
+// The functions a module gives are "C-unwind": a C++ exception reaching the editor through them
+// ends the process in a defined way, instead of being undefined behaviour.
+type Reply = extern "C-unwind" fn(*mut c_void, *const c_char);
+type Handler = extern "C-unwind" fn(*mut c_void, *const c_char, Reply, *mut c_void) -> i32;
+type InitFn = unsafe extern "C-unwind" fn(*const Api, *mut ModuleInfo, Reply, *mut c_void) -> i32;
 
+/// The table of `uniwow.h`. A reply function a module passes may be NULL: the text is then
+/// ignored.
 #[repr(C)]
 struct Api {
     version: u32,
     context: *mut c_void,
-    commands: extern "C" fn(*mut c_void, Reply, *mut c_void),
-    call: extern "C" fn(*mut c_void, *const c_char, *const c_char, Reply, *mut c_void) -> i32,
+    commands: extern "C" fn(*mut c_void, Option<Reply>, *mut c_void),
+    call: extern "C" fn(*mut c_void, *const c_char, *const c_char, Option<Reply>, *mut c_void) -> i32,
     publish: extern "C" fn(*mut c_void, *const c_char, *const c_char),
     subscribe: extern "C" fn(*mut c_void, *const c_char) -> u64,
-    next_event: extern "C" fn(*mut c_void, u64, u32, Reply, *mut c_void) -> i32,
+    next_event: extern "C" fn(*mut c_void, u64, u32, Option<Reply>, *mut c_void) -> i32,
     unsubscribe: extern "C" fn(*mut c_void, u64),
-    setting: extern "C" fn(*mut c_void, *const c_char, Reply, *mut c_void),
+    setting: extern "C" fn(*mut c_void, *const c_char, Option<Reply>, *mut c_void),
     set_setting: extern "C" fn(*mut c_void, *const c_char, *const c_char),
     log: extern "C" fn(*mut c_void, i32, *const c_char),
     begin_group: extern "C" fn(*mut c_void, *const c_char),
@@ -51,11 +57,16 @@ struct ModuleInfo {
     version: *const c_char,
     commands: *const CommandEntry,
     command_count: u32,
+    /// `UNIWOW_API_VERSION` of the header the module was built with; 0 from an older header.
+    header_version: u32,
+    /// `sizeof(uniwow_command)` in the module, so that its table is read with the right step.
+    command_size: u32,
 }
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
-    fn LoadLibraryW(file: *const u16) -> *mut c_void;
+    fn LoadLibraryExW(file: *const u16, reserved: *mut c_void, flags: u32) -> *mut c_void;
+    fn GetModuleHandleW(name: *const u16) -> *mut c_void;
     fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
     fn GetLastError() -> u32;
 }
@@ -107,9 +118,24 @@ pub struct Loaded {
 
 /// Loads a module DLL and calls its entry point. A loaded module is never unloaded.
 pub fn load(path: &Path) -> Result<Loaded, String> {
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    // SAFETY: a NUL-terminated wide path.
-    let module = unsafe { LoadLibraryW(wide.as_ptr()) };
+    let wide = |text: &std::ffi::OsStr| -> Vec<u16> { text.encode_wide().chain(std::iter::once(0)).collect() };
+    let file = path.file_name().unwrap_or_default();
+    // Windows would hand back the DLL of that name already in the process instead of the module.
+    // SAFETY: a NUL-terminated wide name.
+    if !unsafe { GetModuleHandleW(wide(file).as_ptr()) }.is_null() {
+        return Err(format!(
+            "a DLL named {} is already loaded in the editor: rename the module",
+            file.to_string_lossy()
+        ));
+    }
+    // SAFETY: a NUL-terminated absolute wide path.
+    let module = unsafe {
+        LoadLibraryExW(
+            wide(path.as_os_str()).as_ptr(),
+            std::ptr::null_mut(),
+            LOAD_WITH_ALTERED_SEARCH_PATH,
+        )
+    };
     if module.is_null() {
         // SAFETY: no other call in between.
         return Err(format!("could not be loaded (Windows error {})", unsafe {
@@ -150,12 +176,27 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
         version: std::ptr::null(),
         commands: std::ptr::null(),
         command_count: 0,
+        header_version: 0,
+        command_size: 0,
     };
     let mut error = String::new();
     // SAFETY: the module receives valid pointers that outlive it.
     let status = unsafe { init(api, &mut info, collect, text_target(&mut error)) };
     if status != 0 {
         return Err(format!("refused to start: {error}"));
+    }
+    if info.header_version != API_VERSION {
+        return Err(format!(
+            "built with version {} of uniwow.h, the editor has version {API_VERSION}: rebuild it",
+            info.header_version
+        ));
+    }
+    if info.command_size as usize != std::mem::size_of::<CommandEntry>() {
+        return Err(format!(
+            "its uniwow_command is {} bytes, the editor's is {}: rebuild it with this uniwow.h",
+            info.command_size,
+            std::mem::size_of::<CommandEntry>()
+        ));
     }
 
     let mut commands = Vec::new();
@@ -190,7 +231,7 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
     })
 }
 
-extern "C" fn collect(target: *mut c_void, text: *const c_char) {
+extern "C-unwind" fn collect(target: *mut c_void, text: *const c_char) {
     if target.is_null() || text.is_null() {
         return;
     }
@@ -217,9 +258,12 @@ fn c_text(text: &str) -> CString {
     CString::new(text.replace('\0', " ")).expect("NUL bytes removed")
 }
 
-fn reply_with(reply: Reply, reply_context: *mut c_void, text: &str) {
-    let text = c_text(text);
-    reply(reply_context, text.as_ptr());
+/// Hands a text to the module's reply function, unless it gave none.
+fn reply_with(reply: Option<Reply>, reply_context: *mut c_void, text: &str) {
+    if let Some(reply) = reply {
+        let text = c_text(text);
+        reply(reply_context, text.as_ptr());
+    }
 }
 
 fn editor(context: *mut c_void) -> Result<&'static Editor, String> {
@@ -239,7 +283,7 @@ fn guarded<R>(fallback: R, body: impl FnOnce() -> R) -> R {
     })
 }
 
-extern "C" fn api_commands(context: *mut c_void, reply: Reply, reply_context: *mut c_void) {
+extern "C" fn api_commands(context: *mut c_void, reply: Option<Reply>, reply_context: *mut c_void) {
     guarded((), || {
         let commands: Vec<Value> = editor(context)
             .map(|editor| editor.commands())
@@ -258,7 +302,7 @@ extern "C" fn api_call(
     context: *mut c_void,
     name: *const c_char,
     arguments: *const c_char,
-    reply: Reply,
+    reply: Option<Reply>,
     reply_context: *mut c_void,
 ) -> i32 {
     guarded(1, || {
@@ -308,7 +352,7 @@ extern "C" fn api_next_event(
     context: *mut c_void,
     subscription: u64,
     timeout_ms: u32,
-    reply: Reply,
+    reply: Option<Reply>,
     reply_context: *mut c_void,
 ) -> i32 {
     guarded(-1, || {
@@ -337,7 +381,7 @@ extern "C" fn api_unsubscribe(context: *mut c_void, subscription: u64) {
     })
 }
 
-extern "C" fn api_setting(context: *mut c_void, key: *const c_char, reply: Reply, reply_context: *mut c_void) {
+extern "C" fn api_setting(context: *mut c_void, key: *const c_char, reply: Option<Reply>, reply_context: *mut c_void) {
     guarded((), || {
         let value = editor(context)
             .and_then(|editor| editor.setting(&read(key)?))

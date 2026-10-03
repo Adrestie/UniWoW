@@ -4,6 +4,9 @@
  * Every value crosses as UTF-8 JSON. Every function can be called from any thread (rule T7).
  * Texts handed to a uniwow_reply are valid only during that call: copy them. Nothing returned by
  * the editor has to be freed.
+ *
+ * No function a module gives the editor (entry point, command handlers, reply functions) may let
+ * an exception out: one that reaches the editor ends its process.
  */
 #ifndef UNIWOW_H
 #define UNIWOW_H
@@ -14,9 +17,11 @@
 extern "C" {
 #endif
 
-#define UNIWOW_API_VERSION 1
+#define UNIWOW_API_VERSION 2
 
-/* Receives a text produced for the caller: JSON for a result, plain text for an error message. */
+/* Receives a text produced for the caller: JSON for a result, plain text for an error message.
+   A module may pass NULL to the functions of uniwow_api that take one: the text is then ignored.
+   The editor never passes NULL to the module's functions. */
 typedef void (*uniwow_reply)(void *reply_context, const char *text);
 
 typedef struct uniwow_api {
@@ -45,7 +50,8 @@ typedef struct uniwow_api {
                           void *reply_context);
     void (*unsubscribe)(void *context, uint64_t subscription);
 
-    /* Replies the JSON value of a setting of the module, or null. */
+    /* Replies the JSON value of a setting of this module, or null. Each module has settings of its
+       own, kept between sessions. */
     void (*setting)(void *context, const char *key, uniwow_reply reply, void *reply_context);
     void (*set_setting)(void *context, const char *key, const char *value_json);
 
@@ -76,6 +82,10 @@ typedef struct uniwow_module_info {
     const char *version;
     const uniwow_command *commands;
     uint32_t command_count;
+    /* Set to UNIWOW_API_VERSION and sizeof(uniwow_command): a module built with another header is
+       refused with the reason. */
+    uint32_t header_version;
+    uint32_t command_size;
 } uniwow_module_info;
 
 /* Exported by every module under the name UNIWOW_MODULE_INIT. Fills info, whose texts must stay

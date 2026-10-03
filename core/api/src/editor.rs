@@ -18,8 +18,9 @@ pub trait EditorBackend: Send + Sync {
     /// not exist or was closed.
     fn next_event(&self, caller: &str, subscription: u64, timeout: Duration) -> Result<Option<Event>, String>;
     fn unsubscribe(&self, subscription: u64);
-    fn setting(&self, caller: &str, key: &str) -> Result<Option<Value>, String>;
-    fn set_setting(&self, caller: &str, key: &str, value: Value) -> Result<(), String>;
+    /// A setting of the space `space`: the caller's feature, or one of its modules.
+    fn setting(&self, caller: &str, space: &str, key: &str) -> Result<Option<Value>, String>;
+    fn set_setting(&self, caller: &str, space: &str, key: &str, value: Value) -> Result<(), String>;
     fn begin_group(&self, caller: &str, label: &str) -> Result<(), String>;
     fn end_group(&self, caller: &str) -> Result<(), String>;
 }
@@ -31,13 +32,17 @@ pub struct Editor {
     backend: Arc<dyn EditorBackend>,
     /// Who acts: a feature id, or `feature#name` for a script run or a module of that feature.
     caller: String,
+    /// Where its settings are kept: the feature id, or `feature#name` for a module of its own.
+    settings: String,
 }
 
 impl Editor {
     pub fn new(backend: Arc<dyn EditorBackend>, caller: &str) -> Self {
+        let feature = caller.split('#').next().unwrap_or(caller);
         Self {
             backend,
             caller: caller.to_owned(),
+            settings: feature.to_owned(),
         }
     }
 
@@ -51,9 +56,22 @@ impl Editor {
     }
 
     /// A handle acting as `name` inside the same feature, e.g. one script run: its calls are
-    /// told apart from the others, in undo groups in particular.
+    /// told apart from the others, in undo groups in particular. It shares the settings of the
+    /// handle it comes from.
     pub fn derive(&self, name: &str) -> Editor {
-        Editor::new(self.backend.clone(), &format!("{}#{name}", self.feature()))
+        Editor {
+            settings: self.settings.clone(),
+            ..Editor::new(self.backend.clone(), &format!("{}#{name}", self.feature()))
+        }
+    }
+
+    /// Like `derive`, with settings of its own, e.g. for a native module.
+    pub fn derive_with_settings(&self, name: &str) -> Editor {
+        let caller = format!("{}#{name}", self.feature());
+        Editor {
+            settings: caller.clone(),
+            ..Editor::new(self.backend.clone(), &caller)
+        }
     }
 
     /// Every command of running features, with its description and schemas.
@@ -93,13 +111,13 @@ impl Editor {
         self.backend.unsubscribe(subscription);
     }
 
-    /// A setting of the feature, kept between sessions.
+    /// A setting kept between sessions, readable from any thread.
     pub fn setting(&self, key: &str) -> Result<Option<Value>, String> {
-        self.backend.setting(&self.caller, key)
+        self.backend.setting(&self.caller, &self.settings, key)
     }
 
     pub fn set_setting(&self, key: &str, value: Value) -> Result<(), String> {
-        self.backend.set_setting(&self.caller, key, value)
+        self.backend.set_setting(&self.caller, &self.settings, key, value)
     }
 
     /// Logs under the feature's name, with the caller's own name when it has one.

@@ -37,7 +37,9 @@ pub struct KernelHost {
 }
 
 impl KernelHost {
-    pub fn new(gpu: Option<egui_wgpu::RenderState>, settings: Settings, pool: Pool, bridge: Arc<Bridge>) -> Self {
+    /// The settings of the features move to the bridge, where every thread reads them.
+    pub fn new(gpu: Option<egui_wgpu::RenderState>, mut settings: Settings, pool: Pool, bridge: Arc<Bridge>) -> Self {
+        *bridge.settings.write().unwrap_or_else(|e| e.into_inner()) = std::mem::take(&mut settings.features);
         Self {
             events: Vec::new(),
             pending: Vec::new(),
@@ -50,6 +52,12 @@ impl KernelHost {
             bridge,
             next_call: 0,
         }
+    }
+
+    /// Writes the settings, the features' ones back from the bridge.
+    pub fn save_settings(&mut self) {
+        self.settings.features = self.bridge.settings.read().unwrap_or_else(|e| e.into_inner()).clone();
+        self.settings.save();
     }
 }
 
@@ -75,12 +83,15 @@ impl Host for KernelHost {
     }
 
     fn setting(&self, feature: &str, key: &str) -> Option<serde_json::Value> {
-        self.settings.features.get(feature)?.get(key).cloned()
+        let settings = self.bridge.settings.read().unwrap_or_else(|e| e.into_inner());
+        settings.get(feature)?.get(key).cloned()
     }
 
     fn set_setting(&mut self, feature: &str, key: &str, value: serde_json::Value) {
-        self.settings
-            .features
+        self.bridge
+            .settings
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
             .entry(feature.to_owned())
             .or_default()
             .insert(key.to_owned(), value);

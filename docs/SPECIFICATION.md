@@ -328,7 +328,7 @@ Rules:
 | S7 | Scripts and native modules have full access to the machine, like editor scripts in Unity: one received from someone else is checked before it is used. |
 | S8 | Each language stays optional: without `scripting-python.dll`, or without the Python files, the editor starts with Lua only, and the other way round. In particular the runtime must not require the Python DLL to start. |
 | S9 | One interpreter per language. Scripts are stored by language and version: `scripts\lua-5.1\…`, `scripts\python-3.xx\…`, the Python version being the one shipped. Native modules go in `modules\`. |
-| S10 | A native module exports one C entry point. It receives the table of functions of the C interface and returns its description (name, version) and the named commands it offers, implemented in its own language with the same JSON form. |
+| S10 | A native module exports one C entry point. It receives the table of functions of the C interface and returns its description (name, version, the version of `uniwow.h` it was built with) and the named commands it offers, implemented in its own language with the same JSON form. |
 
 Risks to verify first, before any other work on scripting: the runtime's exported symbol count with PyO3 and mlua inside it; starting the editor without the Python DLL while PyO3 is part of the runtime (delayed loading); the embeddable Python distribution beside the executable; a C++ module and a C# NativeAOT module calling the C interface from several threads.
 

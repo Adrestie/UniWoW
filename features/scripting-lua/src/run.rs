@@ -421,11 +421,11 @@ mod tests {
             self.note(format!("unsubscribe {subscription}"));
         }
 
-        fn setting(&self, _caller: &str, _key: &str) -> Result<Option<Value>, String> {
+        fn setting(&self, _caller: &str, _space: &str, _key: &str) -> Result<Option<Value>, String> {
             Ok(None)
         }
 
-        fn set_setting(&self, _caller: &str, _key: &str, _value: Value) -> Result<(), String> {
+        fn set_setting(&self, _caller: &str, _space: &str, _key: &str, _value: Value) -> Result<(), String> {
             Ok(())
         }
 

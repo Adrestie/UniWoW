@@ -22,7 +22,7 @@ use crate::logger;
 use crate::order;
 use crate::panels::{self, CommandsPanel};
 use crate::requirements::{self, Need};
-use crate::router::{self, Bridge, Entry, ReplyTo, Request, feature_of};
+use crate::router::{self, Bridge, Entry, ReplyTo, Request};
 use crate::settings::Settings;
 
 const KERNEL: &str = "kernel";
@@ -536,12 +536,6 @@ impl Shell {
                     ReplyTo::Kernel(call) => self.commands_panel.answer(call, result),
                 }
             }
-            Request::Setting { caller, key, reply } => {
-                let _ = reply.send(self.host.setting(feature_of(&caller), &key));
-            }
-            Request::SetSetting { caller, key, value } => {
-                self.host.set_setting(feature_of(&caller), &key, value);
-            }
             Request::BeginGroup { caller, thread, label } => {
                 if self.host.bridge.active(&caller).is_ok() {
                     self.groups.begin(&caller, thread, &label);
@@ -774,10 +768,18 @@ impl eframe::App for Shell {
             // Keeps the progress of the jobs moving in the Jobs panel.
             ctx.request_repaint_after(Duration::from_millis(100));
         }
+        if self
+            .host
+            .bridge
+            .settings_changed
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.host.settings_changed = true;
+        }
         if self.host.settings_changed {
             let since = self.last_settings_save.elapsed();
             if since >= SETTINGS_SAVE_INTERVAL {
-                self.host.settings.save();
+                self.host.save_settings();
                 self.host.settings_changed = false;
                 self.last_settings_save = Instant::now();
             } else {
@@ -898,7 +900,7 @@ impl eframe::App for Shell {
             }
         }
         self.host.settings.layout = serde_json::to_value(&self.dock).ok();
-        self.host.settings.save();
+        self.host.save_settings();
     }
 }
 

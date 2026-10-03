@@ -32,15 +32,21 @@ static int32_t sum(void *, const char *arguments, uniwow_reply reply, void *repl
 }
 
 static int32_t paint_from_thread(void *, const char *, uniwow_reply reply, void *reply_context) {
-    std::thread([] {
-        editor->begin_group(editor->context, "C++ module: gold then green");
-        std::string answer;
-        const int32_t gold = editor->call(editor->context, "cube.paint", "{\"color\":[1.0,0.72,0.18]}", copy_into, &answer);
-        const int32_t green = editor->call(editor->context, "cube.paint", "{\"color\":[0.15,0.65,0.2]}", copy_into, &answer);
-        editor->end_group(editor->context);
-        const std::string message = (gold == 0 && green == 0 ? "painted from a C++ thread: " : "painting failed: ") + answer;
-        editor->log(editor->context, gold == 0 && green == 0 ? 3 : 1, message.c_str());
-    }).detach();
+    // No exception may reach the editor: starting a thread can throw std::system_error.
+    try {
+        std::thread([] {
+            editor->begin_group(editor->context, "C++ module: gold then green");
+            std::string answer;
+            const int32_t gold = editor->call(editor->context, "cube.paint", "{\"color\":[1.0,0.72,0.18]}", copy_into, &answer);
+            const int32_t green = editor->call(editor->context, "cube.paint", "{\"color\":[0.15,0.65,0.2]}", copy_into, &answer);
+            editor->end_group(editor->context);
+            const std::string message = (gold == 0 && green == 0 ? "painted from a C++ thread: " : "painting failed: ") + answer;
+            editor->log(editor->context, gold == 0 && green == 0 ? 3 : 1, message.c_str());
+        }).detach();
+    } catch (const std::exception &failure) {
+        reply(reply_context, failure.what());
+        return 1;
+    }
     reply(reply_context, "{\"started\":true}");
     return 0;
 }
@@ -66,5 +72,7 @@ extern "C" __declspec(dllexport) int32_t uniwow_module_init(const uniwow_api *ap
     info->version = "0.1.0";
     info->commands = commands;
     info->command_count = sizeof commands / sizeof commands[0];
+    info->header_version = UNIWOW_API_VERSION;
+    info->command_size = sizeof(uniwow_command);
     return 0;
 }
