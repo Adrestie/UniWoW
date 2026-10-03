@@ -1,6 +1,6 @@
 # UniWoW — Architecture and feature catalogue
 
-Status: **validated**. Milestones 1 and 2 built and validated; milestone 3 built, awaiting validation. Open questions in section 10.
+Status: **validated**. Milestones 1 to 3 built and validated. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -445,7 +445,7 @@ processor: 3.7 million calls per second to a command running on the calling thre
 second to a command running on the interface thread. `Editor::call` refuses, with an error, to wait
 on the interface thread for a command of the interface thread, which would wait for itself.
 
-### Milestone 3: C interface, native modules and Lua scripts (built, awaiting validation)
+### Milestone 3: C interface, native modules and Lua scripts (done)
 
 The generic interface of S1 complete and offered in C, the first native module, and Lua 5.1.
 Python, whose risks are of another kind (embedding, delayed loading of its DLL, distribution,
