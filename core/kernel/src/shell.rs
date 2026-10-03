@@ -743,13 +743,15 @@ impl Shell {
             }
             ui.separator();
             ui.label(format!("{} changes in history", self.history.done.len()));
-            let open: Vec<String> = self.groups.list().into_iter().map(|(_, label)| label).collect();
-            if !open.is_empty() {
+            // The oldest group, and how many others: the Edit menu lists them all.
+            let open = self.groups.list();
+            if let Some((_, oldest)) = open.first() {
                 ui.separator();
-                ui.colored_label(
-                    ui.visuals().warn_fg_color,
-                    format!("Undo groups open: {}", open.join(", ")),
-                );
+                let text = match open.len() {
+                    1 => format!("Undo group open: {oldest}"),
+                    count => format!("{count} undo groups open: {oldest} and {} more", count - 1),
+                };
+                ui.colored_label(ui.visuals().warn_fg_color, text);
             }
         });
     }
