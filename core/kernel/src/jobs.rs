@@ -165,6 +165,26 @@ mod tests {
         }
 
         fn publish(&self, _source: &str, _topic: &str, _payload: Value) {}
+
+        fn subscribe(&self, _caller: &str, _topic: &str) -> u64 {
+            0
+        }
+
+        fn next_event(&self, _subscription: u64, _timeout: Duration) -> Option<uniwow_api::Event> {
+            None
+        }
+
+        fn unsubscribe(&self, _subscription: u64) {}
+
+        fn setting(&self, _caller: &str, _key: &str) -> Result<Option<Value>, String> {
+            Ok(None)
+        }
+
+        fn set_setting(&self, _caller: &str, _key: &str, _value: Value) {}
+
+        fn begin_group(&self, _caller: &str, _label: &str) {}
+
+        fn end_group(&self, _caller: &str) {}
     }
 
     fn editor() -> Editor {

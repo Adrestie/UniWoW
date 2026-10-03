@@ -1,23 +1,32 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::CommandInfo;
+use crate::{CommandInfo, Event};
 
 /// What the kernel offers behind an `Editor` handle. Implemented by the kernel only.
 pub trait EditorBackend: Send + Sync {
     fn commands(&self) -> Vec<CommandInfo>;
-    /// Calls a command and waits for its answer. Must not be called from the interface thread.
+    /// Calls a command and waits for its answer. Must not be called from the interface thread
+    /// for a command running there.
     fn call(&self, caller: &str, name: &str, arguments: Value) -> Result<Value, String>;
     fn publish(&self, source: &str, topic: &str, payload: Value);
+    fn subscribe(&self, caller: &str, topic: &str) -> u64;
+    fn next_event(&self, subscription: u64, timeout: Duration) -> Option<Event>;
+    fn unsubscribe(&self, subscription: u64);
+    fn setting(&self, caller: &str, key: &str) -> Result<Option<Value>, String>;
+    fn set_setting(&self, caller: &str, key: &str, value: Value);
+    fn begin_group(&self, caller: &str, label: &str);
+    fn end_group(&self, caller: &str);
 }
 
-/// The generic interface of the editor (rule S1), usable from any thread: jobs, and later scripts
-/// and native modules. Every value crosses it as JSON.
+/// The generic interface of the editor (rule S1), usable from any thread: jobs, scripts and,
+/// through the C interface, native modules. Every value crosses it as JSON.
 #[derive(Clone)]
 pub struct Editor {
     backend: Arc<dyn EditorBackend>,
-    /// Id of the feature this handle acts for.
+    /// Who acts: a feature id, or `feature#name` for a script run or a module of that feature.
     caller: String,
 }
 
@@ -31,6 +40,17 @@ impl Editor {
 
     pub fn caller(&self) -> &str {
         &self.caller
+    }
+
+    /// The feature this handle belongs to: the caller without its `#name` part.
+    pub fn feature(&self) -> &str {
+        self.caller.split('#').next().unwrap_or(&self.caller)
+    }
+
+    /// A handle acting as `name` inside the same feature, e.g. one script run: its calls are
+    /// told apart from the others, in undo groups in particular.
+    pub fn derive(&self, name: &str) -> Editor {
+        Editor::new(self.backend.clone(), &format!("{}#{name}", self.feature()))
     }
 
     /// Every command of running features, with its description and schemas.
@@ -55,5 +75,46 @@ impl Editor {
             Ok(value) => self.publish(topic, value),
             Err(error) => log::error!("'{topic}' not published: {error}"),
         }
+    }
+
+    /// Receives the events of `topic` (`*` for all) from now on; read them with `next_event`.
+    pub fn subscribe(&self, topic: &str) -> u64 {
+        self.backend.subscribe(&self.caller, topic)
+    }
+
+    /// The next event of a subscription, waiting at most `timeout`.
+    pub fn next_event(&self, subscription: u64, timeout: Duration) -> Option<Event> {
+        self.backend.next_event(subscription, timeout)
+    }
+
+    pub fn unsubscribe(&self, subscription: u64) {
+        self.backend.unsubscribe(subscription);
+    }
+
+    /// A setting of the feature, kept between sessions.
+    pub fn setting(&self, key: &str) -> Result<Option<Value>, String> {
+        self.backend.setting(&self.caller, key)
+    }
+
+    pub fn set_setting(&self, key: &str, value: Value) {
+        self.backend.set_setting(&self.caller, key, value);
+    }
+
+    /// Logs under the feature's name, with the caller's own name when it has one.
+    pub fn log(&self, level: log::Level, message: &str) {
+        let target = format!("uniwow_feature_{}", self.feature().replace('-', "_"));
+        match self.caller.split_once('#') {
+            Some((_, name)) => log::log!(target: target.as_str(), level, "[{name}] {message}"),
+            None => log::log!(target: target.as_str(), level, "{message}"),
+        }
+    }
+
+    /// From here to `end_group`, the commands this caller's calls apply form one undo entry.
+    pub fn begin_group(&self, label: &str) {
+        self.backend.begin_group(&self.caller, label);
+    }
+
+    pub fn end_group(&self) {
+        self.backend.end_group(&self.caller);
     }
 }

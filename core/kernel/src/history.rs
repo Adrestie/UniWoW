@@ -1,8 +1,17 @@
 use uniwow_api::{Command, log};
 
-pub struct Entry {
+/// One undoable command and the feature it belongs to.
+pub struct Part {
     pub owner: String,
     pub command: Box<dyn Command>,
+}
+
+/// One step of the history: a single command, or the commands of one script run or one group
+/// (rule S4), possibly from several features.
+pub struct Entry {
+    pub label: String,
+    /// In the order they were applied.
+    pub parts: Vec<Part>,
 }
 
 /// The single undo history shared by every feature.
@@ -14,50 +23,74 @@ pub struct History {
 
 impl History {
     pub fn push(&mut self, owner: String, command: Box<dyn Command>) {
-        self.done.push(Entry { owner, command });
+        let label = command.label();
+        self.push_group(label, vec![Part { owner, command }]);
+    }
+
+    /// Records several commands as one entry; nothing when there is none.
+    pub fn push_group(&mut self, label: String, parts: Vec<Part>) {
+        if parts.is_empty() {
+            return;
+        }
+        self.done.push(Entry { label, parts });
         self.undone.clear();
     }
 
     pub fn undo_label(&self) -> Option<String> {
-        self.done.last().map(|entry| entry.command.label())
+        self.done.last().map(|entry| entry.label.clone())
     }
 
     pub fn redo_label(&self) -> Option<String> {
-        self.undone.last().map(|entry| entry.command.label())
+        self.undone.last().map(|entry| entry.label.clone())
     }
 
-    /// Takes the last command to undo it.
+    /// Takes the last entry to undo it.
     pub fn take_undo(&mut self, running: impl Fn(&str) -> bool) -> Option<Entry> {
         take(&mut self.done, running)
     }
 
-    /// Takes the last undone command to redo it.
+    /// Takes the last undone entry to redo it.
     pub fn take_redo(&mut self, running: impl Fn(&str) -> bool) -> Option<Entry> {
         take(&mut self.undone, running)
     }
 
-    /// Removes every entry of `owner`, done or undone, and returns how many there were. The other
-    /// entries stay valid: a command only changes the state of its own feature (F3).
+    /// Removes every command of `owner`, done or undone, and returns how many there were; entries
+    /// left empty disappear. The other commands stay valid: a command only changes the state of
+    /// its own feature (F3).
     pub fn purge(&mut self, owner: &str) -> usize {
-        let before = self.done.len() + self.undone.len();
-        self.done.retain(|entry| entry.owner != owner);
-        self.undone.retain(|entry| entry.owner != owner);
-        before - self.done.len() - self.undone.len()
+        purge(&mut self.done, owner) + purge(&mut self.undone, owner)
     }
 }
 
-/// Pops the last entry. One whose feature is not running, which the purge on failure should make
-/// impossible, is dropped with a warning and the next one is taken.
+fn purge(entries: &mut Vec<Entry>, owner: &str) -> usize {
+    let mut removed = 0;
+    for entry in entries.iter_mut() {
+        let before = entry.parts.len();
+        entry.parts.retain(|part| part.owner != owner);
+        removed += before - entry.parts.len();
+    }
+    entries.retain(|entry| !entry.parts.is_empty());
+    removed
+}
+
+/// Pops the last entry. Commands whose feature is not running, which the purge on failure should
+/// make impossible, are dropped with a warning; an entry left empty is skipped.
 fn take(entries: &mut Vec<Entry>, running: impl Fn(&str) -> bool) -> Option<Entry> {
-    while let Some(entry) = entries.pop() {
-        if running(&entry.owner) {
+    while let Some(mut entry) = entries.pop() {
+        entry.parts.retain(|part| {
+            let keep = running(&part.owner);
+            if !keep {
+                log::warn!(
+                    "'{}' dropped from the history: '{}' is not running",
+                    part.command.label(),
+                    part.owner
+                );
+            }
+            keep
+        });
+        if !entry.parts.is_empty() {
             return Some(entry);
         }
-        log::warn!(
-            "'{}' dropped from the history: '{}' is not running",
-            entry.command.label(),
-            entry.owner
-        );
     }
     None
 }
@@ -68,7 +101,7 @@ mod tests {
 
     use uniwow_api::Command;
 
-    use super::{Entry, History};
+    use super::{Entry, History, Part};
 
     struct Named(&'static str);
 
@@ -82,10 +115,24 @@ mod tests {
         fn revert(&mut self, _feature: &mut dyn Any) {}
     }
 
+    fn part(owner: &str, label: &'static str) -> Part {
+        Part {
+            owner: owner.to_owned(),
+            command: Box::new(Named(label)),
+        }
+    }
+
     fn labels(entries: &[Entry]) -> Vec<String> {
         entries
             .iter()
-            .map(|e| format!("{}:{}", e.owner, e.command.label()))
+            .map(|e| {
+                let parts: Vec<String> = e
+                    .parts
+                    .iter()
+                    .map(|p| format!("{}:{}", p.owner, p.command.label()))
+                    .collect();
+                format!("{}[{}]", e.label, parts.join(","))
+            })
             .collect()
     }
 
@@ -119,35 +166,42 @@ mod tests {
     }
 
     #[test]
-    fn the_purge_removes_only_the_failed_feature_and_keeps_the_order() {
+    fn a_group_is_one_entry_and_an_empty_group_none() {
         let mut history = History::default();
-        history.push("cube".to_owned(), Box::new(Named("a")));
-        history.push("terrain".to_owned(), Box::new(Named("b")));
-        history.push("cube".to_owned(), Box::new(Named("c")));
-        history.push("terrain".to_owned(), Box::new(Named("d")));
-        history.push("cube".to_owned(), Box::new(Named("e")));
-        let undone = history.take_undo(|_| true).expect("e");
-        history.undone.push(undone);
-        history.undone.push(Entry {
-            owner: "terrain".to_owned(),
-            command: Box::new(Named("f")),
-        });
-
-        assert_eq!(history.purge("cube"), 3);
-        assert_eq!(labels(&history.done), vec!["terrain:b", "terrain:d"]);
-        assert_eq!(labels(&history.undone), vec!["terrain:f"]);
-        // Undo works again at once, on the other feature's last entry.
-        let taken = history.take_undo(|id| id != "cube").map(|e| e.command.label());
-        assert_eq!(taken.as_deref(), Some("d"));
+        history.push_group("script".to_owned(), vec![part("cube", "a"), part("terrain", "b")]);
+        history.push_group("nothing".to_owned(), Vec::new());
+        assert_eq!(labels(&history.done), vec!["script[cube:a,terrain:b]"]);
     }
 
     #[test]
-    fn an_entry_of_a_stopped_feature_is_dropped_by_the_guard() {
+    fn the_purge_removes_only_the_failed_feature_and_keeps_the_order() {
+        let mut history = History::default();
+        history.push("cube".to_owned(), Box::new(Named("a")));
+        history.push_group("script".to_owned(), vec![part("cube", "b"), part("terrain", "c")]);
+        history.push("cube".to_owned(), Box::new(Named("d")));
+        history.push("terrain".to_owned(), Box::new(Named("e")));
+        let undone = history.take_undo(|_| true).expect("e");
+        history.undone.push(undone);
+        history.undone.push(Entry {
+            label: "f".to_owned(),
+            parts: vec![part("cube", "f")],
+        });
+
+        assert_eq!(history.purge("cube"), 4);
+        assert_eq!(labels(&history.done), vec!["script[terrain:c]"]);
+        assert_eq!(labels(&history.undone), vec!["e[terrain:e]"]);
+        // Undo works again at once, on the other feature's commands.
+        let taken = history.take_undo(|id| id != "cube").map(|e| e.label);
+        assert_eq!(taken.as_deref(), Some("script"));
+    }
+
+    #[test]
+    fn commands_of_a_stopped_feature_are_dropped_by_the_guard() {
         let mut history = History::default();
         history.push("terrain".to_owned(), Box::new(Named("b")));
         history.push("cube".to_owned(), Box::new(Named("c")));
         let taken = history.take_undo(|id| id != "cube").expect("terrain's entry");
-        assert_eq!(taken.command.label(), "b");
+        assert_eq!(taken.label, "b");
         assert!(history.done.is_empty());
     }
 }

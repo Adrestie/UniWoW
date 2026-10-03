@@ -1,6 +1,6 @@
 # UniWoW — Architecture and feature catalogue
 
-Status: **validated**. Milestones 1 and 2 built and validated. Open questions in section 10.
+Status: **validated**. Milestones 1 and 2 built and validated; milestone 3 built, awaiting validation. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -344,6 +344,9 @@ E:\WoW-editor
   core/kernel/
   libs/<name>/
   features/<id>/
+  sdk/uniwow.h          the C interface of native modules (S1)
+  modules-src/<name>/   native modules built by `cargo xtask build` (C++, MSVC)
+  scripts/lua-5.1/      sample scripts, copied beside the executable
   client-bridge/        C++ (WXL SDK), own build
   xtask/
   docs/
@@ -442,7 +445,7 @@ processor: 3.7 million calls per second to a command running on the calling thre
 second to a command running on the interface thread. `Editor::call` refuses, with an error, to wait
 on the interface thread for a command of the interface thread, which would wait for itself.
 
-### Milestone 3: C interface, native modules and Lua scripts (validated, in progress)
+### Milestone 3: C interface, native modules and Lua scripts (built, awaiting validation)
 
 The generic interface of S1 complete and offered in C, the first native module, and Lua 5.1.
 Python, whose risks are of another kind (embedding, delayed loading of its DLL, distribution,
@@ -456,10 +459,10 @@ Content:
 - **One undo entry per run (S4)**: the kernel groups the commands a script run or a module call
   applies into a single history entry.
 - **C interface (S1, S10, T7)**: `sdk/uniwow.h`, a table of C functions (list the commands, call,
-  publish, subscribe and wait for an event, settings, log, free a string) exchanging UTF-8 JSON,
-  callable from any thread; strings returned by the editor are freed by the editor's own function.
-  A module exports one entry point that receives this table and returns its name, version and
-  commands.
+  publish, subscribe and wait for an event, settings, log, undo groups) exchanging UTF-8 JSON,
+  callable from any thread. The editor hands each text it produces to a reply function given by
+  the caller, valid during that call: no string crosses to be freed. A module exports one entry
+  point that receives this table and returns its name, version and commands.
 - **`native-modules` feature**: loads the DLLs of `modules\`, adds their commands to the catalogue
   (running on the calling thread), lists the modules and their state in a panel. A module without
   the entry point, or whose entry point reports an error, is refused with the reason.
@@ -491,6 +494,36 @@ Acceptance:
 | A script waiting for the events of a topic | It prints them as they are published |
 | Calls per second from Lua, for both kinds of command | Measured and recorded here |
 | Runtime size, tests, `cargo xtask check`, CI | Below the symbol limit, green |
+
+As built:
+
+- **C interface**: a deviation from the content first validated, which had a function freeing the
+  strings returned by the editor. Texts are given to a reply function instead, so no memory
+  crosses between the editor and a module, and a module that forgets to free leaks nothing. The
+  table also has `begin_group` and `end_group`: a module's command often returns before the work
+  it starts ends (the sample's thread), so a module groups its own changes into one undo entry.
+  A script run is grouped automatically.
+- **Lua in the runtime**: mlua's generic code is instantiated in the feature using it, which then
+  calls the Lua C functions directly. The runtime exports the 122 functions of the Lua 5.1 C API
+  (`core/api/build.rs`), so that every feature uses the one Lua compiled into it. Runtime: 18,261
+  exported symbols, 28% of the limit.
+- **Modules**: loaded once from `modules\` beside the executable and never unloaded; a module's
+  calls go through an `Editor` named `native-modules#<module>`. `cargo xtask build` compiles each
+  folder of `modules-src\` (`cl /LD /MD /O2 /std:c++17 /W4 /WX`, linked with `/Brepro` so that an
+  unchanged module gives the same file) and copies `scripts\` beside the executable.
+- **Lua**: the safe subset of the standard libraries; `require` finds Lua files in
+  `scripts\lua-5.1\`. `uniwow.next_event(subscription, timeout_ms)` waits without a time limit when
+  `timeout_ms` is omitted, until an event arrives or the run is stopped; the subscriptions a run
+  leaves open end with it. Stop is checked every 1,000 Lua instructions and before each call.
+  Each console line is a run of its own, in a new Lua state: a global set on one line is gone on
+  the next. The console shows a table returned by an expression as JSON.
+- **Calls per second**, measured on a 32-thread processor in one session, `measure.lua` (Lua) and
+  the measuring job of `sample-notes` (Rust):
+
+  | Command | From Lua | From Rust |
+  |---|---|---|
+  | `cube.color`, calling thread | 1.06 to 1.09 million | 3.6 million |
+  | `cube.paint`, interface thread | 30,000 to 39,000 | 24,000 |
 
 ### Milestone 4: Python and C# (outline)
 

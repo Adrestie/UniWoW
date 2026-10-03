@@ -2,7 +2,8 @@
 #[derive(Clone, Debug)]
 pub struct Event {
     pub topic: String,
-    /// Id of the publishing feature, or `kernel`.
+    /// The publisher: a feature id, `kernel`, or `<feature>#<name>` for a script run or a native
+    /// module of that feature.
     pub source: String,
     pub payload: serde_json::Value,
 }

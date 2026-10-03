@@ -107,7 +107,7 @@ impl CommandsPanel {
                                 self.next_call += 1;
                                 self.waiting = Some(self.next_call);
                                 self.answer = None;
-                                bridge.queue(Request {
+                                bridge.queue(Request::Call {
                                     caller: "kernel".to_owned(),
                                     name: command.name.clone(),
                                     arguments,

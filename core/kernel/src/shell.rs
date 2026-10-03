@@ -11,7 +11,7 @@ use uniwow_api::{
 };
 
 use crate::guard::{guarded, guarded_as};
-use crate::history::History;
+use crate::history::{self, History, Part};
 use crate::host::{KernelHost, Service};
 use crate::jobs::Pool;
 use crate::layout::{self, PanelEntry, Tab};
@@ -47,6 +47,8 @@ pub struct Shell {
     /// Answers to `Context::call`, delivered after the calls are served.
     replies: Vec<(String, CallId, Result<serde_json::Value, String>)>,
     commands_panel: CommandsPanel,
+    /// Undo groups open per caller (S4): their commands become one entry when the group ends.
+    groups: HashMap<String, (String, Vec<Part>)>,
 }
 
 /// Whether the dock could be drawn this session.
@@ -88,6 +90,7 @@ impl Shell {
             requests: Some(requests),
             replies: Vec::new(),
             commands_panel: CommandsPanel::default(),
+            groups: HashMap::new(),
         };
         shell.register_all();
         shell.resolve_requirements();
@@ -321,6 +324,12 @@ impl Shell {
     }
 
     fn apply_pending(&mut self) {
+        self.apply_pending_for(None);
+    }
+
+    /// Applies the queued undoable commands. Those applied for a caller with an open undo group go
+    /// into the group instead of the history.
+    fn apply_pending_for(&mut self, caller: Option<&str>) {
         for (owner, mut command) in std::mem::take(&mut self.host.pending) {
             let Some(index) = self.running_index(&owner) else {
                 continue;
@@ -330,7 +339,10 @@ impl Shell {
                 .as_deref_mut()
                 .expect("running features are loaded");
             match guarded_as(&owner, || command.apply(feature)) {
-                Ok(()) => self.history.push(owner, command),
+                Ok(()) => match caller.and_then(|c| self.groups.get_mut(c)) {
+                    Some((_, parts)) => parts.push(Part { owner, command }),
+                    None => self.history.push(owner, command),
+                },
                 Err(message) => {
                     let label = command.label();
                     self.fail(index, format!("command '{label}': {message}"));
@@ -350,38 +362,65 @@ impl Shell {
         }
     }
 
-    /// Reverts the last command. If the revert fails, the feature fails and its entries leave the
-    /// history, this one included.
+    /// Reverts the last entry, its commands in reverse order. A command whose revert fails makes
+    /// its feature fail; the other commands of the entry are reverted all the same.
     fn undo(&mut self) {
         let running = self.running_ids();
-        let Some(mut entry) = self.history.take_undo(|id| running.contains(id)) else {
+        let Some(entry) = self.history.take_undo(|id| running.contains(id)) else {
             return;
         };
-        let index = self.running_index(&entry.owner).expect("taken only when running");
-        let feature = self.slots[index]
-            .feature
-            .as_deref_mut()
-            .expect("running features are loaded");
-        match guarded_as(&entry.owner, || entry.command.revert(feature)) {
-            Ok(()) => self.history.undone.push(entry),
-            Err(message) => self.fail(index, format!("undo of '{}': {message}", entry.command.label())),
+        let parts = self.replay(entry.parts.into_iter().rev().collect(), true);
+        let parts: Vec<Part> = parts.into_iter().rev().collect();
+        if !parts.is_empty() {
+            self.history.undone.push(history::Entry {
+                label: entry.label,
+                parts,
+            });
         }
     }
 
     fn redo(&mut self) {
         let running = self.running_ids();
-        let Some(mut entry) = self.history.take_redo(|id| running.contains(id)) else {
+        let Some(entry) = self.history.take_redo(|id| running.contains(id)) else {
             return;
         };
-        let index = self.running_index(&entry.owner).expect("taken only when running");
-        let feature = self.slots[index]
-            .feature
-            .as_deref_mut()
-            .expect("running features are loaded");
-        match guarded_as(&entry.owner, || entry.command.apply(feature)) {
-            Ok(()) => self.history.done.push(entry),
-            Err(message) => self.fail(index, format!("redo of '{}': {message}", entry.command.label())),
+        let parts = self.replay(entry.parts, false);
+        if !parts.is_empty() {
+            self.history.done.push(history::Entry {
+                label: entry.label,
+                parts,
+            });
         }
+    }
+
+    /// Reverts or applies `parts` in the given order and returns those that succeeded.
+    fn replay(&mut self, parts: Vec<Part>, revert: bool) -> Vec<Part> {
+        let mut done = Vec::new();
+        for mut part in parts {
+            // An earlier part may have made this feature fail.
+            let Some(index) = self.running_index(&part.owner) else {
+                continue;
+            };
+            let feature = self.slots[index]
+                .feature
+                .as_deref_mut()
+                .expect("running features are loaded");
+            let outcome = guarded_as(&part.owner, || {
+                if revert {
+                    part.command.revert(feature)
+                } else {
+                    part.command.apply(feature)
+                }
+            });
+            match outcome {
+                Ok(()) => done.push(part),
+                Err(message) => {
+                    let verb = if revert { "undo" } else { "redo" };
+                    self.fail(index, format!("{verb} of '{}': {message}", part.command.label()));
+                }
+            }
+        }
+        done
     }
 
     /// Disables a feature that failed, withdraws its services, drops its history entries and
@@ -393,7 +432,12 @@ impl Shell {
         let id = slot.id.clone();
         self.host.services.retain(|_, s| s.provider != id);
         self.sync_running();
-        let purged = self.history.purge(&id);
+        let mut purged = self.history.purge(&id);
+        for (_, parts) in self.groups.values_mut() {
+            let before = parts.len();
+            parts.retain(|part| part.owner != id);
+            purged += before - parts.len();
+        }
         if purged > 0 {
             log::warn!("{purged} changes of '{id}' can no longer be undone");
         }
@@ -452,21 +496,57 @@ impl Shell {
     }
 
     fn answer(&mut self, request: Request) {
-        let result = self.run_command(&request.name, request.arguments);
-        if let Err(error) = &result {
-            log::warn!("call of '{}' by '{}' failed: {error}", request.name, request.caller);
-        }
-        match request.reply {
-            ReplyTo::Thread(reply) => {
-                // The caller may have given up; nothing to do then.
-                let _ = reply.send(result);
+        match request {
+            Request::Call {
+                caller,
+                name,
+                arguments,
+                reply,
+            } => {
+                let result = self.run_command(&caller, &name, arguments);
+                if let Err(error) = &result {
+                    log::warn!("call of '{name}' by '{caller}' failed: {error}");
+                }
+                match reply {
+                    ReplyTo::Thread(reply) => {
+                        // The caller may have given up; nothing to do then.
+                        let _ = reply.send(result);
+                    }
+                    ReplyTo::Feature(caller, call) => self.replies.push((caller, call, result)),
+                    ReplyTo::Kernel(call) => self.commands_panel.answer(call, result),
+                }
             }
-            ReplyTo::Feature(caller, call) => self.replies.push((caller, call, result)),
-            ReplyTo::Kernel(call) => self.commands_panel.answer(call, result),
+            Request::Setting { caller, key, reply } => {
+                let _ = reply.send(self.host.setting(feature_of(&caller), &key));
+            }
+            Request::SetSetting { caller, key, value } => {
+                self.host.set_setting(feature_of(&caller), &key, value);
+            }
+            Request::BeginGroup { caller, label } => match self.groups.entry(caller) {
+                std::collections::hash_map::Entry::Occupied(open) => {
+                    log::warn!(
+                        "'{}' opened an undo group inside another one; it continues the first",
+                        open.key()
+                    );
+                }
+                std::collections::hash_map::Entry::Vacant(free) => {
+                    free.insert((label, Vec::new()));
+                }
+            },
+            Request::EndGroup { caller } => {
+                if let Some((label, parts)) = self.groups.remove(&caller) {
+                    self.history.push_group(label, parts);
+                }
+            }
         }
     }
 
-    fn run_command(&mut self, name: &str, arguments: serde_json::Value) -> Result<serde_json::Value, String> {
+    fn run_command(
+        &mut self,
+        caller: &str,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
         let bridge = self.host.bridge.clone();
         let (owner, handler) = bridge.lookup(name)?;
         if let Some(handler) = handler {
@@ -480,7 +560,7 @@ impl Shell {
         });
         match outcome {
             Ok(result) => {
-                self.apply_pending();
+                self.apply_pending_for(Some(caller));
                 result
             }
             Err(panic) => {
@@ -501,6 +581,7 @@ impl Shell {
     /// Delivers the events published this frame. Events published meanwhile wait for the next one.
     fn dispatch_events(&mut self) {
         for event in std::mem::take(&mut self.host.events) {
+            self.host.bridge.deliver(&event);
             for index in 0..self.slots.len() {
                 let slot = &self.slots[index];
                 if !slot.state.is_running() || !slot.subscribed_to(&event.topic) {
@@ -922,6 +1003,11 @@ fn call_feature<R>(
     let feature = feature.as_deref_mut().expect("running features are loaded");
     let mut ctx = Context::new(host, id);
     guarded_as(id, || f(feature, &mut ctx))
+}
+
+/// The feature part of a caller: `scripting-lua#run-3` → `scripting-lua`.
+fn feature_of(caller: &str) -> &str {
+    caller.split('#').next().unwrap_or(caller)
 }
 
 fn state_text(state: &State) -> String {

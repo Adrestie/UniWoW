@@ -1,0 +1,8 @@
+[package]
+name = "uniwow-lua"
+description = "Lua 5.1 for the runtime, compiled in (mlua)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mlua = { version = "0.12", features = ["lua51", "vendored", "serialize"] }

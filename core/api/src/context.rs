@@ -12,6 +12,7 @@ pub trait Host {
     fn set_setting(&mut self, feature: &str, key: &str, value: serde_json::Value);
     fn report_failure(&mut self, reporter: &str, culprit: &str, message: &str);
     fn spawn(&mut self, owner: &str, label: &str, job: JobFn) -> JobId;
+    fn cancel(&mut self, job: JobId);
     fn call(&mut self, caller: &str, name: &str, arguments: serde_json::Value) -> CallId;
     fn editor(&self, caller: &str) -> Editor;
 }
@@ -89,6 +90,11 @@ impl<'a> Context<'a> {
     pub fn spawn<T: Any + Send>(&mut self, label: &str, job: impl FnOnce(&JobContext) -> T + Send + 'static) -> JobId {
         self.host
             .spawn(self.feature, label, Box::new(move |context| Box::new(job(context))))
+    }
+
+    /// Asks one of this feature's jobs to stop (as the Jobs panel's Cancel button does).
+    pub fn cancel(&mut self, job: JobId) {
+        self.host.cancel(job);
     }
 
     /// Calls a named command from the interface thread. The answer comes back at the end of the

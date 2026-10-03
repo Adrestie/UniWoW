@@ -1,7 +1,8 @@
 //! The catalogue of named commands (F6), the `Editor` handle given to other threads, and the
 //! queue through which they reach the interface thread (T4).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, mpsc};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
@@ -29,11 +30,37 @@ pub enum ReplyTo {
     Kernel(u64),
 }
 
-pub struct Request {
-    pub caller: String,
-    pub name: String,
-    pub arguments: Value,
-    pub reply: ReplyTo,
+/// What other threads ask of the interface thread, served in the order they asked.
+pub enum Request {
+    Call {
+        caller: String,
+        name: String,
+        arguments: Value,
+        reply: ReplyTo,
+    },
+    Setting {
+        caller: String,
+        key: String,
+        reply: mpsc::Sender<Option<Value>>,
+    },
+    SetSetting {
+        caller: String,
+        key: String,
+        value: Value,
+    },
+    BeginGroup {
+        caller: String,
+        label: String,
+    },
+    EndGroup {
+        caller: String,
+    },
+}
+
+struct Subscription {
+    topic: String,
+    sender: mpsc::Sender<Event>,
+    receiver: Arc<Mutex<mpsc::Receiver<Event>>>,
 }
 
 /// State shared between the interface thread and every `Editor` handle.
@@ -45,6 +72,8 @@ pub struct Bridge {
     pub events: Mutex<Vec<Event>>,
     /// Failures of commands run on other threads, applied at the next frame.
     pub failures: Mutex<Vec<Reported>>,
+    subscriptions: Mutex<HashMap<u64, Subscription>>,
+    next_subscription: AtomicU64,
     requests: mpsc::Sender<Request>,
     interface_thread: ThreadId,
     wake: Option<egui::Context>,
@@ -59,6 +88,8 @@ impl Bridge {
             running: RwLock::default(),
             events: Mutex::default(),
             failures: Mutex::default(),
+            subscriptions: Mutex::default(),
+            next_subscription: AtomicU64::new(1),
             requests,
             interface_thread: std::thread::current().id(),
             wake,
@@ -66,7 +97,21 @@ impl Bridge {
         (Arc::new(bridge), receiver)
     }
 
-    /// Queues a call for the interface thread.
+    /// Hands a published event to the subscriptions of other threads.
+    pub fn deliver(&self, event: &Event) {
+        for subscription in self.subscriptions.lock().unwrap_or_else(|e| e.into_inner()).values() {
+            if subscription.topic == "*" || subscription.topic == event.topic {
+                // A subscriber that stopped reading is no reason to fail.
+                let _ = subscription.sender.send(event.clone());
+            }
+        }
+    }
+
+    fn on_interface_thread(&self) -> bool {
+        std::thread::current().id() == self.interface_thread
+    }
+
+    /// Queues a request for the interface thread.
     pub fn queue(&self, request: Request) {
         if self.requests.send(request).is_ok() {
             self.wake();
@@ -128,13 +173,13 @@ impl EditorBackend for Bridge {
             return self.run_on_caller(&owner, name, &handler, arguments);
         }
         // Waiting on the interface thread for the interface thread would never end.
-        if std::thread::current().id() == self.interface_thread {
+        if self.on_interface_thread() {
             return Err(format!(
                 "'{name}' runs on the interface thread: call it with Context::call from there"
             ));
         }
         let (reply, answer) = mpsc::channel();
-        self.queue(Request {
+        self.queue(Request::Call {
             caller: caller.to_owned(),
             name: name.to_owned(),
             arguments,
@@ -152,6 +197,75 @@ impl EditorBackend for Bridge {
             payload,
         });
         self.wake();
+    }
+
+    fn subscribe(&self, _caller: &str, topic: &str) -> u64 {
+        let id = self.next_subscription.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::channel();
+        let subscription = Subscription {
+            topic: topic.to_owned(),
+            sender,
+            receiver: Arc::new(Mutex::new(receiver)),
+        };
+        self.subscriptions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, subscription);
+        id
+    }
+
+    fn next_event(&self, subscription: u64, timeout: Duration) -> Option<Event> {
+        // The map is released before waiting, so that other threads can publish meanwhile.
+        let receiver = self
+            .subscriptions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&subscription)?
+            .receiver
+            .clone();
+        let receiver = receiver.lock().unwrap_or_else(|e| e.into_inner());
+        receiver.recv_timeout(timeout).ok()
+    }
+
+    fn unsubscribe(&self, subscription: u64) {
+        self.subscriptions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&subscription);
+    }
+
+    fn setting(&self, caller: &str, key: &str) -> Result<Option<Value>, String> {
+        if self.on_interface_thread() {
+            return Err("on the interface thread, read settings with Context::setting".to_owned());
+        }
+        let (reply, answer) = mpsc::channel();
+        self.queue(Request::Setting {
+            caller: caller.to_owned(),
+            key: key.to_owned(),
+            reply,
+        });
+        answer.recv().map_err(|_| "no answer: the editor is closing".to_owned())
+    }
+
+    fn set_setting(&self, caller: &str, key: &str, value: Value) {
+        self.queue(Request::SetSetting {
+            caller: caller.to_owned(),
+            key: key.to_owned(),
+            value,
+        });
+    }
+
+    fn begin_group(&self, caller: &str, label: &str) {
+        self.queue(Request::BeginGroup {
+            caller: caller.to_owned(),
+            label: label.to_owned(),
+        });
+    }
+
+    fn end_group(&self, caller: &str) {
+        self.queue(Request::EndGroup {
+            caller: caller.to_owned(),
+        });
     }
 }
 
@@ -194,7 +308,7 @@ mod tests {
     use uniwow_api::serde_json::{Value, json};
     use uniwow_api::{CommandInfo, EditorBackend};
 
-    use super::{Bridge, Entry, ReplyTo, serve};
+    use super::{Bridge, Entry, ReplyTo, Request, serve};
 
     fn info(name: &str, owner: &str, on_caller: bool) -> CommandInfo {
         CommandInfo {
@@ -270,10 +384,15 @@ mod tests {
             std::thread::spawn(move || bridge.call("test", "cube.paint", json!({ "n": 1 })))
         };
         let request = receiver.recv_timeout(Duration::from_secs(5)).expect("queued");
-        assert_eq!(request.name, "cube.paint");
-        let ReplyTo::Thread(reply) = request.reply else {
-            panic!("a worker waits for the answer")
+        let Request::Call {
+            name,
+            reply: ReplyTo::Thread(reply),
+            ..
+        } = request
+        else {
+            panic!("a worker waits for the answer of a call")
         };
+        assert_eq!(name, "cube.paint");
         reply.send(Ok(json!("painted"))).unwrap();
         assert_eq!(worker.join().unwrap(), Ok(json!("painted")));
     }
@@ -305,7 +424,11 @@ mod tests {
                 Duration::from_secs(2),
                 Duration::from_millis(200),
                 |request| {
-                    if let ReplyTo::Thread(reply) = request.reply {
+                    if let Request::Call {
+                        reply: ReplyTo::Thread(reply),
+                        ..
+                    } = request
+                    {
                         reply.send(Ok(Value::Null)).unwrap();
                     }
                 },
@@ -319,6 +442,42 @@ mod tests {
         }
         worker.join().unwrap();
         assert_eq!((served, rounds), (50, 1));
+    }
+
+    #[test]
+    fn a_subscription_receives_its_topic_only() {
+        let (bridge, _receiver) = bridge();
+        let paints = bridge.subscribe("test", "cube.painted");
+        let everything = bridge.subscribe("test", "*");
+        for topic in ["cube.painted", "other"] {
+            bridge.deliver(&uniwow_api::Event {
+                topic: topic.to_owned(),
+                source: "cube".to_owned(),
+                payload: json!({}),
+            });
+        }
+        let short = Duration::from_millis(50);
+        assert_eq!(
+            bridge.next_event(paints, short).map(|e| e.topic).as_deref(),
+            Some("cube.painted")
+        );
+        assert!(bridge.next_event(paints, short).is_none());
+        assert_eq!(
+            bridge.next_event(everything, short).map(|e| e.topic).as_deref(),
+            Some("cube.painted")
+        );
+        assert_eq!(
+            bridge.next_event(everything, short).map(|e| e.topic).as_deref(),
+            Some("other")
+        );
+        bridge.unsubscribe(paints);
+        assert!(bridge.next_event(paints, short).is_none());
+    }
+
+    #[test]
+    fn a_setting_cannot_be_awaited_on_the_interface_thread() {
+        let (bridge, _receiver) = bridge();
+        assert!(bridge.setting("test", "key").is_err());
     }
 
     #[test]

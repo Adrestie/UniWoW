@@ -14,6 +14,8 @@ pub use glam;
 pub use log;
 pub use serde;
 pub use serde_json;
+/// Lua 5.1 (`libs/lua`), part of the runtime.
+pub use uniwow_lua::mlua;
 
 mod command;
 mod commands;

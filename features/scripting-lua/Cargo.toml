@@ -1,0 +1,18 @@
+[package]
+name = "uniwow-feature-scripting-lua"
+description = "Lua 5.1 scripts: a console, the scripts of scripts/lua-5.1 run on worker threads, and the uniwow module over the generic interface"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+uniwow-api.workspace = true
+
+[package.metadata.uniwow]
+id = "scripting-lua"
+name = "Lua scripting"
+category = "Scripting"
+requires = []
+uses = []

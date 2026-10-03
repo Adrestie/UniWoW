@@ -35,6 +35,12 @@ impl JobContext {
         self.cancelled.load(Ordering::Relaxed)
     }
 
+    /// The cancellation flag itself, for code that must check it on its own, such as a hook of
+    /// a script interpreter.
+    pub fn cancellation(&self) -> Arc<AtomicBool> {
+        self.cancelled.clone()
+    }
+
     /// The editor, usable from this worker thread.
     pub fn editor(&self) -> &Editor {
         &self.editor

@@ -103,13 +103,17 @@ impl Host for KernelHost {
     fn call(&mut self, caller: &str, name: &str, arguments: serde_json::Value) -> CallId {
         self.next_call += 1;
         let id = CallId(self.next_call);
-        self.bridge.queue(Request {
+        self.bridge.queue(Request::Call {
             caller: caller.to_owned(),
             name: name.to_owned(),
             arguments,
             reply: ReplyTo::Feature(caller.to_owned(), id),
         });
         id
+    }
+
+    fn cancel(&mut self, job: JobId) {
+        self.pool.cancel(job);
     }
 
     fn editor(&self, caller: &str) -> Editor {

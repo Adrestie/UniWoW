@@ -108,13 +108,105 @@ fn build(release: bool) -> Result<String> {
         deploy_feature(&profile, package, &runtime)?;
     }
     remove_stale(&profile, &features)?;
+    let modules = build_modules(&ws, &profile)?;
+    let scripts = deploy_scripts(&ws, &profile)?;
     println!(
-        "{} ready with {} features (runtime {})",
+        "{} ready with {} features, {modules} modules and {scripts} scripts (runtime {})",
         profile.out.display(),
         features.len(),
         &runtime[..12]
     );
     Ok(runtime)
+}
+
+/// Compiles each `modules-src/<name>` folder (its `.cpp` and `.c` files) into
+/// `out/<profile>/modules/<name>.dll` with the MSVC compiler found on the machine.
+fn build_modules(ws: &Workspace, profile: &Profile) -> Result<usize> {
+    let mut folders: Vec<PathBuf> = match std::fs::read_dir(ws.root.join("modules-src")) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect(),
+        Err(_) => return Ok(0),
+    };
+    folders.sort();
+    let mut built = 0;
+    for folder in folders {
+        let mut sources: Vec<PathBuf> = std::fs::read_dir(&folder)
+            .map_err(|e| e.to_string())?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "cpp" || e == "c"))
+            .collect();
+        if sources.is_empty() {
+            continue;
+        }
+        sources.sort();
+        let name = folder.file_name().expect("folder").to_string_lossy().into_owned();
+        let work = profile.target.join("modules").join(&name);
+        std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+        let compiler = cc::windows_registry::find_tool("x86_64-pc-windows-msvc", "cl.exe")
+            .ok_or("no MSVC compiler found: install the Visual Studio C++ build tools")?;
+        let output = compiler
+            .to_command()
+            .current_dir(&work)
+            .args([
+                "/nologo",
+                "/LD",
+                "/MD",
+                "/O2",
+                "/EHsc",
+                "/std:c++17",
+                "/utf-8",
+                "/W4",
+                "/WX",
+            ])
+            .arg(format!("/I{}", ws.root.join("sdk").display()))
+            .args(&sources)
+            .arg(format!("/Fe:{name}.dll"))
+            .args(["/link", "/Brepro"])
+            .output()
+            .map_err(|e| format!("could not start the MSVC compiler: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "module {name} failed to compile:\n{}",
+                String::from_utf8_lossy(&output.stdout).trim()
+            ));
+        }
+        let destination = profile.out.join("modules");
+        std::fs::create_dir_all(&destination).map_err(|e| e.to_string())?;
+        copy_if_changed(
+            &work.join(format!("{name}.dll")),
+            &destination.join(format!("{name}.dll")),
+        )?;
+        built += 1;
+    }
+    Ok(built)
+}
+
+/// Copies the scripts of `scripts/` into `out/<profile>/scripts`, overwriting those of the same
+/// name and leaving the others alone.
+fn deploy_scripts(ws: &Workspace, profile: &Profile) -> Result<usize> {
+    fn copy_tree(source: &Path, destination: &Path) -> Result<usize> {
+        let Ok(entries) = std::fs::read_dir(source) else {
+            return Ok(0);
+        };
+        std::fs::create_dir_all(destination).map_err(|e| e.to_string())?;
+        let mut copied = 0;
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            let target = destination.join(entry.file_name());
+            if path.is_dir() {
+                copied += copy_tree(&path, &target)?;
+            } else {
+                copy_if_changed(&path, &target)?;
+                copied += 1;
+            }
+        }
+        Ok(copied)
+    }
+    copy_tree(&ws.root.join("scripts"), &profile.out.join("scripts"))
 }
 
 fn build_feature(id: &str, release: bool) -> Result {

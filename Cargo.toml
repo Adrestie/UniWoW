@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["app", "core/*", "features/*", "xtask"]
-default-members = ["app", "core/*", "features/*"]
+members = ["app", "core/*", "libs/*", "features/*", "xtask"]
+default-members = ["app", "core/*", "libs/*", "features/*"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,7 @@ edition = "2024"
 [workspace.dependencies]
 uniwow-api = { path = "core/api" }
 uniwow-kernel = { path = "core/kernel" }
+uniwow-lua = { path = "libs/lua" }
 eframe = "0.36"
 egui_dock = { version = "0.21", features = ["serde"] }
 glam = "0.30"
@@ -20,6 +21,7 @@ serde_json = "1"
 toml = "0.9"
 libloading = "0.9"
 blake3 = "1"
+cc = "1"
 
 # Optimised even in debug: without it the runtime DLL exceeds the Windows limit of 65,535 exported symbols.
 [profile.dev]
