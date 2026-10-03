@@ -31,8 +31,8 @@ const PRESETS: [(&str, [f32; 3]); 4] = [
 struct CubeFeature {
     params: Rc<RefCell<Params>>,
     drawn: bool,
-    /// Speed when the current slider drag started.
-    drag_start_speed: Option<f32>,
+    /// Speed before the slider started changing it, until the change is recorded.
+    speed_before_edit: Option<f32>,
 }
 
 impl Default for CubeFeature {
@@ -43,7 +43,7 @@ impl Default for CubeFeature {
                 speed: 1.0,
             })),
             drawn: false,
-            drag_start_speed: None,
+            speed_before_edit: None,
         }
     }
 }
@@ -88,23 +88,22 @@ impl Feature for CubeFeature {
         });
         ui.separator();
 
-        let mut speed = self.params.borrow().speed;
+        let before = self.params.borrow().speed;
+        let mut speed = before;
         let response = ui.add(egui::Slider::new(&mut speed, 0.0..=4.0).text("Rotation speed"));
-        if response.drag_started() {
-            self.drag_start_speed = Some(self.params.borrow().speed);
-        }
         if response.changed() {
-            // Shown live while dragging; recorded as one command when the drag ends.
+            // The value before the first change, whatever changed it: mouse, keyboard or typing.
+            self.speed_before_edit.get_or_insert(before);
+            // Shown live; recorded as one command once the slider is no longer being dragged.
             self.params.borrow_mut().speed = speed;
-            if !response.dragged() {
-                let old = self.drag_start_speed.take().unwrap_or(speed);
-                ctx.execute(SetSpeed { old, new: speed });
-            }
         }
-        if response.drag_stopped()
-            && let Some(old) = self.drag_start_speed.take()
+        if !response.dragged()
+            && let Some(old) = self.speed_before_edit.take()
         {
-            ctx.execute(SetSpeed { old, new: speed });
+            let new = self.params.borrow().speed;
+            if new != old {
+                ctx.execute(SetSpeed { old, new });
+            }
         }
         ui.separator();
         ui.weak("Ctrl+Z / Ctrl+Y undo and redo these changes.");
