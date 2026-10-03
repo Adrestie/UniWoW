@@ -286,8 +286,7 @@ extern "C" fn api_publish(context: *mut c_void, topic: *const c_char, payload: *
         let result = (|| {
             let payload: Value =
                 serde_json::from_str(&read(payload)?).map_err(|e| format!("invalid JSON payload: {e}"))?;
-            editor(context)?.publish(&read(topic)?, payload);
-            Ok::<(), String>(())
+            editor(context)?.publish(&read(topic)?, payload)
         })();
         if let Err(error) = result {
             log::warn!("a native module could not publish: {error}");
@@ -296,9 +295,12 @@ extern "C" fn api_publish(context: *mut c_void, topic: *const c_char, payload: *
 }
 
 extern "C" fn api_subscribe(context: *mut c_void, topic: *const c_char) -> u64 {
-    guarded(0, || match (editor(context), read(topic)) {
-        (Ok(editor), Ok(topic)) => editor.subscribe(&topic),
-        _ => 0,
+    guarded(0, || {
+        let subscribed = read(topic).and_then(|topic| editor(context)?.subscribe(&topic));
+        subscribed.unwrap_or_else(|error| {
+            log::warn!("a native module could not subscribe: {error}");
+            0
+        })
     })
 }
 
@@ -351,8 +353,7 @@ extern "C" fn api_set_setting(context: *mut c_void, key: *const c_char, value: *
     guarded((), || {
         let result = (|| {
             let value: Value = serde_json::from_str(&read(value)?).map_err(|e| format!("invalid JSON value: {e}"))?;
-            editor(context)?.set_setting(&read(key)?, value);
-            Ok::<(), String>(())
+            editor(context)?.set_setting(&read(key)?, value)
         })();
         if let Err(error) = result {
             log::warn!("a native module could not write a setting: {error}");
@@ -376,16 +377,16 @@ extern "C" fn api_log(context: *mut c_void, level: i32, message: *const c_char) 
 
 extern "C" fn api_begin_group(context: *mut c_void, label: *const c_char) {
     guarded((), || {
-        if let (Ok(editor), Ok(label)) = (editor(context), read(label)) {
-            editor.begin_group(&label);
+        if let Err(error) = read(label).and_then(|label| editor(context)?.begin_group(&label)) {
+            log::warn!("a native module could not open an undo group: {error}");
         }
     })
 }
 
 extern "C" fn api_end_group(context: *mut c_void) {
     guarded((), || {
-        if let Ok(editor) = editor(context) {
-            editor.end_group();
+        if let Err(error) = editor(context).and_then(Editor::end_group) {
+            log::warn!("a native module could not end an undo group: {error}");
         }
     })
 }

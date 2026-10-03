@@ -444,6 +444,8 @@ impl Shell {
         let id = slot.id.clone();
         self.host.services.retain(|_, s| s.provider != id);
         self.sync_running();
+        // Its jobs and script runs stop; from now on the bridge refuses whatever they still ask.
+        self.host.pool.cancel_owner(&id);
         let purged = self.history.purge(&id) + self.groups.purge(&id);
         if purged > 0 {
             log::warn!("{purged} changes of '{id}' can no longer be undone");
@@ -540,7 +542,11 @@ impl Shell {
             Request::SetSetting { caller, key, value } => {
                 self.host.set_setting(feature_of(&caller), &key, value);
             }
-            Request::BeginGroup { caller, thread, label } => self.groups.begin(&caller, thread, &label),
+            Request::BeginGroup { caller, thread, label } => {
+                if self.host.bridge.active(&caller).is_ok() {
+                    self.groups.begin(&caller, thread, &label);
+                }
+            }
             Request::EndGroup { caller, thread } => match self.groups.end(&caller, thread) {
                 Ended::Closed(closed) => self.push_closed(closed),
                 Ended::StillOpen => {}
@@ -563,6 +569,8 @@ impl Shell {
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         let bridge = self.host.bridge.clone();
+        // Asked before the caller's feature failed.
+        bridge.active(caller)?;
         let (owner, handler) = bridge.lookup(name)?;
         if let Some(handler) = handler {
             return bridge.run_on_caller(&owner, name, &handler, arguments);

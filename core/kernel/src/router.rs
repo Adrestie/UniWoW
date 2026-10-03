@@ -120,6 +120,17 @@ impl Bridge {
         }
     }
 
+    /// Refuses a caller whose feature no longer runs: its scripts, jobs and module threads get
+    /// errors from then on. The kernel itself always acts.
+    pub fn active(&self, caller: &str) -> Result<(), String> {
+        let feature = feature_of(caller);
+        if caller == "kernel" || self.running.read().unwrap_or_else(|e| e.into_inner()).contains(feature) {
+            Ok(())
+        } else {
+            Err(format!("'{feature}' is not running: '{caller}' can no longer act"))
+        }
+    }
+
     fn on_interface_thread(&self) -> bool {
         std::thread::current().id() == self.interface_thread
     }
@@ -181,6 +192,7 @@ impl EditorBackend for Bridge {
     }
 
     fn call(&self, caller: &str, name: &str, arguments: Value) -> Result<Value, String> {
+        self.active(caller)?;
         let (owner, handler) = self.lookup(name)?;
         if let Some(handler) = handler {
             return self.run_on_caller(&owner, name, &handler, arguments);
@@ -204,16 +216,19 @@ impl EditorBackend for Bridge {
             .map_err(|_| format!("'{name}' got no answer: the editor is closing"))?
     }
 
-    fn publish(&self, source: &str, topic: &str, payload: Value) {
+    fn publish(&self, source: &str, topic: &str, payload: Value) -> Result<(), String> {
+        self.active(source)?;
         self.events.lock().unwrap_or_else(|e| e.into_inner()).push(Event {
             topic: topic.to_owned(),
             source: source.to_owned(),
             payload,
         });
         self.wake();
+        Ok(())
     }
 
-    fn subscribe(&self, _caller: &str, topic: &str) -> u64 {
+    fn subscribe(&self, caller: &str, topic: &str) -> Result<u64, String> {
+        self.active(caller)?;
         let id = self.next_subscription.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel();
         let subscription = Subscription {
@@ -225,10 +240,11 @@ impl EditorBackend for Bridge {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(id, subscription);
-        id
+        Ok(id)
     }
 
-    fn next_event(&self, subscription: u64, timeout: Duration) -> Result<Option<Event>, String> {
+    fn next_event(&self, caller: &str, subscription: u64, timeout: Duration) -> Result<Option<Event>, String> {
+        self.active(caller)?;
         let unknown = || format!("unknown subscription {subscription}: never opened, or closed");
         // The map is released before waiting, so that other threads can publish meanwhile.
         let receiver = self
@@ -256,6 +272,7 @@ impl EditorBackend for Bridge {
     }
 
     fn setting(&self, caller: &str, key: &str) -> Result<Option<Value>, String> {
+        self.active(caller)?;
         if self.on_interface_thread() {
             return Err("on the interface thread, read settings with Context::setting".to_owned());
         }
@@ -268,27 +285,33 @@ impl EditorBackend for Bridge {
         answer.recv().map_err(|_| "no answer: the editor is closing".to_owned())
     }
 
-    fn set_setting(&self, caller: &str, key: &str, value: Value) {
+    fn set_setting(&self, caller: &str, key: &str, value: Value) -> Result<(), String> {
+        self.active(caller)?;
         self.queue(Request::SetSetting {
             caller: caller.to_owned(),
             key: key.to_owned(),
             value,
         });
+        Ok(())
     }
 
-    fn begin_group(&self, caller: &str, label: &str) {
+    fn begin_group(&self, caller: &str, label: &str) -> Result<(), String> {
+        self.active(caller)?;
         self.queue(Request::BeginGroup {
             caller: caller.to_owned(),
             thread: std::thread::current().id(),
             label: label.to_owned(),
         });
+        Ok(())
     }
 
-    fn end_group(&self, caller: &str) {
+    fn end_group(&self, caller: &str) -> Result<(), String> {
+        self.active(caller)?;
         self.queue(Request::EndGroup {
             caller: caller.to_owned(),
             thread: std::thread::current().id(),
         });
+        Ok(())
     }
 }
 
@@ -371,7 +394,7 @@ mod tests {
     #[test]
     fn an_unknown_command_is_an_error() {
         let (bridge, _receiver) = bridge();
-        let error = bridge.call("test", "cube.fly", json!({})).unwrap_err();
+        let error = bridge.call("cube", "cube.fly", json!({})).unwrap_err();
         assert_eq!(error, "unknown command 'cube.fly'");
     }
 
@@ -379,7 +402,7 @@ mod tests {
     fn a_command_of_a_stopped_feature_is_an_error() {
         let (bridge, _receiver) = bridge();
         bridge.running.write().unwrap().clear();
-        let error = bridge.call("test", "cube.color", json!({})).unwrap_err();
+        let error = bridge.call("cube", "cube.color", json!({})).unwrap_err();
         assert!(error.contains("not running"), "{error}");
     }
 
@@ -391,7 +414,7 @@ mod tests {
             let bridge = bridge.clone();
             std::thread::spawn(move || {
                 let there = format!("{:?}", std::thread::current().id());
-                (bridge.call("test", "cube.color", json!({})).unwrap(), there)
+                (bridge.call("cube", "cube.color", json!({})).unwrap(), there)
             })
         };
         let (answer, there) = worker.join().unwrap();
@@ -404,7 +427,7 @@ mod tests {
         let (bridge, receiver) = bridge();
         let worker = {
             let bridge = bridge.clone();
-            std::thread::spawn(move || bridge.call("test", "cube.paint", json!({ "n": 1 })))
+            std::thread::spawn(move || bridge.call("cube", "cube.paint", json!({ "n": 1 })))
         };
         let request = receiver.recv_timeout(Duration::from_secs(5)).expect("queued");
         let Request::Call {
@@ -424,7 +447,7 @@ mod tests {
     fn an_interface_command_cannot_be_awaited_on_the_interface_thread() {
         // The bridge was created on this thread, which stands for the interface thread.
         let (bridge, _receiver) = bridge();
-        let error = bridge.call("test", "cube.paint", json!({})).unwrap_err();
+        let error = bridge.call("cube", "cube.paint", json!({})).unwrap_err();
         assert!(error.contains("Context::call"), "{error}");
     }
 
@@ -435,7 +458,7 @@ mod tests {
             let bridge = bridge.clone();
             std::thread::spawn(move || {
                 for n in 0..50 {
-                    bridge.call("test", "cube.paint", json!(n)).unwrap();
+                    bridge.call("cube", "cube.paint", json!(n)).unwrap();
                 }
             })
         };
@@ -470,8 +493,8 @@ mod tests {
     #[test]
     fn a_subscription_receives_its_topic_only() {
         let (bridge, _receiver) = bridge();
-        let paints = bridge.subscribe("test", "cube.painted");
-        let everything = bridge.subscribe("test", "*");
+        let paints = bridge.subscribe("cube", "cube.painted").unwrap();
+        let everything = bridge.subscribe("cube", "*").unwrap();
         for topic in ["cube.painted", "other"] {
             bridge.deliver(&uniwow_api::Event {
                 topic: topic.to_owned(),
@@ -480,7 +503,11 @@ mod tests {
             });
         }
         let short = Duration::from_millis(50);
-        let topic = |subscription| bridge.next_event(subscription, short).map(|e| e.map(|e| e.topic));
+        let topic = |subscription| {
+            bridge
+                .next_event("cube", subscription, short)
+                .map(|e| e.map(|e| e.topic))
+        };
         assert_eq!(topic(paints), Ok(Some("cube.painted".to_owned())));
         assert_eq!(topic(paints), Ok(None));
         assert_eq!(topic(everything), Ok(Some("cube.painted".to_owned())));
@@ -494,9 +521,33 @@ mod tests {
     }
 
     #[test]
+    fn a_caller_whose_feature_stopped_is_refused() {
+        let (bridge, _receiver) = bridge();
+        let script = "lua#paint.lua #1";
+        bridge.running.write().unwrap().insert("lua".to_owned());
+        assert!(bridge.call(script, "cube.color", json!({})).is_ok());
+        bridge.running.write().unwrap().remove("lua");
+        assert!(
+            bridge
+                .call(script, "cube.color", json!({}))
+                .unwrap_err()
+                .contains("not running")
+        );
+        assert!(bridge.publish(script, "topic", json!({})).is_err());
+        assert!(bridge.subscribe(script, "topic").is_err());
+        assert!(bridge.set_setting(script, "key", json!(1)).is_err());
+        assert!(bridge.begin_group(script, "group").is_err());
+        assert!(bridge.end_group(script).is_err());
+        assert!(
+            bridge.call("kernel", "cube.color", json!({})).is_ok(),
+            "the kernel always acts"
+        );
+    }
+
+    #[test]
     fn a_setting_cannot_be_awaited_on_the_interface_thread() {
         let (bridge, _receiver) = bridge();
-        assert!(bridge.setting("test", "key").is_err());
+        assert!(bridge.setting("cube", "key").is_err());
     }
 
     #[test]

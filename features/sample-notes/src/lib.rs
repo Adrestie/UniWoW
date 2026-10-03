@@ -144,7 +144,11 @@ impl Feature for NotesFeature {
                     || "no result".to_owned(),
                     |r| r.unwrap_or_else(|e| format!("failed: {e}")),
                 ),
-                Kind::Panic | Kind::Publish => format!("job {}: done in {seconds:.2} s", job.0),
+                Kind::Publish => match outcome.take::<Result<(), String>>() {
+                    Some(Err(error)) => format!("job {}: {error}", job.0),
+                    _ => format!("job {}: done in {seconds:.2} s", job.0),
+                },
+                Kind::Panic => format!("job {}: done in {seconds:.2} s", job.0),
             },
         };
         if self.results.len() == MAX_RESULTS {
@@ -161,7 +165,7 @@ impl NotesFeature {
             Kind::Panic => ctx.spawn(label, |_| -> () { panic!("this job panics on purpose") }),
             Kind::Publish => ctx.spawn(label, |context| {
                 let thread = format!("{:?}", std::thread::current().id());
-                context.editor().publish("sample.from_job", json!({ "thread": thread }));
+                context.editor().publish("sample.from_job", json!({ "thread": thread }))
             }),
             Kind::Measure => ctx.spawn(label, measure_calls),
         };

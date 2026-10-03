@@ -5,22 +5,23 @@ use serde_json::Value;
 
 use crate::{CommandInfo, Event};
 
-/// What the kernel offers behind an `Editor` handle. Implemented by the kernel only.
+/// What the kernel offers behind an `Editor` handle. Implemented by the kernel only. Every request
+/// of a caller whose feature no longer runs is refused with an error.
 pub trait EditorBackend: Send + Sync {
     fn commands(&self) -> Vec<CommandInfo>;
     /// Calls a command and waits for its answer. Must not be called from the interface thread
     /// for a command running there.
     fn call(&self, caller: &str, name: &str, arguments: Value) -> Result<Value, String>;
-    fn publish(&self, source: &str, topic: &str, payload: Value);
-    fn subscribe(&self, caller: &str, topic: &str) -> u64;
+    fn publish(&self, source: &str, topic: &str, payload: Value) -> Result<(), String>;
+    fn subscribe(&self, caller: &str, topic: &str) -> Result<u64, String>;
     /// The next event, `None` when `timeout` passed first, or an error when the subscription does
     /// not exist or was closed.
-    fn next_event(&self, subscription: u64, timeout: Duration) -> Result<Option<Event>, String>;
+    fn next_event(&self, caller: &str, subscription: u64, timeout: Duration) -> Result<Option<Event>, String>;
     fn unsubscribe(&self, subscription: u64);
     fn setting(&self, caller: &str, key: &str) -> Result<Option<Value>, String>;
-    fn set_setting(&self, caller: &str, key: &str, value: Value);
-    fn begin_group(&self, caller: &str, label: &str);
-    fn end_group(&self, caller: &str);
+    fn set_setting(&self, caller: &str, key: &str, value: Value) -> Result<(), String>;
+    fn begin_group(&self, caller: &str, label: &str) -> Result<(), String>;
+    fn end_group(&self, caller: &str) -> Result<(), String>;
 }
 
 /// The generic interface of the editor (rule S1), usable from any thread: jobs, scripts and,
@@ -68,26 +69,24 @@ impl Editor {
     }
 
     /// Publishes an event, delivered on the interface thread.
-    pub fn publish(&self, topic: &str, payload: Value) {
-        self.backend.publish(&self.caller, topic, payload);
+    pub fn publish(&self, topic: &str, payload: Value) -> Result<(), String> {
+        self.backend.publish(&self.caller, topic, payload)
     }
 
-    pub fn publish_as<T: serde::Serialize>(&self, topic: &str, payload: &T) {
-        match serde_json::to_value(payload) {
-            Ok(value) => self.publish(topic, value),
-            Err(error) => log::error!("'{topic}' not published: {error}"),
-        }
+    pub fn publish_as<T: serde::Serialize>(&self, topic: &str, payload: &T) -> Result<(), String> {
+        let value = serde_json::to_value(payload).map_err(|error| format!("'{topic}' not published: {error}"))?;
+        self.publish(topic, value)
     }
 
     /// Receives the events of `topic` (`*` for all) from now on; read them with `next_event`.
-    pub fn subscribe(&self, topic: &str) -> u64 {
+    pub fn subscribe(&self, topic: &str) -> Result<u64, String> {
         self.backend.subscribe(&self.caller, topic)
     }
 
     /// The next event of a subscription, waiting at most `timeout`: `None` when the time passed
     /// first, an error when the subscription does not exist or was closed.
     pub fn next_event(&self, subscription: u64, timeout: Duration) -> Result<Option<Event>, String> {
-        self.backend.next_event(subscription, timeout)
+        self.backend.next_event(&self.caller, subscription, timeout)
     }
 
     pub fn unsubscribe(&self, subscription: u64) {
@@ -99,8 +98,8 @@ impl Editor {
         self.backend.setting(&self.caller, key)
     }
 
-    pub fn set_setting(&self, key: &str, value: Value) {
-        self.backend.set_setting(&self.caller, key, value);
+    pub fn set_setting(&self, key: &str, value: Value) -> Result<(), String> {
+        self.backend.set_setting(&self.caller, key, value)
     }
 
     /// Logs under the feature's name, with the caller's own name when it has one.
@@ -113,11 +112,11 @@ impl Editor {
     }
 
     /// From here to `end_group`, the commands this caller's calls apply form one undo entry.
-    pub fn begin_group(&self, label: &str) {
-        self.backend.begin_group(&self.caller, label);
+    pub fn begin_group(&self, label: &str) -> Result<(), String> {
+        self.backend.begin_group(&self.caller, label)
     }
 
-    pub fn end_group(&self) {
-        self.backend.end_group(&self.caller);
+    pub fn end_group(&self) -> Result<(), String> {
+        self.backend.end_group(&self.caller)
     }
 }

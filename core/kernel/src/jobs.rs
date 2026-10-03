@@ -147,6 +147,13 @@ impl Pool {
         }
     }
 
+    /// Asks every job of a feature to stop, when the feature fails.
+    pub fn cancel_owner(&self, owner: &str) {
+        for job in self.running.iter().filter(|j| j.owner == owner) {
+            job.cancelled.store(true, Ordering::Relaxed);
+        }
+    }
+
     /// The jobs that ended since the last call, removed from the running list.
     pub fn take_finished(&mut self) -> Vec<Finished> {
         let finished = std::mem::take(&mut *self.finished.lock().unwrap_or_else(|e| e.into_inner()));
@@ -175,13 +182,20 @@ mod tests {
             Err("no editor in tests".to_owned())
         }
 
-        fn publish(&self, _source: &str, _topic: &str, _payload: Value) {}
-
-        fn subscribe(&self, _caller: &str, _topic: &str) -> u64 {
-            0
+        fn publish(&self, _source: &str, _topic: &str, _payload: Value) -> Result<(), String> {
+            Ok(())
         }
 
-        fn next_event(&self, _subscription: u64, _timeout: Duration) -> Result<Option<uniwow_api::Event>, String> {
+        fn subscribe(&self, _caller: &str, _topic: &str) -> Result<u64, String> {
+            Ok(0)
+        }
+
+        fn next_event(
+            &self,
+            _caller: &str,
+            _subscription: u64,
+            _timeout: Duration,
+        ) -> Result<Option<uniwow_api::Event>, String> {
             Ok(None)
         }
 
@@ -191,11 +205,17 @@ mod tests {
             Ok(None)
         }
 
-        fn set_setting(&self, _caller: &str, _key: &str, _value: Value) {}
+        fn set_setting(&self, _caller: &str, _key: &str, _value: Value) -> Result<(), String> {
+            Ok(())
+        }
 
-        fn begin_group(&self, _caller: &str, _label: &str) {}
+        fn begin_group(&self, _caller: &str, _label: &str) -> Result<(), String> {
+            Ok(())
+        }
 
-        fn end_group(&self, _caller: &str) {}
+        fn end_group(&self, _caller: &str) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     fn editor() -> Editor {
@@ -270,6 +290,28 @@ mod tests {
         pool.cancel(id);
         let finished = wait_for(&mut pool, 1);
         assert!(matches!(finished[0].outcome, JobOutcome::Cancelled));
+    }
+
+    #[test]
+    fn a_failed_feature_has_its_jobs_cancelled() {
+        let mut pool = Pool::new(2, None, None);
+        let wait = |context: &uniwow_api::JobContext| {
+            while !context.is_cancelled() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Box::new(()) as Box<dyn std::any::Any + Send>
+        };
+        let failed = pool.spawn("lua", "script", Box::new(wait), editor());
+        let other = pool.spawn("notes", "computation", Box::new(wait), editor());
+        pool.cancel_owner("lua");
+        let finished = wait_for(&mut pool, 1);
+        assert_eq!(finished[0].id, failed);
+        assert!(
+            pool.running().iter().any(|job| job.id == other),
+            "other features' jobs go on"
+        );
+        pool.cancel_owner("notes");
+        wait_for(&mut pool, 1);
     }
 
     #[test]

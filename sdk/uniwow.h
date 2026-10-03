@@ -36,7 +36,7 @@ typedef struct uniwow_api {
 
     void (*publish)(void *context, const char *topic, const char *payload_json);
 
-    /* Receives the events of a topic ("*" for all) from now on. */
+    /* Receives the events of a topic ("*" for all) from now on. Returns 0 when refused. */
     uint64_t (*subscribe)(void *context, const char *topic);
     /* Waits at most timeout_ms for the next event. Returns 1 and replies
        {"topic", "source", "payload"}; returns 0 when the time passed first; returns -1 and replies

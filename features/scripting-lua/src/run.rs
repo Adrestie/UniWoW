@@ -112,10 +112,12 @@ fn execute(source: &Source, editor: &Editor, cancelled: &Arc<AtomicBool>, output
     let subscriptions = Rc::new(RefCell::new(HashSet::new()));
     globals.set("uniwow", module(&lua, editor, &stop, &subscriptions)?)?;
 
-    editor.begin_group(&match source {
-        Source::Script { name, .. } => format!("Lua: {name}"),
-        Source::Console(line) => format!("Lua console: {}", shorten(line)),
-    });
+    editor
+        .begin_group(&match source {
+            Source::Script { name, .. } => format!("Lua: {name}"),
+            Source::Console(line) => format!("Lua console: {}", shorten(line)),
+        })
+        .map_err(mlua::Error::runtime)?;
     let result = match source {
         Source::Script { name, text } => match loading::load_text(&lua, text, &format!("@{name}"))? {
             Ok(function) => function.call::<()>(()),
@@ -123,7 +125,8 @@ fn execute(source: &Source, editor: &Editor, cancelled: &Arc<AtomicBool>, output
         },
         Source::Console(line) => evaluate(&lua, line, output),
     };
-    editor.end_group();
+    // Refused only when the feature failed meanwhile: its groups are already closed then.
+    let _ = editor.end_group();
     // The subscriptions a run leaves open end with it.
     for subscription in subscriptions.borrow().iter() {
         editor.unsubscribe(*subscription);
@@ -213,8 +216,7 @@ fn module(lua: &Lua, editor: &Editor, stop: &Stop, subscriptions: &Rc<RefCell<Ha
                 Some(value) => from_lua(lua, value)?,
                 None => Value::Null,
             };
-            e.publish(&topic, payload);
-            Ok(())
+            e.publish(&topic, payload).map_err(mlua::Error::runtime)
         })?,
     )?;
 
@@ -224,7 +226,7 @@ fn module(lua: &Lua, editor: &Editor, stop: &Stop, subscriptions: &Rc<RefCell<Ha
         "subscribe",
         lua.create_function(move |_, topic: String| {
             s.check()?;
-            let subscription = e.subscribe(&topic);
+            let subscription = e.subscribe(&topic).map_err(mlua::Error::runtime)?;
             open.borrow_mut().insert(subscription);
             Ok(subscription)
         })?,
@@ -280,8 +282,7 @@ fn module(lua: &Lua, editor: &Editor, stop: &Stop, subscriptions: &Rc<RefCell<Ha
         "set_setting",
         lua.create_function(move |lua, (key, value): (String, mlua::Value)| {
             s.check()?;
-            e.set_setting(&key, from_lua(lua, value)?);
-            Ok(())
+            e.set_setting(&key, from_lua(lua, value)?).map_err(mlua::Error::runtime)
         })?,
     )?;
 
@@ -311,8 +312,7 @@ fn module(lua: &Lua, editor: &Editor, stop: &Stop, subscriptions: &Rc<RefCell<Ha
         "begin_group",
         lua.create_function(move |_, label: String| {
             s.check()?;
-            e.begin_group(&label);
-            Ok(())
+            e.begin_group(&label).map_err(mlua::Error::runtime)
         })?,
     )?;
 
@@ -321,8 +321,7 @@ fn module(lua: &Lua, editor: &Editor, stop: &Stop, subscriptions: &Rc<RefCell<Ha
         "end_group",
         lua.create_function(move |_, ()| {
             s.check()?;
-            e.end_group();
-            Ok(())
+            e.end_group().map_err(mlua::Error::runtime)
         })?,
     )?;
 
@@ -401,14 +400,16 @@ mod tests {
             }
         }
 
-        fn publish(&self, _source: &str, _topic: &str, _payload: Value) {}
-
-        fn subscribe(&self, _caller: &str, topic: &str) -> u64 {
-            self.note(format!("subscribe {topic}"));
-            7
+        fn publish(&self, _source: &str, _topic: &str, _payload: Value) -> Result<(), String> {
+            Ok(())
         }
 
-        fn next_event(&self, subscription: u64, timeout: Duration) -> Result<Option<Event>, String> {
+        fn subscribe(&self, _caller: &str, topic: &str) -> Result<u64, String> {
+            self.note(format!("subscribe {topic}"));
+            Ok(7)
+        }
+
+        fn next_event(&self, _caller: &str, subscription: u64, timeout: Duration) -> Result<Option<Event>, String> {
             if subscription != 7 {
                 return Err(format!("unknown subscription {subscription}"));
             }
@@ -424,14 +425,18 @@ mod tests {
             Ok(None)
         }
 
-        fn set_setting(&self, _caller: &str, _key: &str, _value: Value) {}
-
-        fn begin_group(&self, caller: &str, label: &str) {
-            self.note(format!("begin {caller} {label}"));
+        fn set_setting(&self, _caller: &str, _key: &str, _value: Value) -> Result<(), String> {
+            Ok(())
         }
 
-        fn end_group(&self, caller: &str) {
+        fn begin_group(&self, caller: &str, label: &str) -> Result<(), String> {
+            self.note(format!("begin {caller} {label}"));
+            Ok(())
+        }
+
+        fn end_group(&self, caller: &str) -> Result<(), String> {
             self.note(format!("end {caller}"));
+            Ok(())
         }
     }
 
