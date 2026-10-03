@@ -1,8 +1,13 @@
 use std::path::Path;
 
-/// Number of named exports of a 64-bit PE file (DLL).
+/// Number of exports of a 64-bit PE file (DLL), counting toward the Windows limit of 65,535.
 pub fn exported_names(path: &Path) -> Result<u32, String> {
-    let data = std::fs::read(path).map_err(|e| e.to_string())?;
+    exported_names_in(&std::fs::read(path).map_err(|e| e.to_string())?)
+}
+
+/// The larger of NumberOfFunctions and NumberOfNames of the export directory: exports by ordinal
+/// only have no name but still count.
+pub fn exported_names_in(data: &[u8]) -> Result<u32, String> {
     let u16_at = |o: usize| data.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
     let u32_at = |o: usize| data.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
     let invalid = || "not a PE file".to_owned();
@@ -27,7 +32,9 @@ pub fn exported_names(path: &Path) -> Result<u32, String> {
         let raw_pointer = u32_at(header + 20).ok_or_else(invalid)?;
         if (virtual_address..virtual_address + virtual_size.max(raw_size)).contains(&export_rva) {
             let offset = (export_rva - virtual_address + raw_pointer) as usize;
-            return u32_at(offset + 24).ok_or_else(invalid);
+            let functions = u32_at(offset + 20).ok_or_else(invalid)?;
+            let names = u32_at(offset + 24).ok_or_else(invalid)?;
+            return Ok(functions.max(names));
         }
     }
     Err("export directory not found".to_owned())

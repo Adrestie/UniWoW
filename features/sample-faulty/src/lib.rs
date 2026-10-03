@@ -46,7 +46,7 @@ impl Feature for FaultyFeature {
     }
 
     fn init(&mut self, ctx: &mut Context) {
-        match ctx.service::<viewport::Handle>(viewport::SERVICE) {
+        match ctx.service(viewport::SERVICE) {
             Some(view) => {
                 view.add_layer(ctx.feature_id(), Box::new(FaultyLayer::new(self.mode.clone())));
                 self.drawn = true;

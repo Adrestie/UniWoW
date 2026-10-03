@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -6,6 +7,7 @@ use uniwow_api::log::{self, Level, LevelFilter, Log, Metadata, Record};
 
 const MAX_LINES: usize = 5000;
 
+#[derive(Clone)]
 pub struct LogLine {
     pub seconds: f32,
     pub level: Level,
@@ -77,12 +79,27 @@ pub fn install() {
             .map(|s| s.to_string())
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "panic without message".to_owned());
-        log::error!(target: "uniwow_kernel", "panic{location}: {message}");
+        // Logged under the feature the kernel was calling, so the Log panel names it.
+        let target = match crate::guard::current_feature() {
+            Some(id) => format!("uniwow_feature_{}", id.replace('-', "_")),
+            None => "uniwow_kernel".to_owned(),
+        };
+        log::error!(target: target.as_str(), "panic{location}: {message}");
     }));
 }
 
-pub fn with_lines<R>(f: impl FnOnce(&VecDeque<LogLine>) -> R) -> R {
-    f(&LINES.lock().unwrap_or_else(|e| e.into_inner()))
+pub fn len() -> usize {
+    LINES.lock().unwrap_or_else(|e| e.into_inner()).len()
+}
+
+/// A copy of the lines in `range`, so that the lock is not held while they are drawn: a log or a
+/// panic during drawing would otherwise wait for it forever.
+pub fn lines(range: Range<usize>) -> Vec<LogLine> {
+    let lines = LINES.lock().unwrap_or_else(|e| e.into_inner());
+    lines
+        .range(range.start.min(lines.len())..range.end.min(lines.len()))
+        .cloned()
+        .collect()
 }
 
 pub fn clear() {

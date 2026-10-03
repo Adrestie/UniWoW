@@ -56,7 +56,7 @@ impl Feature for CubeFeature {
     }
 
     fn init(&mut self, ctx: &mut Context) {
-        match ctx.service::<viewport::Handle>(viewport::SERVICE) {
+        match ctx.service(viewport::SERVICE) {
             Some(view) => {
                 view.add_layer(ctx.feature_id(), Box::new(CubeLayer::new(self.params.clone())));
                 self.drawn = true;
@@ -113,7 +113,7 @@ impl Feature for CubeFeature {
     fn on_event(&mut self, event: &Event, ctx: &mut Context) {
         if event.topic == FEATURE_FAILED_TOPIC {
             // The failed feature may be the viewport: its service is then withdrawn.
-            if self.drawn && ctx.service::<viewport::Handle>(viewport::SERVICE).is_none() {
+            if self.drawn && ctx.service(viewport::SERVICE).is_none() {
                 self.drawn = false;
             }
             return;

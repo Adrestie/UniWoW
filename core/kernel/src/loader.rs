@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use uniwow_api::{CREATE_SYMBOL, CreateFn, Feature, MenuItemSpec, PACKAGE_SYMBOL, PackageFn, PanelSpec, RUNTIME_DLL};
 
-use crate::guard::guarded;
+use crate::guard::guarded_as;
 use crate::manifest::{self, Manifest};
 
 pub enum State {
@@ -108,12 +108,6 @@ pub fn discover(exe_dir: &Path, disabled: &BTreeSet<String>) -> Discovery {
             State::Disabled
         } else if runtime_fingerprint.as_deref() != Some(manifest.runtime.as_str()) {
             State::Refused("built for another runtime: rebuild it".to_owned())
-        } else if manifest::hash_file(&dll).ok().as_deref() != Some(manifest.dll_hash.as_str()) {
-            State::Refused(format!(
-                "{} does not match its {}: rebuild it",
-                manifest.dll,
-                manifest::FILE_NAME
-            ))
         } else {
             State::Running
         };
@@ -136,8 +130,17 @@ pub fn discover(exe_dir: &Path, disabled: &BTreeSet<String>) -> Discovery {
 /// Loads a copy of the DLL, so that the original can be rebuilt while the editor runs.
 fn load(dll: &Path, shadow_dir: &Path, slot: &Slot) -> Result<Box<dyn Feature>, State> {
     let manifest = slot.manifest.as_ref().expect("checked by the caller");
-    let copy = shadow_dir.join(format!("{}.dll", slot.id));
+    // Prefixed so that a feature named like a system DLL (version, dbghelp…) cannot be confused with it.
+    let copy = shadow_dir.join(format!("uniwow-feature-{}.dll", slot.id));
     std::fs::copy(dll, &copy).map_err(|e| State::Refused(format!("could not copy the DLL: {e}")))?;
+    // The copy is what gets loaded, so it is the copy that must match the manifest.
+    if manifest::hash_file(&copy).ok().as_deref() != Some(manifest.dll_hash.as_str()) {
+        return Err(State::Refused(format!(
+            "{} does not match its {}: rebuild it",
+            manifest.dll,
+            manifest::FILE_NAME
+        )));
+    }
 
     // SAFETY: the DLL was built against this exact runtime (fingerprint checked by the caller).
     let library =
@@ -166,7 +169,7 @@ fn load(dll: &Path, shadow_dir: &Path, slot: &Slot) -> Result<Box<dyn Feature>, 
     // A loaded feature is never unloaded: its code must outlive every object it created.
     std::mem::forget(library);
 
-    guarded(create).map_err(State::Failed)
+    guarded_as(&slot.id, create).map_err(State::Failed)
 }
 
 /// `%TEMP%\UniWoW\<process id>`, after removing the copies left by editors no longer running.

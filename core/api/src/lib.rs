@@ -20,6 +20,7 @@ mod context;
 mod event;
 mod feature;
 mod registrar;
+mod service;
 pub mod viewport;
 
 pub use command::Command;
@@ -27,6 +28,7 @@ pub use context::{Context, Host};
 pub use event::Event;
 pub use feature::{CREATE_SYMBOL, CreateFn, Feature, PACKAGE_SYMBOL, PackageFn};
 pub use registrar::{DockArea, MenuItemSpec, PanelSpec, Registrar};
+pub use service::ServiceKey;
 
 /// Topic published by the kernel when a feature fails while running. Payload: `{ "id": <feature id> }`.
 pub const FEATURE_FAILED_TOPIC: &str = "kernel.feature_failed";

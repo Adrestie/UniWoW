@@ -1,4 +1,10 @@
+use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+
+thread_local! {
+    /// The feature the kernel is calling on this thread, read by the panic hook.
+    static CURRENT: RefCell<Option<String>> = const { RefCell::new(None) };
+}
 
 /// Runs `f`, turning a panic into an error message.
 pub fn guarded<R>(f: impl FnOnce() -> R) -> Result<R, String> {
@@ -11,4 +17,17 @@ pub fn guarded<R>(f: impl FnOnce() -> R) -> Result<R, String> {
             "panic without message".to_owned()
         }
     })
+}
+
+/// Runs `f` on behalf of `feature`: a panic becomes an error message and is logged under its name.
+pub fn guarded_as<R>(feature: &str, f: impl FnOnce() -> R) -> Result<R, String> {
+    let previous = CURRENT.with(|current| current.replace(Some(feature.to_owned())));
+    let result = guarded(f);
+    CURRENT.with(|current| *current.borrow_mut() = previous);
+    result
+}
+
+/// The feature being called on this thread, if any.
+pub fn current_feature() -> Option<String> {
+    CURRENT.with(|current| current.borrow().clone())
 }

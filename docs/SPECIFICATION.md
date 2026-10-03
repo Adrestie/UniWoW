@@ -83,7 +83,7 @@ Extension points a feature may contribute to:
 | Inspectors, per selection type | creature inspector, doodad inspector |
 | Asset handlers, per file type | open or preview `.blp`, `.m2` |
 | Settings page | brush defaults |
-| Services implementing an interface defined in core/api | "viewport", "creature lookup" |
+| Services implementing an interface defined in core/api, under a typed `ServiceKey<T>` declared beside the interface, used both to provide and to ask, so that a type mismatch does not compile | "viewport", "creature lookup" |
 | Viewport layers, through the viewport service | terrain, cube; each layer records into its own render bundle |
 | Event subscriptions | "project saved", "tile changed" |
 | Project data section owned by the feature | spawn edits not yet deployed |
@@ -176,12 +176,12 @@ the same runtime.
 | Shell | Main window, menus, dockable layout (egui_dock), layouts saved per user. Panels of absent features leave the layout; a returning panel rejoins its area, or the default layout is rebuilt when its whole area had disappeared |
 | Feature loader | Section 4 |
 | Features panel | Lists features, version, state, refusal or failure reason; enable or disable |
-| Commands and history | Undo, redo, unsaved-changes tracking |
+| Commands and history | Undo, redo, unsaved-changes tracking. An entry whose feature is not running is kept; Undo or Redo is then disabled, with the reason |
 | Events | Publish and subscribe, typed by serialisation: the topic is a string and the payload JSON, written with `Context::publish_as` and read with `Event::decode` into a type each feature declares on its own side. No Rust type is shared between features |
 | Services | Registry of interface implementations provided by features |
 | Selection | Current selection, any type |
 | Project | Open, save; content defined in a later step |
-| Settings | Global, per project, per feature |
+| Settings | Global, per project, per feature. Written atomically (temporary file, then rename), at most once per second and at exit |
 | Jobs | Background tasks with progress and cancel |
 | Log | Log panel shared by all features. GPU errors captured by no feature are logged instead of stopping the editor |
 | Inspector host | Shows the selection with the inspector registered for its type |

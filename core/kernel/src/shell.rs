@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use uniwow_api::egui_dock::tab_viewer::OnCloseResponse;
 use uniwow_api::egui_dock::{DockArea, DockState, Node, NodeIndex, Style, SurfaceIndex, TabPath, TabViewer, Tree};
@@ -9,15 +10,18 @@ use uniwow_api::{
     Context, DockArea as Area, FEATURE_FAILED_TOPIC, Feature, Host, Registrar, eframe, egui, log, serde_json,
 };
 
-use crate::guard::guarded;
-use crate::history::History;
+use crate::guard::{guarded, guarded_as};
+use crate::history::{History, Step};
 use crate::host::{KernelHost, Service};
 use crate::loader::{self, Slot, State};
 use crate::logger;
+use crate::order;
 use crate::settings::Settings;
 
 const KERNEL: &str = "kernel";
 const BUILT_IN_MENUS: [&str; 4] = ["File", "Edit", "Window", "Help"];
+/// Settings changed by features are written at most this often, and once more at exit.
+const SETTINGS_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// A dock tab: one panel of one feature, or of the kernel.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -56,6 +60,7 @@ pub struct Shell {
     runtime_fingerprint: Option<String>,
     features_dir: PathBuf,
     restart_needed: bool,
+    last_settings_save: Instant,
 }
 
 impl Shell {
@@ -84,6 +89,7 @@ impl Shell {
             runtime_fingerprint: discovery.runtime_fingerprint,
             features_dir: exe_dir.join("features"),
             restart_needed: false,
+            last_settings_save: Instant::now(),
         };
         shell.register_all();
         shell.resolve_requirements();
@@ -105,7 +111,7 @@ impl Shell {
                 continue;
             };
             let mut reg = Registrar::default();
-            if let Err(message) = guarded(|| feature.register(&mut reg)) {
+            if let Err(message) = guarded_as(&slot.id, || feature.register(&mut reg)) {
                 log::error!("feature '{}' failed in register: {message}", slot.id);
                 slot.state = State::Failed(format!("register: {message}"));
                 continue;
@@ -182,14 +188,13 @@ impl Shell {
                 .filter(|&p| p != i)
                 .collect()
         };
-        let mut order = Vec::new();
-        let mut remaining = running;
-        while !remaining.is_empty() {
-            let ready = remaining
-                .iter()
-                .position(|&i| providers_of(i).iter().all(|p| order.contains(p)))
-                .unwrap_or(0);
-            order.push(remaining.remove(ready));
+        let (order, forced) = order::init_order(&running, providers_of);
+        if !forced.is_empty() {
+            let ids: Vec<&str> = forced.iter().map(|&i| self.slots[i].id.as_str()).collect();
+            log::warn!(
+                "dependency cycle between features: {} initialised before the providers they use",
+                ids.join(", ")
+            );
         }
         order
     }
@@ -313,7 +318,7 @@ impl Shell {
                 .feature
                 .as_deref_mut()
                 .expect("running features are loaded");
-            match guarded(|| command.apply(feature)) {
+            match guarded_as(&owner, || command.apply(feature)) {
                 Ok(()) => self.history.push(owner, command),
                 Err(message) => {
                     let label = command.label();
@@ -339,38 +344,57 @@ impl Shell {
         }
     }
 
+    /// Reverts the last command. An entry whose feature is not running stays where it is: the
+    /// Edit menu shows why it cannot be undone.
     fn undo(&mut self) {
-        while let Some(mut entry) = self.history.done.pop() {
-            let Some(index) = self.running_index(&entry.owner) else {
-                log::warn!("'{}' skipped: '{}' is not running", entry.command.label(), entry.owner);
-                continue;
-            };
-            let feature = self.slots[index]
-                .feature
-                .as_deref_mut()
-                .expect("running features are loaded");
-            match guarded(|| entry.command.revert(feature)) {
-                Ok(()) => self.history.undone.push(entry),
-                Err(message) => fail(&mut self.slots, &mut self.host, index, format!("undo: {message}")),
-            }
+        let Some(entry) = self.history.done.last() else {
             return;
+        };
+        let Some(index) = self.running_index(&entry.owner) else {
+            log::warn!(
+                "cannot undo '{}': '{}' is not running",
+                entry.command.label(),
+                entry.owner
+            );
+            return;
+        };
+        let mut entry = self.history.done.pop().expect("checked above");
+        let feature = self.slots[index]
+            .feature
+            .as_deref_mut()
+            .expect("running features are loaded");
+        match guarded_as(&entry.owner, || entry.command.revert(feature)) {
+            Ok(()) => self.history.undone.push(entry),
+            Err(message) => {
+                self.history.done.push(entry);
+                fail(&mut self.slots, &mut self.host, index, format!("undo: {message}"));
+            }
         }
     }
 
     fn redo(&mut self) {
-        while let Some(mut entry) = self.history.undone.pop() {
-            let Some(index) = self.running_index(&entry.owner) else {
-                continue;
-            };
-            let feature = self.slots[index]
-                .feature
-                .as_deref_mut()
-                .expect("running features are loaded");
-            match guarded(|| entry.command.apply(feature)) {
-                Ok(()) => self.history.done.push(entry),
-                Err(message) => fail(&mut self.slots, &mut self.host, index, format!("redo: {message}")),
-            }
+        let Some(entry) = self.history.undone.last() else {
             return;
+        };
+        let Some(index) = self.running_index(&entry.owner) else {
+            log::warn!(
+                "cannot redo '{}': '{}' is not running",
+                entry.command.label(),
+                entry.owner
+            );
+            return;
+        };
+        let mut entry = self.history.undone.pop().expect("checked above");
+        let feature = self.slots[index]
+            .feature
+            .as_deref_mut()
+            .expect("running features are loaded");
+        match guarded_as(&entry.owner, || entry.command.apply(feature)) {
+            Ok(()) => self.history.done.push(entry),
+            Err(message) => {
+                self.history.undone.push(entry);
+                fail(&mut self.slots, &mut self.host, index, format!("redo: {message}"));
+            }
         }
     }
 
@@ -440,26 +464,13 @@ impl Shell {
                 self.feature_items(ui, "File", &mut actions);
             });
             ui.menu_button("Edit", |ui| {
-                let undo = self.history.undo_label();
-                let undo_text = undo.map_or("Undo".to_owned(), |l| format!("Undo {l}"));
-                if ui
-                    .add_enabled(
-                        !self.history.done.is_empty(),
-                        egui::Button::new(undo_text).shortcut_text("Ctrl+Z"),
-                    )
-                    .clicked()
-                {
+                let running = |id: &str| self.running_index(id).is_some();
+                let undo = self.history.undo_step(running);
+                if history_button(ui, "Undo", "Ctrl+Z", &undo) {
                     actions.push(MenuAction::Undo);
                 }
-                let redo = self.history.redo_label();
-                let redo_text = redo.map_or("Redo".to_owned(), |l| format!("Redo {l}"));
-                if ui
-                    .add_enabled(
-                        !self.history.undone.is_empty(),
-                        egui::Button::new(redo_text).shortcut_text("Ctrl+Y"),
-                    )
-                    .clicked()
-                {
+                let redo = self.history.redo_step(running);
+                if history_button(ui, "Redo", "Ctrl+Y", &redo) {
                     actions.push(MenuAction::Redo);
                 }
                 self.feature_items(ui, "Edit", &mut actions);
@@ -549,12 +560,20 @@ impl eframe::App for Shell {
             features_dir: &self.features_dir,
             restart_needed: &mut self.restart_needed,
         };
+        let mut shown = Ok(());
         egui::CentralPanel::default().show(ui, |ui| {
-            DockArea::new(&mut self.dock)
-                .style(Style::from_egui(ui.style()))
-                .show_inside(ui, &mut viewer);
+            shown = guarded(|| {
+                DockArea::new(&mut self.dock)
+                    .style(Style::from_egui(ui.style()))
+                    .show_inside(ui, &mut viewer);
+            });
         });
         let Viewer { failures, closed, .. } = viewer;
+        // A layout egui_dock cannot draw would otherwise stop the editor at every start.
+        if let Err(message) = shown {
+            log::error!("the panel layout could not be drawn and was reset: {message}");
+            self.dock = default_layout(&self.panel_entries(), &self.host.settings.closed_panels);
+        }
 
         for (index, message) in failures {
             fail(&mut self.slots, &mut self.host, index, message);
@@ -605,21 +624,23 @@ impl eframe::App for Shell {
         if !self.host.events.is_empty() {
             ctx.request_repaint();
         }
-        if std::mem::take(&mut self.host.settings_changed) {
-            self.host.settings.save();
+        if self.host.settings_changed {
+            let since = self.last_settings_save.elapsed();
+            if since >= SETTINGS_SAVE_INTERVAL {
+                self.host.settings.save();
+                self.host.settings_changed = false;
+                self.last_settings_save = Instant::now();
+            } else {
+                ctx.request_repaint_after(SETTINGS_SAVE_INTERVAL - since);
+            }
         }
     }
 
     fn on_exit(&mut self) {
-        for index in 0..self.slots.len() {
-            if self.slots[index].state.is_running() {
-                let feature = self.slots[index]
-                    .feature
-                    .as_deref_mut()
-                    .expect("running features are loaded");
-                if let Err(message) = guarded(|| feature.shutdown()) {
-                    log::error!("feature '{}' failed in shutdown: {message}", self.slots[index].id);
-                }
+        for slot in self.slots.iter_mut().filter(|s| s.state.is_running()) {
+            let feature = slot.feature.as_deref_mut().expect("running features are loaded");
+            if let Err(message) = guarded_as(&slot.id, || feature.shutdown()) {
+                log::error!("feature '{}' failed in shutdown: {message}", slot.id);
             }
         }
         self.host.settings.layout = serde_json::to_value(&self.dock).ok();
@@ -747,25 +768,38 @@ fn log_panel(ui: &mut egui::Ui) {
     });
     ui.separator();
     let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
-    logger::with_lines(|lines| {
-        egui::ScrollArea::vertical()
-            .auto_shrink(false)
-            .stick_to_bottom(true)
-            .show_rows(ui, row_height, lines.len(), |ui, range| {
-                for line in lines.range(range) {
-                    let color = match line.level {
-                        log::Level::Error => ui.visuals().error_fg_color,
-                        log::Level::Warn => ui.visuals().warn_fg_color,
-                        _ => ui.visuals().text_color(),
-                    };
-                    let text = format!(
-                        "{:>9.3}  {:<5}  {:<14}  {}",
-                        line.seconds, line.level, line.source, line.message
-                    );
-                    ui.label(egui::RichText::new(text).monospace().color(color));
-                }
-            });
-    });
+    egui::ScrollArea::vertical()
+        .auto_shrink(false)
+        .stick_to_bottom(true)
+        .show_rows(ui, row_height, logger::len(), |ui, range| {
+            for line in logger::lines(range) {
+                let color = match line.level {
+                    log::Level::Error => ui.visuals().error_fg_color,
+                    log::Level::Warn => ui.visuals().warn_fg_color,
+                    _ => ui.visuals().text_color(),
+                };
+                let text = format!(
+                    "{:>9.3}  {:<5}  {:<14}  {}",
+                    line.seconds, line.level, line.source, line.message
+                );
+                ui.label(egui::RichText::new(text).monospace().color(color));
+            }
+        });
+}
+
+/// An Undo or Redo entry of the Edit menu; returns whether it was clicked.
+fn history_button(ui: &mut egui::Ui, verb: &str, shortcut: &str, step: &Step) -> bool {
+    let (text, enabled) = match step {
+        Step::Nothing => (verb.to_owned(), false),
+        Step::Ready(label) => (format!("{verb} {label}"), true),
+        Step::Blocked(_) => (format!("{verb} (blocked)"), false),
+    };
+    let response = ui.add_enabled(enabled, egui::Button::new(text).shortcut_text(shortcut));
+    if let Step::Blocked(reason) = step {
+        response.on_disabled_hover_text(reason.as_str());
+        return false;
+    }
+    response.clicked()
 }
 
 fn default_layout(entries: &[PanelEntry], closed: &std::collections::BTreeSet<String>) -> DockState<Tab> {
@@ -867,7 +901,7 @@ fn call_feature<R>(
     let Slot { id, feature, .. } = slot;
     let feature = feature.as_deref_mut().expect("running features are loaded");
     let mut ctx = Context::new(host, id);
-    guarded(|| f(feature, &mut ctx))
+    guarded_as(id, || f(feature, &mut ctx))
 }
 
 /// Disables a feature that failed, withdraws its services and tells the others.

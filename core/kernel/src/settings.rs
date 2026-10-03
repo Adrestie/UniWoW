@@ -47,9 +47,12 @@ impl Settings {
         let Some(path) = Self::path() else {
             return;
         };
+        // Written beside, then renamed over the old file: a crash never leaves it half written.
+        let temporary = path.with_extension("json.tmp");
         let result = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| {
             let text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-            std::fs::write(&path, text)
+            std::fs::write(&temporary, text)?;
+            std::fs::rename(&temporary, &path)
         });
         if let Err(e) = result {
             log::warn!("could not save {}: {e}", path.display());

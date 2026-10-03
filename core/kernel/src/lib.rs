@@ -9,6 +9,7 @@ mod host;
 mod loader;
 mod logger;
 mod manifest;
+mod order;
 mod settings;
 mod shell;
 

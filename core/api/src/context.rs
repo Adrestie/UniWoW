@@ -1,6 +1,6 @@
 use std::any::Any;
 
-use crate::{Command, egui_wgpu};
+use crate::{Command, ServiceKey, egui_wgpu};
 
 /// What the kernel offers to features. Implemented by the kernel only.
 pub trait Host {
@@ -47,9 +47,18 @@ impl<'a> Context<'a> {
         self.host.execute(self.feature, Box::new(command));
     }
 
-    /// Returns a clone of the service registered under `id`, if it is present and of type `T`.
-    pub fn service<T: Any + Clone>(&self, id: &str) -> Option<T> {
-        self.host.service(id)?.downcast_ref::<T>().cloned()
+    /// Returns a clone of the service, if a running feature provides it.
+    pub fn service<T: Any + Clone>(&self, key: ServiceKey<T>) -> Option<T> {
+        let service = self.host.service(key.id())?;
+        let typed = service.downcast_ref::<T>().cloned();
+        if typed.is_none() {
+            log::error!(
+                "the service '{}' is not provided as {}: provider and consumer use different keys",
+                key.id(),
+                std::any::type_name::<T>()
+            );
+        }
+        typed
     }
 
     /// The GPU device used by the editor window.

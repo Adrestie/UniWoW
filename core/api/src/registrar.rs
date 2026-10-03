@@ -1,5 +1,7 @@
 use std::any::Any;
 
+use crate::ServiceKey;
+
 /// Where a panel goes the first time it is shown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DockArea {
@@ -59,10 +61,9 @@ impl Registrar {
         self
     }
 
-    /// Provides a service. `service` is usually an `Arc` of a trait object defined in this crate,
-    /// and consumers must ask for exactly that type.
-    pub fn provide<T: Any>(&mut self, id: &str, service: T) -> &mut Self {
-        self.services.push((id.to_owned(), Box::new(service)));
+    /// Provides a service under its key, which fixes the type consumers receive.
+    pub fn provide<T: Any>(&mut self, key: ServiceKey<T>, service: T) -> &mut Self {
+        self.services.push((key.id().to_owned(), Box::new(service)));
         self
     }
 

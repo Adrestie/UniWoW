@@ -2,11 +2,11 @@
 
 use std::rc::Rc;
 
-use crate::{egui_wgpu, glam, wgpu};
+use crate::{ServiceKey, egui_wgpu, glam, wgpu};
 
-pub const SERVICE: &str = "viewport";
+/// Provide with `Registrar::provide(SERVICE, …)`, ask with `Context::service(SERVICE)`.
+pub const SERVICE: ServiceKey<Handle> = ServiceKey::new("viewport");
 
-/// The type under which the service is registered; ask for it with `Context::service::<Handle>(SERVICE)`.
 pub type Handle = Rc<dyn Viewport>;
 
 pub trait Viewport {
