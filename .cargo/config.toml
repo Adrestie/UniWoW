@@ -1,6 +1,7 @@
 # Every crate links the Rust standard library as a DLL, so that the runtime and the features share one copy.
+# /Brepro makes the MSVC linker write no date: relinking unchanged code gives the same runtime fingerprint.
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "prefer-dynamic"]
+rustflags = ["-C", "prefer-dynamic", "-C", "link-arg=/Brepro"]
 
 [alias]
 xtask = "run --quiet --package xtask --"

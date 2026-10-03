@@ -148,8 +148,15 @@ cargo xtask run                  builds what changed, then starts the editor
 | `core/kernel` | The executable only; features stay compatible |
 | `core/api`, `libs/*`, shared dependency versions or compiler | Runtime and every feature (`build`), because the fingerprint changes |
 
-The fingerprint is the BLAKE3 hash of `uniwow_api.dll`. Any rebuild of the runtime, even without
-a change of interface, therefore asks for the features to be rebuilt; `cargo xtask build` does it.
+The fingerprint is the BLAKE3 hash of `uniwow_api.dll`. The MSVC linker runs with `/Brepro`,
+which removes the link date and makes the PDB identifier depend on the content: relinking
+unchanged code gives the same DLL, hence the same fingerprint (checked by rebuilding the runtime
+after `cargo clean -p uniwow-api`, and after touching one of its sources without changing it).
+A real change of the runtime still asks for every feature to be rebuilt; `cargo xtask build` does it.
+
+`build-feature` compiles the whole workspace, not the feature alone, so that Cargo merges the
+options of shared crates exactly as `build` does and leaves the runtime untouched. A compilation
+error in another feature therefore blocks it too.
 
 ### Constraint accepted with this choice
 
