@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 3 built and validated; milestones 4 to 7 proposed, for the model of modules of section 3. Open questions in section 10.
+Status: **validated**. Milestones 1 to 3 built and validated; milestone 4 validated, in progress; milestones 5 to 7 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -561,7 +561,7 @@ As built:
   | `cube.color`, calling thread | 1.06 to 1.09 million | 3.6 million |
   | `cube.paint`, interface thread | 30,000 to 39,000 | 24,000 |
 
-### Milestone 4: modules of every kind (proposed)
+### Milestone 4: modules of every kind (validated, in progress)
 
 The model of section 3 put in place with what exists: one folder and manifest per module, the
 words of the vocabulary, compiled modules loaded by the kernel, scripts by tool. Compiled, Lua and
