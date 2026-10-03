@@ -170,8 +170,8 @@ mod tests {
             0
         }
 
-        fn next_event(&self, _subscription: u64, _timeout: Duration) -> Option<uniwow_api::Event> {
-            None
+        fn next_event(&self, _subscription: u64, _timeout: Duration) -> Result<Option<uniwow_api::Event>, String> {
+            Ok(None)
         }
 
         fn unsubscribe(&self, _subscription: u64) {}

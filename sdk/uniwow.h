@@ -39,7 +39,8 @@ typedef struct uniwow_api {
     /* Receives the events of a topic ("*" for all) from now on. */
     uint64_t (*subscribe)(void *context, const char *topic);
     /* Waits at most timeout_ms for the next event. Returns 1 and replies
-       {"topic", "source", "payload"}, or returns 0. */
+       {"topic", "source", "payload"}; returns 0 when the time passed first; returns -1 and replies
+       an error message when the subscription does not exist or was closed. */
     int32_t (*next_event)(void *context, uint64_t subscription, uint32_t timeout_ms, uniwow_reply reply,
                           void *reply_context);
     void (*unsubscribe)(void *context, uint64_t subscription);

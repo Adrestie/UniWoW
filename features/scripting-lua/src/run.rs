@@ -20,6 +20,40 @@ const HOOK_INTERVAL: u32 = 1_000;
 const EVENT_SLICE: Duration = Duration::from_millis(50);
 const STOPPED: &str = "stopped";
 
+/// Run before the script: once the run is stopped, `pcall`, `xpcall` and `coroutine.resume` raise
+/// the stop again instead of catching it, so that no script can go on by catching it.
+const PRELUDE: &str = r#"
+local stopped, STOPPED = ...
+local raw_pcall, raw_xpcall, raw_resume, error = pcall, xpcall, coroutine.resume, error
+local function rethrow(...)
+    if stopped() then
+        error(STOPPED, 0)
+    end
+    return ...
+end
+pcall = function(...) return rethrow(raw_pcall(...)) end
+xpcall = function(...) return rethrow(raw_xpcall(...)) end
+coroutine.resume = function(...) return rethrow(raw_resume(...)) end
+"#;
+
+/// The cancellation of a run, checked by the hook and by every function of `uniwow`.
+#[derive(Clone)]
+struct Stop(Arc<AtomicBool>);
+
+impl Stop {
+    fn requested(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn check(&self) -> mlua::Result<()> {
+        if self.requested() {
+            Err(mlua::Error::runtime(STOPPED))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 pub enum Source {
     /// A script file: its name and its text.
     Script { name: String, text: String },
@@ -48,14 +82,16 @@ pub fn run(source: Source, editor: Editor, cancelled: Arc<AtomicBool>, output: A
 fn execute(source: &Source, editor: &Editor, cancelled: &Arc<AtomicBool>, output: &Arc<Output>) -> mlua::Result<()> {
     // The safe subset of the standard libraries: C modules cannot be loaded (rule S6).
     let lua = Lua::new();
-    let check = cancelled.clone();
-    lua.set_hook(HookTriggers::new().every_nth_instruction(HOOK_INTERVAL), move |_, _| {
-        if check.load(Ordering::Relaxed) {
-            Err(mlua::Error::runtime(STOPPED))
-        } else {
-            Ok(VmState::Continue)
-        }
+    let stop = Stop(cancelled.clone());
+    // A global hook also runs in the coroutines, which a hook of the main thread does not reach.
+    let hook = stop.clone();
+    lua.set_global_hook(HookTriggers::new().every_nth_instruction(HOOK_INTERVAL), move |_, _| {
+        hook.check().map(|()| VmState::Continue)
     })?;
+    let requested = stop.clone();
+    lua.load(PRELUDE)
+        .set_name("=uniwow")
+        .call::<()>((lua.create_function(move |_, ()| Ok(requested.requested()))?, STOPPED))?;
 
     let globals = lua.globals();
     let printed = output.clone();
@@ -70,7 +106,7 @@ fn execute(source: &Source, editor: &Editor, cancelled: &Arc<AtomicBool>, output
     let folder = crate::scripts_dir();
     package.set("path", format!("{0}\\?.lua;{0}\\?\\init.lua", folder.display()))?;
     let subscriptions = Rc::new(RefCell::new(HashSet::new()));
-    globals.set("uniwow", module(&lua, editor, cancelled, &subscriptions)?)?;
+    globals.set("uniwow", module(&lua, editor, &stop, &subscriptions)?)?;
 
     editor.begin_group(&match source {
         Source::Script { name, .. } => format!("Lua: {name}"),
@@ -126,18 +162,14 @@ fn as_text(lua: &Lua, values: MultiValue) -> mlua::Result<String> {
 
 /// The `uniwow` module: the generic interface, nothing more.
 /// `subscriptions` receives the subscriptions the run has open.
-fn module(
-    lua: &Lua,
-    editor: &Editor,
-    cancelled: &Arc<AtomicBool>,
-    subscriptions: &Rc<RefCell<HashSet<u64>>>,
-) -> mlua::Result<Table> {
+fn module(lua: &Lua, editor: &Editor, stop: &Stop, subscriptions: &Rc<RefCell<HashSet<u64>>>) -> mlua::Result<Table> {
     let module = lua.create_table()?;
 
-    let e = editor.clone();
+    let (e, s) = (editor.clone(), stop.clone());
     module.set(
         "commands",
         lua.create_function(move |lua, ()| {
+            s.check()?;
             let commands: Vec<Value> = e
                 .commands()
                 .into_iter()
@@ -151,14 +183,11 @@ fn module(
         })?,
     )?;
 
-    let e = editor.clone();
-    let stop = cancelled.clone();
+    let (e, s) = (editor.clone(), stop.clone());
     module.set(
         "call",
         lua.create_function(move |lua, (name, arguments): (String, Option<mlua::Value>)| {
-            if stop.load(Ordering::Relaxed) {
-                return Err(mlua::Error::runtime(STOPPED));
-            }
+            s.check()?;
             let arguments = match arguments {
                 Some(value) => from_lua(lua, value)?,
                 None => Value::Object(Default::default()),
@@ -168,10 +197,11 @@ fn module(
         })?,
     )?;
 
-    let e = editor.clone();
+    let (e, s) = (editor.clone(), stop.clone());
     module.set(
         "publish",
         lua.create_function(move |lua, (topic, payload): (String, Option<mlua::Value>)| {
+            s.check()?;
             let payload = match payload {
                 Some(value) => from_lua(lua, value)?,
                 None => Value::Null,
@@ -181,32 +211,30 @@ fn module(
         })?,
     )?;
 
-    let e = editor.clone();
+    let (e, s) = (editor.clone(), stop.clone());
     let open = subscriptions.clone();
     module.set(
         "subscribe",
         lua.create_function(move |_, topic: String| {
+            s.check()?;
             let subscription = e.subscribe(&topic);
             open.borrow_mut().insert(subscription);
             Ok(subscription)
         })?,
     )?;
 
-    let e = editor.clone();
-    let stop = cancelled.clone();
+    let (e, s) = (editor.clone(), stop.clone());
     module.set(
         "next_event",
         lua.create_function(move |lua, (subscription, timeout_ms): (u64, Option<u64>)| {
             let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
             loop {
-                if stop.load(Ordering::Relaxed) {
-                    return Err(mlua::Error::runtime(STOPPED));
-                }
+                s.check()?;
                 let slice = match deadline {
                     Some(deadline) => deadline.saturating_duration_since(Instant::now()).min(EVENT_SLICE),
                     None => EVENT_SLICE,
                 };
-                if let Some(event) = e.next_event(subscription, slice) {
+                if let Some(event) = e.next_event(subscription, slice).map_err(mlua::Error::runtime)? {
                     let event = uniwow_api::serde_json::json!({ "topic": event.topic,
                         "source": event.source, "payload": event.payload });
                     return to_lua(lua, &event);
@@ -218,39 +246,43 @@ fn module(
         })?,
     )?;
 
-    let e = editor.clone();
+    let (e, s) = (editor.clone(), stop.clone());
     let open = subscriptions.clone();
     module.set(
         "unsubscribe",
         lua.create_function(move |_, subscription: u64| {
+            s.check()?;
             e.unsubscribe(subscription);
             open.borrow_mut().remove(&subscription);
             Ok(())
         })?,
     )?;
 
-    let e = editor.clone();
+    let (e, s) = (editor.clone(), stop.clone());
     module.set(
         "setting",
         lua.create_function(move |lua, key: String| {
+            s.check()?;
             let value = e.setting(&key).map_err(mlua::Error::runtime)?;
             to_lua(lua, &value.unwrap_or(Value::Null))
         })?,
     )?;
 
-    let e = editor.clone();
+    let (e, s) = (editor.clone(), stop.clone());
     module.set(
         "set_setting",
         lua.create_function(move |lua, (key, value): (String, mlua::Value)| {
+            s.check()?;
             e.set_setting(&key, from_lua(lua, value)?);
             Ok(())
         })?,
     )?;
 
-    let e = editor.clone();
+    let (e, s) = (editor.clone(), stop.clone());
     module.set(
         "log",
         lua.create_function(move |_, (level, message): (String, String)| {
+            s.check()?;
             let level = match level.as_str() {
                 "error" => log::Level::Error,
                 "warn" | "warning" => log::Level::Warn,
@@ -267,19 +299,21 @@ fn module(
         })?,
     )?;
 
-    let e = editor.clone();
+    let (e, s) = (editor.clone(), stop.clone());
     module.set(
         "begin_group",
         lua.create_function(move |_, label: String| {
+            s.check()?;
             e.begin_group(&label);
             Ok(())
         })?,
     )?;
 
-    let e = editor.clone();
+    let (e, s) = (editor.clone(), stop.clone());
     module.set(
         "end_group",
         lua.create_function(move |_, ()| {
+            s.check()?;
             e.end_group();
             Ok(())
         })?,
@@ -367,9 +401,12 @@ mod tests {
             7
         }
 
-        fn next_event(&self, _subscription: u64, timeout: Duration) -> Option<Event> {
+        fn next_event(&self, subscription: u64, timeout: Duration) -> Result<Option<Event>, String> {
+            if subscription != 7 {
+                return Err(format!("unknown subscription {subscription}"));
+            }
             std::thread::sleep(timeout);
-            None
+            Ok(None)
         }
 
         fn unsubscribe(&self, subscription: u64) {
@@ -458,6 +495,41 @@ mod tests {
             Arc::default(),
         );
         assert_eq!(printed, ["3\tthree\t{\"name\":\"red\"}"]);
+    }
+
+    #[test]
+    fn an_unknown_subscription_is_an_error() {
+        let (_, printed) = execute(script("uniwow.next_event(42)"), Arc::default());
+        assert!(
+            printed.iter().any(|line| line.contains("unknown subscription 42")),
+            "{printed:?}"
+        );
+    }
+
+    #[test]
+    fn stop_cannot_be_escaped() {
+        let escapes = [
+            "coroutine.wrap(function() while true do end end)()",
+            "while true do pcall(function() while true do end end) end",
+            "while true do xpcall(function() while true do end end, function(e) return e end) end",
+            "while true do coroutine.resume(coroutine.create(function() while true do end end)) end",
+        ];
+        for code in escapes {
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let stop = cancelled.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                stop.store(true, Ordering::Relaxed);
+            });
+            let started = std::time::Instant::now();
+            let (_, printed) = execute(script(code), cancelled);
+            assert!(started.elapsed() < Duration::from_secs(1), "{code}");
+            assert_eq!(
+                printed.last().map(String::as_str),
+                Some("test.lua #1: stopped"),
+                "{code}"
+            );
+        }
     }
 
     #[test]

@@ -309,17 +309,20 @@ extern "C" fn api_next_event(
     reply: Reply,
     reply_context: *mut c_void,
 ) -> i32 {
-    guarded(0, || {
-        let Ok(editor) = editor(context) else {
-            return 0;
-        };
-        match editor.next_event(subscription, Duration::from_millis(u64::from(timeout_ms))) {
-            Some(event) => {
+    guarded(-1, || {
+        let next = editor(context)
+            .and_then(|editor| editor.next_event(subscription, Duration::from_millis(u64::from(timeout_ms))));
+        match next {
+            Ok(Some(event)) => {
                 let event = json!({ "topic": event.topic, "source": event.source, "payload": event.payload });
                 reply_with(reply, reply_context, &event.to_string());
                 1
             }
-            None => 0,
+            Ok(None) => 0,
+            Err(error) => {
+                reply_with(reply, reply_context, &error);
+                -1
+            }
         }
     })
 }

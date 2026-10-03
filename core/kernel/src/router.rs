@@ -214,17 +214,24 @@ impl EditorBackend for Bridge {
         id
     }
 
-    fn next_event(&self, subscription: u64, timeout: Duration) -> Option<Event> {
+    fn next_event(&self, subscription: u64, timeout: Duration) -> Result<Option<Event>, String> {
+        let unknown = || format!("unknown subscription {subscription}: never opened, or closed");
         // The map is released before waiting, so that other threads can publish meanwhile.
         let receiver = self
             .subscriptions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&subscription)?
+            .get(&subscription)
+            .ok_or_else(unknown)?
             .receiver
             .clone();
         let receiver = receiver.lock().unwrap_or_else(|e| e.into_inner());
-        receiver.recv_timeout(timeout).ok()
+        match receiver.recv_timeout(timeout) {
+            Ok(event) => Ok(Some(event)),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            // Closed by another thread while this one waited.
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(unknown()),
+        }
     }
 
     fn unsubscribe(&self, subscription: u64) {
@@ -457,21 +464,17 @@ mod tests {
             });
         }
         let short = Duration::from_millis(50);
-        assert_eq!(
-            bridge.next_event(paints, short).map(|e| e.topic).as_deref(),
-            Some("cube.painted")
-        );
-        assert!(bridge.next_event(paints, short).is_none());
-        assert_eq!(
-            bridge.next_event(everything, short).map(|e| e.topic).as_deref(),
-            Some("cube.painted")
-        );
-        assert_eq!(
-            bridge.next_event(everything, short).map(|e| e.topic).as_deref(),
-            Some("other")
-        );
+        let topic = |subscription| bridge.next_event(subscription, short).map(|e| e.map(|e| e.topic));
+        assert_eq!(topic(paints), Ok(Some("cube.painted".to_owned())));
+        assert_eq!(topic(paints), Ok(None));
+        assert_eq!(topic(everything), Ok(Some("cube.painted".to_owned())));
+        assert_eq!(topic(everything), Ok(Some("other".to_owned())));
         bridge.unsubscribe(paints);
-        assert!(bridge.next_event(paints, short).is_none());
+        assert!(
+            topic(paints).is_err(),
+            "a closed subscription is an error, not a timeout"
+        );
+        assert!(topic(42).is_err(), "so is an unknown one");
     }
 
     #[test]

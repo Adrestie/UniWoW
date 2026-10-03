@@ -13,7 +13,9 @@ pub trait EditorBackend: Send + Sync {
     fn call(&self, caller: &str, name: &str, arguments: Value) -> Result<Value, String>;
     fn publish(&self, source: &str, topic: &str, payload: Value);
     fn subscribe(&self, caller: &str, topic: &str) -> u64;
-    fn next_event(&self, subscription: u64, timeout: Duration) -> Option<Event>;
+    /// The next event, `None` when `timeout` passed first, or an error when the subscription does
+    /// not exist or was closed.
+    fn next_event(&self, subscription: u64, timeout: Duration) -> Result<Option<Event>, String>;
     fn unsubscribe(&self, subscription: u64);
     fn setting(&self, caller: &str, key: &str) -> Result<Option<Value>, String>;
     fn set_setting(&self, caller: &str, key: &str, value: Value);
@@ -82,8 +84,9 @@ impl Editor {
         self.backend.subscribe(&self.caller, topic)
     }
 
-    /// The next event of a subscription, waiting at most `timeout`.
-    pub fn next_event(&self, subscription: u64, timeout: Duration) -> Option<Event> {
+    /// The next event of a subscription, waiting at most `timeout`: `None` when the time passed
+    /// first, an error when the subscription does not exist or was closed.
+    pub fn next_event(&self, subscription: u64, timeout: Duration) -> Result<Option<Event>, String> {
         self.backend.next_event(subscription, timeout)
     }
 
