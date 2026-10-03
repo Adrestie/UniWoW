@@ -1,0 +1,265 @@
+//! The pool of worker threads that runs the jobs of the features (rule T2).
+
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Instant;
+
+use uniwow_api::{Editor, JobContext, JobFn, JobId, JobOutcome, egui};
+
+use crate::guard::guarded_as;
+
+type Task = Box<dyn FnOnce() + Send>;
+
+/// A job not yet handed back to its feature.
+pub struct Running {
+    pub id: JobId,
+    pub owner: String,
+    pub label: String,
+    pub started: Instant,
+    progress: Arc<AtomicU32>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Running {
+    pub fn progress(&self) -> f32 {
+        f32::from_bits(self.progress.load(Ordering::Relaxed))
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+}
+
+pub struct Finished {
+    pub id: JobId,
+    pub owner: String,
+    pub label: String,
+    pub outcome: JobOutcome,
+}
+
+pub struct Pool {
+    sender: mpsc::Sender<Task>,
+    threads: usize,
+    finished: Arc<Mutex<Vec<Finished>>>,
+    running: Vec<Running>,
+    next_id: u64,
+    /// Repaints the window when a job ends, so that its result is handed back at once.
+    wake: Option<egui::Context>,
+}
+
+impl Pool {
+    /// Starts `threads` workers. They end with the process; a job running at exit is abandoned.
+    pub fn new(threads: usize, wake: Option<egui::Context>) -> Self {
+        let (sender, receiver) = mpsc::channel::<Task>();
+        let receiver = Arc::new(Mutex::new(receiver));
+        for index in 0..threads {
+            let receiver = receiver.clone();
+            let spawned = std::thread::Builder::new()
+                .name(format!("uniwow-worker-{index}"))
+                .spawn(move || {
+                    loop {
+                        // The lock is released before the task runs.
+                        let task = receiver.lock().unwrap_or_else(|e| e.into_inner()).recv();
+                        match task {
+                            Ok(task) => task(),
+                            Err(_) => return,
+                        }
+                    }
+                });
+            if let Err(error) = spawned {
+                uniwow_api::log::error!("worker thread {index} could not start: {error}");
+            }
+        }
+        Self {
+            sender,
+            threads,
+            finished: Arc::default(),
+            running: Vec::new(),
+            next_id: 0,
+            wake,
+        }
+    }
+
+    pub fn threads(&self) -> usize {
+        self.threads
+    }
+
+    pub fn running(&self) -> &[Running] {
+        &self.running
+    }
+
+    pub fn spawn(&mut self, owner: &str, label: &str, job: JobFn, editor: Editor) -> JobId {
+        self.next_id += 1;
+        let id = JobId(self.next_id);
+        let progress = Arc::new(AtomicU32::new(0f32.to_bits()));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.running.push(Running {
+            id,
+            owner: owner.to_owned(),
+            label: label.to_owned(),
+            started: Instant::now(),
+            progress: progress.clone(),
+            cancelled: cancelled.clone(),
+        });
+
+        let finished = self.finished.clone();
+        let wake = self.wake.clone();
+        let owner = owner.to_owned();
+        let label = label.to_owned();
+        let task: Task = Box::new(move || {
+            let context = JobContext::new(progress, cancelled.clone(), editor);
+            let outcome = match guarded_as(&owner, || job(&context)) {
+                Ok(_) if cancelled.load(Ordering::Relaxed) => JobOutcome::Cancelled,
+                Ok(value) => JobOutcome::Done(value),
+                Err(message) => JobOutcome::Panicked(message),
+            };
+            finished.lock().unwrap_or_else(|e| e.into_inner()).push(Finished {
+                id,
+                owner,
+                label,
+                outcome,
+            });
+            if let Some(wake) = wake {
+                wake.request_repaint();
+            }
+        });
+        if self.sender.send(task).is_err() {
+            uniwow_api::log::error!("job '{}' could not be queued: no worker thread", self.next_id);
+        }
+        id
+    }
+
+    /// Asks a job to stop; it ends as cancelled even if it returns a value.
+    pub fn cancel(&self, id: JobId) {
+        if let Some(job) = self.running.iter().find(|j| j.id == id) {
+            job.cancelled.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// The jobs that ended since the last call, removed from the running list.
+    pub fn take_finished(&mut self) -> Vec<Finished> {
+        let finished = std::mem::take(&mut *self.finished.lock().unwrap_or_else(|e| e.into_inner()));
+        self.running.retain(|job| !finished.iter().any(|f| f.id == job.id));
+        finished
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Barrier};
+    use std::time::{Duration, Instant};
+
+    use uniwow_api::{CommandInfo, Editor, EditorBackend, JobOutcome, serde_json::Value};
+
+    use super::{Finished, Pool};
+
+    struct NoEditor;
+
+    impl EditorBackend for NoEditor {
+        fn commands(&self) -> Vec<CommandInfo> {
+            Vec::new()
+        }
+
+        fn call(&self, _caller: &str, _name: &str, _arguments: Value) -> Result<Value, String> {
+            Err("no editor in tests".to_owned())
+        }
+
+        fn publish(&self, _source: &str, _topic: &str, _payload: Value) {}
+    }
+
+    fn editor() -> Editor {
+        Editor::new(Arc::new(NoEditor), "test")
+    }
+
+    fn wait_for(pool: &mut Pool, count: usize) -> Vec<Finished> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut finished = Vec::new();
+        while finished.len() < count && Instant::now() < deadline {
+            finished.extend(pool.take_finished());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        finished
+    }
+
+    #[test]
+    fn a_job_returns_its_value() {
+        let mut pool = Pool::new(2, None);
+        let id = pool.spawn("test", "add", Box::new(|_| Box::new(40 + 2)), editor());
+        let finished = wait_for(&mut pool, 1);
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0].id, id);
+        let outcome = finished.into_iter().next().expect("one").outcome;
+        assert_eq!(outcome.take::<i32>(), Some(42));
+        assert!(pool.running().is_empty());
+    }
+
+    #[test]
+    fn jobs_run_in_parallel() {
+        // Each job waits for the other at the barrier: only parallel execution lets both end.
+        let mut pool = Pool::new(2, None);
+        let barrier = Arc::new(Barrier::new(2));
+        for _ in 0..2 {
+            let barrier = barrier.clone();
+            pool.spawn(
+                "test",
+                "meet",
+                Box::new(move |_| {
+                    barrier.wait();
+                    Box::new(())
+                }),
+                editor(),
+            );
+        }
+        assert_eq!(wait_for(&mut pool, 2).len(), 2);
+    }
+
+    #[test]
+    fn a_panic_becomes_the_outcome() {
+        let mut pool = Pool::new(1, None);
+        pool.spawn("test", "boom", Box::new(|_| panic!("job failed")), editor());
+        let finished = wait_for(&mut pool, 1);
+        assert!(matches!(&finished[0].outcome, JobOutcome::Panicked(m) if m == "job failed"));
+    }
+
+    #[test]
+    fn a_cancelled_job_ends_as_cancelled() {
+        let mut pool = Pool::new(1, None);
+        let id = pool.spawn(
+            "test",
+            "loop",
+            Box::new(|context| {
+                while !context.is_cancelled() {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Box::new(())
+            }),
+            editor(),
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        pool.cancel(id);
+        let finished = wait_for(&mut pool, 1);
+        assert!(matches!(finished[0].outcome, JobOutcome::Cancelled));
+    }
+
+    #[test]
+    fn progress_is_visible_while_the_job_runs() {
+        let mut pool = Pool::new(1, None);
+        let gate = Arc::new(Barrier::new(2));
+        let inside = gate.clone();
+        pool.spawn(
+            "test",
+            "half",
+            Box::new(move |context| {
+                context.set_progress(0.5);
+                inside.wait();
+                inside.wait();
+                Box::new(())
+            }),
+            editor(),
+        );
+        gate.wait();
+        assert_eq!(pool.running()[0].progress(), 0.5);
+        gate.wait();
+        wait_for(&mut pool, 1);
+    }
+}

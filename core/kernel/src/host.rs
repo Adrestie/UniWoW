@@ -1,13 +1,16 @@
 use std::any::Any;
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use uniwow_api::{Command, Event, Host, egui_wgpu, serde_json};
+use uniwow_api::{CallId, Command, Editor, Event, Host, JobFn, JobId, egui_wgpu, serde_json};
 
+use crate::jobs::Pool;
+use crate::router::{Bridge, ReplyTo, Request};
 use crate::settings::Settings;
 
 pub struct Service {
     pub provider: String,
-    pub value: Box<dyn Any>,
+    pub value: Box<dyn Any + Send + Sync>,
 }
 
 /// A failure of `culprit` noticed by `reporter`, handled like a panic of `culprit`.
@@ -18,7 +21,6 @@ pub struct Reported {
 }
 
 /// Kernel state reachable from features through `Context`.
-#[derive(Default)]
 pub struct KernelHost {
     /// Published this frame, delivered at the end of it.
     pub events: Vec<Event>,
@@ -29,6 +31,26 @@ pub struct KernelHost {
     pub settings: Settings,
     pub settings_changed: bool,
     pub reported: Vec<Reported>,
+    pub pool: Pool,
+    pub bridge: Arc<Bridge>,
+    next_call: u64,
+}
+
+impl KernelHost {
+    pub fn new(gpu: Option<egui_wgpu::RenderState>, settings: Settings, pool: Pool, bridge: Arc<Bridge>) -> Self {
+        Self {
+            events: Vec::new(),
+            pending: Vec::new(),
+            services: HashMap::new(),
+            gpu,
+            settings,
+            settings_changed: false,
+            reported: Vec::new(),
+            pool,
+            bridge,
+            next_call: 0,
+        }
+    }
 }
 
 impl Host for KernelHost {
@@ -44,7 +66,7 @@ impl Host for KernelHost {
         self.pending.push((owner.to_owned(), command));
     }
 
-    fn service(&self, id: &str) -> Option<&dyn Any> {
+    fn service(&self, id: &str) -> Option<&(dyn Any + Send + Sync)> {
         self.services.get(id).map(|s| s.value.as_ref())
     }
 
@@ -71,5 +93,26 @@ impl Host for KernelHost {
             culprit: culprit.to_owned(),
             message: message.to_owned(),
         });
+    }
+
+    fn spawn(&mut self, owner: &str, label: &str, job: JobFn) -> JobId {
+        let editor = self.editor(owner);
+        self.pool.spawn(owner, label, job, editor)
+    }
+
+    fn call(&mut self, caller: &str, name: &str, arguments: serde_json::Value) -> CallId {
+        self.next_call += 1;
+        let id = CallId(self.next_call);
+        self.bridge.queue(Request {
+            caller: caller.to_owned(),
+            name: name.to_owned(),
+            arguments,
+            reply: ReplyTo::Feature(caller.to_owned(), id),
+        });
+        id
+    }
+
+    fn editor(&self, caller: &str) -> Editor {
+        Editor::new(self.bridge.clone(), caller)
     }
 }

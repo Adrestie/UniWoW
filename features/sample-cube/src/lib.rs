@@ -1,24 +1,34 @@
 //! Sample feature: a cube drawn through the viewport service.
 //!
-//! Its colour and speed change through undoable commands, from its own panel or when another
-//! feature publishes `sample.paint`. It never names that other feature.
+//! Its colour and speed change through undoable commands, from its own panel, when another
+//! feature publishes `sample.paint`, or through the named command `cube.paint`. It never names
+//! the features that ask. `cube.color` answers on the calling thread, and the cube's GPU
+//! resources are built in a job.
 
 mod layer;
 
 use std::any::Any;
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use uniwow_api::serde::{Deserialize, Serialize};
+use uniwow_api::serde_json::{Value, json};
 use uniwow_api::viewport;
-use uniwow_api::{Command, Context, DockArea, Event, FEATURE_FAILED_TOPIC, Feature, Registrar, egui, log};
+use uniwow_api::{
+    Command, Context, DockArea, Event, FEATURE_FAILED_TOPIC, Feature, JobId, JobOutcome, Registrar, decode_arguments,
+    egui, log,
+};
 
-use layer::CubeLayer;
+use layer::{CubeLayer, Gpu};
 
 pub struct Params {
     pub color: [f32; 3],
     /// Turns per ten seconds.
     pub speed: f32,
+}
+
+/// Locks shared state even if a panic poisoned it: the values stay usable.
+pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 const PRESETS: [(&str, [f32; 3]); 4] = [
@@ -29,7 +39,10 @@ const PRESETS: [(&str, [f32; 3]); 4] = [
 ];
 
 struct CubeFeature {
-    params: Rc<RefCell<Params>>,
+    params: Arc<Mutex<Params>>,
+    /// Filled by the job building the GPU resources, emptied by the layer.
+    gpu: Arc<Mutex<Option<Gpu>>>,
+    gpu_job: Option<JobId>,
     drawn: bool,
     /// Speed before the slider started changing it, until the change is recorded.
     speed_before_edit: Option<f32>,
@@ -38,10 +51,12 @@ struct CubeFeature {
 impl Default for CubeFeature {
     fn default() -> Self {
         Self {
-            params: Rc::new(RefCell::new(Params {
+            params: Arc::new(Mutex::new(Params {
                 color: PRESETS[2].1,
                 speed: 1.0,
             })),
+            gpu: Arc::default(),
+            gpu_job: None,
             drawn: false,
             speed_before_edit: None,
         }
@@ -50,18 +65,54 @@ impl Default for CubeFeature {
 
 impl Feature for CubeFeature {
     fn register(&mut self, reg: &mut Registrar) {
+        let params = self.params.clone();
         reg.panel("cube", "Cube", DockArea::Right)
             .subscribe("sample.paint")
-            .subscribe(FEATURE_FAILED_TOPIC);
+            .subscribe(FEATURE_FAILED_TOPIC)
+            .command(
+                "cube.paint",
+                "Paints the cube; undoable. Painting it the colour it has changes nothing.",
+                json!({ "type": "object", "properties": { "color": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 } }, "required": ["color"] }),
+                json!({ "type": "object", "properties": { "color": {}, "changed": { "type": "boolean" } } }),
+            )
+            .command_on_caller(
+                "cube.color",
+                "The colour and speed of the cube, read on the calling thread.",
+                json!({ "type": "object" }),
+                json!({ "type": "object", "properties": { "color": {}, "speed": { "type": "number" } } }),
+                Arc::new(move |_| {
+                    let params = lock(&params);
+                    Ok(json!({ "color": params.color, "speed": params.speed }))
+                }),
+            );
     }
 
     fn init(&mut self, ctx: &mut Context) {
-        match ctx.service(viewport::SERVICE) {
-            Some(view) => {
-                view.add_layer(ctx.feature_id(), Box::new(CubeLayer::new(self.params.clone())));
-                self.drawn = true;
-            }
-            None => log::info!("no viewport service: the cube is not drawn"),
+        let Some(view) = ctx.service(viewport::SERVICE) else {
+            log::info!("no viewport service: the cube is not drawn");
+            return;
+        };
+        let Some(gpu) = ctx.gpu().cloned() else {
+            return;
+        };
+        view.add_layer(
+            ctx.feature_id(),
+            Box::new(CubeLayer::new(self.params.clone(), self.gpu.clone())),
+        );
+        self.drawn = true;
+        let target = view.target();
+        self.gpu_job = Some(ctx.spawn("Build the cube's GPU resources", move |_| {
+            layer::create(&gpu.device, &target)
+        }));
+    }
+
+    fn on_job(&mut self, job: JobId, outcome: JobOutcome, _ctx: &mut Context) {
+        if Some(job) != self.gpu_job {
+            return;
+        }
+        match outcome {
+            JobOutcome::Panicked(message) => log::error!("the cube's GPU resources could not be built: {message}"),
+            outcome => *lock(&self.gpu) = outcome.take::<Gpu>(),
         }
     }
 
@@ -73,7 +124,7 @@ impl Feature for CubeFeature {
             );
             ui.separator();
         }
-        let color = self.params.borrow().color;
+        let color = lock(&self.params).color;
         ui.horizontal(|ui| {
             ui.label("Colour");
             let (rect, _) = ui.allocate_exact_size(egui::vec2(36.0, 18.0), egui::Sense::hover());
@@ -88,7 +139,7 @@ impl Feature for CubeFeature {
         });
         ui.separator();
 
-        let before = self.params.borrow().speed;
+        let before = lock(&self.params).speed;
         let mut speed = before;
         // A typed value is taken on Enter or when the box loses focus, not at every character.
         let slider = egui::Slider::new(&mut speed, 0.0..=4.0)
@@ -99,12 +150,12 @@ impl Feature for CubeFeature {
             // The value before the first change, whatever changed it: mouse, keyboard or typing.
             self.speed_before_edit.get_or_insert(before);
             // Shown live; recorded as one command once the slider is no longer being dragged.
-            self.params.borrow_mut().speed = speed;
+            lock(&self.params).speed = speed;
         }
         if !response.dragged()
             && let Some(old) = self.speed_before_edit.take()
         {
-            let new = self.params.borrow().speed;
+            let new = lock(&self.params).speed;
             if new != old {
                 ctx.execute(SetSpeed { old, new });
             }
@@ -126,11 +177,25 @@ impl Feature for CubeFeature {
             Err(error) => log::warn!("ignored: {error}"),
         }
     }
+
+    fn on_command(&mut self, name: &str, arguments: Value, ctx: &mut Context) -> Result<Value, String> {
+        match name {
+            "cube.paint" => {
+                let paint: Paint = decode_arguments(&arguments)?;
+                let changed = lock(&self.params).color != paint.color;
+                if changed {
+                    self.paint(ctx, paint.color, "requested by a command");
+                }
+                Ok(json!({ "color": paint.color, "changed": changed }))
+            }
+            _ => Err(format!("'{name}' is not a command of the cube")),
+        }
+    }
 }
 
 impl CubeFeature {
     fn paint(&mut self, ctx: &mut Context, color: [f32; 3], reason: &str) {
-        let old = self.params.borrow().color;
+        let old = lock(&self.params).color;
         ctx.execute(SetColor { old, new: color });
         let painted = Painted {
             color,
@@ -140,7 +205,7 @@ impl CubeFeature {
     }
 }
 
-/// Payload of `sample.paint`, as this feature reads it. The publisher declares its own type.
+/// Payload of `sample.paint` and arguments of `cube.paint`, as this feature reads them.
 #[derive(Deserialize)]
 #[serde(crate = "uniwow_api::serde")]
 struct Paint {
@@ -176,11 +241,11 @@ impl Command for SetColor {
     }
 
     fn apply(&mut self, feature: &mut dyn Any) {
-        cube(feature).params.borrow_mut().color = self.new;
+        lock(&cube(feature).params).color = self.new;
     }
 
     fn revert(&mut self, feature: &mut dyn Any) {
-        cube(feature).params.borrow_mut().color = self.old;
+        lock(&cube(feature).params).color = self.old;
     }
 }
 
@@ -195,11 +260,11 @@ impl Command for SetSpeed {
     }
 
     fn apply(&mut self, feature: &mut dyn Any) {
-        cube(feature).params.borrow_mut().speed = self.new;
+        lock(&cube(feature).params).speed = self.new;
     }
 
     fn revert(&mut self, feature: &mut dyn Any) {
-        cube(feature).params.borrow_mut().speed = self.old;
+        lock(&cube(feature).params).speed = self.old;
     }
 }
 

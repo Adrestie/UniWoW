@@ -1,28 +1,36 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use uniwow_api::egui_dock::tab_viewer::OnCloseResponse;
 use uniwow_api::egui_dock::{DockArea, DockState, Style, TabViewer};
 use uniwow_api::{
-    Context, DockArea as Area, FEATURE_FAILED_TOPIC, Feature, Host, Registrar, eframe, egui, log, serde_json,
+    CallId, CommandInfo, Context, DockArea as Area, FEATURE_FAILED_TOPIC, Feature, Host, Registrar, RunsOn, eframe,
+    egui, log, serde_json,
 };
 
 use crate::guard::{guarded, guarded_as};
 use crate::history::History;
 use crate::host::{KernelHost, Service};
+use crate::jobs::Pool;
 use crate::layout::{self, PanelEntry, Tab};
 use crate::loader::{self, Slot, State};
 use crate::logger;
 use crate::order;
+use crate::panels::{self, CommandsPanel};
 use crate::requirements::{self, Need};
+use crate::router::{self, Bridge, Entry, ReplyTo, Request};
 use crate::settings::Settings;
 
 const KERNEL: &str = "kernel";
 const BUILT_IN_MENUS: [&str; 4] = ["File", "Edit", "Window", "Help"];
 /// Settings changed by features are written at most this often, and once more at exit.
 const SETTINGS_SAVE_INTERVAL: Duration = Duration::from_secs(1);
+/// Time the interface thread spends each frame answering calls of other threads.
+const CALL_BUDGET: Duration = Duration::from_millis(4);
+/// After a call, how long to wait for the next one of a thread calling in a loop.
+const CALL_IDLE: Duration = Duration::from_micros(500);
 
 pub struct Shell {
     host: KernelHost,
@@ -34,6 +42,11 @@ pub struct Shell {
     restart_needed: bool,
     last_settings_save: Instant,
     panels: PanelsHealth,
+    /// Calls of other threads and of `Context::call`, answered on this thread.
+    requests: Option<mpsc::Receiver<Request>>,
+    /// Answers to `Context::call`, delivered after the calls are served.
+    replies: Vec<(String, CallId, Result<serde_json::Value, String>)>,
+    commands_panel: CommandsPanel,
 }
 
 /// Whether the dock could be drawn this session.
@@ -51,11 +64,10 @@ impl Shell {
             .ok()
             .and_then(|p| p.parent().map(Path::to_path_buf))
             .unwrap_or_default();
-        let host = KernelHost {
-            gpu: cc.wgpu_render_state.clone(),
-            settings: Settings::load(),
-            ..Default::default()
-        };
+        let (bridge, requests) = Bridge::new(Some(cc.egui_ctx.clone()));
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let pool = Pool::new(threads, Some(cc.egui_ctx.clone()));
+        let host = KernelHost::new(cc.wgpu_render_state.clone(), Settings::load(), pool, bridge);
         // wgpu panics on errors nobody captured; log them instead, the editor must keep running.
         if let Some(gpu) = &host.gpu {
             gpu.device.on_uncaptured_error(Arc::new(|error| {
@@ -73,9 +85,13 @@ impl Shell {
             restart_needed: false,
             last_settings_save: Instant::now(),
             panels: PanelsHealth::Drawn,
+            requests: Some(requests),
+            replies: Vec::new(),
+            commands_panel: CommandsPanel::default(),
         };
         shell.register_all();
         shell.resolve_requirements();
+        shell.sync_running();
         shell.init_all();
         // A damaged saved layout must never prevent the editor from starting.
         shell.dock = guarded(|| shell.restore_layout()).unwrap_or_else(|message| {
@@ -102,6 +118,32 @@ impl Shell {
             slot.panels = reg.panels;
             slot.menu_items = reg.menu_items;
             slot.subscriptions = reg.subscriptions;
+            let mut catalogue = self.host.bridge.catalogue.write().unwrap_or_else(|e| e.into_inner());
+            for spec in reg.commands {
+                if let Some(existing) = catalogue.get(&spec.name) {
+                    log::warn!(
+                        "command '{}' of '{}' ignored: already offered by '{}'",
+                        spec.name,
+                        slot.id,
+                        existing.info.owner
+                    );
+                    continue;
+                }
+                let handler = match spec.runs_on {
+                    RunsOn::Interface => None,
+                    RunsOn::Caller(handler) => Some(handler),
+                };
+                let info = CommandInfo {
+                    name: spec.name.clone(),
+                    owner: slot.id.clone(),
+                    description: spec.description,
+                    arguments: spec.arguments,
+                    result: spec.result,
+                    on_caller: handler.is_some(),
+                };
+                catalogue.insert(spec.name, Entry { info, handler });
+            }
+            drop(catalogue);
             for (id, value) in reg.services {
                 if let Some(existing) = self.host.services.get(&id) {
                     log::warn!(
@@ -161,6 +203,12 @@ impl Shell {
         let id = self.slots[index].id.clone();
         self.slots[index].state = State::Blocked(reason);
         self.host.services.retain(|_, s| s.provider != id);
+        self.sync_running();
+    }
+
+    /// Tells the bridge which features are running: only their commands can be called.
+    fn sync_running(&self) {
+        *self.host.bridge.running.write().unwrap_or_else(|e| e.into_inner()) = self.running_ids();
     }
 
     /// Running features, providers of a service before the features that require or use it.
@@ -238,6 +286,18 @@ impl Shell {
             PanelEntry {
                 tab: Tab::new(KERNEL, "log"),
                 title: "Log".to_owned(),
+                area: Area::Bottom,
+                open_by_default: true,
+            },
+            PanelEntry {
+                tab: Tab::new(KERNEL, "jobs"),
+                title: "Jobs".to_owned(),
+                area: Area::Bottom,
+                open_by_default: true,
+            },
+            PanelEntry {
+                tab: Tab::new(KERNEL, "commands"),
+                title: "Commands".to_owned(),
                 area: Area::Bottom,
                 open_by_default: true,
             },
@@ -332,12 +392,102 @@ impl Shell {
         slot.state = State::Failed(message);
         let id = slot.id.clone();
         self.host.services.retain(|_, s| s.provider != id);
+        self.sync_running();
         let purged = self.history.purge(&id);
         if purged > 0 {
             log::warn!("{purged} changes of '{id}' can no longer be undone");
         }
         self.host
             .publish(KERNEL, FEATURE_FAILED_TOPIC, serde_json::json!({ "id": id }));
+    }
+
+    /// Moves what other threads left for the interface thread: events and failures of commands.
+    fn collect_from_threads(&mut self) {
+        let bridge = self.host.bridge.clone();
+        let events = std::mem::take(&mut *bridge.events.lock().unwrap_or_else(|e| e.into_inner()));
+        self.host.events.extend(events);
+        let failures = std::mem::take(&mut *bridge.failures.lock().unwrap_or_else(|e| e.into_inner()));
+        self.host.reported.extend(failures);
+    }
+
+    /// Hands the jobs that ended back to their features.
+    fn deliver_jobs(&mut self) {
+        for finished in self.host.pool.take_finished() {
+            let Some(index) = self.running_index(&finished.owner) else {
+                log::warn!(
+                    "job '{}' of '{}' ended after its feature stopped",
+                    finished.label,
+                    finished.owner
+                );
+                continue;
+            };
+            let (id, outcome) = (finished.id, finished.outcome);
+            if let Err(message) = call_feature(&mut self.slots[index], &mut self.host, |f, ctx| {
+                f.on_job(id, outcome, ctx)
+            }) {
+                self.fail(index, format!("job '{}': {message}", finished.label));
+            }
+        }
+    }
+
+    /// Answers the queued calls for at most `CALL_BUDGET` (T4), then delivers the answers due to
+    /// features.
+    fn serve_calls(&mut self) {
+        let Some(requests) = self.requests.take() else {
+            return;
+        };
+        router::serve(&requests, CALL_BUDGET, CALL_IDLE, |request| self.answer(request));
+        self.requests = Some(requests);
+        self.apply_reported();
+        for (caller, call, result) in std::mem::take(&mut self.replies) {
+            let Some(index) = self.running_index(&caller) else {
+                continue;
+            };
+            if let Err(message) = call_feature(&mut self.slots[index], &mut self.host, |f, ctx| {
+                f.on_reply(call, result, ctx)
+            }) {
+                self.fail(index, format!("reply: {message}"));
+            }
+        }
+    }
+
+    fn answer(&mut self, request: Request) {
+        let result = self.run_command(&request.name, request.arguments);
+        if let Err(error) = &result {
+            log::warn!("call of '{}' by '{}' failed: {error}", request.name, request.caller);
+        }
+        match request.reply {
+            ReplyTo::Thread(reply) => {
+                // The caller may have given up; nothing to do then.
+                let _ = reply.send(result);
+            }
+            ReplyTo::Feature(caller, call) => self.replies.push((caller, call, result)),
+            ReplyTo::Kernel(call) => self.commands_panel.answer(call, result),
+        }
+    }
+
+    fn run_command(&mut self, name: &str, arguments: serde_json::Value) -> Result<serde_json::Value, String> {
+        let bridge = self.host.bridge.clone();
+        let (owner, handler) = bridge.lookup(name)?;
+        if let Some(handler) = handler {
+            return bridge.run_on_caller(&owner, name, &handler, arguments);
+        }
+        let index = self
+            .running_index(&owner)
+            .ok_or_else(|| format!("'{name}' belongs to '{owner}', which is not running"))?;
+        let outcome = call_feature(&mut self.slots[index], &mut self.host, |f, ctx| {
+            f.on_command(name, arguments, ctx)
+        });
+        match outcome {
+            Ok(result) => {
+                self.apply_pending();
+                result
+            }
+            Err(panic) => {
+                self.fail(index, format!("command '{name}': {panic}"));
+                Err(format!("'{name}' failed: {panic}"))
+            }
+        }
     }
 
     fn running_ids(&self) -> HashSet<String> {
@@ -501,6 +651,7 @@ impl eframe::App for Shell {
             runtime: self.runtime_fingerprint.as_deref(),
             features_dir: &self.features_dir,
             restart_needed: &mut self.restart_needed,
+            commands_panel: &mut self.commands_panel,
         };
         let mut shown = Ok(());
         egui::CentralPanel::default().show(ui, |ui| {
@@ -573,10 +724,18 @@ impl eframe::App for Shell {
 
         self.apply_pending();
         self.apply_reported();
+        self.serve_calls();
+        self.deliver_jobs();
+        self.collect_from_threads();
+        self.apply_reported();
         self.dispatch_events();
         self.apply_reported();
         if !self.host.events.is_empty() {
             ctx.request_repaint();
+        }
+        if !self.host.pool.running().is_empty() {
+            // Keeps the progress of the jobs moving in the Jobs panel.
+            ctx.request_repaint_after(Duration::from_millis(100));
         }
         if self.host.settings_changed {
             let since = self.last_settings_save.elapsed();
@@ -611,6 +770,7 @@ struct Viewer<'a> {
     runtime: Option<&'a str>,
     features_dir: &'a Path,
     restart_needed: &'a mut bool,
+    commands_panel: &'a mut CommandsPanel,
 }
 
 impl TabViewer for Viewer<'_> {
@@ -633,6 +793,8 @@ impl TabViewer for Viewer<'_> {
             match tab.panel.as_str() {
                 "features" => self.features_panel(ui),
                 "log" => log_panel(ui),
+                "jobs" => panels::jobs_panel(ui, &self.host.pool),
+                "commands" => self.commands_panel.ui(ui, &self.host.bridge),
                 _ => {}
             }
             return;

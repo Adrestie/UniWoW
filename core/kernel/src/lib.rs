@@ -6,12 +6,15 @@
 mod guard;
 mod history;
 mod host;
+mod jobs;
 mod layout;
 mod loader;
 mod logger;
 mod manifest;
 mod order;
+mod panels;
 mod requirements;
+mod router;
 mod settings;
 mod shell;
 

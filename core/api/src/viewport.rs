@@ -1,20 +1,24 @@
 //! Interface of the "viewport" service: a 3D view to which features add their drawing.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::{ServiceKey, egui_wgpu, glam, wgpu};
 
 /// Provide with `Registrar::provide(SERVICE, …)`, ask with `Context::service(SERVICE)`.
 pub const SERVICE: ServiceKey<Handle> = ServiceKey::new("viewport");
 
-pub type Handle = Rc<dyn Viewport>;
+pub type Handle = Arc<dyn Viewport>;
 
-pub trait Viewport {
+/// Shared between threads (rule T3): a job may add a layer.
+pub trait Viewport: Send + Sync {
     /// Adds a drawing layer. `owner` is the id of the feature adding it.
     fn add_layer(&self, owner: &str, layer: Box<dyn Layer>);
 
     /// Removes every layer added by `owner`.
     fn remove_layers(&self, owner: &str);
+
+    /// Formats of the render target, for features that build their pipelines ahead, in a job.
+    fn target(&self) -> Target;
 }
 
 /// Formats of the render target a layer draws into; its pipelines must match them.
@@ -36,7 +40,8 @@ pub struct View {
     pub time: f32,
 }
 
-pub trait Layer {
+/// Drawn on the interface thread, but may be created on any thread.
+pub trait Layer: Send {
     /// Records the layer's drawing into its own render bundle, created by the viewport with the
     /// formats and sample count of `target`; create pipelines lazily from `gpu.device` to match.
     ///

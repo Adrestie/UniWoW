@@ -5,10 +5,9 @@ mod camera;
 mod grid;
 
 use std::any::Any;
-use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::pin;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Poll, Waker};
 use std::time::Instant;
 
@@ -31,7 +30,12 @@ const BACKGROUND: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 
-type Layers = Rc<RefCell<Vec<(String, Box<dyn Layer>)>>>;
+type Layers = Arc<Mutex<Vec<(String, Box<dyn Layer>)>>>;
+
+/// The layer list, even if a panic left its lock poisoned: layers are taken out while drawn.
+fn lock(layers: &Layers) -> MutexGuard<'_, Vec<(String, Box<dyn Layer>)>> {
+    layers.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Implementation of the service, sharing the layer list with the feature.
 struct Service {
@@ -40,11 +44,15 @@ struct Service {
 
 impl viewport::Viewport for Service {
     fn add_layer(&self, owner: &str, layer: Box<dyn Layer>) {
-        self.layers.borrow_mut().push((owner.to_owned(), layer));
+        lock(&self.layers).push((owner.to_owned(), layer));
     }
 
     fn remove_layers(&self, owner: &str) {
-        self.layers.borrow_mut().retain(|(o, _)| o != owner);
+        lock(&self.layers).retain(|(o, _)| o != owner);
+    }
+
+    fn target(&self) -> Target {
+        TARGET
     }
 }
 
@@ -68,7 +76,7 @@ struct ViewportFeature {
 impl Default for ViewportFeature {
     fn default() -> Self {
         Self {
-            layers: Rc::default(),
+            layers: Arc::default(),
             camera: OrbitCamera::default(),
             targets: None,
             grid: None,
@@ -79,7 +87,7 @@ impl Default for ViewportFeature {
 
 impl Feature for ViewportFeature {
     fn register(&mut self, reg: &mut Registrar) {
-        let service: viewport::Handle = Rc::new(Service {
+        let service: viewport::Handle = Arc::new(Service {
             layers: self.layers.clone(),
         });
         reg.panel("view", "3D View", DockArea::Center)
@@ -107,7 +115,7 @@ impl Feature for ViewportFeature {
         ui.painter().image(targets.texture_id, rect, uv, egui::Color32::WHITE);
         let caption = format!(
             "{} layers · drag: orbit · right drag: pan · wheel: zoom",
-            self.layers.borrow().len()
+            lock(&self.layers).len()
         );
         ui.painter().text(
             rect.left_bottom() + egui::vec2(8.0, -8.0),
@@ -123,7 +131,7 @@ impl Feature for ViewportFeature {
         if event.topic == FEATURE_FAILED_TOPIC
             && let Some(id) = event.payload.get("id").and_then(|v| v.as_str())
         {
-            self.layers.borrow_mut().retain(|(owner, _)| owner != id);
+            lock(&self.layers).retain(|(owner, _)| owner != id);
         }
     }
 
@@ -255,7 +263,7 @@ impl ViewportFeature {
         ctx: &mut Context,
     ) -> Vec<wgpu::RenderBundle> {
         // Layers may add layers while drawing: take the list out, then put it back in front.
-        let mut layers = std::mem::take(&mut *self.layers.borrow_mut());
+        let mut layers = std::mem::take(&mut *lock(&self.layers));
         let mut bundles = Vec::new();
         layers.retain_mut(|(owner, layer)| {
             let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -306,7 +314,7 @@ impl ViewportFeature {
                 }
             }
         });
-        let mut shared = self.layers.borrow_mut();
+        let mut shared = lock(&self.layers);
         layers.append(&mut shared);
         *shared = layers;
         bundles

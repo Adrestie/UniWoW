@@ -16,17 +16,23 @@ pub use serde;
 pub use serde_json;
 
 mod command;
+mod commands;
 mod context;
+mod editor;
 mod event;
 mod feature;
+mod job;
 mod registrar;
 mod service;
 pub mod viewport;
 
 pub use command::Command;
+pub use commands::{CallId, CommandHandler, CommandInfo, CommandSpec, RunsOn, decode_arguments};
 pub use context::{Context, Host};
+pub use editor::{Editor, EditorBackend};
 pub use event::Event;
 pub use feature::{CREATE_SYMBOL, CreateFn, Feature, PACKAGE_SYMBOL, PackageFn};
+pub use job::{JobContext, JobFn, JobId, JobOutcome};
 pub use registrar::{DockArea, MenuItemSpec, PanelSpec, Registrar};
 pub use service::ServiceKey;
 

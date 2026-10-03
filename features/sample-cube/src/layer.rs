@@ -1,12 +1,11 @@
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::viewport::{Layer, Target, View};
 use uniwow_api::wgpu::util::DeviceExt;
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
-use crate::Params;
+use crate::{Params, lock};
 
 const SHADER: &str = r#"
 struct Globals {
@@ -37,7 +36,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-struct Gpu {
+/// Pipeline and buffers of the cube, built in a job (rule T5) then handed to the layer.
+pub struct Gpu {
     pipeline: wgpu::RenderPipeline,
     vertices: wgpu::Buffer,
     globals: wgpu::Buffer,
@@ -45,13 +45,19 @@ struct Gpu {
 }
 
 pub struct CubeLayer {
-    params: Rc<RefCell<Params>>,
+    params: Arc<Mutex<Params>>,
     gpu: Option<Gpu>,
+    /// Where the job building the GPU resources leaves them.
+    incoming: Arc<Mutex<Option<Gpu>>>,
 }
 
 impl CubeLayer {
-    pub fn new(params: Rc<RefCell<Params>>) -> Self {
-        Self { params, gpu: None }
+    pub fn new(params: Arc<Mutex<Params>>, incoming: Arc<Mutex<Option<Gpu>>>) -> Self {
+        Self {
+            params,
+            gpu: None,
+            incoming,
+        }
     }
 }
 
@@ -59,18 +65,27 @@ impl Layer for CubeLayer {
     fn draw<'a>(
         &'a mut self,
         gpu: &egui_wgpu::RenderState,
-        target: &Target,
+        _target: &Target,
         view: &View,
         bundle: &mut wgpu::RenderBundleEncoder<'a>,
     ) {
-        let resources = &*self.gpu.get_or_insert_with(|| create(&gpu.device, target));
-        let params = self.params.borrow();
-        let angle = view.time * params.speed * std::f32::consts::TAU / 10.0;
+        if self.gpu.is_none() {
+            self.gpu = lock(&self.incoming).take();
+        }
+        // Nothing to draw until the job has built the resources.
+        let Some(resources) = self.gpu.as_ref() else {
+            return;
+        };
+        let (color, speed) = {
+            let params = lock(&self.params);
+            (params.color, params.speed)
+        };
+        let angle = view.time * speed * std::f32::consts::TAU / 10.0;
         let model = Mat4::from_translation(Vec3::new(0.0, 0.0, 1.0)) * Mat4::from_rotation_z(angle);
         let mut globals = [0f32; 36];
         globals[0..16].copy_from_slice(&view.view_proj.to_cols_array());
         globals[16..32].copy_from_slice(&model.to_cols_array());
-        globals[32..35].copy_from_slice(&params.color);
+        globals[32..35].copy_from_slice(&color);
         globals[35] = 1.0;
         gpu.queue
             .write_buffer(&resources.globals, 0, bytemuck::cast_slice(&globals));
@@ -111,7 +126,7 @@ fn vertices() -> Vec<[f32; 6]> {
     out
 }
 
-fn create(device: &wgpu::Device, target: &Target) -> Gpu {
+pub fn create(device: &wgpu::Device, target: &Target) -> Gpu {
     let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("cube vertices"),
         contents: bytemuck::cast_slice(&vertices()),

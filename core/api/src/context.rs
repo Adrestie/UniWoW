@@ -1,16 +1,19 @@
 use std::any::Any;
 
-use crate::{Command, ServiceKey, egui_wgpu};
+use crate::{CallId, Command, Editor, JobContext, JobFn, JobId, ServiceKey, egui_wgpu};
 
 /// What the kernel offers to features. Implemented by the kernel only.
 pub trait Host {
     fn publish(&mut self, source: &str, topic: &str, payload: serde_json::Value);
     fn execute(&mut self, owner: &str, command: Box<dyn Command>);
-    fn service(&self, id: &str) -> Option<&dyn Any>;
+    fn service(&self, id: &str) -> Option<&(dyn Any + Send + Sync)>;
     fn gpu(&self) -> Option<&egui_wgpu::RenderState>;
     fn setting(&self, feature: &str, key: &str) -> Option<serde_json::Value>;
     fn set_setting(&mut self, feature: &str, key: &str, value: serde_json::Value);
     fn report_failure(&mut self, reporter: &str, culprit: &str, message: &str);
+    fn spawn(&mut self, owner: &str, label: &str, job: JobFn) -> JobId;
+    fn call(&mut self, caller: &str, name: &str, arguments: serde_json::Value) -> CallId;
+    fn editor(&self, caller: &str) -> Editor;
 }
 
 /// Access to the kernel for one feature, passed to every `Feature` method after `register`.
@@ -48,7 +51,7 @@ impl<'a> Context<'a> {
     }
 
     /// Returns a clone of the service, if a running feature provides it.
-    pub fn service<T: Any + Clone>(&self, key: ServiceKey<T>) -> Option<T> {
+    pub fn service<T: Any + Clone + Send + Sync>(&self, key: ServiceKey<T>) -> Option<T> {
         let service = self.host.service(key.id())?;
         let typed = service.downcast_ref::<T>().cloned();
         if typed.is_none() {
@@ -79,5 +82,23 @@ impl<'a> Context<'a> {
     /// as a viewport layer. The kernel disables it as if it had panicked, naming this feature.
     pub fn report_failure(&mut self, culprit: &str, message: &str) {
         self.host.report_failure(self.feature, culprit, message);
+    }
+
+    /// Runs `job` on a worker thread (rule T2). Its value, cancellation or panic comes back to
+    /// this feature on the interface thread through `Feature::on_job`.
+    pub fn spawn<T: Any + Send>(&mut self, label: &str, job: impl FnOnce(&JobContext) -> T + Send + 'static) -> JobId {
+        self.host
+            .spawn(self.feature, label, Box::new(move |context| Box::new(job(context))))
+    }
+
+    /// Calls a named command from the interface thread. The answer comes back at the end of the
+    /// frame through `Feature::on_reply`, with the returned id.
+    pub fn call(&mut self, name: &str, arguments: serde_json::Value) -> CallId {
+        self.host.call(self.feature, name, arguments)
+    }
+
+    /// A handle to the editor for other threads, acting for this feature.
+    pub fn editor(&self) -> Editor {
+        self.host.editor(self.feature)
     }
 }

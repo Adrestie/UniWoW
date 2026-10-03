@@ -1,8 +1,7 @@
 //! Sample feature: a viewport layer drawing a red triangle, which records invalid GPU commands on
 //! request. The viewport must then disable this feature only, keeping the grid and the others.
 
-use std::cell::Cell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use uniwow_api::viewport::{self, Layer, Target, View};
 use uniwow_api::{Context, DockArea, Feature, Registrar, bytemuck, egui, egui_wgpu, log, wgpu};
@@ -38,7 +37,7 @@ enum Mode {
 
 #[derive(Default)]
 struct FaultyFeature {
-    mode: Rc<Cell<Mode>>,
+    mode: Arc<Mutex<Mode>>,
     drawn: bool,
 }
 
@@ -64,15 +63,21 @@ impl Feature for FaultyFeature {
         }
         ui.label("Draws a red triangle next to the cube. Each button makes the next frame record invalid commands:");
         if ui.button("Draw without the bind group").clicked() {
-            self.mode.set(Mode::NoBindGroup);
+            self.set_mode(Mode::NoBindGroup);
         }
         if ui.button("Use a pipeline with the wrong colour format").clicked() {
-            self.mode.set(Mode::WrongFormat);
+            self.set_mode(Mode::WrongFormat);
         }
         if ui.button("Panic while drawing").clicked() {
-            self.mode.set(Mode::Panic);
+            self.set_mode(Mode::Panic);
         }
         ui.weak("Expected: the grid and the cube stay, only this feature is marked as failed.");
+    }
+}
+
+impl FaultyFeature {
+    fn set_mode(&self, mode: Mode) {
+        *self.mode.lock().unwrap_or_else(|e| e.into_inner()) = mode;
     }
 }
 
@@ -84,12 +89,12 @@ struct Gpu {
 }
 
 struct FaultyLayer {
-    mode: Rc<Cell<Mode>>,
+    mode: Arc<Mutex<Mode>>,
     gpu: Option<Gpu>,
 }
 
 impl FaultyLayer {
-    fn new(mode: Rc<Cell<Mode>>) -> Self {
+    fn new(mode: Arc<Mutex<Mode>>) -> Self {
         Self { mode, gpu: None }
     }
 }
@@ -108,7 +113,8 @@ impl Layer for FaultyLayer {
             0,
             bytemuck::cast_slice(&view.view_proj.to_cols_array()),
         );
-        match self.mode.get() {
+        let mode = *self.mode.lock().unwrap_or_else(|e| e.into_inner());
+        match mode {
             Mode::Valid => {
                 bundle.set_pipeline(&resources.valid);
                 bundle.set_bind_group(0, &resources.bind_group, &[]);

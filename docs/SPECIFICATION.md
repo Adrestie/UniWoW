@@ -1,6 +1,6 @@
 # UniWoW — Architecture and feature catalogue
 
-Status: **validated**. Milestone 1 built and validated. Open questions in section 10.
+Status: **validated**. Milestone 1 built and validated; milestone 2 built, awaiting validation. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -388,7 +388,7 @@ exceeds it (LNK1189). The `dev` profile is therefore built with `opt-level = 2`,
 sharing of generic instantiations: 17,764 exported symbols, 27% of the limit. `cargo xtask check`
 reports the count and fails from 50,000; the runtime would then have to be split.
 
-### Milestone 2: threads, jobs and named commands (validated, in progress)
+### Milestone 2: threads, jobs and named commands (built, awaiting validation)
 
 The common base of speed (R7, R8) and of scripting (S1, S2): the threading model and the catalogue
 of commands, before any other feature is written on the milestone 1 contract.
@@ -435,6 +435,12 @@ Acceptance:
 | A job publishes an event | It is delivered on the interface thread and listed by `sample-notes` |
 | The cube's GPU buffers are built in a job | The cube is drawn as before |
 | `cargo test`, `cargo xtask check`, CI | Green; new tests cover the pool, the cancellation and the routing of commands |
+
+As built: the interface thread serves the calls of other threads for 4 ms per frame, waiting up
+to 0.5 ms after each call for the next one of a thread calling in a loop. Measured on a 32-thread
+processor: 3.7 million calls per second to a command running on the calling thread, 24,000 per
+second to a command running on the interface thread. `Editor::call` refuses, with an error, to wait
+on the interface thread for a command of the interface thread, which would wait for itself.
 
 ---
 

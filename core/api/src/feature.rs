@@ -1,6 +1,6 @@
 use std::any::Any;
 
-use crate::{Context, Event, Registrar, egui};
+use crate::{CallId, Context, Event, JobId, JobOutcome, Registrar, egui};
 
 /// A feature loaded from its own DLL.
 ///
@@ -21,6 +21,22 @@ pub trait Feature: Any {
 
     /// Handles a click on one of the menu items declared in `register`, identified by `action`.
     fn on_menu(&mut self, _action: &str, _ctx: &mut Context) {}
+
+    /// Runs one of the named commands declared with `Registrar::command`, on the interface thread.
+    fn on_command(
+        &mut self,
+        name: &str,
+        _arguments: serde_json::Value,
+        _ctx: &mut Context,
+    ) -> Result<serde_json::Value, String> {
+        Err(format!("'{name}' is not handled"))
+    }
+
+    /// Receives the end of a job started with `Context::spawn`.
+    fn on_job(&mut self, _job: JobId, _outcome: JobOutcome, _ctx: &mut Context) {}
+
+    /// Receives the answer to a call made with `Context::call`.
+    fn on_reply(&mut self, _call: CallId, _result: Result<serde_json::Value, String>, _ctx: &mut Context) {}
 
     /// Called once when the editor closes.
     fn shutdown(&mut self) {}

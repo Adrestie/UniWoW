@@ -1,6 +1,6 @@
 use std::any::Any;
 
-use crate::ServiceKey;
+use crate::{CommandHandler, CommandSpec, RunsOn, ServiceKey};
 
 /// Where a panel goes the first time it is shown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,7 +36,8 @@ pub struct Registrar {
     pub panels: Vec<PanelSpec>,
     pub menu_items: Vec<MenuItemSpec>,
     /// Service id and implementation. Consumers read it back with `Context::service`.
-    pub services: Vec<(String, Box<dyn Any>)>,
+    pub services: Vec<(String, Box<dyn Any + Send + Sync>)>,
+    pub commands: Vec<CommandSpec>,
     /// Event topics; `*` receives every event.
     pub subscriptions: Vec<String>,
 }
@@ -62,8 +63,50 @@ impl Registrar {
     }
 
     /// Provides a service under its key, which fixes the type consumers receive.
-    pub fn provide<T: Any>(&mut self, key: ServiceKey<T>, service: T) -> &mut Self {
+    pub fn provide<T: Any + Send + Sync>(&mut self, key: ServiceKey<T>, service: T) -> &mut Self {
         self.services.push((key.id().to_owned(), Box::new(service)));
+        self
+    }
+
+    /// Declares a named command running on the interface thread, handled by `Feature::on_command`.
+    /// `arguments` and `result` are JSON Schemas.
+    pub fn command(
+        &mut self,
+        name: &str,
+        description: &str,
+        arguments: serde_json::Value,
+        result: serde_json::Value,
+    ) -> &mut Self {
+        self.add_command(name, description, arguments, result, RunsOn::Interface)
+    }
+
+    /// Declares a named command running on the calling thread, at once, through `handler`.
+    pub fn command_on_caller(
+        &mut self,
+        name: &str,
+        description: &str,
+        arguments: serde_json::Value,
+        result: serde_json::Value,
+        handler: CommandHandler,
+    ) -> &mut Self {
+        self.add_command(name, description, arguments, result, RunsOn::Caller(handler))
+    }
+
+    fn add_command(
+        &mut self,
+        name: &str,
+        description: &str,
+        arguments: serde_json::Value,
+        result: serde_json::Value,
+        runs_on: RunsOn,
+    ) -> &mut Self {
+        self.commands.push(CommandSpec {
+            name: name.to_owned(),
+            description: description.to_owned(),
+            arguments,
+            result,
+            runs_on,
+        });
         self
     }
 
