@@ -713,6 +713,37 @@ enum MenuAction {
 }
 
 impl eframe::App for Shell {
+    /// The work of the kernel. eframe calls it before each `ui`, and also while the window is
+    /// minimised whenever a repaint is requested, as other threads do when they need the kernel.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.apply_pending();
+        self.apply_reported();
+        self.serve_calls();
+        self.deliver_jobs();
+        self.collect_from_threads();
+        self.apply_reported();
+        self.dispatch_events();
+        self.apply_reported();
+        if !self.host.events.is_empty() {
+            ctx.request_repaint();
+        }
+        if !self.host.pool.running().is_empty() {
+            // Keeps the progress of the jobs moving in the Jobs panel.
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        if self.host.settings_changed {
+            let since = self.last_settings_save.elapsed();
+            if since >= SETTINGS_SAVE_INTERVAL {
+                self.host.settings.save();
+                self.host.settings_changed = false;
+                self.last_settings_save = Instant::now();
+            } else {
+                ctx.request_repaint_after(SETTINGS_SAVE_INTERVAL - since);
+            }
+        }
+    }
+
+    /// Draws the window and handles what the user did in it; the rest waits for `logic`.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let mut actions = Vec::new();
         egui::Panel::top("menu_bar").show(ui, |ui| actions = self.menu_bar(ui));
@@ -803,30 +834,10 @@ impl eframe::App for Shell {
             }
         }
 
-        self.apply_pending();
-        self.apply_reported();
-        self.serve_calls();
-        self.deliver_jobs();
-        self.collect_from_threads();
-        self.apply_reported();
-        self.dispatch_events();
-        self.apply_reported();
-        if !self.host.events.is_empty() {
+        // What the panels and menus queued is applied by `logic` at the next frame.
+        let host = &self.host;
+        if !host.pending.is_empty() || !host.reported.is_empty() || !host.events.is_empty() || host.settings_changed {
             ctx.request_repaint();
-        }
-        if !self.host.pool.running().is_empty() {
-            // Keeps the progress of the jobs moving in the Jobs panel.
-            ctx.request_repaint_after(Duration::from_millis(100));
-        }
-        if self.host.settings_changed {
-            let since = self.last_settings_save.elapsed();
-            if since >= SETTINGS_SAVE_INTERVAL {
-                self.host.settings.save();
-                self.host.settings_changed = false;
-                self.last_settings_save = Instant::now();
-            } else {
-                ctx.request_repaint_after(SETTINGS_SAVE_INTERVAL - since);
-            }
         }
     }
 
