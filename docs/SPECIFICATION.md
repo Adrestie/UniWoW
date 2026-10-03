@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 4 built and validated; milestones 5 to 7 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 4 built and validated; milestone 5 proposed; milestones 6 and 7 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -618,15 +618,73 @@ As built:
   folder as a group that opens and closes; `require` looks in the script's tool folder first, then
   in the language folder.
 
-### Milestone 5: panels and undo for compiled modules (outline)
+### Milestone 5: panels and undo for compiled modules (proposed)
 
-Described panels in the C interface (widgets, drawing areas, interaction events sent back to the
-module), undoable changes of a compiled module's own state, a sample C++ module with a panel (a
-small timeline), and the sample C# module (.NET 10, NativeAOT): commands called from several
-threads, the changes of each thread as one undo entry, and a panel. Already verified: a C#
-NativeAOT module calls the C interface from four threads at once; `dotnet publish` needs the folder
-of `vswhere.exe` on the path and `ProgramFiles(x86)` set; numbers are written in the invariant
-culture. Specified in detail when milestone 4 is done.
+Described panels and undoable changes, defined once in the core for every module that is not
+written in Rust (S1), offered here to compiled modules; Lua and Python modules will use the same
+ones (milestones 6 and 7).
+
+Risks verified first, with egui 0.36.2 as the editor uses it, on the processor of the earlier
+measures:
+
+| Risk | Result |
+|---|---|
+| Parsing a description | 0.6 ms for 1,000 shapes (94 KB of JSON), 5 ms for 10,000, 24 ms for 50,000 |
+| Drawing the shapes again at every frame | 0.9 ms for 1,000 shapes, 9.4 ms for 10,000: too slow beyond a few thousand |
+| Shapes turned into a mesh once per description, drawn at every frame | 0.35 ms for 1,000 shapes, 2.5 ms for 10,000; building the mesh: 0.6 ms and 7.8 ms. Texts are drawn at every frame: 0.5 ms for 1,000 |
+| .NET 10 in the CI | GitHub's runners install it with `actions/setup-dotnet` (version 10.0.x) |
+
+Content:
+
+- **Described panels**: a module declares its panels when it starts (id, title, area of the
+  dock), then sets out each one, from any thread, as a list of elements laid out from top to bottom:
+  `label`, `button`, `checkbox`, `slider` (a number and its range), `text_field`, `separator`,
+  `row` (elements side by side) and `area`, a drawing area of a given height whose shapes are
+  rectangles (filled or outlined, rounded corners), lines, circles and texts, placed in points from
+  its top left corner, each shape with an optional id. The core reads a description and builds the
+  mesh of its areas on the thread that sets it out, then swaps it in; the interface thread only
+  draws it (T1). A panel not yet set out says that it waits for its module.
+- **Interaction events**: a button clicked, a checkbox ticked, a slider moved (while dragged, then
+  once more at the release) and a text field edited (Enter or focus lost), with the id of the
+  element and its new value; on an area, press, drag, release and wheel, with the position in the
+  area, the id of the shape under the pointer and the keys held (Ctrl, Shift, Alt). A widget shows
+  the value the user gave it at once, until the module sets out the panel again. Events reach the
+  module in order, on a thread the core keeps for that module, never on the interface thread.
+- **Undoable changes (F2, S4)**: a module changes its own state, then records the change with a
+  label and two JSON values, the one that undoes it and the one that redoes it. The change enters
+  the history, or the open undo group of the calling thread, like any other. Undo and Redo hand the
+  matching value to the module, on its thread, which applies it; a module that fails to apply it
+  fails, and its changes leave the history.
+- **`uniwow.h` version 3**: the panels a module declares, `set_panel` and `record_change`, and two
+  functions the module gives, one receiving the interaction events and one applying an undo or redo
+  value. A module built with version 2 is refused with the reason; `sample-cpp` moves to version 3.
+- **Sample C++ timeline** in `examples/modules/sample-timeline/`: tracks of clips, a clip dragged
+  along its track as one undo entry, the wheel zooming without entering the history, Add clip, the
+  selected clip shown under the area; commands `timeline.clips`, `timeline.add_clip` and
+  `timeline.fill` (many clips at once, to measure).
+- **Sample C# module** in `examples/modules/sample-csharp/` (.NET 10, NativeAOT): `cs.sum`,
+  `cs.paint_from_threads` (each thread's paints as one undo entry) and a panel with a counter (two
+  buttons and a slider), each change undoable. Built by `cargo xtask build` with `dotnet publish`;
+  without the .NET SDK, the build says so and goes on without it; the CI installs .NET 10 and
+  builds it.
+- **Section 3** describes the format of the panels and events, written once for every language.
+
+Acceptance:
+
+| Check | Expected result |
+|---|---|
+| Start the editor | `sample-timeline` and `sample-csharp` listed as compiled and running; their panels in the dock and in the Window menu |
+| Drag a clip of the timeline | It follows the pointer; one undo entry at the release; Ctrl+Z puts it back, Ctrl+Y moves it again |
+| The wheel over the timeline | It zooms; nothing enters the history |
+| Add clip, then Ctrl+Z | A clip appears, then goes |
+| `timeline.fill` with 5,000 clips | The interface stays fluid while a clip is dragged; the frame time is measured and recorded here |
+| The counter of the C# panel: buttons and slider | The value changes; each change is one undo entry |
+| `cs.paint_from_threads` | Each thread's paints form one undo entry |
+| A Lua script adding three clips | One undo entry |
+| A module built with `uniwow.h` version 2 | Refused with the reason; the rest runs |
+| A module failing to apply an undo value | It fails, its changes leave the history; the rest runs |
+| Remove `modules\sample-timeline\`, start | The editor starts without it; its panel is gone |
+| Tests, `cargo xtask check`, CI with the C# module built | Green |
 
 ### Milestone 6: Lua modules (outline)
 
