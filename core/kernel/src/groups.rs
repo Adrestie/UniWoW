@@ -106,11 +106,15 @@ impl Groups {
         self.open.iter().map(|group| (group.id, group.label.clone())).collect()
     }
 
-    /// Why Undo and Redo cannot run now, if they cannot: a group is open, and undoing in the
-    /// middle of it would mix the order of the history.
+    /// Why Undo and Redo cannot run now, if they cannot: an open group already holds a change,
+    /// and undoing in the middle of it would mix the order of the history. A group that changed
+    /// nothing yet, such as a script waiting for events, blocks nothing.
     pub fn blocking_undo(&self) -> Option<String> {
-        let group = self.open.first()?;
-        Some(format!("a script or a module is running: {}", group.label))
+        let group = self.open.iter().find(|group| !group.parts.is_empty())?;
+        Some(format!(
+            "a script or a module running has made changes: {}",
+            group.label
+        ))
     }
 
     fn find(&mut self, caller: &str, thread: ThreadId) -> Option<&mut Open> {
@@ -228,6 +232,11 @@ mod tests {
         let mut groups = Groups::default();
         assert_eq!(groups.blocking_undo(), None);
         groups.begin("modules#cpp", ended, "left open");
+        assert_eq!(
+            groups.blocking_undo(),
+            None,
+            "a group that changed nothing blocks nothing"
+        );
         groups.parts_of("modules#cpp", ended).expect("open").push(part("a"));
         assert!(
             groups
@@ -243,6 +252,8 @@ mod tests {
         // …or by the user, at any depth.
         groups.begin("lua#run", here, "stuck");
         groups.begin("lua#run", here, "deeper");
+        groups.parts_of("lua#run", here).expect("open").push(part("b"));
+        assert!(groups.blocking_undo().is_some());
         let id = groups.list()[0].0;
         assert_eq!(groups.close(id).map(|c| c.label).as_deref(), Some("stuck"));
         assert_eq!(groups.blocking_undo(), None);
