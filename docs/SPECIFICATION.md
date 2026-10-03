@@ -89,14 +89,15 @@ kind needs (its DLL and the DLL's hash, the runtime fingerprint, its entry file)
 | Kind | Written as | Loaded by | Panels |
 |---|---|---|---|
 | Rust | A crate of this project, in `modules/<id>/` | The kernel, against the runtime fingerprint | Drawn with egui |
-| Compiled | A DLL exporting the C entry point of `uniwow.h` (S10), from C, C++, C# compiled with NativeAOT, or any language able to export a C function; added by its author | The kernel, through the C interface | Described |
-| Lua, Python | Source files, loaded at start, keeping their state while the editor runs | The module of their language (`scripting-lua`, `scripting-python`), which hosts them | Described |
+| Compiled | A DLL exporting the C entry point of `uniwow.h` (S10), from C, C++, C# compiled with NativeAOT, or any language able to export a C function; added by its author | The kernel, through the C interface | Interface objects |
+| Lua, Python | Source files, loaded at start, keeping their state while the editor runs | The module of their language (`scripting-lua`, `scripting-python`), which hosts them | Interface objects |
 
 Every kind offers named commands, publishes and receives events, has settings, records undoable
-changes and has panels. A **described panel** is set out by its module from any thread: widgets
-with their values, and drawing areas of lines, rectangles and text, for a timeline for instance.
-The core draws it at every frame without calling the module, and sends clicks, drags and edits back
-to the module as events: the interface thread never waits for a module's code (T1, T6).
+changes and has panels. The panels of a module not written in Rust are made of **interface
+objects** modelled on Qt: widgets, layouts, a graphics scene and painting areas, created through
+handles, changed property by property from any thread, their signals connected to the module's
+functions (milestone 5). The core keeps the objects and draws them; signals reach the module on a
+thread of its own: the interface thread never waits for a module's code (T1, T6).
 
 Rules F1 to F6 apply to every kind. The rest of this section is the contract of Rust modules;
 section 7 gives that of the others (S1 to S10).
@@ -229,7 +230,7 @@ the same runtime.
 | Alternative | Reason |
 |---|---|
 | Modules compiled into the editor | Adding or removing a module requires recompiling the editor (R3). |
-| A stable C interface for every module (abi_stable, stabby) | egui and wgpu types cannot cross it: Rust modules keep the Rust interface, with egui and wgpu. Compiled modules use the C interface, with described panels and no 3D drawing. |
+| A stable C interface for every module (abi_stable, stabby) | egui and wgpu types cannot cross it: Rust modules keep the Rust interface, with egui and wgpu. Compiled modules use the C interface, with interface objects and no 3D drawing. |
 | One process per module | Sharing the 3D view and the panels between processes is too heavy. |
 
 ---
@@ -354,7 +355,7 @@ Rules:
 
 | Id | Rule |
 |---|---|
-| S1 | One generic interface, the same for every language: list the named commands with their descriptions and schemas, call one by name, publish and receive events, read and write settings, log, and, for modules, offer commands, set out described panels and record undoable changes. Every value crosses it as JSON. It is defined once, independently of any language, and also offered as a C interface (`extern "C"` functions taking and returning UTF-8 JSON, header `uniwow.h`), so that compiled code reaches the same commands without depending on the Rust ABI. The Lua and Python `uniwow` modules only translate their values to and from JSON on top of this interface: they add no command of their own, so every language always has the same access. |
+| S1 | One generic interface, the same for every language: list the named commands with their descriptions and schemas, call one by name, publish and receive events, read and write settings, log, and, for modules, offer commands, build panels of interface objects and record undoable changes. Commands, events and settings carry their values as JSON; the interface objects are reached through typed functions (handles, texts, numbers). It is defined once, independently of any language, and also offered as a C interface (`extern "C"` functions taking and returning UTF-8 JSON, header `uniwow.h`), so that compiled code reaches the same commands without depending on the Rust ABI. The Lua and Python `uniwow` modules only translate their values to and from JSON on top of this interface: they add no command of their own, so every language always has the same access. Each language has classes over the interface objects, named as in Qt. |
 | S2 | Named commands (F6) must exist in the kernel first: they are what scripts and compiled modules mostly call. |
 | S3 | Scripts never run on the interface thread (T6). A call that changes a module's state is applied on the interface thread at the next frame; a call to a command running on the calling thread answers at once (T4). A running script can be stopped. |
 | S4 | Every change one run of a script makes forms a single undo entry. The kernel learns to group commands. A group belongs to one caller on one thread and can be nested; it closes at its outermost end, when the job that opened it ends, when its module fails, or from the Edit menu. While an open group already holds a change, Undo and Redo are refused, greyed with the reason; a group that changed nothing yet, such as a script waiting for events, blocks nothing. Changes made by hand meanwhile enter the history on their own: when they touch what the script changes, their order relative to the group can be imprecise, and so is the undo order of two runs in parallel that change the same thing. Indirect changes are not grouped: a command triggered by an event a script publishes is applied when the event is delivered, outside the group. |
@@ -620,69 +621,86 @@ As built:
 
 ### Milestone 5: panels and undo for compiled modules (proposed)
 
-Described panels and undoable changes, defined once in the core for every module that is not
-written in Rust (S1), offered here to compiled modules; Lua and Python modules will use the same
-ones (milestones 6 and 7).
+An interface API modelled on Qt, defined once in the core for every module that is not written in
+Rust, offered here to compiled modules with classes for C++ and C#; Lua and Python modules receive
+the same objects, with classes in their language, in milestones 6 and 7.
 
-Risks verified first, with egui 0.36.2 as the editor uses it, on the processor of the earlier
-measures:
+Measures taken first, with egui 0.36.2 as the editor uses it:
 
-| Risk | Result |
+| Measure | Result |
 |---|---|
-| Parsing a description | 0.6 ms for 1,000 shapes (94 KB of JSON), 5 ms for 10,000, 24 ms for 50,000 |
-| Drawing the shapes again at every frame | 0.9 ms for 1,000 shapes, 9.4 ms for 10,000: too slow beyond a few thousand |
-| Shapes turned into a mesh once per description, drawn at every frame | 0.35 ms for 1,000 shapes, 2.5 ms for 10,000; building the mesh: 0.6 ms and 7.8 ms. Texts are drawn at every frame: 0.5 ms for 1,000 |
+| Drawing shapes again at every frame | 0.9 ms for 1,000 shapes, 9.4 ms for 10,000: too slow beyond a few thousand |
+| Shapes turned into a mesh once, drawn at every frame | 0.35 ms for 1,000 shapes, 2.5 ms for 10,000; building the mesh: 0.6 ms and 7.8 ms |
+| Moving that mesh (scroll, zoom) on the processor | 5.6 ms for 10,000 shapes at every frame: a view is moved on the GPU instead |
 | .NET 10 in the CI | GitHub's runners install it with `actions/setup-dotnet` (version 10.0.x) |
 
 Content:
 
-- **Described panels**: a module declares its panels when it starts (id, title, area of the
-  dock), then sets out each one, from any thread, as a list of elements laid out from top to bottom:
-  `label`, `button`, `checkbox`, `slider` (a number and its range), `text_field`, `separator`,
-  `row` (elements side by side) and `area`, a drawing area of a given height whose shapes are
-  rectangles (filled or outlined, rounded corners), lines, circles and texts, placed in points from
-  its top left corner, each shape with an optional id. The core reads a description and builds the
-  mesh of its areas on the thread that sets it out, then swaps it in; the interface thread only
-  draws it (T1). A panel not yet set out says that it waits for its module.
-- **Interaction events**: a button clicked, a checkbox ticked, a slider moved (while dragged, then
-  once more at the release) and a text field edited (Enter or focus lost), with the id of the
-  element and its new value; on an area, press, drag, release and wheel, with the position in the
-  area, the id of the shape under the pointer and the keys held (Ctrl, Shift, Alt). A widget shows
-  the value the user gave it at once, until the module sets out the panel again. Events reach the
-  module in order, on a thread the core keeps for that module, never on the interface thread.
+- **Objects, as in Qt**: a module creates objects and receives a handle for each, sets their
+  properties one by one, places widgets in layouts and connects signals to its functions. The core
+  keeps the tree of objects and draws it: a call from any thread changes it and shows at the next
+  frame, and the interface thread never waits for a module (T1). The functions connected to a
+  signal run in order on a thread the core keeps for the module, as a queued connection does in Qt,
+  never on the interface thread. A widget shows what the user did to it at once (a ticked box, a
+  moved slider), then tells the module. Destroying an object destroys its children.
+- **Base widgets**: `Label`, `PushButton`, `CheckBox`, `Slider`, `SpinBox`, `LineEdit`, `ComboBox`,
+  a separator line, `GroupBox`, and the layouts `VBoxLayout`, `HBoxLayout`, `GridLayout`; each with
+  its usual properties (text, checked, value and range, items and current index, enabled, visible,
+  tooltip) and signals (`clicked`, `toggled`, `valueChanged`, `textChanged`, `editingFinished`,
+  `currentIndexChanged`). A module declares its panels when it starts (id, title, area of the dock),
+  each holding one layout. Lists, trees, tables, tabs and menus come in a later milestone.
+- **Graphics scene, as `QGraphicsScene` and `QGraphicsView`**: a `GraphicsView` widget shows a
+  `GraphicsScene` of items: `RectItem`, `LineItem`, `EllipseItem`, `TextItem` and `ItemGroup`, with
+  position, size, pen, brush, stacking order, tooltip, and the flags `ItemIsMovable` (along x, y or
+  both, within bounds) and `ItemIsSelectable`. A movable item follows the pointer in the core,
+  without waiting for the module, which receives where it was dropped; the scene also tells
+  presses, double clicks and selection changes. The view scrolls and zooms with the mouse and can be
+  set by the module. The core keeps the items on the GPU and draws them through the view's
+  transform: scrolling and zooming cost nothing per item; an item being dragged is drawn on its own
+  until it is dropped; texts are drawn for the visible items only.
+- **Painting, as `paintEvent` and `QPainter`**: a `PaintArea` widget asks its module to paint when
+  it is shown, resized, or after `update()`; the module paints on its thread with a painter
+  (`setPen`, `setBrush`, `drawLine`, `drawRect`, `drawEllipse`, `drawText`, `translate`, `scale`,
+  `save`, `restore`), and the picture shows at the next frame. Mouse presses, moves, releases and
+  the wheel reach the module as signals, with the position and the keys held.
 - **Undoable changes (F2, S4)**: a module changes its own state, then records the change with a
   label and two JSON values, the one that undoes it and the one that redoes it. The change enters
   the history, or the open undo group of the calling thread, like any other. Undo and Redo hand the
   matching value to the module, on its thread, which applies it; a module that fails to apply it
   fails, and its changes leave the history.
-- **`uniwow.h` version 3**: the panels a module declares, `set_panel` and `record_change`, and two
-  functions the module gives, one receiving the interaction events and one applying an undo or redo
-  value. A module built with version 2 is refused with the reason; `sample-cpp` moves to version 3.
-- **Sample C++ timeline** in `examples/modules/sample-timeline/`: tracks of clips, a clip dragged
-  along its track as one undo entry, the wheel zooming without entering the history, Add clip, the
-  selected clip shown under the area; commands `timeline.clips`, `timeline.add_clip` and
+- **`uniwow.h` version 3**: the C functions of the objects, typed (handles, texts, numbers):
+  commands, events and settings keep their JSON (S1 changes accordingly). A module built with
+  version 2 is refused with the reason; `sample-cpp` moves to version 3. Beside it,
+  `sdk/uniwow.hpp`, header-only C++ classes (`uniwow::PushButton`, signals connected to lambdas),
+  and `sdk/UniWoW.cs`, the same classes for C#.
+- **Sample C++ timeline** in `examples/modules/sample-timeline/`, on the graphics scene: tracks of
+  clips, a clip dragged along its track as one undo entry, zoom and scroll outside the history, Add
+  clip, the selected clip shown under the view; commands `timeline.clips`, `timeline.add_clip` and
   `timeline.fill` (many clips at once, to measure).
 - **Sample C# module** in `examples/modules/sample-csharp/` (.NET 10, NativeAOT): `cs.sum`,
-  `cs.paint_from_threads` (each thread's paints as one undo entry) and a panel with a counter (two
-  buttons and a slider), each change undoable. Built by `cargo xtask build` with `dotnet publish`;
-  without the .NET SDK, the build says so and goes on without it; the CI installs .NET 10 and
-  builds it.
-- **Section 3** describes the format of the panels and events, written once for every language.
+  `cs.paint_from_threads` (each thread's paints as one undo entry), and a panel: a counter changed
+  by buttons, a slider and a spin box, each change undoable, with a `PaintArea` drawing its history
+  as bars. Built by `cargo xtask build` with `dotnet publish`; without the .NET SDK the build says
+  so and goes on without it; the CI installs .NET 10 and builds it.
+- **Section 3** describes the objects, their properties and signals, written once for every
+  language.
 
 Acceptance:
 
 | Check | Expected result |
 |---|---|
 | Start the editor | `sample-timeline` and `sample-csharp` listed as compiled and running; their panels in the dock and in the Window menu |
-| Drag a clip of the timeline | It follows the pointer; one undo entry at the release; Ctrl+Z puts it back, Ctrl+Y moves it again |
-| The wheel over the timeline | It zooms; nothing enters the history |
+| Drag a clip of the timeline | It follows the pointer along its track; one undo entry when dropped; Ctrl+Z puts it back, Ctrl+Y moves it again |
+| Scroll and zoom the timeline | The view moves; nothing enters the history |
 | Add clip, then Ctrl+Z | A clip appears, then goes |
-| `timeline.fill` with 5,000 clips | The interface stays fluid while a clip is dragged; the frame time is measured and recorded here |
-| The counter of the C# panel: buttons and slider | The value changes; each change is one undo entry |
+| `timeline.fill` with 10,000 clips | The interface stays fluid while a clip is dragged and while zooming; the frame time is measured and recorded here |
+| The C# panel: buttons, slider, spin box | The counter changes, the widgets agree, each change is one undo entry; the bars are painted again |
+| Resize the C# panel | The bars are painted again at the new size |
+| A slot of a module waiting two seconds | The interface stays fluid meanwhile; the next signals wait their turn |
 | `cs.paint_from_threads` | Each thread's paints form one undo entry |
 | A Lua script adding three clips | One undo entry |
 | A module built with `uniwow.h` version 2 | Refused with the reason; the rest runs |
-| A module failing to apply an undo value | It fails, its changes leave the history; the rest runs |
+| A module failing to apply an undo value | It fails, its changes leave the history, its panel says so; the rest runs |
 | Remove `modules\sample-timeline\`, start | The editor starts without it; its panel is gone |
 | Tests, `cargo xtask check`, CI with the C# module built | Green |
 
@@ -690,7 +708,8 @@ Acceptance:
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
 hosts them through a contract of the core open to the module of any language: their own Lua state
-kept while the editor runs, commands, events, settings, described panels, undo. Specified in detail
+kept while the editor runs, commands, events, settings, the interface objects of milestone 5 with
+Lua classes, undo. Specified in detail
 when milestone 5 is done.
 
 ### Milestone 7: Python (outline)
