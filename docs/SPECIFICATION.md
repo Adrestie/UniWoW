@@ -1,6 +1,6 @@
 # UniWoW — Architecture and feature catalogue
 
-Status: **validated**. Milestone 1 built and validated; milestone 2 built, awaiting validation. Open questions in section 10.
+Status: **validated**. Milestones 1 and 2 built and validated. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -388,7 +388,7 @@ exceeds it (LNK1189). The `dev` profile is therefore built with `opt-level = 2`,
 sharing of generic instantiations: 17,764 exported symbols, 27% of the limit. `cargo xtask check`
 reports the count and fails from 50,000; the runtime would then have to be split.
 
-### Milestone 2: threads, jobs and named commands (built, awaiting validation)
+### Milestone 2: threads, jobs and named commands (done)
 
 The common base of speed (R7, R8) and of scripting (S1, S2): the threading model and the catalogue
 of commands, before any other feature is written on the milestone 1 contract.
