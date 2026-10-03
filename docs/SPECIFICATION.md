@@ -339,6 +339,7 @@ Acceptance:
 | A sample feature panics while drawing | That feature is shown as failed in the Features panel; the rest keeps working |
 | A sample feature depends on the other in its Cargo.toml | `cargo xtask check` fails and names the offending dependency |
 | `sample-faulty` draws without its bind group, or with a pipeline of the wrong colour format | The viewport and the grid stay; only `sample-faulty` is marked as failed, reported by `viewport` |
+| `sample-faulty` panics while drawing (button "Panic while drawing") | The viewport and the grid stay; only `sample-faulty` is marked as failed, reported by `viewport` |
 
 Risk verified first: a Windows DLL exports at most 65,535 symbols. Unoptimised, the runtime
 exceeds it (LNK1189). The `dev` profile is therefore built with `opt-level = 2`, which stops the

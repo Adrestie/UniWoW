@@ -32,6 +32,8 @@ enum Mode {
     NoBindGroup,
     /// Uses a pipeline built for another colour format than the viewport's.
     WrongFormat,
+    /// Panics in `Layer::draw`.
+    Panic,
 }
 
 #[derive(Default)]
@@ -66,6 +68,9 @@ impl Feature for FaultyFeature {
         }
         if ui.button("Use a pipeline with the wrong colour format").clicked() {
             self.mode.set(Mode::WrongFormat);
+        }
+        if ui.button("Panic while drawing").clicked() {
+            self.mode.set(Mode::Panic);
         }
         ui.weak("Expected: the grid and the cube stay, only this feature is marked as failed.");
     }
@@ -113,6 +118,7 @@ impl Layer for FaultyLayer {
                 bundle.set_pipeline(&resources.wrong_format);
                 bundle.set_bind_group(0, &resources.bind_group, &[]);
             }
+            Mode::Panic => panic!("simulated panic while drawing the faulty layer"),
         }
         bundle.draw(0..3, 0..1);
     }
