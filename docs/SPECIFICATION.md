@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 3 built and validated; milestone 4 validated, in progress; milestones 5 to 7 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 3 built and validated; milestone 4 built, awaiting validation; milestones 5 to 7 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -561,7 +561,7 @@ As built:
   | `cube.color`, calling thread | 1.06 to 1.09 million | 3.6 million |
   | `cube.paint`, interface thread | 30,000 to 39,000 | 24,000 |
 
-### Milestone 4: modules of every kind (validated, in progress)
+### Milestone 4: modules of every kind (built, awaiting validation)
 
 The model of section 3 put in place with what exists: one folder and manifest per module, the
 words of the vocabulary, compiled modules loaded by the kernel, scripts by tool. Compiled, Lua and
@@ -601,6 +601,22 @@ Acceptance:
 | The Lua panel | Scripts listed under their tool, the examples under `samples`; a script loads another file of its tool with `require` |
 | The checks of milestones 1 to 3 | Same results under the new names: C++ thread painting, Lua console and scripts, undo groups, Stop |
 | Tests, `cargo xtask check`, CI | Green |
+
+As built:
+
+- **Compiled modules in the kernel**: the C interface over an `Editor` is in the runtime
+  (`uniwow_api::capi`); the kernel loads a compiled module's DLL where it is, so that the DLLs it
+  needs are found in its folder, and refuses one named like a DLL already in the process. Each
+  compiled module is a module of its own in the catalogue, with its own `Editor`, settings and log
+  name, and its commands declared on its behalf as delegated (F6).
+- **Manifest**: `module.toml` has a `kind` (`rust` or `compiled`); `package`, `dll_hash` and
+  `runtime` concern Rust modules only. Settings and layouts saved with the former names
+  (`disabled_features`, `features`, a tab's `feature`) are still read.
+- **Modules panel**: kind, state and commands of every module; a command set aside shows the module
+  that offers it.
+- **Scripts**: the panel lists the scripts placed directly in `scripts\lua-5.1\`, then each tool
+  folder as a group that opens and closes; `require` looks in the script's tool folder first, then
+  in the language folder.
 
 ### Milestone 5: panels and undo for compiled modules (outline)
 
