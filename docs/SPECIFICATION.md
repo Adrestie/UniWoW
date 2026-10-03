@@ -292,6 +292,28 @@ without touching the core.
 |---|---|
 | package | Build an installable WoW-mods module (installer.json): files in the right patch archive, DBC copied from client to server, install and uninstall SQL, id ranges checked |
 
+### Scripting
+
+| Id | Feature |
+|---|---|
+| scripting-lua | Lua interpreter (mlua, Lua compiled into the runtime, nothing to install): console panel, script runner, the `uniwow` module |
+| scripting-python | CPython interpreter (PyO3, with the official embeddable Python of Windows shipped beside the editor): the same console, runner and `uniwow` module |
+
+Both languages follow the same rules:
+
+| Id | Rule |
+|---|---|
+| S1 | Scripts see the editor through one `uniwow` module, defined once in `libs/scripting` and adapted to each language: run a named command, publish and receive events, read and write settings, log. Scripts can do only what the kernel and the features expose. |
+| S2 | Named commands ("open creature 1234", section 3) must exist in the kernel first: they are what scripts mostly call. |
+| S3 | A script runs outside the interface thread, so that a long script does not freeze the editor; each call to the editor goes through a queue served at the next frame. A running script can be stopped. |
+| S4 | Every change one run of a script makes forms a single undo entry. The kernel learns to group commands. |
+| S5 | A Lua or Python error is shown in the console with its line; it does not make the feature fail. |
+| S6 | Native code a script loads runs inside the editor and can end its process: a crash there is not an error that can be caught. Lua scripts cannot load C modules. Python scripts may import compiled packages placed by the user; this risk is accepted, and running Python in a separate process remains possible later. |
+| S7 | Scripts have full access to the machine, like editor scripts in Unity: a script received from someone else is read before it is run. |
+| S8 | Each language stays optional: without `scripting-python.dll`, or without the Python files, the editor starts with Lua only, and the other way round. In particular the runtime must not require the Python DLL to start. |
+
+Risks to verify first, before any other work on scripting: the runtime's exported symbol count with PyO3 and mlua inside it; starting the editor without the Python DLL while PyO3 is part of the runtime (delayed loading of the DLL); the embeddable Python distribution beside the executable.
+
 ---
 
 ## 8. Repository layout
@@ -353,3 +375,5 @@ reports the count and fails from 50,000; the runtime would then have to be split
 - Project model: what a project contains, where it is stored, how it maps to a WoW-mods module.
 - Installations targeted: client with WXL, server, database connection.
 - Order of the features after milestone 1.
+- Lua version for scripting: 5.1, the dialect of the 3.3.5 client and of ALE scripts, or a later one.
+- Python version shipped, and where scripts and their packages are stored.
