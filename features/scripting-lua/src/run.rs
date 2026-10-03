@@ -118,20 +118,35 @@ fn execute(source: &Source, editor: &Editor, cancelled: &Arc<AtomicBool>, output
             Source::Console(line) => format!("Lua console: {}", shorten(line)),
         })
         .map_err(mlua::Error::runtime)?;
-    let result = match source {
+    // Ends the run however it ends: normally, by an error returned with `?`, or by a panic.
+    let _end = RunEnd {
+        editor,
+        subscriptions: subscriptions.clone(),
+    };
+    match source {
         Source::Script { name, text } => match loading::load_text(&lua, text, &format!("@{name}"))? {
             Ok(function) => function.call::<()>(()),
             Err(message) => Err(mlua::Error::runtime(message)),
         },
         Source::Console(line) => evaluate(&lua, line, output),
-    };
-    // Refused only when the feature failed meanwhile: its groups are already closed then.
-    let _ = editor.end_group();
-    // The subscriptions a run leaves open end with it.
-    for subscription in subscriptions.borrow().iter() {
-        editor.unsubscribe(*subscription);
     }
-    result
+}
+
+/// The end of a run, done when it is dropped: its undo group ends and the subscriptions it left
+/// open close.
+struct RunEnd<'a> {
+    editor: &'a Editor,
+    subscriptions: Rc<RefCell<HashSet<u64>>>,
+}
+
+impl Drop for RunEnd<'_> {
+    fn drop(&mut self) {
+        // Refused only when the feature failed meanwhile: its groups are already closed then.
+        let _ = self.editor.end_group();
+        for subscription in self.subscriptions.borrow().iter() {
+            self.editor.unsubscribe(*subscription);
+        }
+    }
 }
 
 fn evaluate(lua: &Lua, line: &str, output: &Output) -> mlua::Result<()> {
@@ -550,6 +565,16 @@ mod tests {
             printed.contains(&"from source\t2".to_owned()),
             "source text still loads"
         );
+    }
+
+    #[test]
+    fn a_run_ends_its_group_and_subscriptions_even_on_an_error() {
+        let (calls, _) = execute(
+            script(r#"uniwow.subscribe("demo") error("on purpose")"#),
+            Arc::default(),
+        );
+        let ended = calls.iter().position(|c| c.starts_with("end ")).expect("end_group");
+        assert!(calls[ended..].contains(&"unsubscribe 7".to_owned()), "{calls:?}");
     }
 
     #[test]

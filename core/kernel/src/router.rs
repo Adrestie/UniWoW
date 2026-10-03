@@ -61,6 +61,8 @@ pub fn feature_of(caller: &str) -> &str {
 }
 
 struct Subscription {
+    /// Who subscribed: its subscriptions close when its feature fails.
+    caller: String,
     topic: String,
     sender: mpsc::Sender<Event>,
     receiver: Arc<Mutex<mpsc::Receiver<Event>>>,
@@ -115,6 +117,15 @@ impl Bridge {
                 let _ = subscription.sender.send(event.clone());
             }
         }
+    }
+
+    /// Closes the subscriptions of a feature that failed. Their channels close with them: a thread
+    /// waiting in `next_event` wakes at once with an error, and nothing more piles up there.
+    pub fn close_subscriptions(&self, feature: &str) {
+        self.subscriptions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, subscription| feature_of(&subscription.caller) != feature);
     }
 
     /// Refuses a caller whose feature no longer runs: its scripts, jobs and module threads get
@@ -239,6 +250,7 @@ impl EditorBackend for Bridge {
         let id = self.next_subscription.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel();
         let subscription = Subscription {
+            caller: caller.to_owned(),
             topic: topic.to_owned(),
             sender,
             receiver: Arc::new(Mutex::new(receiver)),
@@ -252,7 +264,7 @@ impl EditorBackend for Bridge {
 
     fn next_event(&self, caller: &str, subscription: u64, timeout: Duration) -> Result<Option<Event>, String> {
         self.active(caller)?;
-        let unknown = || format!("unknown subscription {subscription}: never opened, or closed");
+        let unknown = || format!("subscription {subscription} does not exist, was closed, or its feature stopped");
         // The map is released before waiting, so that other threads can publish meanwhile.
         let receiver = self
             .subscriptions
@@ -522,6 +534,39 @@ mod tests {
             "a closed subscription is an error, not a timeout"
         );
         assert!(topic(42).is_err(), "so is an unknown one");
+    }
+
+    #[test]
+    fn the_subscriptions_of_a_failed_feature_close_and_wake_their_reader() {
+        let (bridge, _receiver) = bridge();
+        bridge.running.write().unwrap().insert("lua".to_owned());
+        let script = bridge.subscribe("lua#events.lua #1", "*").unwrap();
+        let cube = bridge.subscribe("cube", "*").unwrap();
+        let reader = {
+            let bridge = bridge.clone();
+            std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                let next = bridge.next_event("lua#events.lua #1", script, Duration::from_secs(10));
+                (next.map(|e| e.is_some()), started.elapsed())
+            })
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        bridge.close_subscriptions("lua");
+        let (next, waited) = reader.join().unwrap();
+        assert!(next.is_err(), "the reader gets an error");
+        assert!(waited < Duration::from_secs(2), "at once, not after its timeout");
+        // Events go on reaching the other features' subscriptions only.
+        bridge.deliver(&uniwow_api::Event {
+            topic: "any".to_owned(),
+            source: "cube".to_owned(),
+            payload: json!({}),
+        });
+        assert!(
+            bridge
+                .next_event("cube", cube, Duration::from_millis(50))
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
