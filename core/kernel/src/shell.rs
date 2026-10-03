@@ -10,7 +10,7 @@ use uniwow_api::{
 };
 
 use crate::guard::{guarded, guarded_as};
-use crate::history::{History, Step};
+use crate::history::History;
 use crate::host::{KernelHost, Service};
 use crate::layout::{self, PanelEntry, Tab};
 use crate::loader::{self, Slot, State};
@@ -195,7 +195,7 @@ impl Shell {
                 continue;
             }
             if let Err(message) = call_feature(&mut self.slots[index], &mut self.host, |f, ctx| f.init(ctx)) {
-                fail(&mut self.slots, &mut self.host, index, format!("init: {message}"));
+                self.fail(index, format!("init: {message}"));
             }
             self.apply_pending();
             self.apply_reported();
@@ -262,12 +262,7 @@ impl Shell {
                 Ok(()) => self.history.push(owner, command),
                 Err(message) => {
                     let label = command.label();
-                    fail(
-                        &mut self.slots,
-                        &mut self.host,
-                        index,
-                        format!("command '{label}': {message}"),
-                    );
+                    self.fail(index, format!("command '{label}': {message}"));
                 }
             }
         }
@@ -280,18 +275,15 @@ impl Shell {
                 continue;
             };
             let message = format!("reported by '{}': {}", reported.reporter, reported.message);
-            fail(&mut self.slots, &mut self.host, index, message);
+            self.fail(index, message);
         }
     }
 
-    /// Reverts the last command. An entry whose feature is not running stays where it is: the
-    /// Edit menu shows why it cannot be undone.
+    /// Reverts the last command. If the revert fails, the feature fails and its entries leave the
+    /// history, this one included.
     fn undo(&mut self) {
         let running = self.running_ids();
         let Some(mut entry) = self.history.take_undo(|id| running.contains(id)) else {
-            if let Step::Blocked(reason) = self.history.undo_step(|id| running.contains(id)) {
-                log::warn!("cannot undo: {reason}");
-            }
             return;
         };
         let index = self.running_index(&entry.owner).expect("taken only when running");
@@ -301,19 +293,13 @@ impl Shell {
             .expect("running features are loaded");
         match guarded_as(&entry.owner, || entry.command.revert(feature)) {
             Ok(()) => self.history.undone.push(entry),
-            Err(message) => {
-                self.history.done.push(entry);
-                fail(&mut self.slots, &mut self.host, index, format!("undo: {message}"));
-            }
+            Err(message) => self.fail(index, format!("undo of '{}': {message}", entry.command.label())),
         }
     }
 
     fn redo(&mut self) {
         let running = self.running_ids();
         let Some(mut entry) = self.history.take_redo(|id| running.contains(id)) else {
-            if let Step::Blocked(reason) = self.history.redo_step(|id| running.contains(id)) {
-                log::warn!("cannot redo: {reason}");
-            }
             return;
         };
         let index = self.running_index(&entry.owner).expect("taken only when running");
@@ -323,11 +309,24 @@ impl Shell {
             .expect("running features are loaded");
         match guarded_as(&entry.owner, || entry.command.apply(feature)) {
             Ok(()) => self.history.done.push(entry),
-            Err(message) => {
-                self.history.undone.push(entry);
-                fail(&mut self.slots, &mut self.host, index, format!("redo: {message}"));
-            }
+            Err(message) => self.fail(index, format!("redo of '{}': {message}", entry.command.label())),
         }
+    }
+
+    /// Disables a feature that failed, withdraws its services, drops its history entries and
+    /// tells the others.
+    fn fail(&mut self, index: usize, message: String) {
+        let slot = &mut self.slots[index];
+        log::error!("feature '{}' failed: {message}", slot.id);
+        slot.state = State::Failed(message);
+        let id = slot.id.clone();
+        self.host.services.retain(|_, s| s.provider != id);
+        let purged = self.history.purge(&id);
+        if purged > 0 {
+            log::warn!("{purged} changes of '{id}' can no longer be undone");
+        }
+        self.host
+            .publish(KERNEL, FEATURE_FAILED_TOPIC, serde_json::json!({ "id": id }));
     }
 
     fn running_ids(&self) -> HashSet<String> {
@@ -350,12 +349,7 @@ impl Shell {
                     call_feature(&mut self.slots[index], &mut self.host, |f, ctx| f.on_event(&event, ctx))
                 {
                     let topic = &event.topic;
-                    fail(
-                        &mut self.slots,
-                        &mut self.host,
-                        index,
-                        format!("event '{topic}': {message}"),
-                    );
+                    self.fail(index, format!("event '{topic}': {message}"));
                 }
             }
         }
@@ -404,13 +398,10 @@ impl Shell {
                 self.feature_items(ui, "File", &mut actions);
             });
             ui.menu_button("Edit", |ui| {
-                let running = |id: &str| self.running_index(id).is_some();
-                let undo = self.history.undo_step(running);
-                if history_button(ui, "Undo", "Ctrl+Z", &undo) {
+                if history_button(ui, "Undo", "Ctrl+Z", self.history.undo_label()) {
                     actions.push(MenuAction::Undo);
                 }
-                let redo = self.history.redo_step(running);
-                if history_button(ui, "Redo", "Ctrl+Y", &redo) {
+                if history_button(ui, "Redo", "Ctrl+Y", self.history.redo_label()) {
                     actions.push(MenuAction::Redo);
                 }
                 self.feature_items(ui, "Edit", &mut actions);
@@ -516,7 +507,7 @@ impl eframe::App for Shell {
         }
 
         for (index, message) in failures {
-            fail(&mut self.slots, &mut self.host, index, message);
+            self.fail(index, message);
         }
         for tab in closed {
             self.host.settings.closed_panels.insert(tab.key());
@@ -546,12 +537,7 @@ impl eframe::App for Shell {
                         && let Err(message) =
                             call_feature(&mut self.slots[index], &mut self.host, |f, ctx| f.on_menu(&action, ctx))
                     {
-                        fail(
-                            &mut self.slots,
-                            &mut self.host,
-                            index,
-                            format!("menu '{action}': {message}"),
-                        );
+                        self.fail(index, format!("menu '{action}': {message}"));
                     }
                 }
             }
@@ -728,18 +714,12 @@ fn log_panel(ui: &mut egui::Ui) {
 }
 
 /// An Undo or Redo entry of the Edit menu; returns whether it was clicked.
-fn history_button(ui: &mut egui::Ui, verb: &str, shortcut: &str, step: &Step) -> bool {
-    let (text, enabled) = match step {
-        Step::Nothing => (verb.to_owned(), false),
-        Step::Ready(label) => (format!("{verb} {label}"), true),
-        Step::Blocked(_) => (format!("{verb} (blocked)"), false),
-    };
-    let response = ui.add_enabled(enabled, egui::Button::new(text).shortcut_text(shortcut));
-    if let Step::Blocked(reason) = step {
-        response.on_disabled_hover_text(reason.as_str());
-        return false;
-    }
-    response.clicked()
+fn history_button(ui: &mut egui::Ui, verb: &str, shortcut: &str, label: Option<String>) -> bool {
+    let text = label
+        .as_ref()
+        .map_or_else(|| verb.to_owned(), |label| format!("{verb} {label}"));
+    ui.add_enabled(label.is_some(), egui::Button::new(text).shortcut_text(shortcut))
+        .clicked()
 }
 
 /// Calls the feature of `slot` with a context, catching panics.
@@ -752,15 +732,6 @@ fn call_feature<R>(
     let feature = feature.as_deref_mut().expect("running features are loaded");
     let mut ctx = Context::new(host, id);
     guarded_as(id, || f(feature, &mut ctx))
-}
-
-/// Disables a feature that failed, withdraws its services and tells the others.
-fn fail(slots: &mut [Slot], host: &mut KernelHost, index: usize, message: String) {
-    let slot = &mut slots[index];
-    log::error!("feature '{}' failed: {message}", slot.id);
-    slot.state = State::Failed(message);
-    host.services.retain(|_, s| s.provider != slot.id);
-    host.publish(KERNEL, FEATURE_FAILED_TOPIC, serde_json::json!({ "id": slot.id }));
 }
 
 fn state_text(state: &State) -> String {

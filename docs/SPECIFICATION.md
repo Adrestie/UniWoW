@@ -188,7 +188,7 @@ the same runtime.
 | Shell | Main window, menus, dockable layout (egui_dock), layouts saved per user. Panels of absent features leave the layout; a returning panel rejoins its area, or the default layout is rebuilt when its whole area had disappeared |
 | Feature loader | Section 4 |
 | Features panel | Lists features, version, state, refusal or failure reason; enable or disable |
-| Commands and history | Undo, redo, unsaved-changes tracking. An entry whose feature is not running is kept; Undo or Redo is then disabled, with the reason |
+| Commands and history | Undo, redo, unsaved-changes tracking. When a feature fails, all its entries leave the history, done and undone, with a warning in the log; the others stay valid since a command only changes its own feature's state (F3) |
 | Events | Publish and subscribe, typed by serialisation: the topic is a string and the payload JSON, written with `Context::publish_as` and read with `Event::decode` into a type each feature declares on its own side. No Rust type is shared between features |
 | Services | Registry of interface implementations provided by features |
 | Selection | Current selection, any type |
