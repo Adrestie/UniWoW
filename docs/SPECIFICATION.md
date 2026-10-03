@@ -1,6 +1,6 @@
-# UniWoW — Architecture and feature catalogue
+# UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 3 built and validated; milestone 4 proposed. Open questions in section 10.
+Status: **validated**. Milestones 1 to 3 built and validated; milestones 4 to 7 proposed, for the model of modules of section 3. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -8,85 +8,116 @@ scripts, packaging. Written in Rust, user interface with egui, 3D rendering with
 
 Players are expected to run the client with WarcraftXL (WXL).
 
+**Vocabulary.** The **core** is what UniWoW cannot work without: the executable, the runtime and
+the kernel (loading, undo and redo, saving, the interface, the log, the commands, the threads).
+Everything else is a **module**: one functionality, such as the 3D view or a timeline. A module is
+written in Rust in this project, or compiled by its author as a DLL from C, C++, C# or any language
+able to export a C function, or written in Lua or Python. A **script** is a one-off task in Lua or
+Python, run from the panel of its language, whose **console** also runs commands on the fly.
+Milestones 1 to 3 (section 9) were written with earlier words: a *feature* was a Rust module, a
+*native module* a compiled module.
+
 ---
 
 ## 1. Modularity requirements
 
 | Id | Requirement |
 |---|---|
-| R1 | Every feature is separate from the core. The core contains no code specific to any feature and never names one. |
-| R2 | Every feature is a DLL. The core detects the feature DLLs present at start and loads them. |
-| R3 | A feature can be added, rebuilt or removed without recompiling the editor. |
-| R4 | Removing a feature's DLL leaves the editor starting and working without it. Example: without the viewport DLL, the editor starts without any 3D window; without the terrain DLL, the 3D window shows no terrain. |
-| R5 | Adding a feature is simple: one command creates it, one command builds it. |
-| R6 | A feature that fails, or that was built for another version of the core, is refused or disabled and reported; the editor keeps running. |
+| R1 | Every module is separate from the core. The core contains no code specific to any module and never names one. |
+| R2 | Every module has its own folder and manifest. The core detects the modules present at start and loads them: Rust and compiled modules are DLLs, Lua and Python modules are source files run by the module of their language. |
+| R3 | A module can be added, rebuilt or removed without recompiling the editor. |
+| R4 | Removing a module's folder leaves the editor starting and working without it. Example: without the viewport module, the editor starts without any 3D window; without the terrain module, the 3D window shows no terrain. |
+| R5 | Adding a module is simple: one command creates it, one command builds it. |
+| R6 | A module that fails, or that was built for another version of the core, is refused or disabled and reported; the editor keeps running. |
 | R7 | Speed: the editor uses every processor core. Long or heavy work (reading archives, parsing files, building meshes, extraction, database queries) never runs on the interface thread. |
-| R8 | Features, scripts and native modules may use threads themselves, through what the kernel offers (section 5, threads). |
+| R8 | Modules and scripts may use threads themselves, through what the kernel offers (section 5, threads). |
 
 ---
 
 ## 2. Layers
 
 ```
-app            small executable: loads the runtime, then the features
-core/api       contracts offered to features (traits, extension points, entry point macro)
-core/kernel    feature loader and core services (section 5)
+app            small executable: loads the runtime, then the modules
+core/api       contracts offered to modules (traits, extension points, entry point macro)
+core/kernel    module loader and core services (section 5)
 libs/*         shared libraries without user interface (section 6)
-features/*     one crate per feature, built as one DLL (section 7)
+modules/*      one crate per Rust module, built as one DLL (section 7)
+examples/*     sample modules in C++, C#, Lua and Python, built and installed as an author would
 client-bridge  C++ WXL module running inside the client (outside the Cargo workspace)
-xtask          developer commands: new-feature, build, build-feature, run, check
+xtask          developer commands: new-module, build, build-module, run, check
 ```
 
-Crates are prefixed `uniwow-` (`uniwow-api`, `uniwow-kernel`, `uniwow-feature-<id>`…).
+Crates are prefixed `uniwow-` (`uniwow-api`, `uniwow-kernel`, `uniwow-module-<id>`…).
 
 `core/api`, `libs/*` and the shared dependencies (egui, wgpu…) are built into one shared DLL,
 `uniwow_api.dll`; the Rust standard library is shared as `std-<hash>.dll`. Together they are the
-**runtime**. Every feature DLL links to the runtime, so each of these exists once in memory.
-`core/kernel` is linked into the executable: features never link to it, so changing the kernel
+**runtime**. Every Rust module links to the runtime, so each of these exists once in memory.
+`core/kernel` is linked into the executable: modules never link to it, so changing the kernel
 does not affect them.
 
 Allowed dependencies (enforced by `xtask check`):
 
 | Layer | May depend on |
 |---|---|
-| features/* | core/api, libs/* |
+| modules/* | core/api, libs/* |
 | core/kernel | core/api, libs/* |
 | core/api | libs/* (types only) |
 | libs/* | other libs/* |
 
-A feature never depends on another feature, nor on `core/kernel`. A library never depends on
-the core or on a feature.
+A module never depends on another module, nor on `core/kernel`. A library never depends on
+the core or on a module.
 
-A feature depends on nothing else, not even through dev or build dependencies: enabling an option
+A Rust module depends on nothing else, not even through dev or build dependencies: enabling an option
 of a crate the runtime also uses makes Cargo rebuild the runtime, which changes its fingerprint and
-makes every feature incompatible. A crate a feature needs is added to the runtime (`core/api` or
+makes every module incompatible. A crate a module needs is added to the runtime (`core/api` or
 `libs/*`). `cargo xtask check` names any other dependency.
 
 Every crate of `libs/*` is a normal dependency of `uniwow-api`, so that it is compiled once, into
-the runtime: a feature using it receives it through `uniwow_api.dll`, without its own copy of the
+the runtime: a module using it receives it through `uniwow_api.dll`, without its own copy of the
 code or of its global state, and the library's own dependencies are those of the runtime.
-`cargo xtask check` refuses a library that `uniwow-api` does not include, whether a feature uses
+`cargo xtask check` refuses a library that `uniwow-api` does not include, whether a module uses
 it or not.
 
 ---
 
-## 3. Feature contract
+## 3. Module contract
 
-A feature is one Rust crate in `features/<id>/` (crate type `cdylib`), deployed as `<id>.dll`.
+Every module has a folder `modules\<id>\` beside the executable, with a manifest `module.toml`:
+id, name, version, category, description, kind, the services it requires or uses, and what its
+kind needs (its DLL and the DLL's hash, the runtime fingerprint, its entry file).
+
+| Kind | Written as | Loaded by | Panels |
+|---|---|---|---|
+| Rust | A crate of this project, in `modules/<id>/` | The kernel, against the runtime fingerprint | Drawn with egui |
+| Compiled | A DLL exporting the C entry point of `uniwow.h` (S10), from C, C++, C# compiled with NativeAOT, or any language able to export a C function; added by its author | The kernel, through the C interface | Described |
+| Lua, Python | Source files, loaded at start, keeping their state while the editor runs | The module of their language (`scripting-lua`, `scripting-python`), which hosts them | Described |
+
+Every kind offers named commands, publishes and receives events, has settings, records undoable
+changes and has panels. A **described panel** is set out by its module from any thread: widgets
+with their values, and drawing areas of lines, rectangles and text, for a timeline for instance.
+The core draws it at every frame without calling the module, and sends clicks, drags and edits back
+to the module as events: the interface thread never waits for a module's code (T1, T6).
+
+Rules F1 to F6 apply to every kind. The rest of this section is the contract of Rust modules;
+section 7 gives that of the others (S1 to S10).
+
+### Rust modules
+
+A Rust module is one crate in `modules/<id>/` (crate type `cdylib`), deployed as `<id>.dll`.
 
 What describes it is declared in its `Cargo.toml`, not in code: id, display name, category, and
 the services it **requires** (cannot work without) or **uses** (when present) under
 `[package.metadata.uniwow]`; version and description under `[package]`. `cargo xtask build`
-copies them into `feature.toml`, which the kernel reads before loading the DLL.
+copies them into `module.toml`, which the kernel reads before loading the DLL.
 
-Its behaviour is one type implementing the `Feature` trait of `core/api`, exported by an entry
+Its behaviour is one type implementing the `Module` trait of `core/api`, exported by an entry
 point macro:
 
-- **register**: declares what the feature contributes (list below). Called once at load.
+- **register**: declares what the module contributes (list below). Called once at load.
 - **init / shutdown**: start and stop, with access to core services.
 - **panel_ui, on_event, on_menu**: draw its panels, receive its events, handle its menu items.
 
-Extension points a feature may contribute to:
+Extension points a module may contribute to:
 
 | Extension point | Example |
 |---|---|
@@ -99,24 +130,24 @@ Extension points a feature may contribute to:
 | Services implementing an interface defined in core/api, under a typed `ServiceKey<T>` declared beside the interface, used both to provide and to ask, so that a type mismatch does not compile | "viewport", "creature lookup" |
 | Viewport layers, through the viewport service | terrain, cube; each layer records into its own render bundle |
 | Event subscriptions | "project saved", "tile changed" |
-| Project data section owned by the feature | spawn edits not yet deployed |
+| Project data section owned by the module | spawn edits not yet deployed |
 
 Rules:
 
 | Id | Rule |
 |---|---|
-| F1 | A feature talks to another only through the core: commands, events, services by interface. Example: the quest editor issues "open creature 1234"; the feature registered for creatures handles it. If no such feature is loaded, the link is shown disabled. |
+| F1 | A module talks to another only through the core: commands, events, services by interface. Example: the quest editor issues "open creature 1234"; the module registered for creatures handles it. If no such module is loaded, the link is shown disabled. |
 | F2 | Every modification goes through an undoable command (single undo history). |
-| F3 | A feature owns its project data section and its settings; no other feature reads them directly. |
-| F4 | A missing required service: the feature is not loaded and the reason is shown. A missing used service: the feature loads without the parts that need it. A feature that fails withdraws its services; requirements are checked again just before each `init`, so a feature whose provider failed meanwhile is not initialised. |
-| F5 | A feature that runs code on behalf of another, such as the viewport drawing a layer, catches its failures and reports the culprit with `Context::report_failure`. The kernel disables the culprit as if it had panicked, naming the reporter. |
-| F6 | Every action a feature offers to others is a named command. The kernel keeps their catalogue and routes the calls; the same catalogue serves the features, the scripts and native modules (S1). A feature may also offer commands on behalf of others, such as modules or scripts: they are delegated. Once every feature has registered, a name declared twice keeps the command a feature declares itself over a delegated one, and the first registered between two of the same kind; each one set aside is logged with the one that wins. |
+| F3 | A module owns its project data section and its settings; no other module reads them directly. |
+| F4 | A missing required service: the module is not loaded and the reason is shown. A missing used service: the module loads without the parts that need it. A module that fails withdraws its services; requirements are checked again just before each `init`, so a module whose provider failed meanwhile is not initialised. |
+| F5 | A module that runs code on behalf of another, such as the viewport drawing a layer, catches its failures and reports the culprit with `Context::report_failure`. The kernel disables the culprit as if it had panicked, naming the reporter. |
+| F6 | Every action a module offers to others is a named command. The kernel keeps their catalogue and routes the calls; the same catalogue serves every module and script (S1). A Rust module declares its commands itself; those of compiled, Lua and Python modules are declared on their behalf, by the kernel or by the module of their language: they are delegated. Once every module has registered, a name declared twice keeps the command declared directly over a delegated one, and the first registered between two of the same kind; each one set aside is logged with the one that wins. |
 
 ---
 
 ## 4. Discovery and loading
 
-### Retained mechanism: one DLL per feature, loaded at start
+### Retained mechanism: one folder per module, loaded at start
 
 Output layout:
 
@@ -124,77 +155,82 @@ Output layout:
 UniWoW.exe
 uniwow_api.dll                 runtime: core/api, libs, egui, wgpu
 std-<hash>.dll                 Rust standard library
-features\<id>\<id>.dll
-features\<id>\feature.toml     generated at build: id, name, version, runtime fingerprint
+modules\<id>\module.toml       manifest: id, name, version, kind, runtime fingerprint for a Rust module
+modules\<id>\<id>.dll          a Rust or compiled module
+modules\<id>\*.lua, *.py       a Lua or Python module
+scripts\<language>-<version>\<tool>\
+interpreters\python-3.xx\
 ```
 
 At start, the kernel:
 
-1. Scans `features\*\feature.toml`. A folder without a manifest or without its DLL is ignored
-   and listed.
-2. Compares each manifest's **runtime fingerprint** with its own. The fingerprint identifies
-   the compiler version and the runtime build. A mismatch refuses the feature with the reason
-   ("built for another runtime, rebuild it") instead of loading it.
-3. Copies each accepted DLL to a temporary folder and loads the copy, so that a feature can be
+1. Scans `modules\*\module.toml`. A folder without a manifest, or without what its kind needs, is
+   ignored and listed.
+2. Compares the **runtime fingerprint** of each Rust module with its own. The fingerprint
+   identifies the compiler version and the runtime build. A mismatch refuses the module with the
+   reason ("built for another runtime, rebuild it") instead of loading it. A compiled module is
+   checked against the version of `uniwow.h` (S10). A Lua or Python module is handed to the module
+   of its language; without it, it is refused with the reason.
+3. Copies each accepted DLL to a temporary folder and loads the copy, so that a module can be
    rebuilt while the editor is open.
 4. Calls the entry point, checks required services, orders initialization so that service
    providers start before their consumers, collects contributions, then calls `init`.
 5. Catches any failure (error or panic) in `register`, `init` or while drawing a panel: that
-   feature is disabled and reported in the Features panel and the log (R6).
+   module is disabled and reported in the Modules panel and the log (R6).
 
-Enabling or disabling a feature from the Features panel takes effect at the next start. A
-loaded feature is never unloaded while the editor runs. Until the project model exists, this
+Enabling or disabling a module from the Modules panel takes effect at the next start. A
+loaded module is never unloaded while the editor runs. Until the project model exists, this
 choice and the panel layout are stored per user, in `%APPDATA%\UniWoW\settings.json`.
 
 Developer commands:
 
 ```
-cargo xtask new-feature <id>     creates features/<id>/ from a template (one empty panel)
-cargo xtask build-feature <id>   builds that feature only, against the current runtime
-cargo xtask build                builds the runtime, the executable and every feature
+cargo xtask new-module <id>      creates the Rust module modules/<id>/ from a template (one empty panel)
+cargo xtask build-module <id>    builds that Rust module only, against the current runtime
+cargo xtask build                builds the runtime, the executable, every Rust module and the examples
 cargo xtask run                  builds what changed, then starts the editor
 ```
 
 | Change | Rebuild |
 |---|---|
-| Code of one feature | That feature only (`build-feature`) |
-| New feature | That feature only |
-| `core/kernel` or `app` | The executable only; features stay compatible, as long as the change enables no option of a crate the runtime uses (below) |
-| `core/api`, `libs/*`, shared dependency versions or compiler | Runtime and every feature (`build`), because the fingerprint changes |
+| Code of one module | That module only (`build-module`) |
+| New module | That module only |
+| `core/kernel` or `app` | The executable only; modules stay compatible, as long as the change enables no option of a crate the runtime uses (below) |
+| `core/api`, `libs/*`, shared dependency versions or compiler | Runtime and every module (`build`), because the fingerprint changes |
 
 The kernel and the app are built in the same `cargo build --workspace` as the runtime, and Cargo
 merges the options each package asks of a shared crate. If the kernel or the app enabled an option
-of a crate the runtime also uses, the runtime would be rebuilt and every feature refused.
+of a crate the runtime also uses, the runtime would be rebuilt and every module refused.
 `cargo xtask check` reads the resolved dependency graph and refuses a direct dependency of
 `core/kernel` or `app` on a crate of the runtime's dependency tree, naming it; such a crate is
 reached through `uniwow-api` instead. A crate reached only through another dependency is not seen
-by the check: `build-feature` then detects the changed runtime and asks for a full build.
+by the check: `build-module` then detects the changed runtime and asks for a full build.
 
 The fingerprint is the BLAKE3 hash of `uniwow_api.dll`. The MSVC linker runs with `/Brepro`,
 which removes the link date and makes the PDB identifier depend on the content: relinking
 unchanged code gives the same DLL, hence the same fingerprint (checked by rebuilding the runtime
 after `cargo clean -p uniwow-api`, and after touching one of its sources without changing it).
-A real change of the runtime still asks for every feature to be rebuilt; `cargo xtask build` does it.
+A real change of the runtime still asks for every module to be rebuilt; `cargo xtask build` does it.
 
-`build-feature` compiles the whole workspace, not the feature alone, so that Cargo merges the
+`build-module` compiles the whole workspace, not the module alone, so that Cargo merges the
 options of shared crates exactly as `build` does and leaves the runtime untouched. A compilation
-error in another feature therefore blocks it too.
+error in another module therefore blocks it too.
 
 ### Constraint accepted with this choice
 
-Rust has no stable binary interface between separately compiled DLLs. Feature DLLs are
+Rust has no stable binary interface between separately compiled DLLs. Rust modules are
 therefore only compatible with the runtime they were built against, with the same compiler.
 The fingerprint (step 2) turns an incompatibility into a refusal with a message instead of a
-crash. A feature DLL taken from another machine works only if built with the same compiler and
+crash. A Rust module taken from another machine works only if built with the same compiler and
 the same runtime.
 
 ### Alternatives not retained
 
 | Alternative | Reason |
 |---|---|
-| Features compiled into the editor | Adding or removing a feature requires recompiling the editor (R3). |
-| Stable C interface between DLLs (abi_stable, stabby) | egui and wgpu types cannot cross it: features could not draw their own panels or 3D. |
-| One process per feature | Sharing the 3D view and the panels between processes is too heavy. |
+| Modules compiled into the editor | Adding or removing a module requires recompiling the editor (R3). |
+| A stable C interface for every module (abi_stable, stabby) | egui and wgpu types cannot cross it: Rust modules keep the Rust interface, with egui and wgpu. Compiled modules use the C interface, with described panels and no 3D drawing. |
+| One process per module | Sharing the 3D view and the panels between processes is too heavy. |
 
 ---
 
@@ -202,32 +238,32 @@ the same runtime.
 
 | Service | Role |
 |---|---|
-| Shell | Main window, menus, dockable layout (egui_dock), layouts saved per user. Panels of absent features leave the layout; a returning panel rejoins its area, or the default layout is rebuilt when its whole area had disappeared |
-| Feature loader | Section 4 |
-| Features panel | Lists features, version, state, refusal or failure reason; enable or disable |
-| Commands and history | Undo, redo, unsaved-changes tracking. When a feature fails, all its entries leave the history, done and undone, with a warning in the log; the others stay valid since a command only changes its own feature's state (F3) |
-| Events | Publish and subscribe, typed by serialisation: the topic is a string and the payload JSON, written with `Context::publish_as` and read with `Event::decode` into a type each feature declares on its own side. No Rust type is shared between features. Events may be published from any thread; they are delivered on the interface thread |
-| Services | Registry of interface implementations provided by features |
+| Shell | Main window, menus, dockable layout (egui_dock), layouts saved per user. Panels of absent modules leave the layout; a returning panel rejoins its area, or the default layout is rebuilt when its whole area had disappeared |
+| Module loader | Section 4 |
+| Modules panel | Lists the modules, their kind, version, state, refusal or failure reason, and their commands; enable or disable |
+| Commands and history | Undo, redo, unsaved-changes tracking. When a module fails, all its entries leave the history, done and undone, with a warning in the log; the others stay valid since a command only changes its own module's state (F3) |
+| Events | Publish and subscribe, typed by serialisation: the topic is a string and the payload JSON, written with `Context::publish_as` and read with `Event::decode` into a type each module declares on its own side. No Rust type is shared between modules. Events may be published from any thread; they are delivered on the interface thread |
+| Services | Registry of interface implementations provided by modules |
 | Selection | Current selection, any type |
 | Project | Open, save; content defined in a later step |
-| Settings | Global, per project, per feature. Written atomically (temporary file, then rename), at most once per second and at exit |
+| Settings | Global, per project, per module. Written atomically (temporary file, then rename), at most once per second and at exit |
 | Jobs | Pool of worker threads, one per processor core: background jobs with progress and cancel (T2) |
-| Log | Log panel shared by all features. GPU errors captured by no feature are logged instead of stopping the editor |
+| Log | Log panel shared by all modules. GPU errors captured by no module are logged instead of stopping the editor |
 | Inspector host | Shows the selection with the inspector registered for its type |
 
-The 3D view is not a core service: it is the `viewport` feature (section 7).
+The 3D view is not a core service: it is the `viewport` module (section 7).
 
 Threads:
 
 | Id | Rule |
 |---|---|
-| T1 | The interface thread draws, applies the undoable commands and owns the state of each feature. It never waits for slow work. |
-| T2 | The kernel keeps a pool of worker threads, one per processor core, for computations. `Context::spawn` runs a job there, with progress and cancel; its result comes back to the feature on the interface thread. Work that waits, such as a script, runs with `Context::spawn_thread` on a thread of its own, so that waiting never holds a thread of the pool; it is otherwise a job like the others. A job of the pool never waits without a time limit, for instance in `next_event` without a timeout. A Jobs panel lists the jobs running. |
-| T3 | Service interfaces are shared between threads (`Send + Sync`, held in an `Arc`), so that jobs, scripts and native modules call them directly. An interface tied to the interface thread says so explicitly. |
-| T4 | Each named command declares where it runs: on the interface thread when it changes a feature's state (through an undoable command), or on the calling thread when it only reads or synchronises itself. The second kind answers at once, without waiting for a frame. |
+| T1 | The interface thread draws, applies the undoable commands and owns the state of each module. It never waits for slow work. |
+| T2 | The kernel keeps a pool of worker threads, one per processor core, for computations. `Context::spawn` runs a job there, with progress and cancel; its result comes back to the module on the interface thread. Work that waits, such as a script, runs with `Context::spawn_thread` on a thread of its own, so that waiting never holds a thread of the pool; it is otherwise a job like the others. A job of the pool never waits without a time limit, for instance in `next_event` without a timeout. A Jobs panel lists the jobs running. |
+| T3 | Service interfaces are shared between threads (`Send + Sync`, held in an `Arc`), so that jobs, scripts and compiled modules call them directly. An interface tied to the interface thread says so explicitly. |
+| T4 | Each named command declares where it runs: on the interface thread when it changes a module's state (through an undoable command), or on the calling thread when it only reads or synchronises itself. The second kind answers at once, without waiting for a frame. |
 | T5 | The GPU device and queue can be used from any thread: jobs create and upload buffers and textures; only drawing happens on the interface thread. |
 | T6 | Each run of a script has a named thread of its own (T2), never the interface thread. Each run of a Lua script has its own Lua state, so several run in parallel. Python scripts run on worker threads too, but standard CPython lets one thread at a time execute Python code (the GIL): their parallel work comes from the commands they call. |
-| T7 | Every function of the C interface can be called from any thread; native modules may create their own threads. |
+| T7 | Every function of the C interface can be called from any thread; compiled modules may create their own threads. |
 
 ---
 
@@ -238,7 +274,7 @@ Threads:
 | formats | Read and write MPQ, DBC, ADT, WDT, WDL, WMO, M2, BLP. Based on warcraft-rs (MIT/Apache) where its writing is verified, own code otherwise |
 | defs | DBC layouts for build 12340 (WoWDBDefs) |
 | vfs | Client archive chain in the 3.3.5a load order, plus the project's own files on top |
-| gpu | Generic GPU helpers on wgpu (device, shaders, buffers, camera math). Drawing of each kind of object belongs to the feature that owns it |
+| gpu | Generic GPU helpers on wgpu (device, shaders, buffers, camera math). Drawing of each kind of object belongs to the module that owns it |
 | db | MySQL access to the AzerothCore databases |
 | server-link | SOAP client, server process control |
 | client-link | Protocol with the WXL client module |
@@ -246,16 +282,16 @@ Threads:
 
 ---
 
-## 7. Feature catalogue
+## 7. Module catalogue
 
-Each line is one feature, one DLL. The list is open: new features are added through section 4
-without touching the core.
+Each line is one Rust module of this project. The list is open: new modules, of any kind, are
+added through section 4 without touching the core.
 
 ### World
 
-| Id | Feature |
+| Id | Module |
 |---|---|
-| viewport | 3D window: camera, picking, gizmos. Provides the "viewport" service to which the features below add their drawing and tools. Each layer records into its own render bundle, with the target's formats and sample count, inside a validation error scope; the viewport also catches the panic of `RenderBundleEncoder::finish`, which wgpu 30 raises on an invalid command instead of reporting it to the scope. A faulty layer is removed and its feature reported (F5); the grid and the other layers stay |
+| viewport | 3D window: camera, picking, gizmos. Provides the "viewport" service to which the modules below add their drawing and tools. Each layer records into its own render bundle, with the target's formats and sample count, inside a validation error scope; the viewport also catches the panic of `RenderBundleEncoder::finish`, which wgpu 30 raises on an invalid command instead of reporting it to the scope. A faulty layer is removed and its module reported (F5); the grid and the other layers stay |
 | maps | Map list (Map.dbc), WDT and WDL, create or duplicate a map, tile management, minimap tiles |
 | terrain | Draws terrain in the viewport; height sculpting, texture painting (layers, alpha maps), holes, vertex shading, area painting, chunk flags |
 | liquids | Draws and edits water, lava, slime: create, heights, types |
@@ -266,7 +302,7 @@ without touching the core.
 
 ### Data
 
-| Id | Feature |
+| Id | Module |
 |---|---|
 | dbc | Generic editor for every client DBC, links between tables. The client copy is the source of truth; the server copy is byte-identical |
 | world-db | Generic editor for the AzerothCore world tables, navigation along references |
@@ -280,7 +316,7 @@ without touching the core.
 
 ### Assets
 
-| Id | Feature |
+| Id | Module |
 |---|---|
 | assets | Browse the virtual file system (archives and project), search, preview |
 | textures | BLP view, PNG to BLP and back, format and size checks |
@@ -289,46 +325,45 @@ without touching the core.
 
 ### Interface and scripts
 
-| Id | Feature |
+| Id | Module |
 |---|---|
 | interface | Client interface files (FrameXML, GlueXML, addons, AIO): tree, open in an external editor, reload in the client |
 | scripts | ALE Lua scripts and C++ server modules: open in an external editor, build, errors in the log, reload or restart |
 
 ### Run
 
-| Id | Feature |
+| Id | Module |
 |---|---|
 | server | Start and stop authserver and worldserver, console, SOAP commands, server logs |
 | play | One action: server and client started or reused, automatic login on the admin account, character moved to the viewport camera, changes pushed live |
 
 ### Delivery
 
-| Id | Feature |
+| Id | Module |
 |---|---|
 | package | Build an installable WoW-mods module (installer.json): files in the right patch archive, DBC copied from client to server, install and uninstall SQL, id ranges checked |
 
-### Scripting and native modules
+### Scripting
 
-| Id | Feature |
+| Id | Module |
 |---|---|
-| scripting-lua | Lua 5.1, the dialect of the 3.3.5 client and of ALE scripts, compiled into the runtime (mlua): console panel, script runner, the `uniwow` module |
-| scripting-python | CPython, the latest stable version when the feature is built, with the official embeddable distribution of Windows in `interpreters\python-3.xx\`, embedded by a host DLL built apart (PyO3) that reaches the editor through `uniwow.h`: the same console, runner and `uniwow` module |
-| native-modules | Loads the compiled modules of `modules\`: DLLs written in C++, in C# compiled with NativeAOT, or in any language able to export a C function. Each receives the C interface (S1) |
+| scripting-lua | Lua 5.1, the dialect of the 3.3.5 client and of ALE scripts, compiled into the runtime (mlua): console panel, script runner, the `uniwow` module, and the host of Lua modules |
+| scripting-python | CPython, the latest stable version when the module is built, with the official embeddable distribution of Windows in `interpreters\python-3.xx\`, embedded by a host DLL built apart (PyO3) that reaches the editor through `uniwow.h`: the same console, runner and `uniwow` module, and the host of Python modules |
 
 Rules:
 
 | Id | Rule |
 |---|---|
-| S1 | One generic interface, the same for every language: list the named commands with their descriptions and schemas, call one by name, publish and receive events, read and write settings, log. Every value crosses it as JSON. It is defined once, independently of any language, and also offered as a C interface (`extern "C"` functions taking and returning UTF-8 JSON, header `uniwow.h`), so that compiled code reaches the same commands without depending on the Rust ABI. The Lua and Python `uniwow` modules only translate their values to and from JSON on top of this interface: they add no command of their own, so every language always has the same access. |
-| S2 | Named commands (F6) must exist in the kernel first: they are what scripts and native modules mostly call. |
-| S3 | Scripts never run on the interface thread (T6). A call that changes a feature's state is applied on the interface thread at the next frame; a call to a command running on the calling thread answers at once (T4). A running script can be stopped. |
-| S4 | Every change one run of a script makes forms a single undo entry. The kernel learns to group commands. A group belongs to one caller on one thread and can be nested; it closes at its outermost end, when the job that opened it ends, when its feature fails, or from the Edit menu. While an open group already holds a change, Undo and Redo are refused, greyed with the reason; a group that changed nothing yet, such as a script waiting for events, blocks nothing. Changes made by hand meanwhile enter the history on their own: when they touch what the script changes, their order relative to the group can be imprecise, and so is the undo order of two runs in parallel that change the same thing. Indirect changes are not grouped: a command triggered by an event a script publishes is applied when the event is delivered, outside the group. |
-| S5 | A Lua or Python error is shown in the console with its line; it does not make the feature fail. |
-| S6 | Native code runs inside the editor and can end its process: a crash there is not an error that can be caught. Lua scripts cannot load C modules, nor precompiled Lua chunks, which the bytecode checks of Lua 5.1 cannot keep from corrupting the memory: `string.dump` is removed, and every way of loading Lua code (scripts, console, `load`, `loadstring`, `loadfile`, `dofile`, `require`) accepts source text only. The compiled packages a Python script imports and the native modules carry this risk, which is accepted. |
-| S7 | Scripts and native modules have full access to the machine, like editor scripts in Unity: one received from someone else is checked before it is used. |
+| S1 | One generic interface, the same for every language: list the named commands with their descriptions and schemas, call one by name, publish and receive events, read and write settings, log, and, for modules, offer commands, set out described panels and record undoable changes. Every value crosses it as JSON. It is defined once, independently of any language, and also offered as a C interface (`extern "C"` functions taking and returning UTF-8 JSON, header `uniwow.h`), so that compiled code reaches the same commands without depending on the Rust ABI. The Lua and Python `uniwow` modules only translate their values to and from JSON on top of this interface: they add no command of their own, so every language always has the same access. |
+| S2 | Named commands (F6) must exist in the kernel first: they are what scripts and compiled modules mostly call. |
+| S3 | Scripts never run on the interface thread (T6). A call that changes a module's state is applied on the interface thread at the next frame; a call to a command running on the calling thread answers at once (T4). A running script can be stopped. |
+| S4 | Every change one run of a script makes forms a single undo entry. The kernel learns to group commands. A group belongs to one caller on one thread and can be nested; it closes at its outermost end, when the job that opened it ends, when its module fails, or from the Edit menu. While an open group already holds a change, Undo and Redo are refused, greyed with the reason; a group that changed nothing yet, such as a script waiting for events, blocks nothing. Changes made by hand meanwhile enter the history on their own: when they touch what the script changes, their order relative to the group can be imprecise, and so is the undo order of two runs in parallel that change the same thing. Indirect changes are not grouped: a command triggered by an event a script publishes is applied when the event is delivered, outside the group. |
+| S5 | A Lua or Python error is shown in the console with its line; it does not make the module fail. |
+| S6 | Compiled code runs inside the editor and can end its process: a crash there is not an error that can be caught. Lua scripts cannot load C modules, nor precompiled Lua chunks, which the bytecode checks of Lua 5.1 cannot keep from corrupting the memory: `string.dump` is removed, and every way of loading Lua code (scripts, console, `load`, `loadstring`, `loadfile`, `dofile`, `require`) accepts source text only. The compiled packages a Python script imports and the compiled modules carry this risk, which is accepted. |
+| S7 | Scripts and compiled modules have full access to the machine, like editor scripts in Unity: one received from someone else is checked before it is used. |
 | S8 | Each language stays optional: without `scripting-python.dll`, or without the Python files, the editor starts with Lua only, and the other way round. In particular the runtime must not require the Python DLL to start. |
-| S9 | One interpreter per language. Scripts are stored by language and version, then by tool: `scripts\lua-5.1\<tool>\<script>.lua`, `scripts\python-3.xx\<tool>\<script>.py`, the Python version being the one shipped. A script may also sit directly in the folder of its language. A script loads the other files of its tool. Native modules go in `modules\`. |
-| S10 | A native module exports one C entry point. It receives the table of functions of the C interface and returns its description (name, version, the version of `uniwow.h` it was built with) and the named commands it offers, implemented in its own language with the same JSON form. They join the catalogue as delegated commands of `native-modules` (F6): a feature's own command of the same name keeps its name, and the Modules panel shows the module's one as refused. |
+| S9 | One interpreter per language. Scripts are stored by language and version, then by tool: `scripts\lua-5.1\<tool>\<script>.lua`, `scripts\python-3.xx\<tool>\<script>.py`, the Python version being the one shipped. A script may also sit directly in the folder of its language. A script loads the other files of its tool. Every module has its folder in `modules\` (section 3). |
+| S10 | A compiled module is a folder `modules\<id>\` with its manifest and a DLL exporting one C entry point. It receives the table of functions of the C interface and returns its description (name, version, the version of `uniwow.h` it was built with) and the named commands it offers, implemented in its own language with the same JSON form. They join the catalogue as delegated commands (F6): a Rust module's command of the same name keeps its name, and the Modules panel shows the compiled module's one as refused. |
 
 Risks to verify first, before any other work on scripting: the runtime's exported symbol count with PyO3 and mlua inside it; starting the editor without the Python DLL while PyO3 is part of the runtime (delayed loading); the embeddable Python distribution beside the executable; a C++ module and a C# NativeAOT module calling the C interface from several threads. Verified for milestone 4: see section 9.
 
@@ -338,15 +373,16 @@ Risks to verify first, before any other work on scripting: the runtime's exporte
 
 ```
 E:\WoW-editor
-  Cargo.toml            workspace: app, core/*, libs/*, features/*, xtask
+  Cargo.toml            workspace: app, core/*, libs/*, modules/*, xtask
   app/
   core/api/
   core/kernel/
   libs/<name>/
-  features/<id>/
-  sdk/uniwow.h          the C interface of native modules (S1)
-  modules-src/<name>/   native modules built by `cargo xtask build` (C++, MSVC)
-  scripts/lua-5.1/      sample scripts, copied beside the executable
+  modules/<id>/         Rust modules
+  examples/modules/<id>/  sample modules in C++, C#, Lua and Python, built and installed by
+                        `cargo xtask build` as their author would
+  sdk/uniwow.h          the C interface of compiled modules (S1)
+  scripts/<language>-<version>/<tool>/  sample scripts, copied beside the executable
   client-bridge/        C++ (WXL SDK), own build
   xtask/
   docs/
@@ -525,78 +561,82 @@ As built:
   | `cube.color`, calling thread | 1.06 to 1.09 million | 3.6 million |
   | `cube.paint`, interface thread | 30,000 to 39,000 | 24,000 |
 
-### Milestone 4: Python and C# (proposed)
+### Milestone 4: modules of every kind (proposed)
 
-Python scripts with the same console, runner and `uniwow` module as Lua, and a sample native module
-in C# compiled with NativeAOT.
+The model of section 3 put in place with what exists: one folder and manifest per module, the
+words of the vocabulary, compiled modules loaded by the kernel, scripts by tool. Compiled, Lua and
+Python modules gain no new capability yet: panels and undo come with milestone 5.
+
+Content:
+
+- **Words**: everything named *feature* is named *module*: the `Module` trait and its entry point
+  macro, `modules/` in the repository and beside the executable, the crates `uniwow-module-<id>`,
+  `module.toml`, the Modules panel, `cargo xtask new-module` and `build-module`, the rules and the
+  messages. Settings saved under the former names are still read.
+- **One folder per module**: `modules\<id>\module.toml` gives its `kind`: `rust` for the modules
+  of this project, `compiled` for a compiled module, whose author writes the manifest (id, name,
+  version, kind, the name of the DLL) beside the DLL.
+- **Compiled modules loaded by the kernel**: what `native-modules` does (loading, the C interface
+  over an `Editor`, refusals with their reason) moves into the core, which declares their commands
+  on their behalf (delegated, F6). `native-modules` disappears: the Modules panel lists every
+  module with its kind, state and commands, refused ones with their reason, and a compiled module
+  is enabled or disabled there like any other.
+- **Examples**: the sample C++ module moves to `examples/modules/sample-cpp/` with its manifest;
+  `cargo xtask build` builds it and installs it in `modules\sample-cpp\`, as its author would.
+- **Scripts by tool (S9)**: the Lua panel lists the scripts of `scripts\lua-5.1\` as a tree, by tool
+  folder; `require` looks in the folder of the script's tool first; the samples move into
+  `scripts\lua-5.1\samples\`.
+
+Acceptance:
+
+| Check | Expected result |
+|---|---|
+| Start the editor | The Modules panel lists every module with its kind: the Rust modules, and `sample-cpp` as compiled, with its commands |
+| Remove `modules\viewport\`, start | No 3D window; the rest works (R4) |
+| Remove `modules\sample-cpp\`, start | The editor starts without it; its commands are gone |
+| A folder of `modules\` without manifest, and a compiled module whose DLL has no entry point | One ignored, the other refused, each with its reason; the rest runs |
+| A compiled module offering `cube.paint` | The cube keeps it; the Modules panel shows the module's one as refused |
+| Disable `sample-cpp` in the Modules panel, restart; enable it, restart | Not loaded, then back |
+| `cargo xtask new-module third`, then `cargo xtask build-module third` | A third module with its panel; the runtime and the executable unchanged |
+| The Lua panel | Scripts listed under their tool, the examples under `samples`; a script loads another file of its tool with `require` |
+| The checks of milestones 1 to 3 | Same results under the new names: C++ thread painting, Lua console and scripts, undo groups, Stop |
+| Tests, `cargo xtask check`, CI | Green |
+
+### Milestone 5: panels and undo for compiled modules (outline)
+
+Described panels in the C interface (widgets, drawing areas, interaction events sent back to the
+module), undoable changes of a compiled module's own state, a sample C++ module with a panel (a
+small timeline), and the sample C# module (.NET 10, NativeAOT): commands called from several
+threads, the changes of each thread as one undo entry, and a panel. Already verified: a C#
+NativeAOT module calls the C interface from four threads at once; `dotnet publish` needs the folder
+of `vswhere.exe` on the path and `ProgramFiles(x86)` set; numbers are written in the invariant
+culture. Specified in detail when milestone 4 is done.
+
+### Milestone 6: Lua modules (outline)
+
+Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
+hosts them through a contract of the core open to the module of any language: their own Lua state
+kept while the editor runs, commands, events, settings, described panels, undo. Specified in detail
+when milestone 5 is done.
+
+### Milestone 7: Python (outline)
+
+Python scripts, console and modules, with the behaviour of Lua: the host built apart and reaching
+the editor through `uniwow.h`, the embeddable distribution in `interpreters\python-3.14\`, scripts
+by tool in `scripts\python-3.14\` (the tool folder is a package), Stop even when a script catches
+exceptions, the editor starting without Python. Specified in detail when milestone 6 is done.
 
 Risks verified first:
 
 | Risk | Result |
 |---|---|
 | PyO3 in the runtime | Impossible: `uniwow_api.dll` imports `python314.dll`, so the editor cannot start without Python (S8). Delayed loading is refused by the linker (LNK1194): the C API of Python exports data, such as `PyExc_ValueError` |
-| PyO3 in the `scripting-python` feature | Loads, and the editor starts without Python with that feature refused. But the dependencies of PyO3 change, through Cargo's feature unification, the features of crates the runtime shares (`once_cell`, `syn`): the runtime is built differently and every feature must be rebuilt. It would also need an exception to rule C |
+| PyO3 in the `scripting-python` module | Loads, and the editor starts without Python with that module refused. But the dependencies of PyO3 change, through Cargo's feature unification, the options of crates the runtime shares (`once_cell`, `syn`): the runtime is built differently and every Rust module must be rebuilt. It would also need an exception to the dependency rules of section 2 |
 | The embeddable distribution beside the executable | The official Python 3.14.8 package (SHA-256 checked) runs from `interpreters\python-3.14\` with an isolated `sys.path`; the C extensions of the standard library load |
 | C# module calling the C interface from several threads | A NativeAOT module (.NET 10) has four threads call the C interface at once; the group of each thread is one undo entry. `dotnet publish` needs the folder of `vswhere.exe` on the path, and `ProgramFiles(x86)` set |
 
 Decisions: Python is embedded by a host built apart; Python 3.14, with its GIL; the .NET 10 SDK
 builds the C# module.
-
-Content:
-
-- **C interface in the runtime**: the table of `uniwow.h` over an `Editor` moves from
-  `native-modules` to `uniwow-api`, so that `native-modules` and `scripting-python` share it. Its
-  C declarations in Rust go into `libs/c-interface`, also used by the Python host.
-- **Python host** in `hosts/python\`: a DLL with PyO3, in a Cargo workspace of its own, built by
-  `cargo xtask build` in a separate run of Cargo, so that its dependencies never change the
-  editor's. Its only link with the editor is `uniwow.h`: it receives the table of the C interface
-  and offers three functions, start the interpreter, run code, stop a run. It holds the Python
-  `uniwow` module (the same functions as in Lua, values through JSON), the redirection of `print`
-  and the stop mechanism. It is built against the distribution it runs with: no other Python is
-  needed.
-- **`scripting-python` feature**: the console, the scripts of `scripts\python-3.14\`, Run and Stop,
-  each run on a thread of its own with its own `Editor` and undo group, as in Lua. It loads the host
-  from its folder, with `interpreters\python-3.14\` added to where Windows looks for the DLLs.
-  Without the interpreter or the host, its panel says what is missing and the rest of the editor
-  runs (S8).
-- **Python runs**: each run has its own globals in one interpreter. Under the GIL, Python runs
-  take turns, and the GIL is released while an editor call waits, so that the others go on (T6).
-  Errors are shown with their traceback and line (S5). Stop ends a run even when it catches
-  exceptions: once stopped, every line raises the stop again; a run waiting in `next_event` wakes
-  (S3). `sys.path` holds the interpreter and `scripts\python-3.14\`, where pure Python packages can
-  be put; there is no `site-packages`.
-- **Distribution**: `cargo xtask build` downloads the official embeddable package of the pinned
-  version (3.14.8, SHA-256 checked) into its cache and unpacks it into
-  `out\<profile>\interpreters\python-3.14\`, adding `scripts\python-3.14\` to its `python314._pth`.
-- **Scripts by tool (S9)**, for Lua and Python: the panels list the scripts as a tree, grouped by
-  tool folder, with those placed directly in the folder of the language. A script loads the other
-  files of its tool: `require` in Lua looks in its tool folder first; in Python the tool folder is
-  a package (`from . import helper`). The Lua samples move into a `samples` tool, and the Python
-  samples go there too.
-- **Sample C# module** in `modules-src\sample-csharp\` (.NET 10, NativeAOT): `cs.sum`, and
-  `cs.paint_from_threads`, whose threads each paint the cube twice through `cube.paint`, each
-  thread's paints as one undo entry. Built by `cargo xtask build` with `dotnet publish`; without the
-  .NET SDK, the build says so and goes on without it; the CI builds it.
-- **Sample Python scripts**: paint the cube, measure calls, print the events of a topic, an error,
-  a loop, a loop catching every exception.
-
-Acceptance:
-
-| Check | Expected result |
-|---|---|
-| Start the editor | `scripting-python` runs; its panel shows Python 3.14.8 |
-| Remove `interpreters\python-3.14\`, start | The editor starts and Lua works; the Python panel says the interpreter is missing |
-| Python console: `uniwow.call("cube.paint", {"color": [1, 0, 0]})` | The cube turns red; the answer is shown |
-| A Python script painting the cube three times | One undo entry |
-| A Python script with an error | The message and the line are shown; the feature keeps running |
-| A loop, and a loop catching `BaseException`, then Stop | Both end within a second |
-| A Python script waiting for the events of a topic | It prints them as they are published |
-| A tool folder in `scripts\lua-5.1\` and one in `scripts\python-3.14\`, each with a script using another file of its tool | Listed under their tool; each runs and loads the other file |
-| Two Python scripts at once; a Python and a Lua script at once | The Python ones take turns; the Lua one runs in parallel with them |
-| Calls per second from Python, for both kinds of command | Measured and recorded here |
-| The C# module | Listed as running; `cs.sum` answers; after `cs.paint_from_threads`, each thread's paints are one undo entry |
-| Remove `modules\sample-csharp.dll`, start | The editor starts without it |
-| The runtime, built with and without the Python host | The same file; tests, `cargo xtask check` and CI green |
 
 ---
 
