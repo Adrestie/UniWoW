@@ -442,7 +442,7 @@ processor: 3.7 million calls per second to a command running on the calling thre
 second to a command running on the interface thread. `Editor::call` refuses, with an error, to wait
 on the interface thread for a command of the interface thread, which would wait for itself.
 
-### Milestone 3: C interface, native modules and Lua scripts (proposed)
+### Milestone 3: C interface, native modules and Lua scripts (validated, in progress)
 
 The generic interface of S1 complete and offered in C, the first native module, and Lua 5.1.
 Python, whose risks are of another kind (embedding, delayed loading of its DLL, distribution,
