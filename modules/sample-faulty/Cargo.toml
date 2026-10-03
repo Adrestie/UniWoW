@@ -1,6 +1,6 @@
 [package]
-name = "uniwow-feature-sample-faulty"
-description = "Sample: a viewport layer that records invalid GPU commands on request, to check that only its feature fails"
+name = "uniwow-module-sample-faulty"
+description = "Sample: a viewport layer that records invalid GPU commands on request, to check that only its module fails"
 version.workspace = true
 edition.workspace = true
 

@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 
-/// A running feature and the services it requires.
+/// A running module and the services it requires.
 pub struct Need<'a> {
     pub id: &'a str,
     pub requires: &'a [String],
 }
 
-/// The features to block, with the first service each lacks. Blocking a feature withdraws the
+/// The modules to block, with the first service each lacks. Blocking a module withdraws the
 /// services it provides, which may block others in turn. `providers` maps each service to the
-/// feature providing it.
+/// module providing it.
 pub fn blocked(needs: &[Need], providers: &HashMap<String, String>) -> Vec<(usize, String)> {
     let mut providers = providers.clone();
     let mut blocked: Vec<(usize, String)> = Vec::new();
@@ -55,7 +55,7 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_service_blocks_the_feature() {
+    fn a_missing_service_blocks_the_module() {
         let requires = strings(&["viewport"]);
         let needs = [Need {
             id: "cube",

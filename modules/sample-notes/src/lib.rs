@@ -1,5 +1,5 @@
-//! Sample feature: lists every event it receives, asks for the cube to be repainted by publishing
-//! `sample.paint`, and exercises the jobs and the named commands. It does not know which feature,
+//! Sample module: lists every event it receives, asks for the cube to be repainted by publishing
+//! `sample.paint`, and exercises the jobs and the named commands. It does not know which module,
 //! if any, answers.
 
 use std::collections::{HashMap, VecDeque};
@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use uniwow_api::serde::Serialize;
 use uniwow_api::serde_json::json;
-use uniwow_api::{Context, DockArea, Event, Feature, JobContext, JobId, JobOutcome, Registrar, egui};
+use uniwow_api::{Context, DockArea, Event, JobContext, JobId, JobOutcome, Module, Registrar, egui};
 
 const MAX_EVENTS: usize = 200;
 const MAX_RESULTS: usize = 30;
@@ -24,7 +24,7 @@ enum Kind {
     Measure,
 }
 
-struct NotesFeature {
+struct NotesModule {
     start: Instant,
     received: VecDeque<(f32, Event)>,
     /// Set by the "Simulate a failure" button; the next draw panics.
@@ -33,7 +33,7 @@ struct NotesFeature {
     results: VecDeque<String>,
 }
 
-impl Default for NotesFeature {
+impl Default for NotesModule {
     fn default() -> Self {
         Self {
             start: Instant::now(),
@@ -45,7 +45,7 @@ impl Default for NotesFeature {
     }
 }
 
-impl Feature for NotesFeature {
+impl Module for NotesModule {
     fn register(&mut self, reg: &mut Registrar) {
         reg.panel("events", "Events", DockArea::Left).subscribe("*");
     }
@@ -158,7 +158,7 @@ impl Feature for NotesFeature {
     }
 }
 
-impl NotesFeature {
+impl NotesModule {
     fn start_job(&mut self, ctx: &mut Context, kind: Kind, label: &str) {
         let id = match kind {
             Kind::Computation => ctx.spawn(label, count_primes),
@@ -231,11 +231,11 @@ fn measure_calls(context: &JobContext) -> Result<String, String> {
     ))
 }
 
-/// Payload of `sample.paint`, as this feature writes it. Whoever answers declares its own type.
+/// Payload of `sample.paint`, as this module writes it. Whoever answers declares its own type.
 #[derive(Serialize)]
 #[serde(crate = "uniwow_api::serde")]
 struct Paint {
     color: [f32; 3],
 }
 
-uniwow_api::export_feature!(NotesFeature::default());
+uniwow_api::export_module!(NotesModule::default());

@@ -1,4 +1,4 @@
-//! The 3D view. Draws a ground grid and the layers that other features add through the
+//! The 3D view. Draws a ground grid and the layers that other modules add through the
 //! "viewport" service, into an offscreen target shown in its panel.
 
 mod camera;
@@ -12,7 +12,7 @@ use std::task::{Poll, Waker};
 use std::time::Instant;
 
 use uniwow_api::viewport::{self, Layer, Target, View};
-use uniwow_api::{Context, DockArea, Event, FEATURE_FAILED_TOPIC, Feature, Registrar, egui, egui_wgpu, wgpu};
+use uniwow_api::{Context, DockArea, Event, MODULE_FAILED_TOPIC, Module, Registrar, egui, egui_wgpu, wgpu};
 
 use camera::OrbitCamera;
 use grid::Grid;
@@ -56,7 +56,7 @@ fn remove(layers: &Layers, owner: &str) {
     }
 }
 
-/// Implementation of the service, sharing the layer list with the feature.
+/// Implementation of the service, sharing the layer list with the module.
 struct Service {
     layers: Layers,
 }
@@ -84,7 +84,7 @@ struct Targets {
     texture_id: egui::TextureId,
 }
 
-struct ViewportFeature {
+struct ViewportModule {
     layers: Layers,
     camera: OrbitCamera,
     targets: Option<Targets>,
@@ -92,7 +92,7 @@ struct ViewportFeature {
     start: Instant,
 }
 
-impl Default for ViewportFeature {
+impl Default for ViewportModule {
     fn default() -> Self {
         Self {
             layers: Arc::default(),
@@ -104,14 +104,14 @@ impl Default for ViewportFeature {
     }
 }
 
-impl Feature for ViewportFeature {
+impl Module for ViewportModule {
     fn register(&mut self, reg: &mut Registrar) {
         let service: viewport::Handle = Arc::new(Service {
             layers: self.layers.clone(),
         });
         reg.panel("view", "3D View", DockArea::Center)
             .provide(viewport::SERVICE, service)
-            .subscribe(FEATURE_FAILED_TOPIC)
+            .subscribe(MODULE_FAILED_TOPIC)
             .menu_item("View", "Reset camera", "reset_camera");
     }
 
@@ -147,7 +147,7 @@ impl Feature for ViewportFeature {
     }
 
     fn on_event(&mut self, event: &Event, _ctx: &mut Context) {
-        if event.topic == FEATURE_FAILED_TOPIC
+        if event.topic == MODULE_FAILED_TOPIC
             && let Some(id) = event.payload.get("id").and_then(|v| v.as_str())
         {
             remove(&self.layers, id);
@@ -161,7 +161,7 @@ impl Feature for ViewportFeature {
     }
 }
 
-impl ViewportFeature {
+impl ViewportModule {
     fn ensure_targets(&mut self, gpu: &egui_wgpu::RenderState, size: [u32; 2]) {
         if self.targets.as_ref().is_some_and(|t| t.size == size) {
             return;
@@ -273,7 +273,7 @@ impl ViewportFeature {
     }
 
     /// Records each layer into its own render bundle, inside a validation error scope. A layer
-    /// that panics or records invalid commands is removed and its feature reported; the bundles of
+    /// that panics or records invalid commands is removed and its module reported; the bundles of
     /// the others are returned.
     fn record_layers(
         &mut self,
@@ -364,4 +364,4 @@ fn panic_text(payload: Box<dyn Any + Send>) -> String {
         .unwrap_or_else(|| "panic without message".to_owned())
 }
 
-uniwow_api::export_feature!(ViewportFeature::default());
+uniwow_api::export_module!(ViewportModule::default());

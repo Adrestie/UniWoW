@@ -1,5 +1,5 @@
 [package]
-name = "uniwow-feature-native-modules"
+name = "uniwow-module-native-modules"
 description = "Loads the compiled modules beside the executable (C++, C# NativeAOT or any language exporting a C function) and gives each the C interface of sdk/uniwow.h"
 version.workspace = true
 edition.workspace = true
@@ -12,7 +12,7 @@ uniwow-api.workspace = true
 
 [package.metadata.uniwow]
 id = "native-modules"
-name = "Native modules"
+name = "Compiled modules"
 category = "Scripting"
 requires = []
 uses = []

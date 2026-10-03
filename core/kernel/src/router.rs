@@ -24,8 +24,8 @@ pub struct Entry {
 pub enum ReplyTo {
     /// A thread waiting in `Editor::call`.
     Thread(mpsc::Sender<Result<Value, String>>),
-    /// A feature, through `Feature::on_reply`.
-    Feature(String, CallId),
+    /// A module, through `Module::on_reply`.
+    Module(String, CallId),
     /// The Commands panel of the kernel.
     Kernel(u64),
 }
@@ -55,10 +55,10 @@ pub enum Request {
     },
 }
 
-/// Chooses, once every feature has registered, which declaration of each command name the
-/// catalogue keeps: a command a feature declares itself wins over a delegated one; between two of
+/// Chooses, once every module has registered, which declaration of each command name the
+/// catalogue keeps: a command a module declares itself wins over a delegated one; between two of
 /// the same kind, the first registered wins. Each declaration set aside is logged with the one
-/// that wins. Only the kind of declaration counts, never which feature it comes from (R1).
+/// that wins. Only the kind of declaration counts, never which module it comes from (R1).
 pub fn choose_commands(declared: Vec<(String, CommandSpec)>) -> Vec<(String, CommandSpec)> {
     let mut kept: Vec<(String, CommandSpec)> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
@@ -82,13 +82,13 @@ pub fn choose_commands(declared: Vec<(String, CommandSpec)>) -> Vec<(String, Com
     kept
 }
 
-/// The feature part of a caller: `scripting-lua#paint.lua #3` → `scripting-lua`.
-pub fn feature_of(caller: &str) -> &str {
+/// The module part of a caller: `scripting-lua#paint.lua #3` → `scripting-lua`.
+pub fn module_of(caller: &str) -> &str {
     caller.split('#').next().unwrap_or(caller)
 }
 
 struct Subscription {
-    /// Who subscribed: its subscriptions close when its feature fails.
+    /// Who subscribed: its subscriptions close when its module fails.
     caller: String,
     topic: String,
     sender: mpsc::Sender<Event>,
@@ -98,13 +98,13 @@ struct Subscription {
 /// State shared between the interface thread and every `Editor` handle.
 pub struct Bridge {
     pub catalogue: RwLock<BTreeMap<String, Entry>>,
-    /// Ids of the running features; only their commands can be called.
+    /// Ids of the running modules; only their commands can be called.
     pub running: RwLock<HashSet<String>>,
     /// Events published from other threads, delivered at the next frame.
     pub events: Mutex<Vec<Event>>,
     /// Failures of commands run on other threads, applied at the next frame.
     pub failures: Mutex<Vec<Reported>>,
-    /// Settings by space (a feature id, or `feature#module`) then key. Shared, so that any
+    /// Settings by space (a module id, or `module#module`) then key. Shared, so that any
     /// thread reads them at once, the interface thread included.
     pub settings: RwLock<BTreeMap<String, BTreeMap<String, Value>>>,
     /// Set when a setting changes; the interface thread then saves them.
@@ -146,30 +146,30 @@ impl Bridge {
         }
     }
 
-    /// Closes the subscriptions of a feature that failed. Their channels close with them: a thread
+    /// Closes the subscriptions of a module that failed. Their channels close with them: a thread
     /// waiting in `next_event` wakes at once with an error, and nothing more piles up there.
-    pub fn close_subscriptions(&self, feature: &str) {
+    pub fn close_subscriptions(&self, module: &str) {
         self.subscriptions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|_, subscription| feature_of(&subscription.caller) != feature);
+            .retain(|_, subscription| module_of(&subscription.caller) != module);
     }
 
-    /// Refuses a caller whose feature no longer runs: its scripts, jobs and module threads get
+    /// Refuses a caller whose module no longer runs: its scripts, jobs and module threads get
     /// errors from then on. The kernel itself always acts.
     pub fn active(&self, caller: &str) -> Result<(), String> {
-        let feature = feature_of(caller);
-        if caller == "kernel" || self.running.read().unwrap_or_else(|e| e.into_inner()).contains(feature) {
+        let module = module_of(caller);
+        if caller == "kernel" || self.running.read().unwrap_or_else(|e| e.into_inner()).contains(module) {
             Ok(())
         } else {
-            Err(format!("'{feature}' is not running: '{caller}' can no longer act"))
+            Err(format!("'{module}' is not running: '{caller}' can no longer act"))
         }
     }
 
-    /// Refuses settings of another feature than the caller's.
+    /// Refuses settings of another module than the caller's.
     fn settings_of(&self, caller: &str, space: &str) -> Result<(), String> {
         self.active(caller)?;
-        if feature_of(space) == feature_of(caller) {
+        if module_of(space) == module_of(caller) {
             Ok(())
         } else {
             Err(format!("'{caller}' cannot reach the settings of '{space}'"))
@@ -187,7 +187,7 @@ impl Bridge {
         }
     }
 
-    /// The command, if it exists and its feature is running.
+    /// The command, if it exists and its module is running.
     pub fn lookup(&self, name: &str) -> Result<(String, Option<CommandHandler>), String> {
         let catalogue = self.catalogue.read().unwrap_or_else(|e| e.into_inner());
         let entry = catalogue.get(name).ok_or_else(|| format!("unknown command '{name}'"))?;
@@ -198,7 +198,7 @@ impl Bridge {
         Ok((owner.clone(), entry.handler.clone()))
     }
 
-    /// Runs a command handled on the calling thread. A panic makes its feature fail.
+    /// Runs a command handled on the calling thread. A panic makes its module fail.
     pub fn run_on_caller(
         &self,
         owner: &str,
@@ -291,7 +291,7 @@ impl EditorBackend for Bridge {
 
     fn next_event(&self, caller: &str, subscription: u64, timeout: Duration) -> Result<Option<Event>, String> {
         self.active(caller)?;
-        let unknown = || format!("subscription {subscription} does not exist, was closed, or its feature stopped");
+        let unknown = || format!("subscription {subscription} does not exist, was closed, or its module stopped");
         // The map is released before waiting, so that other threads can publish meanwhile.
         let receiver = self
             .subscriptions
@@ -418,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn a_feature_s_own_command_wins_over_a_delegated_one_in_any_order() {
+    fn a_module_s_own_command_wins_over_a_delegated_one_in_any_order() {
         for declared in [
             vec![
                 declared("modules", "cube.paint", true),
@@ -484,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn a_command_of_a_stopped_feature_is_an_error() {
+    fn a_command_of_a_stopped_module_is_an_error() {
         let (bridge, _receiver) = bridge();
         bridge.running.write().unwrap().clear();
         let error = bridge.call("cube", "cube.color", json!({})).unwrap_err();
@@ -608,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn the_subscriptions_of_a_failed_feature_close_and_wake_their_reader() {
+    fn the_subscriptions_of_a_failed_module_close_and_wake_their_reader() {
         let (bridge, _receiver) = bridge();
         bridge.running.write().unwrap().insert("lua".to_owned());
         let script = bridge.subscribe("lua#events.lua #1", "*").unwrap();
@@ -626,7 +626,7 @@ mod tests {
         let (next, waited) = reader.join().unwrap();
         assert!(next.is_err(), "the reader gets an error");
         assert!(waited < Duration::from_secs(2), "at once, not after its timeout");
-        // Events go on reaching the other features' subscriptions only.
+        // Events go on reaching the other modules' subscriptions only.
         bridge.deliver(&uniwow_api::Event {
             topic: "any".to_owned(),
             source: "cube".to_owned(),
@@ -641,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn a_caller_whose_feature_stopped_is_refused() {
+    fn a_caller_whose_module_stopped_is_refused() {
         let (bridge, _receiver) = bridge();
         let script = "lua#paint.lua #1";
         bridge.running.write().unwrap().insert("lua".to_owned());
@@ -676,12 +676,12 @@ mod tests {
         assert_eq!(bridge.setting("modules", "modules", "size"), Ok(None));
         assert!(
             bridge.setting("modules#a", "cube", "size").is_err(),
-            "not another feature's"
+            "not another module's"
         );
     }
 
     #[test]
-    fn the_catalogue_lists_only_running_features() {
+    fn the_catalogue_lists_only_running_modules() {
         let (bridge, _receiver) = bridge();
         assert_eq!(bridge.commands().len(), 2);
         bridge.running.write().unwrap().clear();

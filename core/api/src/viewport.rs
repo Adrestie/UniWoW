@@ -1,4 +1,4 @@
-//! Interface of the "viewport" service: a 3D view to which features add their drawing.
+//! Interface of the "viewport" service: a 3D view to which modules add their drawing.
 
 use std::sync::Arc;
 
@@ -11,13 +11,13 @@ pub type Handle = Arc<dyn Viewport>;
 
 /// Shared between threads (rule T3): a job may add a layer.
 pub trait Viewport: Send + Sync {
-    /// Adds a drawing layer. `owner` is the id of the feature adding it.
+    /// Adds a drawing layer. `owner` is the id of the module adding it.
     fn add_layer(&self, owner: &str, layer: Box<dyn Layer>);
 
     /// Removes every layer added by `owner`.
     fn remove_layers(&self, owner: &str);
 
-    /// Formats of the render target, for features that build their pipelines ahead, in a job.
+    /// Formats of the render target, for modules that build their pipelines ahead, in a job.
     fn target(&self) -> Target;
 }
 
@@ -46,7 +46,7 @@ pub trait Layer: Send {
     /// formats and sample count of `target`; create pipelines lazily from `gpu.device` to match.
     ///
     /// The viewport validates the bundle on its own: a layer that panics or records an invalid
-    /// command is removed and its feature reported as failed, without affecting the others.
+    /// command is removed and its module reported as failed, without affecting the others.
     fn draw<'a>(
         &'a mut self,
         gpu: &egui_wgpu::RenderState,

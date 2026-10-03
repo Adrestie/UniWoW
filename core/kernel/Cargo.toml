@@ -1,6 +1,6 @@
 [package]
 name = "uniwow-kernel"
-description = "UniWoW kernel: feature loader and core services"
+description = "UniWoW kernel: module loader and core services"
 version.workspace = true
 edition.workspace = true
 

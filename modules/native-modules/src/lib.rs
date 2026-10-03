@@ -8,9 +8,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use uniwow_api::{Context, DockArea, Feature, Registrar, egui, log};
+use uniwow_api::{Context, DockArea, Module, Registrar, egui, log};
 
-const FEATURE: &str = "native-modules";
+const MODULE: &str = "native-modules";
 
 /// A command a module offers, and why it is refused, if it is.
 struct Offered {
@@ -18,7 +18,7 @@ struct Offered {
     refused: Option<String>,
 }
 
-struct Module {
+struct Loaded {
     file: String,
     /// Name, version and commands, or why the module was refused.
     state: Result<(String, String, Vec<Offered>), String>,
@@ -26,11 +26,11 @@ struct Module {
 
 #[derive(Default)]
 struct NativeModules {
-    modules: Vec<Module>,
+    modules: Vec<Loaded>,
     contexts: Vec<&'static capi::ModuleContext>,
 }
 
-impl Feature for NativeModules {
+impl Module for NativeModules {
     fn register(&mut self, reg: &mut Registrar) {
         reg.panel("modules", "Modules", DockArea::Bottom);
         // Command name → the module that offers it.
@@ -49,7 +49,7 @@ impl Feature for NativeModules {
                             continue;
                         }
                         let handler = command.handler;
-                        // Offered for the module: a feature's own command of that name wins.
+                        // Offered for the module: a module's own command of that name wins.
                         reg.command_on_caller_delegated(
                             &command.name,
                             &command.description,
@@ -72,7 +72,7 @@ impl Feature for NativeModules {
                     Err(reason)
                 }
             };
-            self.modules.push(Module { file, state });
+            self.modules.push(Loaded { file, state });
         }
     }
 
@@ -81,14 +81,14 @@ impl Feature for NativeModules {
         for context in &self.contexts {
             let _ = context.editor.set(editor.derive_with_settings(&context.name));
         }
-        // A name another feature offered first stays that feature's: the kernel kept it.
+        // A name another module offered first stays that module's: the kernel kept it.
         let owners: HashMap<String, String> = editor.commands().into_iter().map(|c| (c.name, c.owner)).collect();
         for module in &mut self.modules {
             let Ok((_, _, commands)) = &mut module.state else {
                 continue;
             };
             for command in commands.iter_mut().filter(|c| c.refused.is_none()) {
-                if let Some(owner) = owners.get(&command.name).filter(|owner| *owner != FEATURE) {
+                if let Some(owner) = owners.get(&command.name).filter(|owner| *owner != MODULE) {
                     log::warn!(
                         "command '{}' of {} refused: offered by '{owner}'",
                         command.name,
@@ -165,4 +165,4 @@ fn module_files() -> Vec<PathBuf> {
     files
 }
 
-uniwow_api::export_feature!(NativeModules::default());
+uniwow_api::export_module!(NativeModules::default());

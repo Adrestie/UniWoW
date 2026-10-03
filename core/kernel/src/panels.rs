@@ -14,7 +14,7 @@ pub fn jobs_panel(ui: &mut egui::Ui, pool: &Pool) {
         return;
     }
     egui::Grid::new("jobs").striped(true).num_columns(5).show(ui, |ui| {
-        for header in ["Feature", "Job", "Progress", "Time", ""] {
+        for header in ["Module", "Job", "Progress", "Time", ""] {
             ui.strong(header);
         }
         ui.end_row();

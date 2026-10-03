@@ -1,4 +1,4 @@
-// Sample native module in C++: one command of its own, and a thread of its own calling the
+// Sample compiled module in C++: one command of its own, and a thread of its own calling the
 // editor through the C interface.
 
 #include "../../sdk/uniwow.h"

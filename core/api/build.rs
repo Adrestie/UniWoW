@@ -1,4 +1,4 @@
-//! Exports the C API of Lua 5.1 from the runtime. mlua is compiled into the runtime, and a feature
+//! Exports the C API of Lua 5.1 from the runtime. mlua is compiled into the runtime, and a module
 //! using it calls these functions directly: they must come from the one Lua of the runtime.
 
 /// Every function of `lua.h`, `lauxlib.h` and `lualib.h` (Lua 5.1.5), except `luaL_getn` and

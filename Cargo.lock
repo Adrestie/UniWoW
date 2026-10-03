@@ -3435,48 +3435,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "uniwow-feature-native-modules"
-version = "0.1.0"
-dependencies = [
- "uniwow-api",
-]
-
-[[package]]
-name = "uniwow-feature-sample-cube"
-version = "0.1.0"
-dependencies = [
- "uniwow-api",
-]
-
-[[package]]
-name = "uniwow-feature-sample-faulty"
-version = "0.1.0"
-dependencies = [
- "uniwow-api",
-]
-
-[[package]]
-name = "uniwow-feature-sample-notes"
-version = "0.1.0"
-dependencies = [
- "uniwow-api",
-]
-
-[[package]]
-name = "uniwow-feature-scripting-lua"
-version = "0.1.0"
-dependencies = [
- "uniwow-api",
-]
-
-[[package]]
-name = "uniwow-feature-viewport"
-version = "0.1.0"
-dependencies = [
- "uniwow-api",
-]
-
-[[package]]
 name = "uniwow-kernel"
 version = "0.1.0"
 dependencies = [
@@ -3491,6 +3449,48 @@ name = "uniwow-lua"
 version = "0.1.0"
 dependencies = [
  "mlua",
+]
+
+[[package]]
+name = "uniwow-module-native-modules"
+version = "0.1.0"
+dependencies = [
+ "uniwow-api",
+]
+
+[[package]]
+name = "uniwow-module-sample-cube"
+version = "0.1.0"
+dependencies = [
+ "uniwow-api",
+]
+
+[[package]]
+name = "uniwow-module-sample-faulty"
+version = "0.1.0"
+dependencies = [
+ "uniwow-api",
+]
+
+[[package]]
+name = "uniwow-module-sample-notes"
+version = "0.1.0"
+dependencies = [
+ "uniwow-api",
+]
+
+[[package]]
+name = "uniwow-module-scripting-lua"
+version = "0.1.0"
+dependencies = [
+ "uniwow-api",
+]
+
+[[package]]
+name = "uniwow-module-viewport"
+version = "0.1.0"
+dependencies = [
+ "uniwow-api",
 ]
 
 [[package]]

@@ -278,7 +278,7 @@ fn editor(context: *mut c_void) -> Result<&'static Editor, String> {
 /// Runs the body of a C function: a panic must not cross into the module's code.
 fn guarded<R>(fallback: R, body: impl FnOnce() -> R) -> R {
     catch_unwind(AssertUnwindSafe(body)).unwrap_or_else(|_| {
-        log::error!("a call of a native module panicked in the editor");
+        log::error!("a call of a compiled module panicked in the editor");
         fallback
     })
 }
@@ -333,7 +333,7 @@ extern "C" fn api_publish(context: *mut c_void, topic: *const c_char, payload: *
             editor(context)?.publish(&read(topic)?, payload)
         })();
         if let Err(error) = result {
-            log::warn!("a native module could not publish: {error}");
+            log::warn!("a compiled module could not publish: {error}");
         }
     })
 }
@@ -342,7 +342,7 @@ extern "C" fn api_subscribe(context: *mut c_void, topic: *const c_char) -> u64 {
     guarded(0, || {
         let subscribed = read(topic).and_then(|topic| editor(context)?.subscribe(&topic));
         subscribed.unwrap_or_else(|error| {
-            log::warn!("a native module could not subscribe: {error}");
+            log::warn!("a compiled module could not subscribe: {error}");
             0
         })
     })
@@ -386,7 +386,7 @@ extern "C" fn api_setting(context: *mut c_void, key: *const c_char, reply: Optio
         let value = editor(context)
             .and_then(|editor| editor.setting(&read(key)?))
             .unwrap_or_else(|error| {
-                log::warn!("a native module could not read a setting: {error}");
+                log::warn!("a compiled module could not read a setting: {error}");
                 None
             });
         reply_with(reply, reply_context, &value.unwrap_or(Value::Null).to_string());
@@ -400,7 +400,7 @@ extern "C" fn api_set_setting(context: *mut c_void, key: *const c_char, value: *
             editor(context)?.set_setting(&read(key)?, value)
         })();
         if let Err(error) = result {
-            log::warn!("a native module could not write a setting: {error}");
+            log::warn!("a compiled module could not write a setting: {error}");
         }
     })
 }
@@ -422,7 +422,7 @@ extern "C" fn api_log(context: *mut c_void, level: i32, message: *const c_char) 
 extern "C" fn api_begin_group(context: *mut c_void, label: *const c_char) {
     guarded((), || {
         if let Err(error) = read(label).and_then(|label| editor(context)?.begin_group(&label)) {
-            log::warn!("a native module could not open an undo group: {error}");
+            log::warn!("a compiled module could not open an undo group: {error}");
         }
     })
 }
@@ -430,7 +430,7 @@ extern "C" fn api_begin_group(context: *mut c_void, label: *const c_char) {
 extern "C" fn api_end_group(context: *mut c_void) {
     guarded((), || {
         if let Err(error) = editor(context).and_then(Editor::end_group) {
-            log::warn!("a native module could not end an undo group: {error}");
+            log::warn!("a compiled module could not end an undo group: {error}");
         }
     })
 }

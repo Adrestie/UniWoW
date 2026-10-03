@@ -2,9 +2,9 @@ use std::path::Path;
 
 use uniwow_api::serde::Deserialize;
 
-pub const FILE_NAME: &str = "feature.toml";
+pub const FILE_NAME: &str = "module.toml";
 
-/// `feature.toml`, written next to each feature DLL by `cargo xtask build`.
+/// `module.toml`, written next to each module DLL by `cargo xtask build`.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(crate = "uniwow_api::serde")]
 pub struct Manifest {
@@ -17,17 +17,17 @@ pub struct Manifest {
     pub category: String,
     #[serde(default)]
     pub description: String,
-    /// Services the feature cannot work without.
+    /// Services the module cannot work without.
     #[serde(default)]
     pub requires: Vec<String>,
-    /// Services the feature uses when present.
+    /// Services the module uses when present.
     #[serde(default)]
     pub uses: Vec<String>,
     /// DLL file name, in the same folder.
     pub dll: String,
     /// BLAKE3 hash of that DLL.
     pub dll_hash: String,
-    /// BLAKE3 hash of the runtime DLL the feature was built against.
+    /// BLAKE3 hash of the runtime DLL the module was built against.
     pub runtime: String,
 }
 

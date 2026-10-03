@@ -1,5 +1,5 @@
 /*
- * UniWoW C interface (rule S1): what a native module sees of the editor.
+ * UniWoW C interface (rule S1): what a compiled module sees of the editor.
  *
  * Every value crosses as UTF-8 JSON. Every function can be called from any thread (rule T7).
  * Texts handed to a uniwow_reply are valid only during that call: copy them. Nothing returned by
@@ -45,7 +45,7 @@ typedef struct uniwow_api {
     uint64_t (*subscribe)(void *context, const char *topic);
     /* Waits at most timeout_ms for the next event. Returns 1 and replies
        {"topic", "source", "payload"}; returns 0 when the time passed first; returns -1 and replies
-       an error message when the subscription does not exist, was closed, or its feature stopped. */
+       an error message when the subscription does not exist, was closed, or its module stopped. */
     int32_t (*next_event)(void *context, uint64_t subscription, uint32_t timeout_ms, uniwow_reply reply,
                           void *reply_context);
     void (*unsubscribe)(void *context, uint64_t subscription);

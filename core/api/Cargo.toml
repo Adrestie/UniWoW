@@ -1,6 +1,6 @@
 [package]
 name = "uniwow-api"
-description = "Contracts between the UniWoW kernel and its features"
+description = "Contracts between the UniWoW kernel and its modules"
 version.workspace = true
 edition.workspace = true
 

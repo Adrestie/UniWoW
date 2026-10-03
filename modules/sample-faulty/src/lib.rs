@@ -1,10 +1,10 @@
-//! Sample feature: a viewport layer drawing a red triangle, which records invalid GPU commands on
-//! request. The viewport must then disable this feature only, keeping the grid and the others.
+//! Sample module: a viewport layer drawing a red triangle, which records invalid GPU commands on
+//! request. The viewport must then disable this module only, keeping the grid and the others.
 
 use std::sync::{Arc, Mutex};
 
 use uniwow_api::viewport::{self, Layer, Target, View};
-use uniwow_api::{Context, DockArea, Feature, Registrar, bytemuck, egui, egui_wgpu, log, wgpu};
+use uniwow_api::{Context, DockArea, Module, Registrar, bytemuck, egui, egui_wgpu, log, wgpu};
 
 const SHADER: &str = r#"
 struct Globals { view_proj: mat4x4<f32> };
@@ -36,12 +36,12 @@ enum Mode {
 }
 
 #[derive(Default)]
-struct FaultyFeature {
+struct FaultyModule {
     mode: Arc<Mutex<Mode>>,
     drawn: bool,
 }
 
-impl Feature for FaultyFeature {
+impl Module for FaultyModule {
     fn register(&mut self, reg: &mut Registrar) {
         reg.panel("faulty", "Faulty layer", DockArea::Right);
     }
@@ -49,7 +49,7 @@ impl Feature for FaultyFeature {
     fn init(&mut self, ctx: &mut Context) {
         match ctx.service(viewport::SERVICE) {
             Some(view) => {
-                view.add_layer(ctx.feature_id(), Box::new(FaultyLayer::new(self.mode.clone())));
+                view.add_layer(ctx.module_id(), Box::new(FaultyLayer::new(self.mode.clone())));
                 self.drawn = true;
             }
             None => log::info!("no viewport service: the triangle is not drawn"),
@@ -71,11 +71,11 @@ impl Feature for FaultyFeature {
         if ui.button("Panic while drawing").clicked() {
             self.set_mode(Mode::Panic);
         }
-        ui.weak("Expected: the grid and the cube stay, only this feature is marked as failed.");
+        ui.weak("Expected: the grid and the cube stay, only this module is marked as failed.");
     }
 }
 
-impl FaultyFeature {
+impl FaultyModule {
     fn set_mode(&self, mode: Mode) {
         *self.mode.lock().unwrap_or_else(|e| e.into_inner()) = mode;
     }
@@ -207,4 +207,4 @@ fn create(device: &wgpu::Device, target: &Target) -> Gpu {
     }
 }
 
-uniwow_api::export_feature!(FaultyFeature::default());
+uniwow_api::export_module!(FaultyModule::default());

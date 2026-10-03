@@ -37,7 +37,7 @@ mod tests {
     }
 
     #[test]
-    fn independent_features_keep_their_order() {
+    fn independent_modules_keep_their_order() {
         let (order, forced) = init_order(&[3, 1, 2], |_| vec![]);
         assert_eq!(order, vec![3, 1, 2]);
         assert!(forced.is_empty());

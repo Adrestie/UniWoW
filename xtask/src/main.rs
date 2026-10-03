@@ -14,9 +14,9 @@ use workspace::{Package, Workspace};
 const USAGE: &str = "\
 usage: cargo xtask <command>
 
-  new-feature <id>              create features/<id> from the template
+  new-module <id>              create modules/<id> from the template
   build [--release]             build everything and lay out out/<profile>
-  build-feature <id> [--release]  build and deploy one feature, leaving the editor untouched
+  build-module <id> [--release]  build and deploy one module, leaving the editor untouched
   run [--release]               build everything, then start the editor
   check                         check the dependency rules and the runtime size";
 
@@ -34,9 +34,9 @@ fn main() -> ExitCode {
         .map(String::as_str)
         .collect();
     let result = match positional.as_slice() {
-        ["new-feature", id] => new_feature(id),
+        ["new-module", id] => new_module(id),
         ["build"] => build(release).map(|_| ()),
-        ["build-feature", id] => build_feature(id, release),
+        ["build-module", id] => build_module(id, release),
         ["run"] => run(release),
         ["check"] => check::run(),
         _ => Err(USAGE.to_owned()),
@@ -50,7 +50,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn new_feature(id: &str) -> Result {
+fn new_module(id: &str) -> Result {
     let valid = id
         .split('-')
         .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()))
@@ -61,7 +61,7 @@ fn new_feature(id: &str) -> Result {
         ));
     }
     let ws = Workspace::load()?;
-    let folder = ws.root.join("features").join(id);
+    let folder = ws.root.join("modules").join(id);
     if folder.exists() {
         return Err(format!("{} already exists", folder.display()));
     }
@@ -76,7 +76,7 @@ fn new_feature(id: &str) -> Result {
     let struct_name: String = id
         .split('-')
         .map(|part| part[..1].to_ascii_uppercase() + &part[1..])
-        .chain(std::iter::once("Feature".to_owned()))
+        .chain(std::iter::once("Module".to_owned()))
         .collect();
     let fill = |template: &str| {
         template
@@ -87,13 +87,13 @@ fn new_feature(id: &str) -> Result {
     std::fs::create_dir_all(folder.join("src")).map_err(|e| e.to_string())?;
     write(
         &folder.join("Cargo.toml"),
-        &fill(include_str!("../templates/feature/Cargo.toml.template")),
+        &fill(include_str!("../templates/module/Cargo.toml.template")),
     )?;
     write(
         &folder.join("src").join("lib.rs"),
-        &fill(include_str!("../templates/feature/lib.rs.template")),
+        &fill(include_str!("../templates/module/lib.rs.template")),
     )?;
-    println!("Created features/{id}. Build it with: cargo xtask build-feature {id}");
+    println!("Created modules/{id}. Build it with: cargo xtask build-module {id}");
     Ok(())
 }
 
@@ -103,17 +103,17 @@ fn build(release: bool) -> Result<String> {
     let ws = Workspace::load()?;
     let profile = Profile::new(&ws, release);
     let runtime = deploy_runtime(&profile)?;
-    let features = ws.features();
-    for package in &features {
-        deploy_feature(&profile, package, &runtime)?;
+    let rust_modules = ws.modules();
+    for package in &rust_modules {
+        deploy_module(&profile, package, &runtime)?;
     }
-    remove_stale(&profile, &features)?;
-    let modules = build_modules(&ws, &profile)?;
+    remove_stale(&profile, &rust_modules)?;
+    let compiled = build_modules(&ws, &profile)?;
     let scripts = deploy_scripts(&ws, &profile)?;
     println!(
-        "{} ready with {} features, {modules} modules and {scripts} scripts (runtime {})",
+        "{} ready with {} Rust modules, {compiled} compiled modules and {scripts} scripts (runtime {})",
         profile.out.display(),
-        features.len(),
+        rust_modules.len(),
         &runtime[..12]
     );
     Ok(runtime)
@@ -209,14 +209,14 @@ fn deploy_scripts(ws: &Workspace, profile: &Profile) -> Result<usize> {
     copy_tree(&ws.root.join("scripts"), &profile.out.join("scripts"))
 }
 
-fn build_feature(id: &str, release: bool) -> Result {
+fn build_module(id: &str, release: bool) -> Result {
     let ws = Workspace::load()?;
     let package = ws
-        .features()
+        .modules()
         .into_iter()
-        .find(|p| p.feature_id().as_deref() == Some(id))
-        .ok_or_else(|| format!("no feature '{id}' in features/"))?;
-    // Same package selection as `build`, so that shared dependencies keep the same features.
+        .find(|p| p.module_id().as_deref() == Some(id))
+        .ok_or_else(|| format!("no module '{id}' in modules/"))?;
+    // Same package selection as `build`, so that shared dependencies keep the same modules.
     cargo_build(release)?;
     let profile = Profile::new(&ws, release);
     let deployed = profile.out.join(RUNTIME_DLL);
@@ -234,10 +234,10 @@ fn build_feature(id: &str, release: bool) -> Result {
                 .to_owned(),
         );
     }
-    deploy_feature(&profile, package, &runtime)?;
+    deploy_module(&profile, package, &runtime)?;
     println!(
-        "feature '{id}' deployed to {}",
-        profile.out.join("features").join(id).display()
+        "module '{id}' deployed to {}",
+        profile.out.join("modules").join(id).display()
     );
     Ok(())
 }
@@ -289,7 +289,7 @@ fn cargo_build(release: bool) -> Result {
 
 /// Copies the executable, the runtime DLL and the Rust standard library DLL.
 fn deploy_runtime(profile: &Profile) -> Result<String> {
-    std::fs::create_dir_all(profile.out.join("features")).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(profile.out.join("modules")).map_err(|e| e.to_string())?;
     for file in [EXECUTABLE, "UniWoW.pdb", RUNTIME_DLL, "uniwow_api.pdb"] {
         let source = profile.target.join(file);
         if source.exists() {
@@ -302,7 +302,7 @@ fn deploy_runtime(profile: &Profile) -> Result<String> {
 }
 
 #[derive(Serialize)]
-struct FeatureManifest<'a> {
+struct ModuleManifest<'a> {
     id: &'a str,
     package: &'a str,
     name: &'a str,
@@ -314,21 +314,21 @@ struct FeatureManifest<'a> {
     dll: String,
     dll_hash: String,
     runtime: &'a str,
-    /// `workspace` for features built from this repository; `cargo xtask build` removes their
+    /// `workspace` for modules built from this repository; `cargo xtask build` removes their
     /// folders when the source is gone, and leaves other folders alone.
     origin: &'a str,
 }
 
-fn deploy_feature(profile: &Profile, package: &Package, runtime: &str) -> Result {
+fn deploy_module(profile: &Profile, package: &Package, runtime: &str) -> Result {
     let id = package
-        .feature_id()
+        .module_id()
         .ok_or_else(|| format!("{}: missing [package.metadata.uniwow] id", package.name))?;
     let source = profile.target.join(format!("{}.dll", package.name.replace('-', "_")));
-    let folder = profile.out.join("features").join(&id);
+    let folder = profile.out.join("modules").join(&id);
     std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
     let dll = format!("{id}.dll");
     copy_if_changed(&source, &folder.join(&dll))?;
-    let manifest = FeatureManifest {
+    let manifest = ModuleManifest {
         id: &id,
         package: &package.name,
         name: package.meta_str("name").unwrap_or(&id),
@@ -343,17 +343,17 @@ fn deploy_feature(profile: &Profile, package: &Package, runtime: &str) -> Result
         origin: "workspace",
     };
     let text = toml::to_string(&manifest).map_err(|e| e.to_string())?;
-    write(&folder.join("feature.toml"), &text)
+    write(&folder.join("module.toml"), &text)
 }
 
-/// Removes the deployed workspace features whose source folder no longer exists.
-fn remove_stale(profile: &Profile, features: &[&Package]) -> Result {
-    let ids: Vec<String> = features.iter().filter_map(|p| p.feature_id()).collect();
-    let Ok(entries) = std::fs::read_dir(profile.out.join("features")) else {
+/// Removes the deployed workspace modules whose source folder no longer exists.
+fn remove_stale(profile: &Profile, modules: &[&Package]) -> Result {
+    let ids: Vec<String> = modules.iter().filter_map(|p| p.module_id()).collect();
+    let Ok(entries) = std::fs::read_dir(profile.out.join("modules")) else {
         return Ok(());
     };
     for entry in entries.filter_map(|e| e.ok()) {
-        let Ok(text) = std::fs::read_to_string(entry.path().join("feature.toml")) else {
+        let Ok(text) = std::fs::read_to_string(entry.path().join("module.toml")) else {
             continue;
         };
         let Ok(manifest) = toml::from_str::<toml::Table>(&text) else {
@@ -363,7 +363,7 @@ fn remove_stale(profile: &Profile, features: &[&Package]) -> Result {
         let from_workspace = manifest.get("origin").and_then(|v| v.as_str()) == Some("workspace");
         if from_workspace && !ids.iter().any(|i| i == id) {
             std::fs::remove_dir_all(entry.path()).map_err(|e| e.to_string())?;
-            println!("removed features/{id}: its source folder no longer exists");
+            println!("removed modules/{id}: its source folder no longer exists");
         }
     }
     Ok(())

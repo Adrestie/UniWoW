@@ -1,9 +1,9 @@
-use uniwow_api::{Context, DockArea, Feature, Registrar, egui};
+use uniwow_api::{Context, DockArea, Module, Registrar, egui};
 
 #[derive(Default)]
 struct {{struct}};
 
-impl Feature for {{struct}} {
+impl Module for {{struct}} {
     fn register(&mut self, reg: &mut Registrar) {
         reg.panel("main", "{{name}}", DockArea::Right);
     }
@@ -13,4 +13,4 @@ impl Feature for {{struct}} {
     }
 }
 
-uniwow_api::export_feature!({{struct}}::default());
+uniwow_api::export_module!({{struct}}::default());

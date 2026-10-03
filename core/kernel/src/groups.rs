@@ -4,7 +4,7 @@
 use std::thread::ThreadId;
 
 use crate::history::Part;
-use crate::router::feature_of;
+use crate::router::module_of;
 
 /// An open group: who opened it, how deeply, and the commands applied so far.
 struct Open {
@@ -79,9 +79,9 @@ impl Groups {
         self.close_where(|group| group.thread == thread)
     }
 
-    /// Closes every group of a feature that failed.
-    pub fn close_feature(&mut self, feature: &str) -> Vec<Closed> {
-        self.close_where(|group| feature_of(&group.caller) == feature)
+    /// Closes every group of a module that failed.
+    pub fn close_module(&mut self, module: &str) -> Vec<Closed> {
+        self.close_where(|group| module_of(&group.caller) == module)
     }
 
     /// Closes the group of this id, whatever its depth: the user's way out of a group left open.
@@ -90,7 +90,7 @@ impl Groups {
         Some(close(self.open.remove(index)))
     }
 
-    /// Removes the commands of a failed feature from the open groups; returns how many there were.
+    /// Removes the commands of a failed module from the open groups; returns how many there were.
     pub fn purge(&mut self, owner: &str) -> usize {
         let mut removed = 0;
         for group in &mut self.open {
@@ -162,9 +162,9 @@ mod tests {
             self.0.to_owned()
         }
 
-        fn apply(&mut self, _feature: &mut dyn Any) {}
+        fn apply(&mut self, _module: &mut dyn Any) {}
 
-        fn revert(&mut self, _feature: &mut dyn Any) {}
+        fn revert(&mut self, _module: &mut dyn Any) {}
     }
 
     fn part(label: &'static str) -> Part {
@@ -260,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn the_groups_of_a_failed_feature_close_and_lose_its_commands() {
+    fn the_groups_of_a_failed_module_close_and_lose_its_commands() {
         let here = std::thread::current().id();
         let mut groups = Groups::default();
         groups.begin("scripting-lua#paint.lua #1", here, "Lua: paint.lua");
@@ -273,7 +273,7 @@ mod tests {
             command: Box::new(Named("own")),
         });
         assert_eq!(groups.purge("scripting-lua"), 1);
-        let closed = groups.close_feature("scripting-lua");
+        let closed = groups.close_module("scripting-lua");
         assert_eq!(labels(&closed[0].parts), vec!["painted".to_owned()]);
         assert_eq!(groups.list().len(), 1, "the module's group stays open");
     }

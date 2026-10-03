@@ -11,7 +11,7 @@ const MAX_LINES: usize = 5000;
 pub struct LogLine {
     pub seconds: f32,
     pub level: Level,
-    /// Feature id, `kernel`, or the library that logged.
+    /// Module id, `kernel`, or the library that logged.
     pub source: String,
     pub message: String,
 }
@@ -50,11 +50,11 @@ impl Log for Logger {
     fn flush(&self) {}
 }
 
-/// `uniwow_feature_sample_cube::layer` → `sample-cube`; `uniwow_kernel::shell` → `kernel`.
+/// `uniwow_module_sample_cube::layer` → `sample-cube`; `uniwow_kernel::shell` → `kernel`.
 fn source_of(target: &str) -> String {
     let root = target.split("::").next().unwrap_or(target);
-    if let Some(feature) = root.strip_prefix("uniwow_feature_") {
-        feature.replace('_', "-")
+    if let Some(module) = root.strip_prefix("uniwow_module_") {
+        module.replace('_', "-")
     } else if root == "uniwow_kernel" {
         "kernel".to_owned()
     } else {
@@ -62,7 +62,7 @@ fn source_of(target: &str) -> String {
     }
 }
 
-/// Routes the `log` macros of the kernel and of every feature to the Log panel, and logs panics.
+/// Routes the `log` macros of the kernel and of every module to the Log panel, and logs panics.
 pub fn install() {
     START.get_or_init(Instant::now);
     static LOGGER: Logger = Logger;
@@ -79,9 +79,9 @@ pub fn install() {
             .map(|s| s.to_string())
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "panic without message".to_owned());
-        // Logged under the feature the kernel was calling, so the Log panel names it.
-        let target = match crate::guard::current_feature() {
-            Some(id) => format!("uniwow_feature_{}", id.replace('-', "_")),
+        // Logged under the module the kernel was calling, so the Log panel names it.
+        let target = match crate::guard::current_module() {
+            Some(id) => format!("uniwow_module_{}", id.replace('-', "_")),
             None => "uniwow_kernel".to_owned(),
         };
         log::error!(target: target.as_str(), "panic{location}: {message}");

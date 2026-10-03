@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use uniwow_api::{Context, DockArea, Feature, JobId, JobOutcome, Registrar, egui};
+use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, Registrar, egui};
 
 use output::{Kind, Output};
 use run::Source;
@@ -30,7 +30,7 @@ struct ScriptingLua {
     next_run: u64,
 }
 
-impl Feature for ScriptingLua {
+impl Module for ScriptingLua {
     fn register(&mut self, reg: &mut Registrar) {
         reg.panel("lua", "Lua", DockArea::Bottom);
     }
@@ -198,4 +198,4 @@ pub(crate) fn scripts_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("scripts").join("lua-5.1"))
 }
 
-uniwow_api::export_feature!(ScriptingLua::default());
+uniwow_api::export_module!(ScriptingLua::default());

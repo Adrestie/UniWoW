@@ -1,6 +1,6 @@
 [package]
-name = "uniwow-feature-sample-notes"
-description = "Sample: lists the events it receives and asks for the cube to be repainted, without knowing the cube feature"
+name = "uniwow-module-sample-notes"
+description = "Sample: lists the events it receives and asks for the cube to be repainted, without knowing the cube module"
 version.workspace = true
 edition.workspace = true
 

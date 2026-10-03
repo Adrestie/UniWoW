@@ -2,14 +2,14 @@ use std::collections::BTreeSet;
 use std::ffi::CStr;
 use std::path::{Path, PathBuf};
 
-use uniwow_api::{CREATE_SYMBOL, CreateFn, Feature, MenuItemSpec, PACKAGE_SYMBOL, PackageFn, PanelSpec, RUNTIME_DLL};
+use uniwow_api::{CREATE_SYMBOL, CreateFn, MenuItemSpec, Module, PACKAGE_SYMBOL, PackageFn, PanelSpec, RUNTIME_DLL};
 
 use crate::guard::guarded_as;
 use crate::manifest::{self, Manifest};
 
 pub enum State {
     Running,
-    /// Turned off in the Features panel; not loaded.
+    /// Turned off in the Modules panel; not loaded.
     Disabled,
     /// Folder without a usable manifest or DLL.
     Ignored(String),
@@ -28,12 +28,12 @@ impl State {
 }
 
 pub struct Slot {
-    /// Feature id from the manifest, or the folder name when there is no manifest.
+    /// Module id from the manifest, or the folder name when there is no manifest.
     pub id: String,
     pub folder: PathBuf,
     pub manifest: Option<Manifest>,
     pub state: State,
-    pub feature: Option<Box<dyn Feature>>,
+    pub module: Option<Box<dyn Module>>,
     pub panels: Vec<PanelSpec>,
     pub menu_items: Vec<MenuItemSpec>,
     pub subscriptions: Vec<String>,
@@ -46,7 +46,7 @@ impl Slot {
             folder,
             manifest,
             state,
-            feature: None,
+            module: None,
             panels: Vec::new(),
             menu_items: Vec::new(),
             subscriptions: Vec::new(),
@@ -67,13 +67,13 @@ pub struct Discovery {
     pub slots: Vec<Slot>,
 }
 
-/// Scans `<exe dir>\features`, checks every feature against the runtime and loads the valid ones.
+/// Scans `<exe dir>\modules`, checks every module against the runtime and loads the valid ones.
 pub fn discover(exe_dir: &Path, disabled: &BTreeSet<String>) -> Discovery {
     let runtime_fingerprint = manifest::hash_file(&exe_dir.join(RUNTIME_DLL)).ok();
     let shadow_dir = prepare_shadow_dir();
     let mut slots: Vec<Slot> = Vec::new();
 
-    let mut folders: Vec<PathBuf> = std::fs::read_dir(exe_dir.join("features"))
+    let mut folders: Vec<PathBuf> = std::fs::read_dir(exe_dir.join("modules"))
         .map(|entries| {
             entries
                 .filter_map(|e| e.ok())
@@ -114,7 +114,7 @@ pub fn discover(exe_dir: &Path, disabled: &BTreeSet<String>) -> Discovery {
         let mut slot = Slot::new(id, folder, Some(manifest), state);
         if slot.state.is_running() {
             match load(&dll, &shadow_dir, &slot) {
-                Ok(feature) => slot.feature = Some(feature),
+                Ok(module) => slot.module = Some(module),
                 Err(state) => slot.state = state,
             }
         }
@@ -128,10 +128,10 @@ pub fn discover(exe_dir: &Path, disabled: &BTreeSet<String>) -> Discovery {
 }
 
 /// Loads a copy of the DLL, so that the original can be rebuilt while the editor runs.
-fn load(dll: &Path, shadow_dir: &Path, slot: &Slot) -> Result<Box<dyn Feature>, State> {
+fn load(dll: &Path, shadow_dir: &Path, slot: &Slot) -> Result<Box<dyn Module>, State> {
     let manifest = slot.manifest.as_ref().expect("checked by the caller");
-    // Prefixed so that a feature named like a system DLL (version, dbghelp…) cannot be confused with it.
-    let copy = shadow_dir.join(format!("uniwow-feature-{}.dll", slot.id));
+    // Prefixed so that a module named like a system DLL (version, dbghelp…) cannot be confused with it.
+    let copy = shadow_dir.join(format!("uniwow-module-{}.dll", slot.id));
     std::fs::copy(dll, &copy).map_err(|e| State::Refused(format!("could not copy the DLL: {e}")))?;
     // The copy is what gets loaded, so it is the copy that must match the manifest.
     if manifest::hash_file(&copy).ok().as_deref() != Some(manifest.dll_hash.as_str()) {
@@ -146,11 +146,11 @@ fn load(dll: &Path, shadow_dir: &Path, slot: &Slot) -> Result<Box<dyn Feature>, 
     let library =
         unsafe { libloading::Library::new(&copy) }.map_err(|e| State::Refused(format!("could not be loaded: {e}")))?;
 
-    // SAFETY: C function returning a static NUL-terminated string, exported by `export_feature!`.
+    // SAFETY: C function returning a static NUL-terminated string, exported by `export_module!`.
     let package = unsafe {
         let package: libloading::Symbol<PackageFn> = library
             .get(PACKAGE_SYMBOL)
-            .map_err(|_| State::Refused("not a UniWoW feature (no entry point)".to_owned()))?;
+            .map_err(|_| State::Refused("not a UniWoW module (no entry point)".to_owned()))?;
         CStr::from_ptr(package().cast()).to_string_lossy().into_owned()
     };
     if package != manifest.package {
@@ -164,9 +164,9 @@ fn load(dll: &Path, shadow_dir: &Path, slot: &Slot) -> Result<Box<dyn Feature>, 
     let create: CreateFn = unsafe {
         *library
             .get::<CreateFn>(CREATE_SYMBOL)
-            .map_err(|_| State::Refused("not a UniWoW feature (no entry point)".to_owned()))?
+            .map_err(|_| State::Refused("not a UniWoW module (no entry point)".to_owned()))?
     };
-    // A loaded feature is never unloaded: its code must outlive every object it created.
+    // A loaded module is never unloaded: its code must outlive every object it created.
     std::mem::forget(library);
 
     guarded_as(&slot.id, create).map_err(State::Failed)

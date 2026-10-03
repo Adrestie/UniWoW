@@ -8,18 +8,18 @@ use uniwow_api::{log, serde_json};
 #[derive(Default, Serialize, Deserialize)]
 #[serde(crate = "uniwow_api::serde")]
 pub struct Settings {
-    /// Features not loaded at start.
-    #[serde(default)]
-    pub disabled_features: BTreeSet<String>,
-    /// Panels the user closed, as `feature/panel`; not reopened automatically.
+    /// Modules not loaded at start.
+    #[serde(default, alias = "disabled_features")]
+    pub disabled_modules: BTreeSet<String>,
+    /// Panels the user closed, as `module/panel`; not reopened automatically.
     #[serde(default)]
     pub closed_panels: BTreeSet<String>,
     /// Dock layout of the last session.
     #[serde(default)]
     pub layout: Option<serde_json::Value>,
-    /// Settings of each feature, by feature id then key.
-    #[serde(default)]
-    pub features: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
+    /// Settings of each module, by module id then key.
+    #[serde(default, alias = "features")]
+    pub modules: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
 }
 
 impl Settings {

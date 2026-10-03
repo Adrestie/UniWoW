@@ -1,8 +1,8 @@
-//! Sample feature: a cube drawn through the viewport service.
+//! Sample module: a cube drawn through the viewport service.
 //!
 //! Its colour and speed change through undoable commands, from its own panel, when another
-//! feature publishes `sample.paint`, or through the named command `cube.paint`. It never names
-//! the features that ask. `cube.color` answers on the calling thread, and the cube's GPU
+//! module publishes `sample.paint`, or through the named command `cube.paint`. It never names
+//! the modules that ask. `cube.color` answers on the calling thread, and the cube's GPU
 //! resources are built in a job.
 
 mod layer;
@@ -14,7 +14,7 @@ use uniwow_api::serde::{Deserialize, Serialize};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::viewport;
 use uniwow_api::{
-    Command, Context, DockArea, Event, FEATURE_FAILED_TOPIC, Feature, JobId, JobOutcome, Registrar, decode_arguments,
+    Command, Context, DockArea, Event, JobId, JobOutcome, MODULE_FAILED_TOPIC, Module, Registrar, decode_arguments,
     egui, log,
 };
 
@@ -38,7 +38,7 @@ const PRESETS: [(&str, [f32; 3]); 4] = [
     ("Gold", [1.0, 0.72, 0.18]),
 ];
 
-struct CubeFeature {
+struct CubeModule {
     params: Arc<Mutex<Params>>,
     /// Filled by the job building the GPU resources, emptied by the layer.
     gpu: Arc<Mutex<Option<Gpu>>>,
@@ -48,7 +48,7 @@ struct CubeFeature {
     speed_before_edit: Option<f32>,
 }
 
-impl Default for CubeFeature {
+impl Default for CubeModule {
     fn default() -> Self {
         Self {
             params: Arc::new(Mutex::new(Params {
@@ -63,12 +63,12 @@ impl Default for CubeFeature {
     }
 }
 
-impl Feature for CubeFeature {
+impl Module for CubeModule {
     fn register(&mut self, reg: &mut Registrar) {
         let params = self.params.clone();
         reg.panel("cube", "Cube", DockArea::Right)
             .subscribe("sample.paint")
-            .subscribe(FEATURE_FAILED_TOPIC)
+            .subscribe(MODULE_FAILED_TOPIC)
             .command(
                 "cube.paint",
                 "Paints the cube; undoable. Painting it the colour it has changes nothing.",
@@ -96,7 +96,7 @@ impl Feature for CubeFeature {
             return;
         };
         view.add_layer(
-            ctx.feature_id(),
+            ctx.module_id(),
             Box::new(CubeLayer::new(self.params.clone(), self.gpu.clone())),
         );
         self.drawn = true;
@@ -120,7 +120,7 @@ impl Feature for CubeFeature {
         if !self.drawn {
             ui.colored_label(
                 ui.visuals().warn_fg_color,
-                "No 3D view: the viewport feature is not running, so the cube is not drawn.",
+                "No 3D view: the viewport module is not running, so the cube is not drawn.",
             );
             ui.separator();
         }
@@ -168,8 +168,8 @@ impl Feature for CubeFeature {
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut Context) {
-        if event.topic == FEATURE_FAILED_TOPIC {
-            // The failed feature may be the viewport: its service is then withdrawn.
+        if event.topic == MODULE_FAILED_TOPIC {
+            // The failed module may be the viewport: its service is then withdrawn.
             if self.drawn && ctx.service(viewport::SERVICE).is_none() {
                 self.drawn = false;
             }
@@ -196,7 +196,7 @@ impl Feature for CubeFeature {
     }
 }
 
-impl CubeFeature {
+impl CubeModule {
     fn paint(&mut self, ctx: &mut Context, color: [f32; 3], reason: &str) {
         ctx.execute(SetColor::new(color));
         let painted = Painted {
@@ -207,7 +207,7 @@ impl CubeFeature {
     }
 }
 
-/// Payload of `sample.paint` and arguments of `cube.paint`, as this feature reads them.
+/// Payload of `sample.paint` and arguments of `cube.paint`, as this module reads them.
 #[derive(Deserialize)]
 #[serde(crate = "uniwow_api::serde")]
 struct Paint {
@@ -226,10 +226,10 @@ fn to_color32(c: [f32; 3]) -> egui::Color32 {
     egui::Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8)
 }
 
-fn cube(feature: &mut dyn Any) -> &mut CubeFeature {
-    feature
+fn cube(module: &mut dyn Any) -> &mut CubeModule {
+    module
         .downcast_mut()
-        .expect("commands of this feature are applied to it")
+        .expect("commands of this module are applied to it")
 }
 
 /// Paints the cube. The colour it replaces is read when applied (see `Command`).
@@ -249,15 +249,15 @@ impl Command for SetColor {
         "cube colour".to_owned()
     }
 
-    fn apply(&mut self, feature: &mut dyn Any) {
-        let mut params = lock(&cube(feature).params);
+    fn apply(&mut self, module: &mut dyn Any) {
+        let mut params = lock(&cube(module).params);
         self.old = Some(params.color);
         params.color = self.new;
     }
 
-    fn revert(&mut self, feature: &mut dyn Any) {
+    fn revert(&mut self, module: &mut dyn Any) {
         if let Some(old) = self.old {
-            lock(&cube(feature).params).color = old;
+            lock(&cube(module).params).color = old;
         }
     }
 }
@@ -279,30 +279,30 @@ impl Command for SetSpeed {
         "cube speed".to_owned()
     }
 
-    fn apply(&mut self, feature: &mut dyn Any) {
-        let mut params = lock(&cube(feature).params);
+    fn apply(&mut self, module: &mut dyn Any) {
+        let mut params = lock(&cube(module).params);
         self.old = Some(params.speed);
         params.speed = self.new;
     }
 
-    fn revert(&mut self, feature: &mut dyn Any) {
+    fn revert(&mut self, module: &mut dyn Any) {
         if let Some(old) = self.old {
-            lock(&cube(feature).params).speed = old;
+            lock(&cube(module).params).speed = old;
         }
     }
 }
 
-uniwow_api::export_feature!(CubeFeature::default());
+uniwow_api::export_module!(CubeModule::default());
 
 #[cfg(test)]
 mod tests {
     use uniwow_api::Command;
 
-    use super::{CubeFeature, PRESETS, SetColor, lock};
+    use super::{CubeModule, PRESETS, SetColor, lock};
 
     #[test]
     fn paints_applied_in_one_pass_undo_back_to_where_they_started() {
-        let mut cube = CubeFeature::default();
+        let mut cube = CubeModule::default();
         let start = lock(&cube.params).color;
         let (red, gold) = (PRESETS[0].1, PRESETS[3].1);
         // Both queued before either is applied, as when two events arrive in the same frame.

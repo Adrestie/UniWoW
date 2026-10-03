@@ -2,14 +2,14 @@ use std::any::Any;
 
 use crate::{CallId, Command, Editor, JobContext, JobFn, JobId, ServiceKey, egui_wgpu};
 
-/// What the kernel offers to features. Implemented by the kernel only.
+/// What the kernel offers to modules. Implemented by the kernel only.
 pub trait Host {
     fn publish(&mut self, source: &str, topic: &str, payload: serde_json::Value);
     fn execute(&mut self, owner: &str, command: Box<dyn Command>);
     fn service(&self, id: &str) -> Option<&(dyn Any + Send + Sync)>;
     fn gpu(&self) -> Option<&egui_wgpu::RenderState>;
-    fn setting(&self, feature: &str, key: &str) -> Option<serde_json::Value>;
-    fn set_setting(&mut self, feature: &str, key: &str, value: serde_json::Value);
+    fn setting(&self, module: &str, key: &str) -> Option<serde_json::Value>;
+    fn set_setting(&mut self, module: &str, key: &str, value: serde_json::Value);
     fn report_failure(&mut self, reporter: &str, culprit: &str, message: &str);
     fn spawn(&mut self, owner: &str, label: &str, job: JobFn) -> JobId;
     fn spawn_thread(&mut self, owner: &str, label: &str, job: JobFn) -> JobId;
@@ -18,28 +18,28 @@ pub trait Host {
     fn editor(&self, caller: &str) -> Editor;
 }
 
-/// Access to the kernel for one feature, passed to every `Feature` method after `register`.
+/// Access to the kernel for one module, passed to every `Module` method after `register`.
 pub struct Context<'a> {
     host: &'a mut dyn Host,
-    feature: &'a str,
+    module: &'a str,
 }
 
 impl<'a> Context<'a> {
-    pub fn new(host: &'a mut dyn Host, feature: &'a str) -> Self {
-        Self { host, feature }
+    pub fn new(host: &'a mut dyn Host, module: &'a str) -> Self {
+        Self { host, module }
     }
 
-    /// Id of the feature this context belongs to.
-    pub fn feature_id(&self) -> &str {
-        self.feature
+    /// Id of the module this context belongs to.
+    pub fn module_id(&self) -> &str {
+        self.module
     }
 
     pub fn publish(&mut self, topic: &str, payload: serde_json::Value) {
-        self.host.publish(self.feature, topic, payload);
+        self.host.publish(self.module, topic, payload);
     }
 
     /// Publishes `payload` serialised to JSON. Subscribers read it back with `Event::decode` into a
-    /// type of their own: features share no Rust type, only the shape of the JSON.
+    /// type of their own: modules share no Rust type, only the shape of the JSON.
     pub fn publish_as<T: serde::Serialize>(&mut self, topic: &str, payload: &T) {
         match serde_json::to_value(payload) {
             Ok(value) => self.publish(topic, value),
@@ -47,12 +47,12 @@ impl<'a> Context<'a> {
         }
     }
 
-    /// Queues an undoable command on this feature.
+    /// Queues an undoable command on this module.
     pub fn execute(&mut self, command: impl Command + 'static) {
-        self.host.execute(self.feature, Box::new(command));
+        self.host.execute(self.module, Box::new(command));
     }
 
-    /// Returns a clone of the service, if a running feature provides it.
+    /// Returns a clone of the service, if a running module provides it.
     pub fn service<T: Any + Clone + Send + Sync>(&self, key: ServiceKey<T>) -> Option<T> {
         let service = self.host.service(key.id())?;
         let typed = service.downcast_ref::<T>().cloned();
@@ -71,26 +71,26 @@ impl<'a> Context<'a> {
         self.host.gpu()
     }
 
-    /// Reads a setting of this feature, kept between sessions.
+    /// Reads a setting of this module, kept between sessions.
     pub fn setting(&self, key: &str) -> Option<serde_json::Value> {
-        self.host.setting(self.feature, key)
+        self.host.setting(self.module, key)
     }
 
     pub fn set_setting(&mut self, key: &str, value: serde_json::Value) {
-        self.host.set_setting(self.feature, key, value);
+        self.host.set_setting(self.module, key, value);
     }
 
-    /// Reports that the feature `culprit` misbehaved in code this feature runs on its behalf, such
-    /// as a viewport layer. The kernel disables it as if it had panicked, naming this feature.
+    /// Reports that the module `culprit` misbehaved in code this module runs on its behalf, such
+    /// as a viewport layer. The kernel disables it as if it had panicked, naming this module.
     pub fn report_failure(&mut self, culprit: &str, message: &str) {
-        self.host.report_failure(self.feature, culprit, message);
+        self.host.report_failure(self.module, culprit, message);
     }
 
     /// Runs `job` on a worker thread (rule T2). Its value, cancellation or panic comes back to
-    /// this feature on the interface thread through `Feature::on_job`.
+    /// this module on the interface thread through `Module::on_job`.
     pub fn spawn<T: Any + Send>(&mut self, label: &str, job: impl FnOnce(&JobContext) -> T + Send + 'static) -> JobId {
         self.host
-            .spawn(self.feature, label, Box::new(move |context| Box::new(job(context))))
+            .spawn(self.module, label, Box::new(move |context| Box::new(job(context))))
     }
 
     /// Like `spawn`, on a thread of its own instead of the pool: for work that waits, such as a
@@ -101,22 +101,22 @@ impl<'a> Context<'a> {
         job: impl FnOnce(&JobContext) -> T + Send + 'static,
     ) -> JobId {
         self.host
-            .spawn_thread(self.feature, label, Box::new(move |context| Box::new(job(context))))
+            .spawn_thread(self.module, label, Box::new(move |context| Box::new(job(context))))
     }
 
-    /// Asks one of this feature's jobs to stop (as the Jobs panel's Cancel button does).
+    /// Asks one of this module's jobs to stop (as the Jobs panel's Cancel button does).
     pub fn cancel(&mut self, job: JobId) {
-        self.host.cancel(self.feature, job);
+        self.host.cancel(self.module, job);
     }
 
     /// Calls a named command from the interface thread. The answer comes back at the end of the
-    /// frame through `Feature::on_reply`, with the returned id.
+    /// frame through `Module::on_reply`, with the returned id.
     pub fn call(&mut self, name: &str, arguments: serde_json::Value) -> CallId {
-        self.host.call(self.feature, name, arguments)
+        self.host.call(self.module, name, arguments)
     }
 
-    /// A handle to the editor for other threads, acting for this feature.
+    /// A handle to the editor for other threads, acting for this module.
     pub fn editor(&self) -> Editor {
-        self.host.editor(self.feature)
+        self.host.editor(self.module)
     }
 }

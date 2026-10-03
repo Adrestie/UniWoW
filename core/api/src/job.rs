@@ -47,7 +47,7 @@ impl JobContext {
     }
 }
 
-/// How a job ended, delivered to its feature on the interface thread by `Feature::on_job`.
+/// How a job ended, delivered to its module on the interface thread by `Module::on_job`.
 pub enum JobOutcome {
     /// The value the job returned.
     Done(Box<dyn Any + Send>),

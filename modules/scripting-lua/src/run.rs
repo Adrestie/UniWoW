@@ -141,7 +141,7 @@ struct RunEnd<'a> {
 
 impl Drop for RunEnd<'_> {
     fn drop(&mut self) {
-        // Refused only when the feature failed meanwhile: its groups are already closed then.
+        // Refused only when the module failed meanwhile: its groups are already closed then.
         let _ = self.editor.end_group();
         for subscription in self.subscriptions.borrow().iter() {
             self.editor.unsubscribe(*subscription);

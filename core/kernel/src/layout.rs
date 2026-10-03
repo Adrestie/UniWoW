@@ -1,4 +1,4 @@
-//! Dock layout: the default arrangement, and the restoration of a saved one when features have
+//! Dock layout: the default arrangement, and the restoration of a saved one when modules have
 //! come or gone since.
 
 use std::collections::{BTreeSet, HashSet};
@@ -7,25 +7,26 @@ use uniwow_api::egui_dock::{DockState, Node, NodeIndex, SurfaceIndex, TabPath, T
 use uniwow_api::serde::{Deserialize, Serialize};
 use uniwow_api::{DockArea as Area, serde_json};
 
-/// A dock tab: one panel of one feature, or of the kernel.
+/// A dock tab: one panel of one module, or of the kernel.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(crate = "uniwow_api::serde")]
 pub struct Tab {
-    pub feature: String,
+    #[serde(alias = "feature")]
+    pub module: String,
     pub panel: String,
 }
 
 impl Tab {
-    pub fn new(feature: &str, panel: &str) -> Self {
+    pub fn new(module: &str, panel: &str) -> Self {
         Self {
-            feature: feature.to_owned(),
+            module: module.to_owned(),
             panel: panel.to_owned(),
         }
     }
 
-    /// `feature/panel`, as stored in the settings.
+    /// `module/panel`, as stored in the settings.
     pub fn key(&self) -> String {
-        format!("{}/{}", self.feature, self.panel)
+        format!("{}/{}", self.module, self.panel)
     }
 }
 
@@ -36,7 +37,7 @@ pub struct PanelEntry {
     pub open_by_default: bool,
 }
 
-/// The saved layout without the panels of absent features, plus the panels of features that came
+/// The saved layout without the panels of absent modules, plus the panels of modules that came
 /// back, unless the user closed them.
 pub fn restore(saved: Option<serde_json::Value>, entries: &[PanelEntry], closed: &BTreeSet<String>) -> DockState<Tab> {
     let saved = saved.and_then(|v| serde_json::from_value::<DockState<Tab>>(v).ok());
@@ -179,9 +180,9 @@ mod tests {
     /// children are empty, with the only remaining leaf orphaned below them.
     const BROKEN: &str = include_str!("fixtures/broken_layout.json");
 
-    fn entry(feature: &str, panel: &str, area: Area) -> PanelEntry {
+    fn entry(module: &str, panel: &str, area: Area) -> PanelEntry {
         PanelEntry {
-            tab: Tab::new(feature, panel),
+            tab: Tab::new(module, panel),
             title: panel.to_owned(),
             area,
             open_by_default: true,
@@ -190,7 +191,7 @@ mod tests {
 
     fn kernel() -> Vec<PanelEntry> {
         vec![
-            entry("kernel", "features", Area::Bottom),
+            entry("kernel", "modules", Area::Bottom),
             entry("kernel", "log", Area::Bottom),
         ]
     }
@@ -245,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn panels_of_absent_features_leave_without_breaking_the_tree() {
+    fn panels_of_absent_modules_leave_without_breaking_the_tree() {
         let mut with_third = all();
         with_third.push(entry("third", "main", Area::Right));
         let before = default_layout(&with_third, &BTreeSet::new());

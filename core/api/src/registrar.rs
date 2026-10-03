@@ -13,11 +13,11 @@ pub enum DockArea {
 
 #[derive(Clone, Debug)]
 pub struct PanelSpec {
-    /// Identifier, unique within the feature.
+    /// Identifier, unique within the module.
     pub id: String,
     pub title: String,
     pub area: DockArea,
-    /// Shown at first start, and again after the feature comes back, unless the user closed it.
+    /// Shown at first start, and again after the module comes back, unless the user closed it.
     pub open_by_default: bool,
 }
 
@@ -26,11 +26,11 @@ pub struct MenuItemSpec {
     /// Top-level menu, e.g. "View". Created if it does not exist.
     pub menu: String,
     pub label: String,
-    /// Passed back to `Feature::on_menu`.
+    /// Passed back to `Module::on_menu`.
     pub action: String,
 }
 
-/// Collects what a feature contributes during `Feature::register`.
+/// Collects what a module contributes during `Module::register`.
 #[derive(Default)]
 pub struct Registrar {
     pub panels: Vec<PanelSpec>,
@@ -68,7 +68,7 @@ impl Registrar {
         self
     }
 
-    /// Declares a named command running on the interface thread, handled by `Feature::on_command`.
+    /// Declares a named command running on the interface thread, handled by `Module::on_command`.
     /// `arguments` and `result` are JSON Schemas.
     pub fn command(
         &mut self,
@@ -93,8 +93,8 @@ impl Registrar {
     }
 
     /// Like `command_on_caller`, for a command offered on behalf of someone else, such as a
-    /// module or a script: a command another feature declares itself under the same name wins
-    /// over it, whatever the order the features register in.
+    /// module or a script: a command another module declares itself under the same name wins
+    /// over it, whatever the order the modules register in.
     pub fn command_on_caller_delegated(
         &mut self,
         name: &str,

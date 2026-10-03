@@ -1,5 +1,5 @@
 [package]
-name = "uniwow-feature-sample-cube"
+name = "uniwow-module-sample-cube"
 description = "Sample: a cube drawn through the viewport service, recoloured by undoable commands and by events"
 version.workspace = true
 edition.workspace = true

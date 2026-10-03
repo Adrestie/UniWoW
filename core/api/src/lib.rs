@@ -1,6 +1,6 @@
-//! Contracts between the UniWoW kernel and its features.
+//! Contracts between the UniWoW kernel and its modules.
 //!
-//! This crate is built as the shared runtime DLL. Features depend on it alone and reach egui,
+//! This crate is built as the shared runtime DLL. Modules depend on it alone and reach egui,
 //! wgpu and the other shared libraries through the re-exports below, so that each of them
 //! exists once in memory.
 
@@ -22,8 +22,8 @@ mod commands;
 mod context;
 mod editor;
 mod event;
-mod feature;
 mod job;
+mod module;
 mod registrar;
 mod service;
 pub mod viewport;
@@ -33,13 +33,13 @@ pub use commands::{CallId, CommandHandler, CommandInfo, CommandSpec, RunsOn, dec
 pub use context::{Context, Host};
 pub use editor::{Editor, EditorBackend};
 pub use event::Event;
-pub use feature::{CREATE_SYMBOL, CreateFn, Feature, PACKAGE_SYMBOL, PackageFn};
 pub use job::{JobContext, JobFn, JobId, JobOutcome};
+pub use module::{CREATE_SYMBOL, CreateFn, Module, PACKAGE_SYMBOL, PackageFn};
 pub use registrar::{DockArea, MenuItemSpec, PanelSpec, Registrar};
 pub use service::ServiceKey;
 
-/// Topic published by the kernel when a feature fails while running. Payload: `{ "id": <feature id> }`.
-pub const FEATURE_FAILED_TOPIC: &str = "kernel.feature_failed";
+/// Topic published by the kernel when a module fails while running. Payload: `{ "id": <module id> }`.
+pub const MODULE_FAILED_TOPIC: &str = "kernel.module_failed";
 
 /// Name of the runtime DLL, next to the executable.
 pub const RUNTIME_DLL: &str = "uniwow_api.dll";

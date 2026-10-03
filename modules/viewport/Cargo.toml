@@ -1,5 +1,5 @@
 [package]
-name = "uniwow-feature-viewport"
+name = "uniwow-module-viewport"
 description = "3D window with an orbit camera and a ground grid; provides the viewport service"
 version.workspace = true
 edition.workspace = true

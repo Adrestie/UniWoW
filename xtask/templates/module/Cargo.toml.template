@@ -1,5 +1,5 @@
 [package]
-name = "uniwow-feature-{{id}}"
+name = "uniwow-module-{{id}}"
 description = "{{name}}"
 version.workspace = true
 edition.workspace = true
@@ -10,13 +10,13 @@ crate-type = ["cdylib"]
 [dependencies]
 # Only uniwow-api and the crates of libs/ are allowed, here and in dev or build dependencies
 # (cargo xtask check). Any other crate, even one the runtime already contains, can make Cargo
-# rebuild the runtime and so make every feature incompatible. Ask for it to be added to the runtime.
+# rebuild the runtime and so make every module incompatible. Ask for it to be added to the runtime.
 uniwow-api.workspace = true
 
 [package.metadata.uniwow]
 id = "{{id}}"
 name = "{{name}}"
 category = "Other"
-# Services the feature cannot work without, and services it uses when present.
+# Services the module cannot work without, and services it uses when present.
 requires = []
 uses = []

@@ -1,4 +1,4 @@
-//! The pool of worker threads that runs the jobs of the features (rule T2).
+//! The pool of worker threads that runs the jobs of the modules (rule T2).
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -11,7 +11,7 @@ use crate::router::{Bridge, Request};
 
 type Task = Box<dyn FnOnce() + Send>;
 
-/// A job not yet handed back to its feature.
+/// A job not yet handed back to its module.
 pub struct Running {
     pub id: JobId,
     pub owner: String,
@@ -163,7 +163,7 @@ impl Pool {
     }
 
     /// Asks a job of `owner` to stop; it ends as cancelled even if it returns a value. A job of
-    /// another feature is left alone.
+    /// another module is left alone.
     pub fn cancel(&self, owner: &str, id: JobId) {
         match self.running.iter().find(|j| j.id == id) {
             Some(job) if job.owner == owner => job.cancelled.store(true, Ordering::Relaxed),
@@ -172,7 +172,7 @@ impl Pool {
         }
     }
 
-    /// Asks every job of a feature to stop, when the feature fails.
+    /// Asks every job of a module to stop, when the module fails.
     pub fn cancel_owner(&self, owner: &str) {
         for job in self.running.iter().filter(|j| j.owner == owner) {
             job.cancelled.store(true, Ordering::Relaxed);
@@ -339,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn a_feature_cannot_cancel_the_job_of_another() {
+    fn a_module_cannot_cancel_the_job_of_another() {
         let mut pool = Pool::new(1, None, None);
         let id = pool.spawn(
             "notes",
@@ -360,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_feature_has_its_jobs_cancelled() {
+    fn a_failed_module_has_its_jobs_cancelled() {
         let mut pool = Pool::new(2, None, None);
         let wait = |context: &uniwow_api::JobContext| {
             while !context.is_cancelled() {
@@ -375,7 +375,7 @@ mod tests {
         assert_eq!(finished[0].id, failed);
         assert!(
             pool.running().iter().any(|job| job.id == other),
-            "other features' jobs go on"
+            "other modules' jobs go on"
         );
         pool.cancel_owner("notes");
         wait_for(&mut pool, 1);

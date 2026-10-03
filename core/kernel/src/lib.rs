@@ -1,6 +1,6 @@
-//! UniWoW kernel: loads the feature DLLs and provides the core services.
+//! UniWoW kernel: loads the module DLLs and provides the core services.
 //!
-//! The kernel is linked into the executable. Features never depend on it: they only see the
+//! The kernel is linked into the executable. Modules never depend on it: they only see the
 //! contracts of `uniwow-api`.
 
 mod groups;

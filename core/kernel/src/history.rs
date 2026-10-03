@@ -1,6 +1,6 @@
 use uniwow_api::{Command, log};
 
-/// One undoable command, the feature it belongs to, and its label, read once under guard when
+/// One undoable command, the module it belongs to, and its label, read once under guard when
 /// the command was applied.
 pub struct Part {
     pub owner: String,
@@ -9,14 +9,14 @@ pub struct Part {
 }
 
 /// One step of the history: a single command, or the commands of one script run or one group
-/// (rule S4), possibly from several features.
+/// (rule S4), possibly from several modules.
 pub struct Entry {
     pub label: String,
     /// In the order they were applied.
     pub parts: Vec<Part>,
 }
 
-/// The single undo history shared by every feature.
+/// The single undo history shared by every module.
 #[derive(Default)]
 pub struct History {
     pub done: Vec<Entry>,
@@ -57,7 +57,7 @@ impl History {
 
     /// Removes every command of `owner`, done or undone, and returns how many there were; entries
     /// left empty disappear. The other commands stay valid: a command only changes the state of
-    /// its own feature (F3).
+    /// its own module (F3).
     pub fn purge(&mut self, owner: &str) -> usize {
         purge(&mut self.done, owner) + purge(&mut self.undone, owner)
     }
@@ -74,7 +74,7 @@ fn purge(entries: &mut Vec<Entry>, owner: &str) -> usize {
     removed
 }
 
-/// Pops the last entry. Commands whose feature is not running, which the purge on failure should
+/// Pops the last entry. Commands whose module is not running, which the purge on failure should
 /// make impossible, are dropped with a warning; an entry left empty is skipped.
 fn take(entries: &mut Vec<Entry>, running: impl Fn(&str) -> bool) -> Option<Entry> {
     while let Some(mut entry) = entries.pop() {
@@ -111,9 +111,9 @@ mod tests {
             self.0.to_owned()
         }
 
-        fn apply(&mut self, _feature: &mut dyn Any) {}
+        fn apply(&mut self, _module: &mut dyn Any) {}
 
-        fn revert(&mut self, _feature: &mut dyn Any) {}
+        fn revert(&mut self, _module: &mut dyn Any) {}
     }
 
     fn part(owner: &str, label: &'static str) -> Part {
@@ -172,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn the_purge_removes_only_the_failed_feature_and_keeps_the_order() {
+    fn the_purge_removes_only_the_failed_module_and_keeps_the_order() {
         let mut history = History::default();
         history.push(part("cube", "a"));
         history.push_group("script".to_owned(), vec![part("cube", "b"), part("terrain", "c")]);
@@ -188,13 +188,13 @@ mod tests {
         assert_eq!(history.purge("cube"), 4);
         assert_eq!(labels(&history.done), vec!["script[terrain:c]"]);
         assert_eq!(labels(&history.undone), vec!["e[terrain:e]"]);
-        // Undo works again at once, on the other feature's commands.
+        // Undo works again at once, on the other module's commands.
         let taken = history.take_undo(|id| id != "cube").map(|e| e.label);
         assert_eq!(taken.as_deref(), Some("script"));
     }
 
     #[test]
-    fn commands_of_a_stopped_feature_are_dropped_by_the_guard() {
+    fn commands_of_a_stopped_module_are_dropped_by_the_guard() {
         let mut history = History::default();
         history.push(part("terrain", "b"));
         history.push(part("cube", "c"));

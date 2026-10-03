@@ -12,7 +12,7 @@ pub enum Layer {
     Api,
     Kernel,
     Lib,
-    Feature,
+    Module,
     Xtask,
     Unknown,
 }
@@ -42,7 +42,7 @@ pub struct Package {
 }
 
 impl Package {
-    pub fn feature_id(&self) -> Option<String> {
+    pub fn module_id(&self) -> Option<String> {
         self.meta_str("id").map(str::to_owned)
     }
 
@@ -153,8 +153,8 @@ impl Workspace {
         reached
     }
 
-    pub fn features(&self) -> Vec<&Package> {
-        self.packages.iter().filter(|p| p.layer == Layer::Feature).collect()
+    pub fn modules(&self) -> Vec<&Package> {
+        self.packages.iter().filter(|p| p.layer == Layer::Module).collect()
     }
 
     pub fn layer_of(&self, path: &Path) -> Layer {
@@ -212,7 +212,7 @@ fn layer_of(root: &Path, dir: &Path) -> Layer {
         ["core", "api"] => Layer::Api,
         ["core", "kernel"] => Layer::Kernel,
         ["libs", _] => Layer::Lib,
-        ["features", _] => Layer::Feature,
+        ["modules", _] => Layer::Module,
         ["xtask"] => Layer::Xtask,
         _ => Layer::Unknown,
     }

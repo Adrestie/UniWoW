@@ -20,11 +20,11 @@ pub struct Reported {
     pub message: String,
 }
 
-/// Kernel state reachable from features through `Context`.
+/// Kernel state reachable from modules through `Context`.
 pub struct KernelHost {
     /// Published this frame, delivered at the end of it.
     pub events: Vec<Event>,
-    /// Queued commands with the id of their feature.
+    /// Queued commands with the id of their module.
     pub pending: Vec<(String, Box<dyn Command>)>,
     pub services: HashMap<String, Service>,
     pub gpu: Option<egui_wgpu::RenderState>,
@@ -37,9 +37,9 @@ pub struct KernelHost {
 }
 
 impl KernelHost {
-    /// The settings of the features move to the bridge, where every thread reads them.
+    /// The settings of the modules move to the bridge, where every thread reads them.
     pub fn new(gpu: Option<egui_wgpu::RenderState>, mut settings: Settings, pool: Pool, bridge: Arc<Bridge>) -> Self {
-        *bridge.settings.write().unwrap_or_else(|e| e.into_inner()) = std::mem::take(&mut settings.features);
+        *bridge.settings.write().unwrap_or_else(|e| e.into_inner()) = std::mem::take(&mut settings.modules);
         Self {
             events: Vec::new(),
             pending: Vec::new(),
@@ -54,9 +54,9 @@ impl KernelHost {
         }
     }
 
-    /// Writes the settings, the features' ones back from the bridge.
+    /// Writes the settings, the modules' ones back from the bridge.
     pub fn save_settings(&mut self) {
-        self.settings.features = self.bridge.settings.read().unwrap_or_else(|e| e.into_inner()).clone();
+        self.settings.modules = self.bridge.settings.read().unwrap_or_else(|e| e.into_inner()).clone();
         self.settings.save();
     }
 }
@@ -82,17 +82,17 @@ impl Host for KernelHost {
         self.gpu.as_ref()
     }
 
-    fn setting(&self, feature: &str, key: &str) -> Option<serde_json::Value> {
+    fn setting(&self, module: &str, key: &str) -> Option<serde_json::Value> {
         let settings = self.bridge.settings.read().unwrap_or_else(|e| e.into_inner());
-        settings.get(feature)?.get(key).cloned()
+        settings.get(module)?.get(key).cloned()
     }
 
-    fn set_setting(&mut self, feature: &str, key: &str, value: serde_json::Value) {
+    fn set_setting(&mut self, module: &str, key: &str, value: serde_json::Value) {
         self.bridge
             .settings
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .entry(feature.to_owned())
+            .entry(module.to_owned())
             .or_default()
             .insert(key.to_owned(), value);
         self.settings_changed = true;
@@ -124,7 +124,7 @@ impl Host for KernelHost {
             thread: std::thread::current().id(),
             name: name.to_owned(),
             arguments,
-            reply: ReplyTo::Feature(caller.to_owned(), id),
+            reply: ReplyTo::Module(caller.to_owned(), id),
         });
         id
     }

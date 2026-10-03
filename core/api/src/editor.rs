@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::{CommandInfo, Event};
 
 /// What the kernel offers behind an `Editor` handle. Implemented by the kernel only. Every request
-/// of a caller whose feature no longer runs is refused with an error.
+/// of a caller whose module no longer runs is refused with an error.
 pub trait EditorBackend: Send + Sync {
     fn commands(&self) -> Vec<CommandInfo>;
     /// Calls a command and waits for its answer. Must not be called from the interface thread
@@ -18,7 +18,8 @@ pub trait EditorBackend: Send + Sync {
     /// not exist or was closed.
     fn next_event(&self, caller: &str, subscription: u64, timeout: Duration) -> Result<Option<Event>, String>;
     fn unsubscribe(&self, subscription: u64);
-    /// A setting of the space `space`: the caller's feature, or one of its modules.
+    /// A setting of the space `space`: the caller's module, or a space of its own, such as a
+    /// compiled module's.
     fn setting(&self, caller: &str, space: &str, key: &str) -> Result<Option<Value>, String>;
     fn set_setting(&self, caller: &str, space: &str, key: &str, value: Value) -> Result<(), String>;
     fn begin_group(&self, caller: &str, label: &str) -> Result<(), String>;
@@ -26,23 +27,25 @@ pub trait EditorBackend: Send + Sync {
 }
 
 /// The generic interface of the editor (rule S1), usable from any thread: jobs, scripts and,
-/// through the C interface, native modules. Every value crosses it as JSON.
+/// through the C interface, compiled modules. Every value crosses it as JSON.
 #[derive(Clone)]
 pub struct Editor {
     backend: Arc<dyn EditorBackend>,
-    /// Who acts: a feature id, or `feature#name` for a script run or a module of that feature.
+    /// Who acts: a module id, or `module#name` for a script run of that module or a module it
+    /// hosts.
     caller: String,
-    /// Where its settings are kept: the feature id, or `feature#name` for a module of its own.
+    /// Where its settings are kept: the module id, or `module#name` for a handle with settings of
+    /// its own.
     settings: String,
 }
 
 impl Editor {
     pub fn new(backend: Arc<dyn EditorBackend>, caller: &str) -> Self {
-        let feature = caller.split('#').next().unwrap_or(caller);
+        let module = caller.split('#').next().unwrap_or(caller);
         Self {
             backend,
             caller: caller.to_owned(),
-            settings: feature.to_owned(),
+            settings: module.to_owned(),
         }
     }
 
@@ -50,31 +53,31 @@ impl Editor {
         &self.caller
     }
 
-    /// The feature this handle belongs to: the caller without its `#name` part.
-    pub fn feature(&self) -> &str {
+    /// The module this handle belongs to: the caller without its `#name` part.
+    pub fn module(&self) -> &str {
         self.caller.split('#').next().unwrap_or(&self.caller)
     }
 
-    /// A handle acting as `name` inside the same feature, e.g. one script run: its calls are
+    /// A handle acting as `name` inside the same module, e.g. one script run: its calls are
     /// told apart from the others, in undo groups in particular. It shares the settings of the
     /// handle it comes from.
     pub fn derive(&self, name: &str) -> Editor {
         Editor {
             settings: self.settings.clone(),
-            ..Editor::new(self.backend.clone(), &format!("{}#{name}", self.feature()))
+            ..Editor::new(self.backend.clone(), &format!("{}#{name}", self.module()))
         }
     }
 
-    /// Like `derive`, with settings of its own, e.g. for a native module.
+    /// Like `derive`, with settings of its own, e.g. for a compiled module.
     pub fn derive_with_settings(&self, name: &str) -> Editor {
-        let caller = format!("{}#{name}", self.feature());
+        let caller = format!("{}#{name}", self.module());
         Editor {
             settings: caller.clone(),
             ..Editor::new(self.backend.clone(), &caller)
         }
     }
 
-    /// Every command of running features, with its description and schemas.
+    /// Every command of running modules, with its description and schemas.
     pub fn commands(&self) -> Vec<CommandInfo> {
         self.backend.commands()
     }
@@ -120,9 +123,9 @@ impl Editor {
         self.backend.set_setting(&self.caller, &self.settings, key, value)
     }
 
-    /// Logs under the feature's name, with the caller's own name when it has one.
+    /// Logs under the module's name, with the caller's own name when it has one.
     pub fn log(&self, level: log::Level, message: &str) {
-        let target = format!("uniwow_feature_{}", self.feature().replace('-', "_"));
+        let target = format!("uniwow_module_{}", self.module().replace('-', "_"));
         match self.caller.split_once('#') {
             Some((_, name)) => log::log!(target: target.as_str(), level, "[{name}] {message}"),
             None => log::log!(target: target.as_str(), level, "{message}"),

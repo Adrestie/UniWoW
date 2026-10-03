@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use uniwow_api::egui_dock::tab_viewer::OnCloseResponse;
 use uniwow_api::egui_dock::{DockArea, DockState, Style, TabViewer};
 use uniwow_api::{
-    CallId, CommandInfo, Context, DockArea as Area, FEATURE_FAILED_TOPIC, Feature, Host, Registrar, RunsOn, eframe,
-    egui, log, serde_json,
+    CallId, CommandInfo, Context, DockArea as Area, Host, MODULE_FAILED_TOPIC, Module, Registrar, RunsOn, eframe, egui,
+    log, serde_json,
 };
 
 use crate::groups::{Closed, Ended, Groups};
@@ -27,7 +27,7 @@ use crate::settings::Settings;
 
 const KERNEL: &str = "kernel";
 const BUILT_IN_MENUS: [&str; 4] = ["File", "Edit", "Window", "Help"];
-/// Settings changed by features are written at most this often, and once more at exit.
+/// Settings changed by modules are written at most this often, and once more at exit.
 const SETTINGS_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 /// Time the interface thread spends each frame answering calls of other threads.
 const CALL_BUDGET: Duration = Duration::from_millis(4);
@@ -43,7 +43,7 @@ pub struct Shell {
     dock: DockState<Tab>,
     history: History,
     runtime_fingerprint: Option<String>,
-    features_dir: PathBuf,
+    modules_dir: PathBuf,
     restart_needed: bool,
     last_settings_save: Instant,
     panels: PanelsHealth,
@@ -79,17 +79,17 @@ impl Shell {
         // wgpu panics on errors nobody captured; log them instead, the editor must keep running.
         if let Some(gpu) = &host.gpu {
             gpu.device.on_uncaptured_error(Arc::new(|error| {
-                log::error!("GPU error not captured by any feature: {error}");
+                log::error!("GPU error not captured by any module: {error}");
             }));
         }
-        let discovery = loader::discover(&exe_dir, &host.settings.disabled_features);
+        let discovery = loader::discover(&exe_dir, &host.settings.disabled_modules);
         let mut shell = Self {
             host,
             slots: discovery.slots,
             dock: DockState::new(Vec::new()),
             history: History::default(),
             runtime_fingerprint: discovery.runtime_fingerprint,
-            features_dir: exe_dir.join("features"),
+            modules_dir: exe_dir.join("modules"),
             restart_needed: false,
             last_settings_save: Instant::now(),
             panels: PanelsHealth::Drawn,
@@ -114,15 +114,15 @@ impl Shell {
     }
 
     fn register_all(&mut self) {
-        // Name conflicts are settled once every feature has declared its commands.
+        // Name conflicts are settled once every module has declared its commands.
         let mut declared = Vec::new();
         for slot in &mut self.slots {
-            let Some(feature) = slot.feature.as_deref_mut().filter(|_| slot.state.is_running()) else {
+            let Some(module) = slot.module.as_deref_mut().filter(|_| slot.state.is_running()) else {
                 continue;
             };
             let mut reg = Registrar::default();
-            if let Err(message) = guarded_as(&slot.id, || feature.register(&mut reg)) {
-                log::error!("feature '{}' failed in register: {message}", slot.id);
+            if let Err(message) = guarded_as(&slot.id, || module.register(&mut reg)) {
+                log::error!("module '{}' failed in register: {message}", slot.id);
                 slot.state = State::Failed(format!("register: {message}"));
                 continue;
             }
@@ -161,7 +161,7 @@ impl Shell {
         }
     }
 
-    /// Blocks the features whose required services are missing, until nothing changes.
+    /// Blocks the modules whose required services are missing, until nothing changes.
     fn resolve_requirements(&mut self) {
         let running: Vec<usize> = (0..self.slots.len())
             .filter(|&i| self.slots[i].state.is_running() && self.slots[i].manifest.is_some())
@@ -185,12 +185,12 @@ impl Shell {
         for (need, service) in blocked {
             self.block(
                 running[need],
-                format!("requires the service '{service}', which no running feature provides"),
+                format!("requires the service '{service}', which no running module provides"),
             );
         }
     }
 
-    /// The first service a running feature requires and nobody provides.
+    /// The first service a running module requires and nobody provides.
     fn missing_requirement(&self, index: usize) -> Option<String> {
         let slot = &self.slots[index];
         let manifest = slot.manifest.as_ref().filter(|_| slot.state.is_running())?;
@@ -208,12 +208,12 @@ impl Shell {
         self.sync_running();
     }
 
-    /// Tells the bridge which features are running: only their commands can be called.
+    /// Tells the bridge which modules are running: only their commands can be called.
     fn sync_running(&self) {
         *self.host.bridge.running.write().unwrap_or_else(|e| e.into_inner()) = self.running_ids();
     }
 
-    /// Running features, providers of a service before the features that require or use it.
+    /// Running modules, providers of a service before the modules that require or use it.
     fn init_order(&self) -> Vec<usize> {
         let running: Vec<usize> = (0..self.slots.len())
             .filter(|&i| self.slots[i].state.is_running())
@@ -235,7 +235,7 @@ impl Shell {
         if !forced.is_empty() {
             let ids: Vec<&str> = forced.iter().map(|&i| self.slots[i].id.as_str()).collect();
             log::warn!(
-                "dependency cycle between features: {} initialised before the providers they use",
+                "dependency cycle between modules: {} initialised before the providers they use",
                 ids.join(", ")
             );
         }
@@ -255,7 +255,7 @@ impl Shell {
                 );
                 continue;
             }
-            if let Err(message) = call_feature(&mut self.slots[index], &mut self.host, |f, ctx| f.init(ctx)) {
+            if let Err(message) = call_module(&mut self.slots[index], &mut self.host, |f, ctx| f.init(ctx)) {
                 self.fail(index, format!("init: {message}"));
             }
             self.apply_pending();
@@ -266,13 +266,13 @@ impl Shell {
     fn log_summary(&self) {
         let running = self.slots.iter().filter(|s| s.state.is_running()).count();
         log::info!(
-            "{running} of {} features running, runtime {}",
+            "{running} of {} modules running, runtime {}",
             self.slots.len(),
             short(self.runtime_fingerprint.as_deref())
         );
         for slot in &self.slots {
             if !slot.state.is_running() {
-                log::warn!("feature '{}': {}", slot.id, state_text(&slot.state));
+                log::warn!("module '{}': {}", slot.id, state_text(&slot.state));
             }
         }
     }
@@ -280,8 +280,8 @@ impl Shell {
     fn panel_entries(&self) -> Vec<PanelEntry> {
         let mut entries = vec![
             PanelEntry {
-                tab: Tab::new(KERNEL, "features"),
-                title: "Features".to_owned(),
+                tab: Tab::new(KERNEL, "modules"),
+                title: "Modules".to_owned(),
                 area: Area::Bottom,
                 open_by_default: true,
             },
@@ -333,13 +333,13 @@ impl Shell {
             let Some(index) = self.running_index(&owner) else {
                 continue;
             };
-            let feature = self.slots[index]
-                .feature
+            let module = self.slots[index]
+                .module
                 .as_deref_mut()
-                .expect("running features are loaded");
-            match guarded_as(&owner, || command.apply(feature)) {
+                .expect("running modules are loaded");
+            match guarded_as(&owner, || command.apply(module)) {
                 Ok(()) => {
-                    // A label is feature code too: if it panics, the feature fails.
+                    // A label is module code too: if it panics, the module fails.
                     let label = match guarded_as(&owner, || command.label()) {
                         Ok(label) => label,
                         Err(message) => {
@@ -361,7 +361,7 @@ impl Shell {
         }
     }
 
-    /// Disables the features that another feature reported as failed.
+    /// Disables the modules that another module reported as failed.
     fn apply_reported(&mut self) {
         for reported in std::mem::take(&mut self.host.reported) {
             let Some(index) = self.running_index(&reported.culprit) else {
@@ -373,7 +373,7 @@ impl Shell {
     }
 
     /// Reverts the last entry, its commands in reverse order. A command whose revert fails makes
-    /// its feature fail; the other commands of the entry are reverted all the same. Refused while
+    /// its module fail; the other commands of the entry are reverted all the same. Refused while
     /// an undo group is open.
     fn undo(&mut self) {
         if let Some(reason) = self.groups.blocking_undo() {
@@ -416,19 +416,19 @@ impl Shell {
     fn replay(&mut self, parts: Vec<history::Part>, revert: bool) -> Vec<history::Part> {
         let mut done = Vec::new();
         for mut part in parts {
-            // An earlier part may have made this feature fail.
+            // An earlier part may have made this module fail.
             let Some(index) = self.running_index(&part.owner) else {
                 continue;
             };
-            let feature = self.slots[index]
-                .feature
+            let module = self.slots[index]
+                .module
                 .as_deref_mut()
-                .expect("running features are loaded");
+                .expect("running modules are loaded");
             let outcome = guarded_as(&part.owner, || {
                 if revert {
-                    part.command.revert(feature)
+                    part.command.revert(module)
                 } else {
-                    part.command.apply(feature)
+                    part.command.apply(module)
                 }
             });
             match outcome {
@@ -442,11 +442,11 @@ impl Shell {
         done
     }
 
-    /// Disables a feature that failed, withdraws its services, drops its history entries and
+    /// Disables a module that failed, withdraws its services, drops its history entries and
     /// tells the others.
     fn fail(&mut self, index: usize, message: String) {
         let slot = &mut self.slots[index];
-        log::error!("feature '{}' failed: {message}", slot.id);
+        log::error!("module '{}' failed: {message}", slot.id);
         slot.state = State::Failed(message);
         let id = slot.id.clone();
         self.host.services.retain(|_, s| s.provider != id);
@@ -460,12 +460,12 @@ impl Shell {
         }
         // Its scripts or modules will not end their groups: what they changed elsewhere stays
         // undoable.
-        for closed in self.groups.close_feature(&id) {
+        for closed in self.groups.close_module(&id) {
             log::warn!("undo group '{}' closed: '{id}' failed", closed.label);
             self.push_closed(closed);
         }
         self.host
-            .publish(KERNEL, FEATURE_FAILED_TOPIC, serde_json::json!({ "id": id }));
+            .publish(KERNEL, MODULE_FAILED_TOPIC, serde_json::json!({ "id": id }));
     }
 
     fn push_closed(&mut self, closed: Closed) {
@@ -481,19 +481,19 @@ impl Shell {
         self.host.reported.extend(failures);
     }
 
-    /// Hands the jobs that ended back to their features.
+    /// Hands the jobs that ended back to their modules.
     fn deliver_jobs(&mut self) {
         for finished in self.host.pool.take_finished() {
             let Some(index) = self.running_index(&finished.owner) else {
                 log::warn!(
-                    "job '{}' of '{}' ended after its feature stopped",
+                    "job '{}' of '{}' ended after its module stopped",
                     finished.label,
                     finished.owner
                 );
                 continue;
             };
             let (id, outcome) = (finished.id, finished.outcome);
-            if let Err(message) = call_feature(&mut self.slots[index], &mut self.host, |f, ctx| {
+            if let Err(message) = call_module(&mut self.slots[index], &mut self.host, |f, ctx| {
                 f.on_job(id, outcome, ctx)
             }) {
                 self.fail(index, format!("job '{}': {message}", finished.label));
@@ -502,7 +502,7 @@ impl Shell {
     }
 
     /// Answers the queued calls for at most `budget` (T4), then delivers the answers due to
-    /// features. Returns whether the time ran out with calls perhaps still waiting.
+    /// modules. Returns whether the time ran out with calls perhaps still waiting.
     fn serve_calls(&mut self, budget: Duration) -> bool {
         let Some(requests) = self.requests.take() else {
             return false;
@@ -514,7 +514,7 @@ impl Shell {
             let Some(index) = self.running_index(&caller) else {
                 continue;
             };
-            if let Err(message) = call_feature(&mut self.slots[index], &mut self.host, |f, ctx| {
+            if let Err(message) = call_module(&mut self.slots[index], &mut self.host, |f, ctx| {
                 f.on_reply(call, result, ctx)
             }) {
                 self.fail(index, format!("reply: {message}"));
@@ -543,7 +543,7 @@ impl Shell {
                         // The caller may have given up; nothing to do then.
                         let _ = reply.send(result);
                     }
-                    ReplyTo::Feature(caller, call) => self.replies.push((caller, call, result)),
+                    ReplyTo::Module(caller, call) => self.replies.push((caller, call, result)),
                     ReplyTo::Kernel(call) => self.commands_panel.answer(call, result),
                 }
             }
@@ -574,7 +574,7 @@ impl Shell {
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         let bridge = self.host.bridge.clone();
-        // Asked before the caller's feature failed.
+        // Asked before the caller's module failed.
         bridge.active(caller)?;
         let (owner, handler) = bridge.lookup(name)?;
         if let Some(handler) = handler {
@@ -583,7 +583,7 @@ impl Shell {
         let index = self
             .running_index(&owner)
             .ok_or_else(|| format!("'{name}' belongs to '{owner}', which is not running"))?;
-        let outcome = call_feature(&mut self.slots[index], &mut self.host, |f, ctx| {
+        let outcome = call_module(&mut self.slots[index], &mut self.host, |f, ctx| {
             f.on_command(name, arguments, ctx)
         });
         match outcome {
@@ -616,7 +616,7 @@ impl Shell {
                     continue;
                 }
                 if let Err(message) =
-                    call_feature(&mut self.slots[index], &mut self.host, |f, ctx| f.on_event(&event, ctx))
+                    call_module(&mut self.slots[index], &mut self.host, |f, ctx| f.on_event(&event, ctx))
                 {
                     let topic = &event.topic;
                     self.fail(index, format!("event '{topic}': {message}"));
@@ -651,11 +651,11 @@ impl Shell {
     fn menu_bar(&mut self, ui: &mut egui::Ui) -> Vec<MenuAction> {
         let mut actions = Vec::new();
         let entries = self.panel_entries();
-        let mut feature_menus: Vec<String> = Vec::new();
+        let mut module_menus: Vec<String> = Vec::new();
         for slot in self.slots.iter().filter(|s| s.state.is_running()) {
             for item in &slot.menu_items {
-                if !BUILT_IN_MENUS.contains(&item.menu.as_str()) && !feature_menus.contains(&item.menu) {
-                    feature_menus.push(item.menu.clone());
+                if !BUILT_IN_MENUS.contains(&item.menu.as_str()) && !module_menus.contains(&item.menu) {
+                    module_menus.push(item.menu.clone());
                 }
             }
         }
@@ -665,7 +665,7 @@ impl Shell {
                 if ui.button("Quit").clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
-                self.feature_items(ui, "File", &mut actions);
+                self.module_items(ui, "File", &mut actions);
             });
             ui.menu_button("Edit", |ui| {
                 let blocked = self.groups.blocking_undo();
@@ -685,35 +685,35 @@ impl Shell {
                         actions.push(MenuAction::CloseGroup(id));
                     }
                 }
-                self.feature_items(ui, "Edit", &mut actions);
+                self.module_items(ui, "Edit", &mut actions);
             });
             ui.menu_button("Window", |ui| {
                 for entry in &entries {
                     let mut open = self.dock.find_tab(&entry.tab).is_some();
-                    let label = if entry.tab.feature == KERNEL {
+                    let label = if entry.tab.module == KERNEL {
                         entry.title.clone()
                     } else {
-                        format!("{} ({})", entry.title, entry.tab.feature)
+                        format!("{} ({})", entry.title, entry.tab.module)
                     };
                     if ui.checkbox(&mut open, label).changed() {
                         actions.push(MenuAction::SetPanelOpen(entry.tab.clone(), open));
                     }
                 }
-                self.feature_items(ui, "Window", &mut actions);
+                self.module_items(ui, "Window", &mut actions);
             });
-            for menu in &feature_menus {
-                ui.menu_button(menu.as_str(), |ui| self.feature_items(ui, menu, &mut actions));
+            for menu in &module_menus {
+                ui.menu_button(menu.as_str(), |ui| self.module_items(ui, menu, &mut actions));
             }
             ui.menu_button("Help", |ui| {
                 ui.label(format!("UniWoW {}", env!("CARGO_PKG_VERSION")));
                 ui.label(format!("Runtime {}", short(self.runtime_fingerprint.as_deref())));
-                self.feature_items(ui, "Help", &mut actions);
+                self.module_items(ui, "Help", &mut actions);
             });
         });
         actions
     }
 
-    fn feature_items(&self, ui: &mut egui::Ui, menu: &str, actions: &mut Vec<MenuAction>) {
+    fn module_items(&self, ui: &mut egui::Ui, menu: &str, actions: &mut Vec<MenuAction>) {
         let mut first = BUILT_IN_MENUS.contains(&menu);
         for (index, slot) in self.slots.iter().enumerate().filter(|(_, s)| s.state.is_running()) {
             for item in slot.menu_items.iter().filter(|i| i.menu == menu) {
@@ -721,7 +721,7 @@ impl Shell {
                     ui.separator();
                 }
                 if ui.button(&item.label).clicked() {
-                    actions.push(MenuAction::Feature(index, item.action.clone()));
+                    actions.push(MenuAction::Module(index, item.action.clone()));
                 }
             }
         }
@@ -731,11 +731,11 @@ impl Shell {
         let running = self.slots.iter().filter(|s| s.state.is_running()).count();
         let others = self.slots.len() - running;
         ui.horizontal(|ui| {
-            ui.label(format!("{running} features running"));
+            ui.label(format!("{running} modules running"));
             if others > 0 {
                 ui.colored_label(
                     ui.visuals().warn_fg_color,
-                    format!("{others} not running (see Features)"),
+                    format!("{others} not running (see Modules)"),
                 );
             }
             ui.separator();
@@ -759,7 +759,7 @@ enum MenuAction {
     Redo,
     CloseGroup(u64),
     SetPanelOpen(Tab, bool),
-    Feature(usize, String),
+    Module(usize, String),
 }
 
 impl eframe::App for Shell {
@@ -815,7 +815,7 @@ impl eframe::App for Shell {
         egui::Panel::top("menu_bar").show(ui, |ui| actions = self.menu_bar(ui));
         egui::Panel::bottom("status_bar").show(ui, |ui| self.status_bar(ui));
 
-        // Every registered panel, so that the tab of a feature that failed keeps its title.
+        // Every registered panel, so that the tab of a module that failed keeps its title.
         let mut titles: Vec<(Tab, String)> = self.panel_entries().into_iter().map(|e| (e.tab, e.title)).collect();
         for slot in self.slots.iter().filter(|s| !s.state.is_running()) {
             titles.extend(slot.panels.iter().map(|p| (Tab::new(&slot.id, &p.id), p.title.clone())));
@@ -827,7 +827,7 @@ impl eframe::App for Shell {
             failures: Vec::new(),
             closed: Vec::new(),
             runtime: self.runtime_fingerprint.as_deref(),
-            features_dir: &self.features_dir,
+            modules_dir: &self.modules_dir,
             restart_needed: &mut self.restart_needed,
             commands_panel: &mut self.commands_panel,
         };
@@ -897,10 +897,10 @@ impl eframe::App for Shell {
                     }
                 }
                 MenuAction::SetPanelOpen(tab, open) => self.set_panel_open(&tab, open),
-                MenuAction::Feature(index, action) => {
+                MenuAction::Module(index, action) => {
                     if self.slots[index].state.is_running()
                         && let Err(message) =
-                            call_feature(&mut self.slots[index], &mut self.host, |f, ctx| f.on_menu(&action, ctx))
+                            call_module(&mut self.slots[index], &mut self.host, |f, ctx| f.on_menu(&action, ctx))
                     {
                         self.fail(index, format!("menu '{action}': {message}"));
                     }
@@ -917,9 +917,9 @@ impl eframe::App for Shell {
 
     fn on_exit(&mut self) {
         for slot in self.slots.iter_mut().filter(|s| s.state.is_running()) {
-            let feature = slot.feature.as_deref_mut().expect("running features are loaded");
-            if let Err(message) = guarded_as(&slot.id, || feature.shutdown()) {
-                log::error!("feature '{}' failed in shutdown: {message}", slot.id);
+            let module = slot.module.as_deref_mut().expect("running modules are loaded");
+            if let Err(message) = guarded_as(&slot.id, || module.shutdown()) {
+                log::error!("module '{}' failed in shutdown: {message}", slot.id);
             }
         }
         self.host.settings.layout = serde_json::to_value(&self.dock).ok();
@@ -934,7 +934,7 @@ struct Viewer<'a> {
     failures: Vec<(usize, String)>,
     closed: Vec<Tab>,
     runtime: Option<&'a str>,
-    features_dir: &'a Path,
+    modules_dir: &'a Path,
     restart_needed: &'a mut bool,
     commands_panel: &'a mut CommandsPanel,
 }
@@ -955,9 +955,9 @@ impl TabViewer for Viewer<'_> {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Tab) {
-        if tab.feature == KERNEL {
+        if tab.module == KERNEL {
             match tab.panel.as_str() {
-                "features" => self.features_panel(ui),
+                "modules" => self.modules_panel(ui),
                 "log" => log_panel(ui),
                 "jobs" => panels::jobs_panel(ui, &self.host.pool),
                 "commands" => self.commands_panel.ui(ui, &self.host.bridge),
@@ -965,8 +965,8 @@ impl TabViewer for Viewer<'_> {
             }
             return;
         }
-        let Some(index) = self.slots.iter().position(|s| s.id == tab.feature) else {
-            ui.label(format!("The feature '{}' is not present.", tab.feature));
+        let Some(index) = self.slots.iter().position(|s| s.id == tab.module) else {
+            ui.label(format!("The module '{}' is not present.", tab.module));
             return;
         };
         let slot = &mut self.slots[index];
@@ -978,7 +978,7 @@ impl TabViewer for Viewer<'_> {
             return;
         }
         let panel = tab.panel.clone();
-        if let Err(message) = call_feature(slot, self.host, |f, ctx| f.panel_ui(&panel, ui, ctx)) {
+        if let Err(message) = call_module(slot, self.host, |f, ctx| f.panel_ui(&panel, ui, ctx)) {
             self.failures.push((index, format!("panel '{panel}': {message}")));
         }
     }
@@ -990,30 +990,30 @@ impl TabViewer for Viewer<'_> {
 }
 
 impl Viewer<'_> {
-    fn features_panel(&mut self, ui: &mut egui::Ui) {
+    fn modules_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(format!("Runtime {}", short(self.runtime)));
             ui.separator();
-            ui.label(self.features_dir.display().to_string());
+            ui.label(self.modules_dir.display().to_string());
         });
         if *self.restart_needed {
             ui.colored_label(ui.visuals().warn_fg_color, "Restart UniWoW to apply the changes.");
         }
         ui.separator();
         egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
-            egui::Grid::new("features").striped(true).num_columns(7).show(ui, |ui| {
-                for header in ["On", "Feature", "Category", "Id", "Version", "State", "Folder"] {
+            egui::Grid::new("modules").striped(true).num_columns(7).show(ui, |ui| {
+                for header in ["On", "Module", "Category", "Id", "Version", "State", "Folder"] {
                     ui.strong(header);
                 }
                 ui.end_row();
                 for slot in self.slots.iter() {
-                    let mut enabled = !self.host.settings.disabled_features.contains(&slot.id);
+                    let mut enabled = !self.host.settings.disabled_modules.contains(&slot.id);
                     let toggle = ui.add_enabled(slot.manifest.is_some(), egui::Checkbox::without_text(&mut enabled));
                     if toggle.changed() {
                         if enabled {
-                            self.host.settings.disabled_features.remove(&slot.id);
+                            self.host.settings.disabled_modules.remove(&slot.id);
                         } else {
-                            self.host.settings.disabled_features.insert(slot.id.clone());
+                            self.host.settings.disabled_modules.insert(slot.id.clone());
                         }
                         self.host.settings_changed = true;
                         *self.restart_needed = true;
@@ -1084,16 +1084,16 @@ fn history_button(ui: &mut egui::Ui, verb: &str, shortcut: &str, label: Option<S
     .clicked()
 }
 
-/// Calls the feature of `slot` with a context, catching panics.
-fn call_feature<R>(
+/// Calls the module of `slot` with a context, catching panics.
+fn call_module<R>(
     slot: &mut Slot,
     host: &mut KernelHost,
-    f: impl FnOnce(&mut dyn Feature, &mut Context) -> R,
+    f: impl FnOnce(&mut dyn Module, &mut Context) -> R,
 ) -> Result<R, String> {
-    let Slot { id, feature, .. } = slot;
-    let feature = feature.as_deref_mut().expect("running features are loaded");
+    let Slot { id, module, .. } = slot;
+    let module = module.as_deref_mut().expect("running modules are loaded");
     let mut ctx = Context::new(host, id);
-    guarded_as(id, || f(feature, &mut ctx))
+    guarded_as(id, || f(module, &mut ctx))
 }
 
 fn state_text(state: &State) -> String {
