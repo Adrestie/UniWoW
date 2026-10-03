@@ -1,6 +1,6 @@
 # UniWoW — Architecture and feature catalogue
 
-Status: **validated**. Milestones 1 to 3 built and validated. Open questions in section 10.
+Status: **validated**. Milestones 1 to 3 built and validated; milestone 4 proposed. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -312,7 +312,7 @@ without touching the core.
 | Id | Feature |
 |---|---|
 | scripting-lua | Lua 5.1, the dialect of the 3.3.5 client and of ALE scripts, compiled into the runtime (mlua): console panel, script runner, the `uniwow` module |
-| scripting-python | CPython, the latest stable version when the feature is built, embedded (PyO3) with the official embeddable distribution of Windows in `interpreters\python-3.xx\`: the same console, runner and `uniwow` module |
+| scripting-python | CPython, the latest stable version when the feature is built, with the official embeddable distribution of Windows in `interpreters\python-3.xx\`, embedded by a host DLL built apart (PyO3) that reaches the editor through `uniwow.h`: the same console, runner and `uniwow` module |
 | native-modules | Loads the compiled modules of `modules\`: DLLs written in C++, in C# compiled with NativeAOT, or in any language able to export a C function. Each receives the C interface (S1) |
 
 Rules:
@@ -330,7 +330,7 @@ Rules:
 | S9 | One interpreter per language. Scripts are stored by language and version: `scripts\lua-5.1\…`, `scripts\python-3.xx\…`, the Python version being the one shipped. Native modules go in `modules\`. |
 | S10 | A native module exports one C entry point. It receives the table of functions of the C interface and returns its description (name, version, the version of `uniwow.h` it was built with) and the named commands it offers, implemented in its own language with the same JSON form. They join the catalogue as delegated commands of `native-modules` (F6): a feature's own command of the same name keeps its name, and the Modules panel shows the module's one as refused. |
 
-Risks to verify first, before any other work on scripting: the runtime's exported symbol count with PyO3 and mlua inside it; starting the editor without the Python DLL while PyO3 is part of the runtime (delayed loading); the embeddable Python distribution beside the executable; a C++ module and a C# NativeAOT module calling the C interface from several threads.
+Risks to verify first, before any other work on scripting: the runtime's exported symbol count with PyO3 and mlua inside it; starting the editor without the Python DLL while PyO3 is part of the runtime (delayed loading); the embeddable Python distribution beside the executable; a C++ module and a C# NativeAOT module calling the C interface from several threads. Verified for milestone 4: see section 9.
 
 ---
 
@@ -525,12 +525,72 @@ As built:
   | `cube.color`, calling thread | 1.06 to 1.09 million | 3.6 million |
   | `cube.paint`, interface thread | 30,000 to 39,000 | 24,000 |
 
-### Milestone 4: Python and C# (outline)
+### Milestone 4: Python and C# (proposed)
 
-`scripting-python` (CPython embedded through PyO3, the embeddable distribution in
-`interpreters\python-3.xx\`, the runtime starting without the Python DLL, the same console, runner
-and `uniwow` module as Lua, the GIL limit stated), and a sample native module in C# compiled with
-NativeAOT. Specified in detail when milestone 3 is done.
+Python scripts with the same console, runner and `uniwow` module as Lua, and a sample native module
+in C# compiled with NativeAOT.
+
+Risks verified first:
+
+| Risk | Result |
+|---|---|
+| PyO3 in the runtime | Impossible: `uniwow_api.dll` imports `python314.dll`, so the editor cannot start without Python (S8). Delayed loading is refused by the linker (LNK1194): the C API of Python exports data, such as `PyExc_ValueError` |
+| PyO3 in the `scripting-python` feature | Loads, and the editor starts without Python with that feature refused. But the dependencies of PyO3 change, through Cargo's feature unification, the features of crates the runtime shares (`once_cell`, `syn`): the runtime is built differently and every feature must be rebuilt. It would also need an exception to rule C |
+| The embeddable distribution beside the executable | The official Python 3.14.8 package (SHA-256 checked) runs from `interpreters\python-3.14\` with an isolated `sys.path`; the C extensions of the standard library load |
+| C# module calling the C interface from several threads | A NativeAOT module (.NET 10) has four threads call the C interface at once; the group of each thread is one undo entry. `dotnet publish` needs the folder of `vswhere.exe` on the path, and `ProgramFiles(x86)` set |
+
+Decisions: Python is embedded by a host built apart; Python 3.14, with its GIL; the .NET 10 SDK
+builds the C# module.
+
+Content:
+
+- **C interface in the runtime**: the table of `uniwow.h` over an `Editor` moves from
+  `native-modules` to `uniwow-api`, so that `native-modules` and `scripting-python` share it. Its
+  C declarations in Rust go into `libs/c-interface`, also used by the Python host.
+- **Python host** in `hosts/python\`: a DLL with PyO3, in a Cargo workspace of its own, built by
+  `cargo xtask build` in a separate run of Cargo, so that its dependencies never change the
+  editor's. Its only link with the editor is `uniwow.h`: it receives the table of the C interface
+  and offers three functions, start the interpreter, run code, stop a run. It holds the Python
+  `uniwow` module (the same functions as in Lua, values through JSON), the redirection of `print`
+  and the stop mechanism. It is built against the distribution it runs with: no other Python is
+  needed.
+- **`scripting-python` feature**: the console, the scripts of `scripts\python-3.14\`, Run and Stop,
+  each run on a thread of its own with its own `Editor` and undo group, as in Lua. It loads the host
+  from its folder, with `interpreters\python-3.14\` added to where Windows looks for the DLLs.
+  Without the interpreter or the host, its panel says what is missing and the rest of the editor
+  runs (S8).
+- **Python runs**: each run has its own globals in one interpreter. Under the GIL, Python runs
+  take turns, and the GIL is released while an editor call waits, so that the others go on (T6).
+  Errors are shown with their traceback and line (S5). Stop ends a run even when it catches
+  exceptions: once stopped, every line raises the stop again; a run waiting in `next_event` wakes
+  (S3). `sys.path` holds the interpreter and `scripts\python-3.14\`, where pure Python packages can
+  be put; there is no `site-packages`.
+- **Distribution**: `cargo xtask build` downloads the official embeddable package of the pinned
+  version (3.14.8, SHA-256 checked) into its cache and unpacks it into
+  `out\<profile>\interpreters\python-3.14\`, adding `scripts\python-3.14\` to its `python314._pth`.
+- **Sample C# module** in `modules-src\sample-csharp\` (.NET 10, NativeAOT): `cs.sum`, and
+  `cs.paint_from_threads`, whose threads each paint the cube twice through `cube.paint`, each
+  thread's paints as one undo entry. Built by `cargo xtask build` with `dotnet publish`; without the
+  .NET SDK, the build says so and goes on without it; the CI builds it.
+- **Sample Python scripts**: paint the cube, measure calls, print the events of a topic, an error,
+  a loop, a loop catching every exception.
+
+Acceptance:
+
+| Check | Expected result |
+|---|---|
+| Start the editor | `scripting-python` runs; its panel shows Python 3.14.8 |
+| Remove `interpreters\python-3.14\`, start | The editor starts and Lua works; the Python panel says the interpreter is missing |
+| Python console: `uniwow.call("cube.paint", {"color": [1, 0, 0]})` | The cube turns red; the answer is shown |
+| A Python script painting the cube three times | One undo entry |
+| A Python script with an error | The message and the line are shown; the feature keeps running |
+| A loop, and a loop catching `BaseException`, then Stop | Both end within a second |
+| A Python script waiting for the events of a topic | It prints them as they are published |
+| Two Python scripts at once; a Python and a Lua script at once | The Python ones take turns; the Lua one runs in parallel with them |
+| Calls per second from Python, for both kinds of command | Measured and recorded here |
+| The C# module | Listed as running; `cs.sum` answers; after `cs.paint_from_threads`, each thread's paints are one undo entry |
+| Remove `modules\sample-csharp.dll`, start | The editor starts without it |
+| The runtime, built with and without the Python host | The same file; tests, `cargo xtask check` and CI green |
 
 ---
 
