@@ -442,6 +442,63 @@ processor: 3.7 million calls per second to a command running on the calling thre
 second to a command running on the interface thread. `Editor::call` refuses, with an error, to wait
 on the interface thread for a command of the interface thread, which would wait for itself.
 
+### Milestone 3: C interface, native modules and Lua scripts (proposed)
+
+The generic interface of S1 complete and offered in C, the first native module, and Lua 5.1.
+Python, whose risks are of another kind (embedding, delayed loading of its DLL, distribution,
+supported versions), comes in milestone 4.
+
+Content:
+
+- **Generic interface complete (S1)**: the `Editor` handle gains settings, logging and event
+  subscriptions usable from any thread (subscribe to a topic, then wait for the next event with a
+  time limit).
+- **One undo entry per run (S4)**: the kernel groups the commands a script run or a module call
+  applies into a single history entry.
+- **C interface (S1, S10, T7)**: `sdk/uniwow.h`, a table of C functions (list the commands, call,
+  publish, subscribe and wait for an event, settings, log, free a string) exchanging UTF-8 JSON,
+  callable from any thread; strings returned by the editor are freed by the editor's own function.
+  A module exports one entry point that receives this table and returns its name, version and
+  commands.
+- **`native-modules` feature**: loads the DLLs of `modules\`, adds their commands to the catalogue
+  (running on the calling thread), lists the modules and their state in a panel. A module without
+  the entry point, or whose entry point reports an error, is refused with the reason.
+- **Sample C++ module** in `modules-src\sample-cpp\`, compiled by `cargo xtask build` with the MSVC
+  compiler found on the machine: one command of its own, and a thread of its own calling
+  `cube.paint` through the C interface.
+- **`scripting-lua` feature**: Lua 5.1 compiled into the runtime (`libs/lua`, mlua). A console panel
+  (one line to evaluate, the output below), the list of `scripts\lua-5.1\`, Run and Stop. Each run
+  on a worker thread with its own Lua state (T6). The `uniwow` Lua module translates tables to and
+  from JSON over the generic interface and adds nothing of its own (S1). Errors shown with their
+  line (S5); C modules cannot be loaded (S6); Stop interrupts a running script through a hook
+  checking its cancellation (S3).
+- **Sample scripts**: paint the cube, measure calls, print the events of a topic.
+
+Acceptance:
+
+| Check | Expected result |
+|---|---|
+| Start the editor | The C++ module is listed as running; its command appears in the Commands panel and answers |
+| The C++ module's thread calls `cube.paint` | The cube is painted; Ctrl+Z undoes it |
+| Remove `modules\sample-cpp.dll`, start | The editor starts without it |
+| A DLL without the entry point in `modules\` | Refused with the reason; the rest runs |
+| Lua console: `uniwow.call("cube.paint", {color = {1, 0, 0}})` | The cube turns red |
+| A Lua script painting the cube three times | One undo entry; Ctrl+Z restores the colour before the script |
+| A Lua script with an error | The message and the line are shown; the feature keeps running |
+| A script looping forever, then Stop | It ends; the interface stays fluid throughout |
+| Two scripts at once | Both run in parallel |
+| `require` of a C module in Lua | Refused |
+| A script waiting for the events of a topic | It prints them as they are published |
+| Calls per second from Lua, for both kinds of command | Measured and recorded here |
+| Runtime size, tests, `cargo xtask check`, CI | Below the symbol limit, green |
+
+### Milestone 4: Python and C# (outline)
+
+`scripting-python` (CPython embedded through PyO3, the embeddable distribution in
+`interpreters\python-3.xx\`, the runtime starting without the Python DLL, the same console, runner
+and `uniwow` module as Lua, the GIL limit stated), and a sample native module in C# compiled with
+NativeAOT. Specified in detail when milestone 3 is done.
+
 ---
 
 ## 10. Open questions
