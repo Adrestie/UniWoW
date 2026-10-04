@@ -30,6 +30,10 @@ numbered!(
         Dialog = 22,
         /// curves edited by hand, drawn by the module curves
         CurveView = 23,
+        /// tracks of keys on animatable properties, with a frame rate and a length; not drawn
+        Sequence = 24,
+        /// plays a sequence, as QTimeLine; moved on by the kernel; not drawn
+        Player = 25,
     }
 );
 
@@ -86,6 +90,24 @@ numbered!(
         /// curve view, text: JSON [{label, colour: [r, g, b], visible, keys: [{time, value, mode,
         /// left, right}]}]; keys in time order, each at a time of its own, numbers within 1e9
         Curves = 31,
+        /// sequence, text: JSON [{property, kind, curves: [{keys: [{time, value, mode, left,
+        /// right}]}]}], one curve per number of the property; keys at whole frames from 0, numbers
+        /// within 1e9; each change is an undo entry the kernel records
+        Tracks = 32,
+        /// sequence: frames per second, a whole number from 1 to 240
+        FrameRate = 33,
+        /// sequence: in frames, a whole number from 1 to 1000000
+        Length = 34,
+        /// player: the handle of the sequence it plays, 0 for none
+        Sequence = 35,
+        /// player: in frames, fractional, from 0 to the length of its sequence
+        Time = 36,
+        /// player: 1 plays from the time, or from 0 when at the end; 0 pauses
+        Playing = 37,
+        /// player: at the end, starts again from 0
+        Loop = 38,
+        /// player: times the frame rate, from 0 to 100
+        Speed = 39,
     }
 );
 
@@ -130,6 +152,10 @@ numbered!(
         Rejected = 18,
         /// curve view: text, the curves; boolean, whether the change is done
         CurvesChanged = 19,
+        /// player, as it plays: number, the time in frames
+        TimeChanged = 20,
+        /// player: it reached the end without LOOP and stopped
+        Finished = 21,
     }
 );
 

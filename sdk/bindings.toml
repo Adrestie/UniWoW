@@ -35,6 +35,8 @@ entries = [
     [21, "PaintArea", "PAINT_AREA"],
     [22, "Dialog", "DIALOG", "a modal window; created hidden, shown and hidden through VISIBLE"],
     [23, "CurveView", "CURVE_VIEW", "curves edited by hand, drawn by the module curves"],
+    [24, "Sequence", "SEQUENCE", "tracks of keys on animatable properties, with a frame rate and a length; not drawn"],
+    [25, "Player", "PLAYER", "plays a sequence, as QTimeLine; moved on by the kernel; not drawn"],
 ]
 
 [property]
@@ -74,6 +76,14 @@ entries = [
     [29, "ViewCenter", "VIEW_CENTER", "graphics view: x, y of the scene at its centre"],
     [30, "Count", "COUNT", "read only: entries of a combo box, children otherwise"],
     [31, "Curves", "CURVES", "curve view, text: JSON [{label, colour: [r, g, b], visible, keys: [{time, value, mode, left, right}]}]; keys in time order, each at a time of its own, numbers within 1e9"],
+    [32, "Tracks", "TRACKS", "sequence, text: JSON [{property, kind, curves: [{keys: [{time, value, mode, left, right}]}]}], one curve per number of the property; keys at whole frames from 0, numbers within 1e9; each change is an undo entry the kernel records"],
+    [33, "FrameRate", "FRAME_RATE", "sequence: frames per second, a whole number from 1 to 240"],
+    [34, "Length", "LENGTH", "sequence: in frames, a whole number from 1 to 1000000"],
+    [35, "Sequence", "SEQUENCE", "player: the handle of the sequence it plays, 0 for none"],
+    [36, "Time", "TIME", "player: in frames, fractional, from 0 to the length of its sequence"],
+    [37, "Playing", "PLAYING", "player: 1 plays from the time, or from 0 when at the end; 0 pauses"],
+    [38, "Loop", "LOOP", "player: at the end, starts again from 0"],
+    [39, "Speed", "SPEED", "player: times the frame rate, from 0 to 100"],
 ]
 
 [value_kind]
@@ -113,4 +123,6 @@ entries = [
     [17, "Wheel", "WHEEL", "paint area: x, y, dx, dy"],
     [18, "Rejected", "REJECTED", "dialog: the user closed it, which hid it"],
     [19, "CurvesChanged", "CURVES_CHANGED", "curve view: text, the curves; boolean, whether the change is done"],
+    [20, "TimeChanged", "TIME_CHANGED", "player, as it plays: number, the time in frames"],
+    [21, "Finished", "FINISHED", "player: it reached the end without LOOP and stopped"],
 ]

@@ -520,6 +520,47 @@ class CurveView : public Widget {
     Signal<std::string, bool> curvesChanged{handle_, UNIWOW_SIGNAL_CURVES_CHANGED};
 };
 
+// Tracks of keys on animatable properties, with a frame rate and a length, as in the files of the
+// Timeline: setTracks and tracks take the JSON of UNIWOW_PROPERTY_TRACKS. Each change of the
+// tracks is an undo entry the editor records: the module records nothing.
+class Sequence : public Object {
+  public:
+    Sequence() : Object(make(UNIWOW_SEQUENCE)) {}
+    void setTracks(const std::string &json) const { setString(UNIWOW_PROPERTY_TRACKS, json); }
+    std::string tracks() const { return string(UNIWOW_PROPERTY_TRACKS); }
+    void setFrameRate(int framesPerSecond) const {
+        setNumbers(UNIWOW_PROPERTY_FRAME_RATE, {double(framesPerSecond)});
+    }
+    int frameRate() const { return int(number(UNIWOW_PROPERTY_FRAME_RATE)); }
+    void setLength(int frames) const { setNumbers(UNIWOW_PROPERTY_LENGTH, {double(frames)}); }
+    int length() const { return int(number(UNIWOW_PROPERTY_LENGTH)); }
+};
+
+// Plays a sequence, as QTimeLine: the editor moves it on at each frame and writes the value of
+// each track at its time into its property. timeChanged gives the time in frames as it plays;
+// finished comes at the end, without loop.
+class Player : public Object {
+  public:
+    Player() : Object(make(UNIWOW_PLAYER)) {}
+    void setSequence(const Sequence &sequence) const {
+        setNumbers(UNIWOW_PROPERTY_SEQUENCE, {double(sequence.handle())});
+    }
+    // In frames, fractional.
+    void setTime(double frames) const { setNumbers(UNIWOW_PROPERTY_TIME, {frames}); }
+    double time() const { return number(UNIWOW_PROPERTY_TIME); }
+    // From the time, or from 0 when at the end.
+    void play() const { setNumbers(UNIWOW_PROPERTY_PLAYING, {1.0}); }
+    void pause() const { setNumbers(UNIWOW_PROPERTY_PLAYING, {0.0}); }
+    bool isPlaying() const { return number(UNIWOW_PROPERTY_PLAYING) != 0.0; }
+    void setLoop(bool loop) const { setNumbers(UNIWOW_PROPERTY_LOOP, {loop ? 1.0 : 0.0}); }
+    bool loops() const { return number(UNIWOW_PROPERTY_LOOP) != 0.0; }
+    // Times the frame rate, from 0 to 100.
+    void setSpeed(double speed) const { setNumbers(UNIWOW_PROPERTY_SPEED, {speed}); }
+    double speed() const { return number(UNIWOW_PROPERTY_SPEED); }
+    Signal<double> timeChanged{handle_, UNIWOW_SIGNAL_TIME_CHANGED};
+    Signal<> finished{handle_, UNIWOW_SIGNAL_FINISHED};
+};
+
 // A modal window, as QDialog: while it is shown, the rest of the editor cannot be used. It is
 // created hidden; the user closing it, with Escape or its close button, hides it and sends rejected.
 class Dialog : public Object {

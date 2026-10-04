@@ -1,7 +1,8 @@
-//! Interface objects modelled on Qt (section 3): widgets, layouts, a graphics scene and painting
-//! areas. A module that is not written in Rust creates them through handles and changes them from
-//! any thread; the core keeps them, draws them on the interface thread, and sends their signals to
-//! the module's own thread. The object model is defined once here, for every language.
+//! Interface objects modelled on Qt (section 3): widgets, layouts, a graphics scene, painting
+//! areas, sequences and their players. A module that is not written in Rust creates them through
+//! handles and changes them from any thread; the core keeps them, draws them on the interface
+//! thread, and sends their signals to the module's own thread. The object model is defined once
+//! here, for every language.
 
 mod painter;
 
@@ -10,8 +11,10 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 pub use painter::{MAX_TEXT, PaintCommand};
 
+use crate::AppliedChange;
 use crate::curve::ShownCurve;
 use crate::egui;
+use crate::sequence::{self, MAX_FRAME_RATE, MAX_LENGTH, Sequence, Track};
 
 /// Identifies an object of one module.
 pub type Handle = u64;
@@ -22,9 +25,23 @@ pub fn read_curves(text: &str) -> Result<Vec<ShownCurve>, String> {
     ShownCurve::list_from_json(&value)
 }
 
+/// Reads the tracks of a sequence from their JSON text (`sequence::tracks_from_json`).
+pub fn read_tracks(text: &str) -> Result<Vec<Track>, String> {
+    let value = serde_json::from_str(text).map_err(|error| format!("the tracks are not JSON: {error}"))?;
+    sequence::tracks_from_json(&value)
+}
+
 /// The highest row, column or span of a grid layout: a wrapped negative number would otherwise
 /// ask for billions of cells.
 pub const MAX_CELL: u32 = 10_000;
+
+/// The fastest a player plays, in times the frame rate of its sequence.
+pub const MAX_SPEED: f64 = 100.0;
+
+/// Records, as an undo entry of the module owning the objects, a change already made to them: its
+/// label, and how to undo and redo it. Set by the kernel, which refuses it when the module may not
+/// record now.
+pub type Recorder = Arc<dyn Fn(&str, Box<dyn AppliedChange>) -> Result<(), String> + Send + Sync>;
 
 /// Runs a job on the module's own thread.
 pub type Post = Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync>;
@@ -51,7 +68,11 @@ impl Kind {
 
     /// A widget that a layout can hold.
     pub fn is_widget(self) -> bool {
-        !self.is_item() && !matches!(self, Kind::Panel | Kind::GraphicsScene | Kind::Dialog)
+        !self.is_item()
+            && !matches!(
+                self,
+                Kind::Panel | Kind::GraphicsScene | Kind::Dialog | Kind::Sequence | Kind::Player
+            )
     }
 }
 
@@ -138,6 +159,15 @@ pub struct Object {
     pub generation: u64,
     /// The curves of a curve view.
     pub curves: Vec<ShownCurve>,
+    /// A sequence's frame rate, length and tracks, shared with the kernel playing it.
+    pub sequence: Option<Arc<Sequence>>,
+    /// The sequence a player plays.
+    pub plays: Option<Handle>,
+    /// A player's time, in frames.
+    pub time: f64,
+    pub playing: bool,
+    pub looping: bool,
+    pub speed: f64,
 }
 
 impl Object {
@@ -190,7 +220,52 @@ impl Object {
             repaint: true,
             generation: 0,
             curves: Vec::new(),
+            sequence: (kind == Kind::Sequence).then(|| Arc::new(Sequence::default())),
+            plays: None,
+            time: 0.0,
+            playing: false,
+            looping: false,
+            speed: 1.0,
         }
+    }
+}
+
+/// What a player shows at the end of a frame: its time in the sequence it plays.
+#[derive(Clone, Debug)]
+pub struct PlayerFrame {
+    pub player: Handle,
+    pub time: f64,
+    pub sequence: Handle,
+    /// Changed at each change of the sequence.
+    pub generation: u64,
+    pub data: Arc<Sequence>,
+}
+
+/// A change of a sequence's tracks, recorded for the module owning it: undoing and redoing set the
+/// tracks back, recording nothing.
+struct TracksChange {
+    objects: Weak<Mutex<Ui>>,
+    sequence: Handle,
+    before: Vec<Track>,
+    after: Vec<Track>,
+}
+
+impl TracksChange {
+    fn set(&self, tracks: &[Track]) {
+        // A sequence destroyed since has nothing to set back.
+        if let Some(shared) = self.objects.upgrade() {
+            let _ = lock(&shared).replace_tracks(self.sequence, tracks.to_vec());
+        }
+    }
+}
+
+impl AppliedChange for TracksChange {
+    fn undo(&mut self) {
+        self.set(&self.before);
+    }
+
+    fn redo(&mut self) {
+        self.set(&self.after);
     }
 }
 
@@ -221,6 +296,8 @@ pub struct Ui {
     post: Post,
     /// Where jobs that record nothing go, if the module's thread tells them apart.
     uncounted: Option<Post>,
+    /// Records the changes the kernel keeps track of, once the kernel has adopted the objects.
+    recorder: Option<Recorder>,
     wake: Option<egui::Context>,
     /// The store itself, for its jobs on the module's thread to look at it.
     this: Weak<Mutex<Ui>>,
@@ -286,6 +363,7 @@ impl Ui {
                 structure: HashMap::new(),
                 post,
                 uncounted: None,
+                recorder: None,
                 wake: None,
                 this: this.clone(),
             })
@@ -394,11 +472,15 @@ impl Ui {
             self.connections.retain(|c| c.sender != next);
             self.structure.remove(&next);
         }
-        // Views showing a destroyed scene show nothing.
+        // Views showing a destroyed scene show nothing; players of a destroyed sequence play
+        // nothing.
         let alive: Vec<Handle> = self.objects.keys().copied().collect();
         for object in self.objects.values_mut() {
             if object.scene.is_some_and(|scene| !alive.contains(&scene)) {
                 object.scene = None;
+            }
+            if object.plays.is_some_and(|sequence| !alive.contains(&sequence)) {
+                object.plays = None;
             }
         }
         Ok(())
@@ -466,6 +548,9 @@ impl Ui {
         if property == Property::Curves {
             return self.set_curves(handle, read_curves(text)?);
         }
+        if property == Property::Tracks {
+            return self.set_tracks(handle, read_tracks(text)?);
+        }
         let object = self.get_mut(handle)?;
         let field = match property {
             Property::Text => &mut object.text,
@@ -491,6 +576,52 @@ impl Ui {
         Ok(self.get(handle)?.curves.clone())
     }
 
+    /// The frame rate, length and tracks of a sequence.
+    pub fn sequence(&self, handle: Handle) -> Result<Arc<Sequence>, String> {
+        let object = self.get(handle)?;
+        object
+            .sequence
+            .clone()
+            .ok_or_else(|| format!("a {:?} is not a sequence", object.kind))
+    }
+
+    /// Sets the tracks of a sequence. A change is one undo entry, which the kernel records once it
+    /// has adopted the objects; a change it refuses is not made.
+    pub fn set_tracks(&mut self, handle: Handle, tracks: Vec<Track>) -> Result<(), String> {
+        let before = self.sequence(handle)?.tracks.clone();
+        if before == tracks {
+            return Ok(());
+        }
+        if let Some(record) = &self.recorder {
+            let change = TracksChange {
+                objects: self.this.clone(),
+                sequence: handle,
+                before,
+                after: tracks.clone(),
+            };
+            record("edit a sequence", Box::new(change))?;
+        }
+        self.replace_tracks(handle, tracks)
+    }
+
+    /// Sets the tracks of a sequence, recording nothing: for its undo and redo.
+    fn replace_tracks(&mut self, handle: Handle, tracks: Vec<Track>) -> Result<(), String> {
+        let object = self.get_mut(handle)?;
+        let kind = object.kind;
+        let sequence = object
+            .sequence
+            .as_mut()
+            .ok_or_else(|| format!("a {kind:?} is not a sequence"))?;
+        Arc::make_mut(sequence).tracks = tracks;
+        self.changed(handle);
+        Ok(())
+    }
+
+    /// The kernel records the changes it keeps track of through `recorder` (section 3).
+    pub fn set_recorder(&mut self, recorder: Recorder) {
+        self.recorder = Some(recorder);
+    }
+
     pub fn text(&self, handle: Handle, property: Property) -> Result<String, String> {
         let object = self.get(handle)?;
         Ok(match property {
@@ -499,6 +630,7 @@ impl Ui {
             Property::Placeholder => object.placeholder.clone(),
             Property::Title => object.title.clone(),
             Property::Curves => ShownCurve::list_to_json(&object.curves).to_string(),
+            Property::Tracks => sequence::tracks_to_json(&self.sequence(handle)?.tracks).to_string(),
             other => return Err(format!("{other:?} is not a text")),
         })
     }
@@ -511,6 +643,9 @@ impl Ui {
             return Err(format!("{property:?} takes {expected} numbers, not {}", values.len()));
         }
         let first = values[0];
+        if Self::is_playback(property) {
+            return self.set_playback(handle, property, first);
+        }
         let object = self.get_mut(handle)?;
         // Which items a scene draws, and in which order.
         let structural = matches!(property, Property::ZValue | Property::Visible);
@@ -566,6 +701,9 @@ impl Ui {
     }
 
     pub fn numbers(&self, handle: Handle, property: Property) -> Result<Vec<f64>, String> {
+        if Self::is_playback(property) {
+            return self.playback(handle, property).map(|number| vec![number]);
+        }
         let object = self.get(handle)?;
         let flag = |value: bool| if value { 1.0 } else { 0.0 };
         Ok(match property {
@@ -597,6 +735,171 @@ impl Ui {
             Property::Count => vec![(object.items.len().max(object.children.len())) as f64],
             other => return Err(format!("{other:?} is not a number")),
         })
+    }
+
+    /// A number of a sequence or of a player.
+    fn is_playback(property: Property) -> bool {
+        matches!(
+            property,
+            Property::FrameRate
+                | Property::Length
+                | Property::Sequence
+                | Property::Time
+                | Property::Playing
+                | Property::Loop
+                | Property::Speed
+        )
+    }
+
+    /// The object `handle` if it is a sequence, for the frame rate and the length, or a player.
+    fn playback_object(&self, handle: Handle, property: Property) -> Result<&Object, String> {
+        let object = self.get(handle)?;
+        let kind = if matches!(property, Property::FrameRate | Property::Length) {
+            Kind::Sequence
+        } else {
+            Kind::Player
+        };
+        if object.kind != kind {
+            return Err(format!("a {:?} has no {property:?}", object.kind));
+        }
+        Ok(object)
+    }
+
+    /// The length of the sequence a player plays, if it plays one.
+    fn length_played(&self, player: &Object) -> Option<f64> {
+        let sequence = self.objects.get(&player.plays?)?.sequence.as_ref()?;
+        Some(f64::from(sequence.length))
+    }
+
+    fn set_playback(&mut self, handle: Handle, property: Property, value: f64) -> Result<(), String> {
+        let object = self.playback_object(handle, property)?;
+        if !value.is_finite() {
+            return Err(format!("{property:?} is a finite number"));
+        }
+        let length = self.length_played(object);
+        match property {
+            Property::FrameRate | Property::Length => {
+                let high = if property == Property::FrameRate {
+                    MAX_FRAME_RATE
+                } else {
+                    MAX_LENGTH
+                };
+                if value.fract() != 0.0 || !(1.0..=f64::from(high)).contains(&value) {
+                    return Err(format!("{property:?} is a whole number from 1 to {high}"));
+                }
+                let sequence = self.get_mut(handle)?.sequence.as_mut().expect("checked a sequence");
+                let sequence = Arc::make_mut(sequence);
+                if property == Property::FrameRate {
+                    sequence.frame_rate = value as u32;
+                } else {
+                    sequence.length = value as u32;
+                }
+            }
+            Property::Sequence => {
+                let plays = (value != 0.0).then_some(value as Handle);
+                let valid = plays.is_none_or(|sequence| {
+                    value.fract() == 0.0 && self.objects.get(&sequence).is_some_and(|o| o.kind == Kind::Sequence)
+                });
+                if !valid {
+                    return Err(format!("no sequence {value} among the module's objects"));
+                }
+                self.get_mut(handle)?.plays = plays;
+            }
+            Property::Time => {
+                self.get_mut(handle)?.time = value.clamp(0.0, length.unwrap_or(f64::MAX));
+            }
+            Property::Playing => {
+                let player = self.get_mut(handle)?;
+                let playing = value != 0.0;
+                if playing && !player.playing && length.is_some_and(|length| player.time >= length) {
+                    player.time = 0.0;
+                }
+                player.playing = playing;
+            }
+            Property::Loop => self.get_mut(handle)?.looping = value != 0.0,
+            Property::Speed => self.get_mut(handle)?.speed = value.clamp(0.0, MAX_SPEED),
+            _ => unreachable!("only the numbers of a sequence or a player come here"),
+        }
+        self.changed(handle);
+        Ok(())
+    }
+
+    fn playback(&self, handle: Handle, property: Property) -> Result<f64, String> {
+        let object = self.playback_object(handle, property)?;
+        let flag = |value: bool| if value { 1.0 } else { 0.0 };
+        Ok(match property {
+            Property::FrameRate => f64::from(object.sequence.as_ref().map_or(0, |s| s.frame_rate)),
+            Property::Length => f64::from(object.sequence.as_ref().map_or(0, |s| s.length)),
+            Property::Sequence => object.plays.map_or(0.0, |sequence| sequence as f64),
+            Property::Time => object.time,
+            Property::Playing => flag(object.playing),
+            Property::Loop => flag(object.looping),
+            Property::Speed => object.speed,
+            _ => unreachable!("only the numbers of a sequence or a player come here"),
+        })
+    }
+
+    /// Moves the players that play on by `seconds`, sending `timeChanged` and, at the end of a
+    /// sequence played without loop, `finished`. Returns each player that has a sequence, with its
+    /// time, and whether one plays on.
+    pub fn advance_players(&mut self, seconds: f64) -> (Vec<PlayerFrame>, bool) {
+        let mut players: Vec<Handle> = self
+            .objects
+            .iter()
+            .filter(|(_, object)| object.kind == Kind::Player)
+            .map(|(handle, _)| *handle)
+            .collect();
+        players.sort_unstable();
+        let (mut frames, mut signals, mut playing) = (Vec::new(), Vec::new(), false);
+        for player in players {
+            let Some((sequence, generation, data)) = self.objects[&player].plays.and_then(|sequence| {
+                let object = self.objects.get(&sequence)?;
+                Some((sequence, object.generation, object.sequence.clone()?))
+            }) else {
+                continue;
+            };
+            let length = f64::from(data.length);
+            let object = self.objects.get_mut(&player).expect("listed above");
+            if object.playing {
+                let mut time = object.time + seconds * f64::from(data.frame_rate) * object.speed;
+                if time >= length {
+                    if object.looping {
+                        time %= length;
+                    } else {
+                        time = length;
+                        object.playing = false;
+                    }
+                }
+                if time != object.time {
+                    object.time = time;
+                    signals.push((player, Signal::TimeChanged, time));
+                }
+                if object.playing {
+                    playing = true;
+                } else {
+                    signals.push((player, Signal::Finished, time));
+                }
+            } else {
+                // A sequence made shorter.
+                object.time = object.time.min(length);
+            }
+            frames.push(PlayerFrame {
+                player,
+                time: object.time,
+                sequence,
+                generation,
+                data,
+            });
+        }
+        for (sender, signal, time) in signals {
+            self.emit(SignalData {
+                sender,
+                signal: signal as u32,
+                number: time,
+                ..Default::default()
+            });
+        }
+        (frames, playing)
     }
 
     /// Adds an entry to a combo box.
@@ -703,11 +1006,13 @@ impl Ui {
         (self.post)(job);
     }
 
-    /// Sends a signal to the slots connected to it, on the module's thread. A mouse move, or a
-    /// curves change still under way, replaces the same one of the same object still waiting.
+    /// Sends a signal to the slots connected to it, on the module's thread. A mouse move, a curves
+    /// change still under way, or a player's time, replaces the same one of the same object still
+    /// waiting.
     pub fn emit(&mut self, data: SignalData) {
-        let mergeable =
-            data.signal == Signal::MouseMove as u32 || (data.signal == Signal::CurvesChanged as u32 && !data.boolean);
+        let mergeable = data.signal == Signal::MouseMove as u32
+            || data.signal == Signal::TimeChanged as u32
+            || (data.signal == Signal::CurvesChanged as u32 && !data.boolean);
         let (sender, signal) = (data.sender, data.signal);
         if mergeable
             && let Some((waiting_sender, waiting_signal, waiting)) = &self.waiting
@@ -820,6 +1125,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{Kind, Property, Signal, SignalData, Ui, lock};
+    use crate::AppliedChange;
 
     type Jobs = Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
 
@@ -1116,5 +1422,185 @@ mod tests {
         );
         ui.set_numbers(dialog, Property::Visible, &[1.0]).unwrap();
         assert_eq!(ui.dialogs(), vec![dialog]);
+    }
+
+    /// One track on `cube/opacity`, with a key of `value` at frame 0.
+    fn tracks(value: f64) -> String {
+        format!(
+            "[{{\"property\":\"cube/opacity\",\"kind\":\"number\",\"curves\":[{{\"keys\":[{{\"time\":0,\"value\":{value}}}]}}]}}]"
+        )
+    }
+
+    #[test]
+    fn a_sequence_s_tracks_cross_their_json_and_wrong_ones_are_refused() {
+        let shared = ui();
+        let mut ui = lock(&shared);
+        let sequence = ui.create(Kind::Sequence, None).unwrap();
+        ui.set_text(sequence, Property::Tracks, &tracks(0.5)).unwrap();
+        let text = ui.text(sequence, Property::Tracks).unwrap();
+        assert!(text.contains("\"property\":\"cube/opacity\""), "{text}");
+        assert_eq!(
+            super::read_tracks(&text).unwrap(),
+            ui.sequence(sequence).unwrap().tracks
+        );
+        let wrong = [
+            "[{\"property\":\"cube/opacity\",\"kind\":\"number\",\"curves\":[{\"keys\":[{\"time\":2.5,\"value\":1}]}]}]",
+            "[{\"property\":\"cube/position\",\"kind\":\"vector\",\"curves\":[{\"keys\":[]}]}]",
+            "{",
+        ];
+        for text in wrong {
+            assert!(ui.set_text(sequence, Property::Tracks, text).is_err(), "{text}");
+        }
+        assert_eq!(ui.sequence(sequence).unwrap().tracks[0].curves[0].keys[0].value, 0.5);
+        let label = ui.create(Kind::Label, None).unwrap();
+        assert!(
+            ui.set_text(label, Property::Tracks, &tracks(0.5)).is_err(),
+            "only a sequence"
+        );
+    }
+
+    #[test]
+    fn a_sequence_and_a_player_keep_their_numbers_within_their_rules() {
+        let shared = ui();
+        let mut ui = lock(&shared);
+        let sequence = ui.create(Kind::Sequence, None).unwrap();
+        let player = ui.create(Kind::Player, None).unwrap();
+        for (property, wrong) in [
+            (Property::FrameRate, 0.0),
+            (Property::FrameRate, 241.0),
+            (Property::Length, 2.5),
+        ] {
+            assert!(
+                ui.set_numbers(sequence, property, &[wrong]).is_err(),
+                "{property:?} {wrong}"
+            );
+        }
+        ui.set_numbers(sequence, Property::FrameRate, &[24.0]).unwrap();
+        ui.set_numbers(sequence, Property::Length, &[48.0]).unwrap();
+        assert_eq!(ui.numbers(sequence, Property::Length).unwrap(), vec![48.0]);
+        assert!(
+            ui.set_numbers(player, Property::FrameRate, &[24.0]).is_err(),
+            "a player has no frame rate"
+        );
+        assert!(
+            ui.set_numbers(player, Property::Sequence, &[player as f64]).is_err(),
+            "not a sequence"
+        );
+        ui.set_numbers(player, Property::Sequence, &[sequence as f64]).unwrap();
+        ui.set_numbers(player, Property::Time, &[100.0]).unwrap();
+        assert_eq!(
+            ui.numbers(player, Property::Time).unwrap(),
+            vec![48.0],
+            "within the length"
+        );
+        ui.set_numbers(player, Property::Speed, &[1e6]).unwrap();
+        assert_eq!(ui.numbers(player, Property::Speed).unwrap(), vec![super::MAX_SPEED]);
+        assert!(ui.set_numbers(player, Property::Time, &[f64::NAN]).is_err());
+        let layout = ui.create(Kind::VBoxLayout, None).unwrap();
+        assert!(
+            ui.add_to(layout, sequence, [0, 0, 1, 1]).is_err(),
+            "never placed in a layout"
+        );
+        ui.destroy(sequence).unwrap();
+        assert_eq!(
+            ui.numbers(player, Property::Sequence).unwrap(),
+            vec![0.0],
+            "its sequence gone"
+        );
+    }
+
+    #[test]
+    fn a_player_plays_loops_and_finishes() {
+        let (shared, jobs) = queued();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut store = lock(&shared);
+        let sequence = store.create(Kind::Sequence, None).unwrap();
+        store.set_numbers(sequence, Property::Length, &[60.0]).unwrap();
+        let player = store.create(Kind::Player, None).unwrap();
+        store
+            .set_numbers(player, Property::Sequence, &[sequence as f64])
+            .unwrap();
+        for signal in [Signal::TimeChanged, Signal::Finished] {
+            let seen = seen.clone();
+            store
+                .connect(
+                    player,
+                    signal,
+                    Arc::new(move |data: &SignalData| seen.lock().unwrap().push((data.signal, data.number))),
+                )
+                .unwrap();
+        }
+        let (moved, finished) = (Signal::TimeChanged as u32, Signal::Finished as u32);
+        let (frames, playing) = store.advance_players(1.0);
+        assert!(!playing && frames[0].time == 0.0, "paused, it stays");
+        store.set_numbers(player, Property::Playing, &[1.0]).unwrap();
+        store.advance_players(0.5);
+        store.advance_players(0.5);
+        drop(store);
+        run(&jobs);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![(moved, 30.0)],
+            "two frames, one signal: the last time"
+        );
+        let mut store = lock(&shared);
+        let (frames, playing) = store.advance_players(2.0);
+        assert!(!playing && frames[0].time == 60.0, "stopped at the end");
+        drop(store);
+        run(&jobs);
+        assert_eq!(seen.lock().unwrap()[1..], [(moved, 60.0), (finished, 60.0)]);
+        let mut store = lock(&shared);
+        store.set_numbers(player, Property::Loop, &[1.0]).unwrap();
+        store.set_numbers(player, Property::Playing, &[1.0]).unwrap();
+        assert_eq!(
+            store.numbers(player, Property::Time).unwrap(),
+            vec![0.0],
+            "from the start"
+        );
+        let (frames, playing) = store.advance_players(2.5);
+        assert!(playing && frames[0].time == 15.0, "looped: {}", frames[0].time);
+    }
+
+    #[test]
+    fn a_change_of_tracks_is_recorded_once_and_undone_without_recording() {
+        let shared = ui();
+        let recorded: Arc<Mutex<Vec<Box<dyn AppliedChange>>>> = Arc::default();
+        let refuse = Arc::new(Mutex::new(false));
+        let (kept, refusing) = (recorded.clone(), refuse.clone());
+        let sequence = {
+            let mut ui = lock(&shared);
+            ui.set_recorder(Arc::new(move |label, change| {
+                assert_eq!(label, "edit a sequence");
+                if *refusing.lock().unwrap() {
+                    return Err("not now".to_owned());
+                }
+                kept.lock().unwrap().push(change);
+                Ok(())
+            }));
+            let sequence = ui.create(Kind::Sequence, None).unwrap();
+            ui.set_text(sequence, Property::Tracks, &tracks(1.0)).unwrap();
+            ui.set_text(sequence, Property::Tracks, &tracks(1.0)).unwrap();
+            ui.set_text(sequence, Property::Tracks, &tracks(2.0)).unwrap();
+            sequence
+        };
+        assert_eq!(
+            recorded.lock().unwrap().len(),
+            2,
+            "the same tracks again change nothing"
+        );
+        let value = || lock(&shared).sequence(sequence).unwrap().tracks[0].curves[0].keys[0].value;
+        let mut last = recorded.lock().unwrap().pop().unwrap();
+        last.undo();
+        assert_eq!(value(), 1.0);
+        last.redo();
+        assert_eq!(value(), 2.0);
+        assert_eq!(recorded.lock().unwrap().len(), 1, "undo and redo record nothing");
+        *refuse.lock().unwrap() = true;
+        assert!(
+            lock(&shared)
+                .set_text(sequence, Property::Tracks, &tracks(3.0))
+                .is_err()
+        );
+        assert_eq!(value(), 2.0, "a change that cannot be recorded is not made");
     }
 }

@@ -3,9 +3,10 @@
 
 use std::collections::BTreeSet;
 
-use uniwow_api::curve::{Curve, CurveKey, LIMIT};
-use uniwow_api::serde_json::{Value, json};
-use uniwow_api::{PropertyKind, PropertyValue};
+use serde_json::{Value, json};
+
+use crate::curve::{Curve, CurveKey, LIMIT};
+use crate::{PropertyKind, PropertyValue};
 
 /// The curves of one animated property: one per number (x, y and z of a position), each with keys
 /// of its own, at whole frames.
@@ -233,48 +234,85 @@ impl Sequence {
         if version > 2 {
             return Err(format!("version {version} is newer than this timeline"));
         }
-        let mut sequence = Self {
+        let sequence = Self {
             frame_rate: number(value, "frame_rate", 1, MAX_FRAME_RATE)?,
             length: number(value, "length", 1, MAX_LENGTH)?,
-            tracks: Vec::new(),
+            tracks: read_tracks(&value["tracks"], version)?,
         };
-        for track in value["tracks"].as_array().ok_or("'tracks' must be a list")? {
-            let property = track["property"].as_str().ok_or("a track has no 'property'")?;
-            let kind = track["kind"]
-                .as_str()
-                .and_then(PropertyKind::from_name)
-                .ok_or_else(|| format!("the track of '{property}' has no valid 'kind'"))?;
-            let mut read = Track::new(property, kind);
-            if version == 2 {
-                let curves = track["curves"]
-                    .as_array()
-                    .filter(|curves| curves.len() == kind.components())
-                    .ok_or_else(|| format!("the track of '{property}' needs {} curves", kind.components()))?;
-                for (slot, curve) in read.curves.iter_mut().zip(curves) {
-                    *slot = Curve::from_json(curve).map_err(|error| format!("'{property}': {error}"))?;
-                }
-            } else {
-                for key in track["keys"]
-                    .as_array()
-                    .ok_or_else(|| format!("the track of '{property}' has no 'keys' list"))?
-                {
-                    let frame = number(key, "frame", 0, u32::MAX)?;
-                    let value = PropertyValue::from_json(kind, &key["value"])
-                        .map_err(|error| format!("'{property}' at frame {frame}: {error}"))?;
-                    read.set_key(frame, value);
-                }
-                for curve in &read.curves {
-                    curve.check().map_err(|error| format!("'{property}': {error}"))?;
-                }
-            }
-            if sequence.track(property).is_some() {
-                return Err(format!("'{property}' has two tracks"));
-            }
-            sequence.tracks.push(read);
-        }
         sequence.check()?;
         Ok(sequence)
     }
+}
+
+/// The tracks of a sequence as JSON, as in its file of version 2:
+/// `[{"property", "kind", "curves": [{"keys": [...]}]}]`.
+pub fn tracks_to_json(tracks: &[Track]) -> Value {
+    Value::Array(
+        tracks
+            .iter()
+            .map(|track| {
+                json!({
+                    "property": track.property,
+                    "kind": track.kind.name(),
+                    "curves": track.curves.iter().map(Curve::to_json).collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Reads tracks as `tracks_to_json` writes them, with the rules of a file: those of
+/// `Curve::check`, keys at whole frames from 0, one track per property.
+pub fn tracks_from_json(value: &Value) -> Result<Vec<Track>, String> {
+    let sequence = Sequence {
+        tracks: read_tracks(value, 2)?,
+        ..Sequence::default()
+    };
+    sequence.check()?;
+    Ok(sequence.tracks)
+}
+
+/// The tracks of a file of `version`: version 1 held one whole value per key.
+fn read_tracks(value: &Value, version: u64) -> Result<Vec<Track>, String> {
+    let mut tracks: Vec<Track> = Vec::new();
+    for track in value.as_array().ok_or("'tracks' must be a list")? {
+        let property = track["property"].as_str().ok_or("a track has no 'property'")?;
+        let kind = track["kind"]
+            .as_str()
+            .and_then(PropertyKind::from_name)
+            .ok_or_else(|| format!("the track of '{property}' has no valid 'kind'"))?;
+        let mut read = Track::new(property, kind);
+        if version == 2 {
+            let curves = track["curves"]
+                .as_array()
+                .filter(|curves| curves.len() == kind.components())
+                .ok_or_else(|| format!("the track of '{property}' needs {} curves", kind.components()))?;
+            for (slot, curve) in read.curves.iter_mut().zip(curves) {
+                *slot = Curve::from_json(curve).map_err(|error| format!("'{property}': {error}"))?;
+            }
+        } else {
+            for key in track["keys"]
+                .as_array()
+                .ok_or_else(|| format!("the track of '{property}' has no 'keys' list"))?
+            {
+                let frame = key["frame"]
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .ok_or_else(|| format!("'frame' must be a whole number from 0 to {}", u32::MAX))?;
+                let value = PropertyValue::from_json(kind, &key["value"])
+                    .map_err(|error| format!("'{property}' at frame {frame}: {error}"))?;
+                read.set_key(frame, value);
+            }
+            for curve in &read.curves {
+                curve.check().map_err(|error| format!("'{property}': {error}"))?;
+            }
+        }
+        if tracks.iter().any(|other| other.property == property) {
+            return Err(format!("'{property}' has two tracks"));
+        }
+        tracks.push(read);
+    }
+    Ok(tracks)
 }
 
 /// Items one per line, the closing bracket at `indent`; nothing when there are none.
@@ -293,9 +331,10 @@ pub const MAX_LENGTH: u32 = 1_000_000;
 mod tests {
     use std::collections::BTreeSet;
 
-    use uniwow_api::curve::TangentMode;
-    use uniwow_api::serde_json::{Value, json};
-    use uniwow_api::{PropertyKind, PropertyValue};
+    use serde_json::{Value, json};
+
+    use crate::curve::TangentMode;
+    use crate::{PropertyKind, PropertyValue};
 
     use super::{Sequence, Track};
 
@@ -333,7 +372,7 @@ mod tests {
         let sequence = sample();
         let text = sequence.to_text();
         assert!(text.contains("\n            {\"time\":0.0,\"value\":0.0}"), "{text}");
-        let value: Value = uniwow_api::serde_json::from_str(&text).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value["version"], 2);
         assert_eq!(Sequence::from_json(&value), Ok(sequence));
         let mut wrong = value;

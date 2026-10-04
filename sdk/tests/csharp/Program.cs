@@ -49,10 +49,20 @@ static unsafe class Fake
     [UnmanagedCallersOnly]
     public static void Collect(IntPtr context, byte* text) => Error = Utf8.Read(text);
 
-    /// <summary>Calls a slot as the editor would, even after its disconnect.</summary>
-    public static void Call((IntPtr Slot, IntPtr User) kept)
+    /// <summary>The last numbers set: on which object, which property, and the first number.</summary>
+    public static (ulong Handle, uint Property, double Value) Numbers;
+
+    [UnmanagedCallersOnly]
+    public static int SetNumbers(IntPtr context, ulong handle, uint property, double* values, uint count)
     {
-        var data = new SignalData();
+        Numbers = (handle, property, count > 0 ? values[0] : -1);
+        return 0;
+    }
+
+    /// <summary>Calls a slot as the editor would, even after its disconnect.</summary>
+    public static void Call((IntPtr Slot, IntPtr User) kept, double number = 0)
+    {
+        var data = new SignalData { Number = number };
         ((delegate* unmanaged<IntPtr, SignalData*, void>)kept.Slot)(kept.User, &data);
     }
 }
@@ -98,6 +108,7 @@ static unsafe class Program
         api->Destroy = &Fake.Destroy;
         api->AddTo = &Fake.AddTo;
         api->SetText = &Fake.SetText;
+        api->SetNumbers = &Fake.SetNumbers;
         api->Connect = &Fake.Connect;
         api->Disconnect = &Fake.Disconnect;
         api->Log = &Fake.Log;
@@ -167,6 +178,16 @@ static unsafe class Program
         Expect(declared.Write(declared.User, &written, 1, &Fake.Collect, IntPtr.Zero) != 0 &&
                Fake.Error == "seven is refused", "an exception of the write function is a failure, with its message");
         Expect(Editor.SetProperty("level", 5) && Fake.ToldName == "level" && Fake.ToldValue == 5, "SetProperty tells the value");
+
+        var sequence = new Sequence();
+        var player = new Player();
+        player.SetSequence(sequence);
+        Expect(Fake.Numbers == (player.Handle, (uint)Property.Sequence, (double)sequence.Handle),
+               "a player is given its sequence by its handle");
+        double time = -1;
+        var timed = player.TimeChanged.Connect(frames => time = frames);
+        Fake.Call(Fake.Connections[timed], 12.5);
+        Expect(time == 12.5, "TimeChanged gives the time in frames");
 
         Console.WriteLine($"{failures} failure(s)");
         return failures == 0 ? 0 : 1;

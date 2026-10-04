@@ -4,6 +4,8 @@
 mod objects;
 mod properties;
 
+pub use properties::writing;
+
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -658,8 +660,10 @@ extern "C" fn api_end_group(context: *mut c_void) {
 #[cfg(test)]
 pub(crate) mod testing {
     use std::ffi::{CStr, CString, c_char, c_void};
-    use std::sync::atomic::{AtomicI64, AtomicPtr, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicI64, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Condvar, Mutex};
+
+    use uniwow_api::ui::{self, Property};
 
     use super::properties::PropertyEntry;
     use super::{API_VERSION, Api, CommandEntry, ModuleContext, ModuleInfo, Reply, Started, api_record_change, start};
@@ -676,6 +680,10 @@ pub(crate) mod testing {
         context: AtomicPtr<c_void>,
         /// What record_change answered in the last write of 6.
         recorded: AtomicI64,
+        /// A sequence among its objects, whose tracks a write of 2 to `free` tries to change.
+        sequence: AtomicU64,
+        /// Whether that change was refused: 1 refused, 0 made, -1 not tried.
+        tracks_refused: AtomicI64,
     }
 
     thread_local! {
@@ -757,9 +765,9 @@ pub(crate) mod testing {
         0
     }
 
-    /// Writes `free`, keeping an infinity for 1.
+    /// Writes `free`, keeping an infinity for 1; 2 tries to change the tracks of its sequence.
     extern "C-unwind" fn write_free(
-        _user: *mut c_void,
+        user: *mut c_void,
         values: *mut f64,
         _count: u32,
         _error: Reply,
@@ -769,6 +777,15 @@ pub(crate) mod testing {
         let value = unsafe { &mut *values };
         if *value == 1.0 {
             *value = f64::INFINITY;
+        }
+        if *value == 2.0 {
+            let native = native_of(user);
+            let module = super::module(native.context.load(Ordering::SeqCst));
+            let tracks = r#"[{"property":"native/level","kind":"number","curves":[{"keys":[{"time":0,"value":1}]}]}]"#;
+            let refused = ui::lock(&module.ui)
+                .set_text(native.sequence.load(Ordering::SeqCst), Property::Tracks, tracks)
+                .is_err();
+            native.tracks_refused.store(i64::from(refused), Ordering::SeqCst);
         }
         0
     }
@@ -844,6 +861,8 @@ pub(crate) mod testing {
             writes: AtomicUsize::new(0),
             context: AtomicPtr::new(std::ptr::null_mut()),
             recorded: AtomicI64::new(-1),
+            sequence: AtomicU64::new(0),
+            tracks_refused: AtomicI64::new(-1),
         }));
         STARTING.set(std::ptr::from_ref(state) as usize);
         start(init, id).expect("starts")
@@ -893,6 +912,16 @@ pub(crate) mod testing {
 
     fn context_of(module: &'static ModuleContext) -> *mut c_void {
         std::ptr::from_ref(module).cast_mut().cast()
+    }
+
+    /// The sequence whose tracks a write of 2 to `free` tries to change.
+    pub fn set_sequence(module: &ModuleContext, sequence: u64) {
+        state(module).sequence.store(sequence, Ordering::SeqCst);
+    }
+
+    /// Whether that change was refused: 1 refused, 0 made, -1 not tried.
+    pub fn tracks_refused(module: &ModuleContext) -> i64 {
+        state(module).tracks_refused.load(Ordering::SeqCst)
     }
 
     /// What record_change answered in the last write of 6: 0 recorded, non-zero refused.

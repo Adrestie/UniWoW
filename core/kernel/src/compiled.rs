@@ -45,6 +45,7 @@ impl Module for CompiledModule {
 
     fn init(&mut self, ctx: &mut Context) {
         let _ = self.started.context.editor.set(ctx.editor());
+        ctx.adopt_objects(&self.started.context.ui);
     }
 
     fn panel_ui(&mut self, panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {

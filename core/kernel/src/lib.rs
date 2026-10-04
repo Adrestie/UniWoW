@@ -17,6 +17,7 @@ mod logger;
 mod manifest;
 mod order;
 mod panels;
+mod players;
 #[cfg(test)]
 mod random;
 mod requirements;

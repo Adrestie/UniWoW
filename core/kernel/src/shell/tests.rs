@@ -102,6 +102,21 @@ impl Harness {
     fn index(&self, id: &str) -> usize {
         self.shell.running_index(id).expect("running")
     }
+
+    /// Moves the players on to `at`, then waits for the writes on `thread`; returns whether one
+    /// plays on.
+    fn play_at(&mut self, at: Instant, thread: &'static capi::ModuleContext) -> bool {
+        let stores = self.shell.adopted_stores();
+        let playing = self.shell.players.tick(&stores, at);
+        // The module's thread alone: a frame would move the players on by the real time.
+        let (done, ran) = std::sync::mpsc::channel();
+        ui::lock(&thread.ui).post_job(Box::new(move || {
+            let _ = done.send(());
+        }));
+        ran.recv_timeout(Duration::from_secs(10))
+            .expect("the module's thread runs");
+        playing
+    }
 }
 
 /// The window asked to close, shown or minimised.
@@ -890,4 +905,178 @@ fn a_write_that_unwinds_leaves_the_module_s_thread_recording() {
     assert_eq!(recorded.try_recv(), Ok(0), "recorded once the write unwound");
     harness.frame(RawInput::default());
     assert_eq!(harness.shell.history.undo_label().as_deref(), Some("after an unwind"));
+}
+
+/// Tracks on `native/level`, with a key of each value at each frame given.
+fn level_tracks(keys: &[(u32, f64)]) -> String {
+    let keys: Vec<Value> = keys
+        .iter()
+        .map(|(frame, value)| json!({ "time": frame, "value": value, "mode": "flat" }))
+        .collect();
+    json!([{ "property": "native/level", "kind": "number", "curves": [{ "keys": keys }] }]).to_string()
+}
+
+/// The value of the first track of `sequence` at `frame`, as the module keeps it: rounded.
+fn level_at(module: &capi::ModuleContext, sequence: u64, frame: f64) -> f64 {
+    let data = ui::lock(&module.ui).sequence(sequence).unwrap();
+    match data.tracks[0].evaluate(frame, None) {
+        Some(uniwow_api::PropertyValue::Number(value)) => value.round(),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_player_writes_its_values_through_the_catalogue_where_they_change() {
+    let native = CompiledModule::started(capi::testing::native("native"));
+    let mut harness = Harness::with_slots(vec![Slot::compiled("native", native)]);
+    let thread = harness.shell.slots[0].compiled.expect("compiled");
+    let (sequence, player) = {
+        let mut objects = ui::lock(&thread.ui);
+        let sequence = objects.create(Kind::Sequence, None).unwrap();
+        objects.set_numbers(sequence, Property::Length, &[60.0]).unwrap();
+        objects
+            .set_text(sequence, Property::Tracks, &level_tracks(&[(0, 0.0), (60, 10.0)]))
+            .unwrap();
+        let player = objects.create(Kind::Player, None).unwrap();
+        objects
+            .set_numbers(player, Property::Sequence, &[sequence as f64])
+            .unwrap();
+        objects.set_numbers(player, Property::Time, &[30.0]).unwrap();
+        (sequence, player)
+    };
+    let start = Instant::now();
+    let after = |seconds: f64| start + Duration::from_secs_f64(seconds);
+    assert!(!harness.play_at(after(0.0), thread), "paused");
+    assert_eq!(
+        capi::testing::level(thread),
+        (5.0, 1),
+        "the value at its time, set by the module"
+    );
+    harness.play_at(after(0.0), thread);
+    assert_eq!(capi::testing::level(thread).1, 1, "the same time: nothing written");
+    // Other keys, the same value at frame 30: nothing written; another value: written.
+    let set_tracks = |keys: &[(u32, f64)]| {
+        ui::lock(&thread.ui)
+            .set_text(sequence, Property::Tracks, &level_tracks(keys))
+            .unwrap();
+    };
+    set_tracks(&[(0, 0.0), (30, 5.0), (60, 10.0)]);
+    harness.play_at(after(0.0), thread);
+    assert_eq!(capi::testing::level(thread).1, 1, "the value did not change");
+    set_tracks(&[(0, 0.0), (30, 3.0), (60, 6.0)]);
+    harness.play_at(after(0.0), thread);
+    assert_eq!(capi::testing::level(thread), (3.0, 2));
+    // Played: on by the time elapsed, at the frame rate (30), from the first frame it plays in.
+    ui::lock(&thread.ui)
+        .set_numbers(player, Property::Playing, &[1.0])
+        .unwrap();
+    assert!(harness.play_at(after(10.0), thread), "plays on");
+    assert_eq!(
+        capi::testing::level(thread).1,
+        2,
+        "the first frame it plays in counts no time"
+    );
+    assert!(harness.play_at(after(10.5), thread));
+    assert_eq!(capi::testing::level(thread).0, level_at(thread, sequence, 45.0));
+    assert!(!harness.play_at(after(20.0), thread), "stopped at the end");
+    assert_eq!(capi::testing::level(thread).0, 6.0);
+    assert_eq!(
+        ui::lock(&thread.ui).numbers(player, Property::Time).unwrap(),
+        vec![60.0]
+    );
+}
+
+#[test]
+fn each_change_of_a_sequence_s_tracks_is_an_undo_entry_of_its_module() {
+    let native = CompiledModule::started(capi::testing::native("native"));
+    let mut harness = Harness::with_slots(vec![Slot::compiled("native", native)]);
+    let thread = harness.shell.slots[0].compiled.expect("compiled");
+    let sequence = ui::lock(&thread.ui).create(Kind::Sequence, None).unwrap();
+    ui::lock(&thread.ui)
+        .set_text(sequence, Property::Tracks, &level_tracks(&[(0, 4.0)]))
+        .unwrap();
+    harness.frame(RawInput::default());
+    assert_eq!(harness.shell.history.undo_label().as_deref(), Some("edit a sequence"));
+    let keys = || {
+        let data = ui::lock(&thread.ui).sequence(sequence).unwrap();
+        data.tracks
+            .iter()
+            .map(|track| track.curves[0].keys.len())
+            .sum::<usize>()
+    };
+    harness.shell.undo();
+    assert_eq!(keys(), 0, "the tracks before");
+    harness.shell.redo();
+    assert_eq!(keys(), 1);
+    // The module failing takes its changes out of the history.
+    let index = harness.index("native");
+    harness.shell.fail(index, "test".to_owned());
+    assert!(harness.shell.history.undo_label().is_none());
+}
+
+#[test]
+fn the_tracks_of_a_sequence_cannot_change_in_a_property_s_write() {
+    let native = CompiledModule::started(capi::testing::native("native"));
+    let mut harness = Harness::with_slots(vec![Slot::compiled("native", native)]);
+    let thread = harness.shell.slots[0].compiled.expect("compiled");
+    let sequence = ui::lock(&thread.ui).create(Kind::Sequence, None).unwrap();
+    capi::testing::set_sequence(thread, sequence);
+    let editor = harness.shell.host.editor(KERNEL);
+    editor
+        .write_property("native/free", uniwow_api::PropertyValue::Number(2.0))
+        .unwrap();
+    harness.settle(thread);
+    harness.frame(RawInput::default());
+    assert_eq!(capi::testing::tracks_refused(thread), 1);
+    assert!(ui::lock(&thread.ui).sequence(sequence).unwrap().tracks.is_empty());
+    assert!(harness.shell.history.undo_label().is_none());
+}
+
+/// A Rust module handing its interface objects to the kernel.
+struct Adopting {
+    objects: SharedUi,
+}
+
+impl Module for Adopting {
+    fn register(&mut self, _reg: &mut Registrar) {}
+
+    fn init(&mut self, ctx: &mut Context) {
+        ctx.adopt_objects(&self.objects);
+    }
+}
+
+#[test]
+fn the_objects_a_rust_module_adopts_play_and_record_as_a_compiled_module_s() {
+    let objects = Ui::new(Arc::new(|job| job()));
+    let adopting = Adopting {
+        objects: objects.clone(),
+    };
+    let native = CompiledModule::started(capi::testing::native("native"));
+    let mut harness = Harness::with_slots(vec![
+        Slot::loaded("rust", Box::new(adopting)),
+        Slot::compiled("native", native),
+    ]);
+    let thread = harness.shell.slots[1].compiled.expect("compiled");
+    let player = {
+        let mut store = ui::lock(&objects);
+        let sequence = store.create(Kind::Sequence, None).unwrap();
+        store
+            .set_text(sequence, Property::Tracks, &level_tracks(&[(0, 0.0), (120, 10.0)]))
+            .unwrap();
+        let player = store.create(Kind::Player, None).unwrap();
+        store
+            .set_numbers(player, Property::Sequence, &[sequence as f64])
+            .unwrap();
+        player
+    };
+    harness.frame(RawInput::default());
+    assert_eq!(harness.shell.history.undo_label().as_deref(), Some("edit a sequence"));
+    ui::lock(&objects)
+        .set_numbers(player, Property::Playing, &[1.0])
+        .unwrap();
+    let start = Instant::now();
+    harness.play_at(start, thread);
+    harness.play_at(start + Duration::from_secs(2), thread);
+    assert_eq!(ui::lock(&objects).numbers(player, Property::Time).unwrap(), vec![60.0]);
+    assert_eq!(capi::testing::level(thread).0, 5.0, "the value at frame 60 of 120");
 }

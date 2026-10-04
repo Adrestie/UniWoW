@@ -34,6 +34,16 @@ int32_t fake_set_property(void *, const char *name, const double *values, uint32
     return 0;
 }
 void into(void *target, const char *text) { *static_cast<std::string *>(target) = text; }
+// The last numbers set: on which object, which property, and the first number.
+uniwow_handle numbers_object = 0;
+uint32_t numbers_property = 0;
+double numbers_value = 0.0;
+int32_t fake_set_numbers(void *, uniwow_handle object, uint32_t property, const double *values, uint32_t count) {
+    numbers_object = object;
+    numbers_property = property;
+    numbers_value = count > 0 ? values[0] : -1.0;
+    return 0;
+}
 
 // Counts the slot functions destroyed.
 int destroyed_slots = 0;
@@ -56,6 +66,7 @@ int main() {
     api.destroy = fake_destroy;
     api.add_to = fake_add_to;
     api.set_text = fake_set_text;
+    api.set_numbers = fake_set_numbers;
     api.connect = fake_connect;
     api.disconnect = fake_disconnect;
     api.log = fake_log;
@@ -129,6 +140,19 @@ int main() {
     expect(declared.write(declared.user, &written, 1, into, &error) != 0 && error == "seven is refused",
            "an exception of the write function is a failure, with its message");
     expect(level.set({5.0}) && told_name == "level" && told_value == 5.0, "set tells the value");
+
+    uniwow::Sequence sequence;
+    uniwow::Player player;
+    player.setSequence(sequence);
+    expect(numbers_object == player.handle() && numbers_property == UNIWOW_PROPERTY_SEQUENCE &&
+               numbers_value == double(sequence.handle()),
+           "a player is given its sequence by its handle");
+    double time = -1.0;
+    const uint64_t timed = player.timeChanged.connect([&time](double frames) { time = frames; });
+    uniwow_signal moved{};
+    moved.number = 12.5;
+    fake_connections[timed].slot(fake_connections[timed].user, &moved);
+    expect(time == 12.5, "timeChanged gives the time in frames");
 
     std::printf("%d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

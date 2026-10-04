@@ -55,7 +55,9 @@ enum {
     UNIWOW_ITEM_GROUP = 20,
     UNIWOW_PAINT_AREA = 21,
     UNIWOW_DIALOG = 22,         /* a modal window; created hidden, shown and hidden through VISIBLE */
-    UNIWOW_CURVE_VIEW = 23      /* curves edited by hand, drawn by the module curves */
+    UNIWOW_CURVE_VIEW = 23,     /* curves edited by hand, drawn by the module curves */
+    UNIWOW_SEQUENCE = 24,       /* tracks of keys on animatable properties, with a frame rate and a length; not drawn */
+    UNIWOW_PLAYER = 25          /* plays a sequence, as QTimeLine; moved on by the kernel; not drawn */
 };
 /* </generated kind> */
 
@@ -93,9 +95,20 @@ enum {
     UNIWOW_PROPERTY_VIEW_SCALE = 28,     /* graphics view: zoom */
     UNIWOW_PROPERTY_VIEW_CENTER = 29,    /* graphics view: x, y of the scene at its centre */
     UNIWOW_PROPERTY_COUNT = 30,          /* read only: entries of a combo box, children otherwise */
-    UNIWOW_PROPERTY_CURVES = 31          /* curve view, text: JSON [{label, colour: [r, g, b], visible, keys: [{time,
+    UNIWOW_PROPERTY_CURVES = 31,         /* curve view, text: JSON [{label, colour: [r, g, b], visible, keys: [{time,
                                             value, mode, left, right}]}]; keys in time order, each at a time of its
                                             own, numbers within 1e9 */
+    UNIWOW_PROPERTY_TRACKS = 32,         /* sequence, text: JSON [{property, kind, curves: [{keys: [{time, value,
+                                            mode, left, right}]}]}], one curve per number of the property; keys at
+                                            whole frames from 0, numbers within 1e9; each change is an undo entry the
+                                            kernel records */
+    UNIWOW_PROPERTY_FRAME_RATE = 33,     /* sequence: frames per second, a whole number from 1 to 240 */
+    UNIWOW_PROPERTY_LENGTH = 34,         /* sequence: in frames, a whole number from 1 to 1000000 */
+    UNIWOW_PROPERTY_SEQUENCE = 35,       /* player: the handle of the sequence it plays, 0 for none */
+    UNIWOW_PROPERTY_TIME = 36,           /* player: in frames, fractional, from 0 to the length of its sequence */
+    UNIWOW_PROPERTY_PLAYING = 37,        /* player: 1 plays from the time, or from 0 when at the end; 0 pauses */
+    UNIWOW_PROPERTY_LOOP = 38,           /* player: at the end, starts again from 0 */
+    UNIWOW_PROPERTY_SPEED = 39           /* player: times the frame rate, from 0 to 100 */
 };
 /* </generated property> */
 
@@ -120,7 +133,9 @@ enum {
     UNIWOW_SIGNAL_MOUSE_RELEASE = 16,        /* paint area: x, y */
     UNIWOW_SIGNAL_WHEEL = 17,                /* paint area: x, y, dx, dy */
     UNIWOW_SIGNAL_REJECTED = 18,             /* dialog: the user closed it, which hid it */
-    UNIWOW_SIGNAL_CURVES_CHANGED = 19        /* curve view: text, the curves; boolean, whether the change is done */
+    UNIWOW_SIGNAL_CURVES_CHANGED = 19,       /* curve view: text, the curves; boolean, whether the change is done */
+    UNIWOW_SIGNAL_TIME_CHANGED = 20,         /* player, as it plays: number, the time in frames */
+    UNIWOW_SIGNAL_FINISHED = 21              /* player: it reached the end without LOOP and stopped */
 };
 /* </generated signal> */
 

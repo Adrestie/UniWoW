@@ -43,6 +43,7 @@ impl Shell {
         self.apply_reported();
         self.dispatch_events();
         self.apply_reported();
+        self.play(ctx, Instant::now());
         if !self.host.events.is_empty() {
             ctx.request_repaint();
         }

@@ -47,6 +47,7 @@ mod module;
 mod numbers;
 mod property;
 mod registrar;
+pub mod sequence;
 mod service;
 pub mod ui;
 pub mod viewport;

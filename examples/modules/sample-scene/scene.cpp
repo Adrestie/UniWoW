@@ -1,6 +1,7 @@
 // Sample compiled module in C++ on the graphics scene: a board of coloured cards. Dragging a card
 // is one undo entry, a double click on a card paints the cube in its colour, the wheel zooms and
-// the middle or right button scrolls. The position of the first card is an animatable property.
+// the middle or right button scrolls. The position of the first card is an animatable property,
+// which a sequence of the module's own moves when played from its panel.
 
 #include "uniwow.hpp"
 
@@ -18,6 +19,15 @@ namespace {
 constexpr double CardWidth = 120.0;
 constexpr double CardHeight = 70.0;
 constexpr int Columns = 8;
+
+// The path of the first card: down, right, then back where it started, in 3 seconds at 30 frames
+// per second; one curve for each number of its position, x, y and z.
+constexpr int PathLength = 90;
+const char *const FirstCardPath =
+    R"([{"property":"sample-scene/first_card","kind":"vector","curves":[)"
+    R"({"keys":[{"time":0,"value":0},{"time":30,"value":0},{"time":60,"value":600},{"time":90,"value":0}]},)"
+    R"({"keys":[{"time":0,"value":0},{"time":30,"value":160},{"time":60,"value":160},{"time":90,"value":0}]},)"
+    R"({"keys":[{"time":0,"value":0}]}]}])";
 
 struct Colour {
     double r, g, b;
@@ -49,6 +59,12 @@ struct Board {
     uniwow::Label selection{"Nothing selected."};
     uniwow::PushButton add{"Add card"};
     std::vector<Card> cards;
+    uniwow::Sequence path;
+    uniwow::Player player;
+    uniwow::PushButton play{"Play"};
+    uniwow::PushButton pause{"Pause"};
+    uniwow::CheckBox loop{"Loop"};
+    uniwow::Label frame{"Frame 0"};
 };
 
 Board *board = nullptr;
@@ -219,6 +235,12 @@ void build_panel() {
     bar.addWidget(board->add);
     bar.addWidget(board->selection);
     layout.addLayout(bar);
+    uniwow::HBoxLayout playback;
+    playback.addWidget(board->play);
+    playback.addWidget(board->pause);
+    playback.addWidget(board->loop);
+    playback.addWidget(board->frame);
+    layout.addLayout(playback);
     board->view.setScene(board->scene);
     board->view.setMinimumHeight(300);
     // The six cards of the start in the middle of the view.
@@ -230,6 +252,15 @@ void build_panel() {
         std::lock_guard<std::mutex> guard(board->lock);
         add_cards(1);
     });
+    // The editor plays the sequence and moves the card through its property.
+    board->path.setLength(PathLength);
+    board->path.setTracks(FirstCardPath);
+    board->player.setSequence(board->path);
+    board->play.clicked.connect([] { board->player.play(); });
+    board->pause.clicked.connect([] { board->player.pause(); });
+    board->loop.toggled.connect([](bool checked) { board->player.setLoop(checked); });
+    board->player.timeChanged.connect([](double frames) { board->frame.setText(format("Frame %.0f", frames)); });
+    board->player.finished.connect([] { board->frame.setText("Finished"); });
     board->scene.itemMoved.connect([](uniwow::ItemEvent event) {
         std::lock_guard<std::mutex> guard(board->lock);
         const int card = card_of(event.item);

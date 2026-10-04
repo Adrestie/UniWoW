@@ -178,6 +178,8 @@ and Python receive theirs in milestones 9 and 10.
 | `PaintArea` | a `QWidget` and its `paintEvent` | minimum height | `paint` (painter, width, height), `mousePress`, `mouseMove`, `mouseRelease`, `wheel` (x, y, dx, dy, button, keys) |
 | `Dialog` | `QDialog` | title, the one layout it holds, shown or hidden | `rejected` |
 | `CurveView` | a `QWidget` drawn by the module `curves` | curves (JSON), minimum height | `curvesChanged` (curves, finished) |
+| `Sequence` | the data a `QTimeLine` plays; not drawn | tracks (JSON), frame rate, length | |
+| `Player` | `QTimeLine`; not drawn | sequence, time, playing, loop, speed | `timeChanged` (time), `finished` |
 
 Every widget is enabled or not, visible or not, and has a tooltip. Every item has a position in its
 parent, a pen, a brush, a stacking order, a tooltip, and is visible, movable (along x, y or both,
@@ -201,6 +203,12 @@ within bounds), selectable and selected or not. Colours are `0xRRGGBBAA`, sizes 
 - **Dialogs**: a dialog is a floating window, created hidden. While it is shown, the rest of the
   editor takes neither clicks nor shortcuts. The user closing it, with Escape or its close button,
   hides it and sends `rejected`.
+- **Sequences and players** (milestone 8): a sequence holds tracks of keys on animatable
+  properties, with a frame rate and a length, in the JSON of the Timeline's files. While a player
+  plays, the kernel moves it on at each frame by the time elapsed, times its speed; at the end it
+  stops and sends `finished`, or starts again with *loop*. Whenever its time or its sequence
+  changes, the kernel writes the value of each track at that time into its property, through the
+  catalogue of animatable properties, and only the values that changed.
 - **Undo**: a module records a change it has made with a label and two JSON values, one undoing it
   and one redoing it. Undo and Redo hand the matching value to the function the module declared,
   on its thread; when that function fails, the module fails and its changes leave the history.
@@ -217,7 +225,7 @@ within bounds), selectable and selected or not. Colours are `0xRRGGBBAA`, sizes 
   module of another language changed by hand. The entry belongs to the module owning the object or
   the property, and joins its open group (S4). The author of a tool in any language has nothing to
   write for these; `record_change` stays for the module's own data. Rust modules using these
-  objects get the same.
+  objects hand them to the kernel with `Context::adopt_objects` and get the same.
 
 ### Capabilities and their unified form
 
@@ -239,7 +247,7 @@ fills it, or *not planned* when no milestone does yet.
 | The curve editor | The service `curve-editor` | `CurveView` | `uniwow::CurveView`; `CurveView` | Milestones 9 and 10 |
 | Animatable properties: declare, list, read, write | `Registrar::animatable`; `Editor::properties`, `read_property`, `write_property` | `uniwow_module_info.properties` (`uniwow_property`); `properties`, `read_property`, `write_property`, `set_property` | `uniwow::Property`, `describeProperties`, `properties`, `readProperty`, `writeProperty`; `Editor.DeclareProperty`, `Properties`, `ReadProperty`, `WriteProperty`, `SetProperty` | — milestones 9 and 10 |
 | The viewport's camera | Inside the module `viewport` (*View*, *Reset camera*) | The properties `viewport/camera_position`, `camera_target`, `camera_fov`; the commands `viewport.camera`, `viewport.look_at`, `viewport.frame` | The functions of properties; `call` | Scripts: the commands through `uniwow.call`; the properties: milestones 9 and 10 |
-| Sequences and their playback | Inside the Timeline | — step 8.4 | — step 8.4 | — milestones 9 and 10 |
+| Sequences and their playback | Inside the Timeline; `uniwow_api::sequence`, the objects `Sequence` and `Player` handed to the kernel with `Context::adopt_objects` | `Sequence`, `Player` | `uniwow::Sequence`, `uniwow::Player`; `Sequence`, `Player` | — milestones 9 and 10 |
 | The dopesheet | Inside the Timeline's panel | — step 8.5 | — step 8.5 | — milestones 9 and 10 |
 | Tree, table, property grid | egui | — step 8.7 | — step 8.7 | — milestones 9 and 10 |
 | Drawing in the 3D view | The service `viewport` and its layers | — not planned (an other 3D access of step 8.3) | — | — |
@@ -1296,6 +1304,33 @@ table up to date, and its review checks it.
   by that module and joining its open group (section 3): the module records nothing itself.
 - Sample: the C++ scene plays a sequence of its own on its first card, which moves; pause and loop
   from its panel.
+
+  As built:
+
+  - `uniwow_api::sequence` holds the model the Timeline used, which the Timeline now reads from
+    there. `tracks_to_json` and `tracks_from_json` give the tracks of a sequence alone, with the
+    rules of a file: keys at whole frames from 0, one track per property.
+  - Kinds 24 and 25 (`SEQUENCE`, `PLAYER`), properties 32 to 39 (`TRACKS`, `FRAME_RATE`,
+    `LENGTH`, `SEQUENCE`, `TIME`, `PLAYING`, `LOOP`, `SPEED`) and signals 20 and 21
+    (`TIME_CHANGED`, `FINISHED`) in `sdk/bindings.toml`; `uniwow.h` keeps version 4 and its table.
+    A frame rate is a whole number from 1 to 240, a length from 1 to 1,000,000 frames; a player's
+    time stays within the length of its sequence and its speed from 0 to 100; a player plays a
+    sequence of its own module, and a destroyed sequence leaves its players without one. Playing
+    from the end of the sequence starts from 0.
+  - The kernel moves on the players of every module whose objects it adopted: a compiled module's
+    when it starts, a Rust module's through `Context::adopt_objects`. The first frame a player plays
+    in counts no time, so that a player started while the editor is idle does not jump. A
+    `timeChanged` still waiting for the module's thread is replaced by the next one, as a mouse move
+    is.
+  - The values are written whenever the player's time changes, and also when its sequence changes:
+    the values at the playhead follow the keys, as in the Timeline. Only the values that changed
+    since the player last wrote are written.
+  - Each change of `TRACKS` is one undo entry, *edit a sequence*, owned by the module and in its
+    open group; Undo and Redo set the tracks back without recording. Tracks set while the module
+    starts, before the editor is ready, and tracks unchanged, are not recorded. While a write
+    function of a property runs, a change of tracks is refused and not made (the rule of step 8.2).
+  - The C++ scene's panel has *Play*, *Pause*, *Loop* and the frame played, then *Finished*; its
+    first card goes down, right and back in 3 seconds.
 
 **Step 8.5, the dopesheet as an object:**
 

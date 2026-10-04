@@ -589,7 +589,7 @@ fn admissible_value(timeline: &mut TimelineModule, name: &str, value: &PropertyV
     let fits = value
         .components()
         .iter()
-        .all(|number| crate::sequence::admissible(*number));
+        .all(|number| uniwow_api::sequence::admissible(*number));
     if !fits {
         timeline
             .panel

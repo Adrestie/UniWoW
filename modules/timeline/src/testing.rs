@@ -46,6 +46,8 @@ impl Host for FakeHost {
 
     fn draw_dialogs(&mut self, _owner: &str, _objects: &SharedUi, _egui: &egui::Context) {}
 
+    fn adopt_objects(&mut self, _owner: &str, _objects: &SharedUi) {}
+
     fn setting(&self, _module: &str, _key: &str) -> Option<serde_json::Value> {
         None
     }

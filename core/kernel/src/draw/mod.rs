@@ -413,7 +413,9 @@ impl PanelView {
             | Kind::LineItem
             | Kind::EllipseItem
             | Kind::TextItem
-            | Kind::ItemGroup => None,
+            | Kind::ItemGroup
+            | Kind::Sequence
+            | Kind::Player => None,
         }
     }
 

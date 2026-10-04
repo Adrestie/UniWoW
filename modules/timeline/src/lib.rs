@@ -4,7 +4,6 @@
 //! executable.
 
 mod panel;
-mod sequence;
 #[cfg(test)]
 mod testing;
 
@@ -19,7 +18,7 @@ use uniwow_api::{
     CallId, Command, Context, DIALOG_ANSWERED_TOPIC, DockArea, Editor, Event, Module, Registrar, egui, log,
 };
 
-use sequence::{KeyId, Sequence};
+use uniwow_api::sequence::{KeyId, Sequence};
 
 /// A sequence opened during this session.
 struct Document {
@@ -394,8 +393,8 @@ mod tests {
     use uniwow_api::{Command, Module, PropertyKind};
 
     use super::{Document, SequenceEdit, TimelineModule};
-    use crate::sequence::{Sequence, Track};
     use crate::testing::FakeHost;
+    use uniwow_api::sequence::{Sequence, Track};
 
     #[test]
     fn an_edit_is_undone_and_redone_and_marks_the_sequence() {

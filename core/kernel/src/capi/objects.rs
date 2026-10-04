@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use super::{Reply, UserPointer, c_text, guarded, module, read, reply_with};
 use uniwow_api::curve::ShownCurve;
+use uniwow_api::sequence::{self, Sequence, Track};
 use uniwow_api::ui::{self, Kind, PaintCommand, Property, Signal, SignalData, Ui};
 
 /// What a slot receives; the fields its signal does not use are zero.
@@ -142,16 +143,24 @@ extern "C" fn add_to(
     })
 }
 
+/// Curves or tracks read from their JSON.
+enum Read {
+    Curves(Result<Vec<ShownCurve>, String>),
+    Tracks(Result<Vec<Track>, String>),
+}
+
 extern "C" fn set_text(context: *mut c_void, object: u64, which: u32, text: *const c_char) -> i32 {
     let which = property(which);
     let text = read(text);
-    // Curves are read before taking the lock: a long text would hold the interface waiting.
-    let curves = match (&which, &text) {
-        (Ok(Property::Curves), Ok(text)) => Some(ui::read_curves(text)),
+    // JSON is read before taking the lock: a long text would hold the interface waiting.
+    let parsed = match (&which, &text) {
+        (Ok(Property::Curves), Ok(text)) => Some(Read::Curves(ui::read_curves(text))),
+        (Ok(Property::Tracks), Ok(text)) => Some(Read::Tracks(ui::read_tracks(text))),
         _ => None,
     };
-    with_ui(context, "set_text", 1, |ui| match curves {
-        Some(curves) => status(ui.set_curves(object, curves?)),
+    with_ui(context, "set_text", 1, |ui| match parsed {
+        Some(Read::Curves(curves)) => status(ui.set_curves(object, curves?)),
+        Some(Read::Tracks(tracks)) => status(ui.set_tracks(object, tracks?)),
         None => status(ui.set_text(object, which?, &text?)),
     })
 }
@@ -171,6 +180,7 @@ extern "C" fn set_numbers(context: *mut c_void, object: u64, which: u32, values:
 enum Copied {
     Text(String),
     Curves(Vec<ShownCurve>),
+    Sequence(std::sync::Arc<Sequence>),
 }
 
 extern "C" fn text(
@@ -186,6 +196,7 @@ extern "C" fn text(
             let ui = ui::lock(&module.ui);
             match which {
                 Property::Curves => ui.curves(object).map(Copied::Curves),
+                Property::Tracks => ui.sequence(object).map(Copied::Sequence),
                 _ => ui.text(object, which).map(Copied::Text),
             }
         });
@@ -195,6 +206,11 @@ extern "C" fn text(
             Ok(Copied::Curves(curves)) => {
                 reply_with(reply, reply_context, &ShownCurve::list_to_json(&curves).to_string())
             }
+            Ok(Copied::Sequence(data)) => reply_with(
+                reply,
+                reply_context,
+                &sequence::tracks_to_json(&data.tracks).to_string(),
+            ),
             Err(error) => {
                 module.refuse("text", &error);
                 return 1;
@@ -417,5 +433,39 @@ mod tests {
         assert!(seen.free, "the reply ran under the lock");
         assert!(seen.text.contains("\"value\":1.0"), "{}", seen.text);
         assert_eq!(set_text(context, view, Property::Curves as u32, c"[{".as_ptr()), 1);
+    }
+
+    #[test]
+    fn the_tracks_of_a_sequence_cross_the_c_functions() {
+        let module: &'static ModuleContext = Box::leak(Box::new(ModuleContext {
+            id: "test".to_owned(),
+            editor: OnceLock::new(),
+            ui: Ui::new(Arc::new(|job| job())),
+            activity: Arc::default(),
+            apply: OnceLock::new(),
+            properties: OnceLock::new(),
+        }));
+        let context = std::ptr::from_ref(module).cast_mut().cast::<c_void>();
+        let sequence = create(context, Kind::Sequence as u32, 0);
+        assert_ne!(sequence, 0);
+        let tracks = c"[{\"property\":\"cube/opacity\",\"kind\":\"number\",\"curves\":[{\"keys\":[{\"time\":3,\"value\":0.5}]}]}]";
+        assert_eq!(set_text(context, sequence, Property::Tracks as u32, tracks.as_ptr()), 0);
+        let mut seen = Seen {
+            context: context as usize,
+            ..Seen::default()
+        };
+        let target = std::ptr::from_mut(&mut seen).cast::<c_void>();
+        assert_eq!(
+            text(context, sequence, Property::Tracks as u32, Some(answer), target),
+            0
+        );
+        assert!(seen.free, "the reply ran under the lock");
+        assert!(seen.text.contains("\"time\":3.0"), "{}", seen.text);
+        let between = c"[{\"property\":\"cube/opacity\",\"kind\":\"number\",\"curves\":[{\"keys\":[{\"time\":3.5,\"value\":0.5}]}]}]";
+        assert_eq!(
+            set_text(context, sequence, Property::Tracks as u32, between.as_ptr()),
+            1,
+            "between frames"
+        );
     }
 }

@@ -1,9 +1,9 @@
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use uniwow_api::curve::{self, CurveEditor};
-use uniwow_api::ui::SharedUi;
+use uniwow_api::ui::{self, SharedUi};
 use uniwow_api::{CallId, Command, Editor, Event, Host, JobFn, JobId, egui, egui_wgpu, serde_json};
 
 use crate::draw::PanelView;
@@ -46,6 +46,9 @@ pub struct KernelHost {
     pub modal_shown: bool,
     /// The layers of every modal window the kernel has drawn, to tell them from those of modules.
     pub kernel_modals: HashSet<egui::LayerId>,
+    /// The interface objects of each module that handed them over, whose players the kernel moves
+    /// on and whose changes it records.
+    pub adopted: Vec<(String, Weak<std::sync::Mutex<ui::Ui>>)>,
     next_call: u64,
 }
 
@@ -87,6 +90,7 @@ impl KernelHost {
             views: HashMap::new(),
             modal_shown: false,
             kernel_modals: HashSet::new(),
+            adopted: Vec::new(),
             services: HashMap::new(),
             gpu,
             settings,
@@ -150,6 +154,26 @@ impl Host for KernelHost {
         self.modal_shown |= !layers.is_empty();
         self.kernel_modals.extend(layers);
         self.report_editor_failure(owner, objects);
+    }
+
+    fn adopt_objects(&mut self, owner: &str, objects: &SharedUi) {
+        let pointer = Arc::as_ptr(objects);
+        if self
+            .adopted
+            .iter()
+            .any(|(module, kept)| module == owner && kept.as_ptr() == pointer)
+        {
+            return;
+        }
+        self.adopted.push((owner.to_owned(), Arc::downgrade(objects)));
+        let editor = self.editor(owner);
+        ui::lock(objects).set_recorder(Arc::new(move |label, change| {
+            // Undo does not wait for a property's write: nothing may be recorded there.
+            if let Some(reason) = crate::capi::writing() {
+                return Err(reason.to_owned());
+            }
+            editor.record_change(label, change)
+        }));
     }
 
     fn setting(&self, module: &str, key: &str) -> Option<serde_json::Value> {

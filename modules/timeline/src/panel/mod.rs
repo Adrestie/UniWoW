@@ -12,8 +12,8 @@ use uniwow_api::egui::{self, Align, Align2, Color32, FontId, Layout, Pos2, Rect,
 use uniwow_api::serde_json::json;
 use uniwow_api::{Context, DIALOG_COMMAND, PropertyInfo, PropertyKind, PropertyValue};
 
-use crate::sequence::{KeyId, MAX_FRAME_RATE, MAX_LENGTH, Sequence, Track, frame_of};
 use crate::{Question, TimelineModule};
+use uniwow_api::sequence::{KeyId, MAX_FRAME_RATE, MAX_LENGTH, Sequence, Track, frame_of};
 
 use curves::{curves_side, shown_box};
 use dopesheet::{Gesture, Row, dopesheet, properties_row};

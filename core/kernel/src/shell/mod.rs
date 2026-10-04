@@ -32,6 +32,7 @@ use crate::loader::{self, Slot, State};
 use crate::logger;
 use crate::order;
 use crate::panels::{self, CommandsPanel};
+use crate::players::{Players, Store};
 use crate::requirements::{self, Need};
 use crate::router::{self, Bridge, Entry, PropertyEntry, ReplyTo, Request};
 use crate::settings::Settings;
@@ -78,6 +79,7 @@ pub struct Shell {
     /// group ends.
     groups: Groups,
     closing: Closing,
+    players: Players,
 }
 
 /// Where the closing of the editor stands while modules have unsaved changes.
@@ -148,6 +150,7 @@ impl Shell {
             commands_panel: CommandsPanel::default(),
             groups: Groups::new(std::thread::current().id()),
             closing: Closing::Open,
+            players: Players::default(),
         };
         shell.register_all();
         shell.resolve_requirements();
@@ -478,6 +481,32 @@ impl Shell {
             .filter(|s| s.state.is_running())
             .map(|s| s.id.clone())
             .collect()
+    }
+
+    /// The interface objects the kernel adopted, of the modules still running.
+    fn adopted_stores(&mut self) -> Vec<Store> {
+        let running = self.running_ids();
+        self.host.adopted.retain(|(_, objects)| objects.strong_count() > 0);
+        self.host
+            .adopted
+            .iter()
+            .filter(|(owner, _)| running.contains(owner))
+            .filter_map(|(owner, objects)| {
+                Some(Store {
+                    owner: owner.clone(),
+                    objects: objects.upgrade()?,
+                    editor: self.host.editor(owner),
+                })
+            })
+            .collect()
+    }
+
+    /// Moves the players on and writes their values; frames keep coming while one plays.
+    fn play(&mut self, ctx: &egui::Context, now: Instant) {
+        let stores = self.adopted_stores();
+        if self.players.tick(&stores, now) {
+            ctx.request_repaint();
+        }
     }
 
     fn running_index(&self, id: &str) -> Option<usize> {

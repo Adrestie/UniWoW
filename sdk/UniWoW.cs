@@ -155,6 +155,8 @@ public enum Kind : uint
     PaintArea = 21,
     Dialog = 22,        // a modal window; created hidden, shown and hidden through VISIBLE
     CurveView = 23,     // curves edited by hand, drawn by the module curves
+    Sequence = 24,      // tracks of keys on animatable properties, with a frame rate and a length; not drawn
+    Player = 25,        // plays a sequence, as QTimeLine; moved on by the kernel; not drawn
 }
 // </generated kind>
 
@@ -195,6 +197,16 @@ public enum Property : uint
     Count = 30,         // read only: entries of a combo box, children otherwise
     Curves = 31,        // curve view, text: JSON [{label, colour: [r, g, b], visible, keys: [{time, value, mode, left,
                         // right}]}]; keys in time order, each at a time of its own, numbers within 1e9
+    Tracks = 32,        // sequence, text: JSON [{property, kind, curves: [{keys: [{time, value, mode, left,
+                        // right}]}]}], one curve per number of the property; keys at whole frames from 0, numbers
+                        // within 1e9; each change is an undo entry the kernel records
+    FrameRate = 33,     // sequence: frames per second, a whole number from 1 to 240
+    Length = 34,        // sequence: in frames, a whole number from 1 to 1000000
+    Sequence = 35,      // player: the handle of the sequence it plays, 0 for none
+    Time = 36,          // player: in frames, fractional, from 0 to the length of its sequence
+    Playing = 37,       // player: 1 plays from the time, or from 0 when at the end; 0 pauses
+    Loop = 38,          // player: at the end, starts again from 0
+    Speed = 39,         // player: times the frame rate, from 0 to 100
 }
 // </generated property>
 
@@ -221,6 +233,8 @@ public enum SignalId : uint
     Wheel = 17,              // paint area: x, y, dx, dy
     Rejected = 18,           // dialog: the user closed it, which hid it
     CurvesChanged = 19,      // curve view: text, the curves; boolean, whether the change is done
+    TimeChanged = 20,        // player, as it plays: number, the time in frames
+    Finished = 21,           // player: it reached the end without LOOP and stopped
 }
 // </generated signal>
 
@@ -955,6 +969,49 @@ public class CurveView : Widget
     public void SetCurves(string json) => WriteText(Property.Curves, json);
     public string Curves() => ReadText(Property.Curves);
     public void SetMinimumHeight(double height) => WriteNumbers(Property.MinimumHeight, height);
+}
+
+/// <summary>Tracks of keys on animatable properties, with a frame rate and a length, as in the
+/// files of the Timeline: SetTracks and Tracks take the JSON of the property TRACKS of uniwow.h.
+/// Each change of the tracks is an undo entry the editor records: the module records
+/// nothing.</summary>
+public class Sequence() : UiObject(Make(Kind.Sequence))
+{
+    public void SetTracks(string json) => WriteText(Property.Tracks, json);
+    public string Tracks() => ReadText(Property.Tracks);
+    public void SetFrameRate(int framesPerSecond) => WriteNumbers(Property.FrameRate, framesPerSecond);
+    public int FrameRate() => (int)ReadNumber(Property.FrameRate);
+    public void SetLength(int frames) => WriteNumbers(Property.Length, frames);
+    public int Length() => (int)ReadNumber(Property.Length);
+}
+
+/// <summary>Plays a sequence, as QTimeLine: the editor moves it on at each frame and writes the
+/// value of each track at its time into its property. TimeChanged gives the time in frames as it
+/// plays; Finished comes at the end, without loop.</summary>
+public class Player : UiObject
+{
+    public Player() : base(Make(Kind.Player))
+    {
+        TimeChanged = NumberSignal(Handle, SignalId.TimeChanged);
+        Finished = new Signal(Handle, SignalId.Finished);
+    }
+
+    public Signal<double> TimeChanged { get; }
+    public Signal Finished { get; }
+
+    public void SetSequence(Sequence sequence) => WriteNumbers(Property.Sequence, sequence.Handle);
+    /// <summary>In frames, fractional.</summary>
+    public void SetTime(double frames) => WriteNumbers(Property.Time, frames);
+    public double Time() => ReadNumber(Property.Time);
+    /// <summary>From the time, or from 0 when at the end.</summary>
+    public void Play() => WriteNumbers(Property.Playing, 1.0);
+    public void Pause() => WriteNumbers(Property.Playing, 0.0);
+    public bool IsPlaying() => ReadNumber(Property.Playing) != 0.0;
+    public void SetLoop(bool loop) => WriteNumbers(Property.Loop, Flag(loop));
+    public bool Loops() => ReadNumber(Property.Loop) != 0.0;
+    /// <summary>Times the frame rate, from 0 to 100.</summary>
+    public void SetSpeed(double speed) => WriteNumbers(Property.Speed, speed);
+    public double Speed() => ReadNumber(Property.Speed);
 }
 
 /// <summary>A modal window, as QDialog: while it is shown, the rest of the editor cannot be
