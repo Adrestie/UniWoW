@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 6 built and validated; milestone 7 built, awaiting validation; milestones 8 to 11 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 7 built and validated; milestones 8 to 11 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -949,7 +949,7 @@ As built:
   lowercase); the kernel loads the modules of the group folder `modules\UI\`; `cargo xtask build`
   deploys there, and removes a deployed module whose folder no longer matches its source.
 
-### Milestone 7: the Curves view of the Timeline (built, awaiting validation)
+### Milestone 7: the Curves view of the Timeline (done)
 
 As the Curves view of the Animation window of Unity: every number of an animated property is a
 curve of its own, whose keys and tangents are edited by hand. A module of the interface draws and
