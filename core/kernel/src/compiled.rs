@@ -40,11 +40,24 @@ impl Module for CompiledModule {
     fn panel_ui(&mut self, panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
         self.view.set_curve_editor(ctx.service(curve::SERVICE));
         self.view.show(&self.started.context.ui, panel, ui, ctx.gpu());
+        self.report_editor_failure(ctx);
     }
 
     fn windows_ui(&mut self, egui: &egui::Context, ctx: &mut Context) {
         self.view.set_curve_editor(ctx.service(curve::SERVICE));
         self.view.dialogs(&self.started.context.ui, egui, ctx.gpu());
+        self.report_editor_failure(ctx);
+    }
+}
+
+impl CompiledModule {
+    /// A panic of the curve editor in a curve view is its provider's fault, not this module's (F5).
+    fn report_editor_failure(&mut self, ctx: &mut Context) {
+        if let Some(message) = self.view.take_editor_failure()
+            && let Some(provider) = ctx.service_provider(curve::SERVICE)
+        {
+            ctx.report_failure(&provider, &message);
+        }
     }
 }
 

@@ -78,6 +78,10 @@ impl Host for KernelHost {
         self.services.get(id).map(|s| s.value.as_ref())
     }
 
+    fn service_provider(&self, id: &str) -> Option<String> {
+        self.services.get(id).map(|s| s.provider.clone())
+    }
+
     fn gpu(&self) -> Option<&egui_wgpu::RenderState> {
         self.gpu.as_ref()
     }

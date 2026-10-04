@@ -848,7 +848,20 @@ fn curves_side(
         span: Some([0.0, f64::from(sequence.length)]),
     };
     let id = right.id().with("timeline-curves");
-    let change = editor.show(&mut right, id, &mut shown, &mut time, &options);
+    let shown_before = shown.clone();
+    let change = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        editor.show(&mut right, id, &mut shown, &mut time, &options)
+    })) {
+        Ok(change) => change,
+        Err(_) => {
+            // The curve editor's fault, not the Timeline's (F5): its sequences stay.
+            if let Some(provider) = ctx.service_provider(curve::SERVICE) {
+                ctx.report_failure(&provider, "the curve editor panicked in the Timeline");
+            }
+            shown = shown_before;
+            CurveChange::None
+        }
+    };
     timeline.panel.first_frame = time.first;
     timeline.panel.pixels_per_frame = time.pixels_per_unit;
     if change != CurveChange::None {

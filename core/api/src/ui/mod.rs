@@ -750,7 +750,9 @@ impl Ui {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::{Kind, Property, Signal, SignalData, Ui, lock};
+    use super::{Kind, PanelView, Property, Signal, SignalData, Ui, lock};
+    use crate::curve::{CurveChange, CurveEditor, CurveOptions, ShownCurve, TimeAxis};
+    use crate::egui;
 
     /// A Ui whose posted jobs run at once on the calling thread.
     fn ui() -> super::SharedUi {
@@ -872,6 +874,44 @@ mod tests {
         let structure = ui.structure(scene);
         ui.set_numbers(group, Property::Visible, &[0.0]).unwrap();
         assert!(ui.structure(scene) > structure);
+    }
+
+    struct Broken;
+
+    impl CurveEditor for Broken {
+        fn show(
+            &self,
+            _ui: &mut egui::Ui,
+            _id: egui::Id,
+            _curves: &mut [ShownCurve],
+            _time: &mut TimeAxis,
+            _options: &CurveOptions,
+        ) -> CurveChange {
+            panic!("broken editor")
+        }
+    }
+
+    #[test]
+    fn a_panic_of_the_curve_editor_is_kept_for_its_provider_to_be_reported() {
+        let shared = ui();
+        {
+            let mut store = lock(&shared);
+            let panel = store.panel("p");
+            let layout = store.create(Kind::VBoxLayout, None).unwrap();
+            store.add_to(panel, layout, [0, 0, 1, 1]).unwrap();
+            let view = store.create(Kind::CurveView, None).unwrap();
+            store.add_to(layout, view, [0, 0, 1, 1]).unwrap();
+        }
+        let mut panels = PanelView::default();
+        panels.set_curve_editor(Some(Arc::new(Broken)));
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| panels.show(&shared, "p", ui, None));
+        output.textures_delta.clear();
+        assert!(
+            panels
+                .take_editor_failure()
+                .is_some_and(|m| m.contains("broken editor"))
+        );
     }
 
     #[test]

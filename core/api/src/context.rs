@@ -7,6 +7,8 @@ pub trait Host {
     fn publish(&mut self, source: &str, topic: &str, payload: serde_json::Value);
     fn execute(&mut self, owner: &str, command: Box<dyn Command>);
     fn service(&self, id: &str) -> Option<&(dyn Any + Send + Sync)>;
+    /// The module providing the service `id`.
+    fn service_provider(&self, id: &str) -> Option<String>;
     fn gpu(&self) -> Option<&egui_wgpu::RenderState>;
     fn setting(&self, module: &str, key: &str) -> Option<serde_json::Value>;
     fn set_setting(&mut self, module: &str, key: &str, value: serde_json::Value);
@@ -78,6 +80,11 @@ impl<'a> Context<'a> {
 
     pub fn set_setting(&mut self, key: &str, value: serde_json::Value) {
         self.host.set_setting(self.module, key, value);
+    }
+
+    /// The module providing a service, to report it when its code fails (F5).
+    pub fn service_provider<T>(&self, key: ServiceKey<T>) -> Option<String> {
+        self.host.service_provider(key.id())
     }
 
     /// Reports that the module `culprit` misbehaved in code this module runs on its behalf, such

@@ -502,6 +502,17 @@ impl Shell {
     fn fail(&mut self, index: usize, message: String) {
         let slot = &mut self.slots[index];
         log::error!("module '{}' failed: {message}", slot.id);
+        // What it had not saved can no longer be: at least the log says what.
+        if let Some(module) = slot.module.as_deref()
+            && let Ok(lost) = guarded(|| module.unsaved())
+            && !lost.is_empty()
+        {
+            log::warn!(
+                "'{}' failed with unsaved changes, now lost: {}",
+                slot.id,
+                lost.join(", ")
+            );
+        }
         slot.state = State::Failed(message);
         let id = slot.id.clone();
         self.host.services.retain(|_, s| s.provider != id);
@@ -1105,7 +1116,9 @@ impl eframe::App for Shell {
 
         // A modal window takes the keyboard from the editor.
         let modal = ctx.memory(|memory| memory.top_modal_layer().is_some());
-        if !ctx.egui_wants_keyboard_input() && !modal {
+        // Nor while something is dragged: undoing under a drag would change what it moves.
+        let dragging = ctx.dragged_id().is_some();
+        if !ctx.egui_wants_keyboard_input() && !modal && !dragging {
             if ctx
                 .input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Z)))
             {

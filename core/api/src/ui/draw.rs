@@ -22,6 +22,17 @@ pub struct PanelView {
     curve_editor: Option<Arc<dyn CurveEditor>>,
     /// The time axis of each curve view.
     time_axes: HashMap<Handle, TimeAxis>,
+    /// Why the curve editor failed while drawing a curve view, for its provider to be reported.
+    editor_failure: Option<String>,
+}
+
+/// The text of a panic.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic".to_owned())
 }
 
 /// Whether an object takes the room left in its layout, as a widget whose size policy expands
@@ -43,6 +54,11 @@ impl PanelView {
     /// The curve editor to draw the curve views with, from the service of the module `curves`.
     pub fn set_curve_editor(&mut self, editor: Option<Arc<dyn CurveEditor>>) {
         self.curve_editor = editor;
+    }
+
+    /// Why the curve editor panicked, once: its provider is the culprit (F5).
+    pub fn take_editor_failure(&mut self) -> Option<String> {
+        self.editor_failure.take()
     }
 
     /// Draws the panel `panel` of a module.
@@ -343,18 +359,22 @@ impl PanelView {
                 let mut curves = object.curves.clone();
                 let time = self.time_axes.entry(handle).or_default();
                 let inner = ui.allocate_ui(size, |ui| {
-                    editor.show(
-                        ui,
-                        ui.id().with(("uniwow-curves", handle)),
-                        &mut curves,
-                        time,
-                        &CurveOptions::default(),
-                    )
+                    let id = ui.id().with(("uniwow-curves", handle));
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        editor.show(ui, id, &mut curves, time, &CurveOptions::default())
+                    }))
                 });
-                if inner.inner != CurveChange::None {
+                let change = match inner.inner {
+                    Ok(change) => change,
+                    Err(panic) => {
+                        self.editor_failure = Some(format!("the curve editor panicked: {}", panic_text(&*panic)));
+                        CurveChange::None
+                    }
+                };
+                if change != CurveChange::None {
                     events.push(SignalData {
                         text: ShownCurve::list_to_json(&curves).to_string(),
-                        boolean: inner.inner == CurveChange::Finished,
+                        boolean: change == CurveChange::Finished,
                         ..signal(Signal::CurvesChanged)
                     });
                     if let Some(target) = store.object_mut(handle) {

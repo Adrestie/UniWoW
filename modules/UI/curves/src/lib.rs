@@ -48,6 +48,16 @@ struct State {
     gesture: Gesture,
     /// The keys the context menu acts on.
     menu: Vec<KeyRef>,
+    /// The times and values of the keys as this editor left them, to notice when they change
+    /// elsewhere: by an undo, by a module, by a key pressed during a drag.
+    left: Vec<Vec<(f64, f64)>>,
+}
+
+fn keys_of(curves: &[ShownCurve]) -> Vec<Vec<(f64, f64)>> {
+    curves
+        .iter()
+        .map(|shown| shown.curve.keys.iter().map(|key| (key.time, key.value)).collect())
+        .collect()
 }
 
 /// Where times and values are drawn.
@@ -189,6 +199,9 @@ fn snapped(time: f64, options: &CurveOptions) -> f64 {
 /// handle's length.
 fn drag_handle(shown: &mut ShownCurve, k: usize, side: Side, target: (f64, f64)) {
     let keys = &mut shown.curve.keys;
+    if k >= keys.len() {
+        return;
+    }
     let neighbour = match side {
         Side::Left => k.checked_sub(1).map(|n| keys[n].time),
         Side::Right => keys.get(k + 1).map(|n| n.time),
@@ -356,7 +369,7 @@ fn menu(ui: &mut egui::Ui, curves: &[ShownCurve], keys: &[KeyRef]) -> Option<Men
         ui.weak("Right click a key to set its tangents.");
         return None;
     };
-    let key = curves[c].curve.keys[k];
+    let key = curves.get(c).and_then(|shown| shown.curve.keys.get(k)).copied()?;
     let mut chosen = None;
     for (mode, name) in [
         (TangentMode::ClampedAuto, "Clamped Auto"),
@@ -474,6 +487,11 @@ impl CurveEditor for Editor {
             bottom: state.bottom,
             pixels_per_value: state.pixels_per_value,
         };
+        // Keys changed elsewhere: the gesture and the menu would act on keys that are no more.
+        if keys_of(curves) != state.left {
+            state.gesture = Gesture::None;
+            state.menu.clear();
+        }
         state.selection.retain(|(c, k)| {
             curves
                 .get(*c)
@@ -540,7 +558,10 @@ impl CurveEditor for Editor {
                 let start = state
                     .selection
                     .iter()
-                    .map(|&(c, k)| ((c, k), curves[c].curve.keys[k].time, curves[c].curve.keys[k].value))
+                    .filter_map(|&(c, k)| {
+                        let key = curves.get(c)?.curve.keys.get(k)?;
+                        Some(((c, k), key.time, key.value))
+                    })
                     .collect();
                 Gesture::Move { from: origin, start }
             } else {
@@ -583,8 +604,10 @@ impl CurveEditor for Editor {
                 }
                 Gesture::Handle { key: (c, k), side } => {
                     let target = (graph.time(pointer.x), graph.value(pointer.y));
-                    drag_handle(&mut curves[*c], *k, *side, target);
-                    change = CurveChange::Changing;
+                    if let Some(shown) = curves.get_mut(*c) {
+                        drag_handle(shown, *k, *side, target);
+                        change = CurveChange::Changing;
+                    }
                 }
                 Gesture::Select { to, .. } => *to = pointer,
                 Gesture::None => {}
@@ -676,6 +699,7 @@ impl CurveEditor for Editor {
         }
 
         draw(ui, curves, state, &graph, options);
+        state.left = keys_of(curves);
         *time = graph.time;
         state.bottom = graph.bottom;
         state.pixels_per_value = graph.pixels_per_value;
@@ -807,9 +831,15 @@ uniwow_api::export_module!(CurvesModule);
 
 #[cfg(test)]
 mod tests {
-    use uniwow_api::curve::{Curve, CurveOptions, ShownCurve, SideMode, TangentMode};
+    use std::collections::BTreeSet;
 
-    use super::{Choice, MAX_LINES, Side, apply_choice, drag_handle, grid_lines, grid_step, move_keys};
+    use uniwow_api::curve::{Curve, CurveEditor, CurveOptions, ShownCurve, SideMode, TangentMode, TimeAxis};
+    use uniwow_api::egui;
+
+    use super::{
+        Choice, Editor, Gesture, MAX_LINES, Side, State, apply_choice, drag_handle, grid_lines, grid_step, lock,
+        move_keys,
+    };
 
     fn shown(points: &[(f64, f64)]) -> ShownCurve {
         let mut curve = Curve::default();
@@ -857,6 +887,35 @@ mod tests {
         assert!((key.right.slope + 1.0).abs() < 1e-9);
         assert_eq!(key.left.slope, 0.0, "the other side stays");
         assert!((key.right.weight.unwrap() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn keys_removed_elsewhere_end_the_gesture_and_the_menu_without_panicking() {
+        let editor = Editor::default();
+        let id = egui::Id::new("curves");
+        lock(&editor.states).insert(
+            id,
+            State {
+                selection: BTreeSet::from([(0, 3)]),
+                gesture: Gesture::Move {
+                    from: egui::Pos2::ZERO,
+                    start: vec![((0, 3), 30.0, 3.0)],
+                },
+                menu: vec![(0, 3)],
+                left: vec![vec![(0.0, 0.0), (10.0, 1.0), (20.0, 2.0), (30.0, 3.0)]],
+                ..State::default()
+            },
+        );
+        let mut curves = vec![shown(&[(0.0, 0.0), (10.0, 1.0)])];
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            editor.show(ui, id, &mut curves, &mut TimeAxis::default(), &CurveOptions::default());
+        });
+        output.textures_delta.clear();
+        let states = lock(&editor.states);
+        let state = &states[&id];
+        assert!(matches!(state.gesture, Gesture::None));
+        assert!(state.menu.is_empty() && state.selection.is_empty());
     }
 
     #[test]
