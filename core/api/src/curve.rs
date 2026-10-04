@@ -213,9 +213,13 @@ fn segment(a: &CurveKey, b: &CurveKey, time: f64) -> f64 {
         b.value - b.left.slope * w1,
         b.value,
     ];
-    // The time grows with u when the handles stay within the segment: bisection finds it.
+    // Without weights the time grows evenly with u: the cubic of Hermite, exactly.
+    if a.right.weight.is_none() && b.left.weight.is_none() {
+        return bezier(ys, (time - a.time) / width);
+    }
+    // Else it grows with u as long as the handles stay within the segment: bisection finds it.
     let (mut low, mut high) = (0.0, 1.0);
-    for _ in 0..48 {
+    for _ in 0..60 {
         let middle = (low + high) / 2.0;
         if bezier(xs, middle) < time {
             low = middle;

@@ -3,7 +3,6 @@
 //! properties as it moves, and playback. Sequences are JSON files in `sequences\` beside the
 //! executable.
 
-mod curve;
 mod panel;
 mod sequence;
 
@@ -292,7 +291,13 @@ impl TimelineModule {
             return;
         };
         for track in &sequence.tracks {
-            if let Some(value) = track.evaluate(self.playhead) {
+            // A number without keys keeps the value the property has.
+            let current = if track.has_bare_number() {
+                editor.read_property(&track.property).ok()
+            } else {
+                None
+            };
+            if let Some(value) = track.evaluate(self.playhead, current) {
                 // A property no module declares now is shown greyed; there is nothing to write.
                 let _ = editor.write_property(&track.property, value);
             }

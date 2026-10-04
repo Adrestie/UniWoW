@@ -7,7 +7,7 @@ use uniwow_api::egui::{self, Align, Align2, Color32, FontId, Layout, Pos2, Rect,
 use uniwow_api::serde_json::json;
 use uniwow_api::{Context, DIALOG_COMMAND, PropertyInfo, PropertyKind, PropertyValue};
 
-use crate::sequence::{KeyId, MAX_FRAME_RATE, MAX_LENGTH, Sequence, Track};
+use crate::sequence::{KeyId, MAX_FRAME_RATE, MAX_LENGTH, Sequence, Track, frame_of};
 use crate::{Question, TimelineModule};
 
 /// Height of a row of the dopesheet.
@@ -34,6 +34,8 @@ pub struct State {
     editing: Option<(String, Sequence, bool)>,
     new_name: String,
     message: Option<String>,
+    /// The properties whose numbers have rows of their own.
+    unfolded: BTreeSet<String>,
 }
 
 #[derive(Default)]
@@ -52,7 +54,10 @@ enum Row {
     Summary,
     /// The keys of one module's tracks.
     Group(String),
+    /// A property: the keys of all its numbers.
     Track(usize),
+    /// One number of a property, by its index.
+    Number(usize, usize),
 }
 
 /// Where frames are drawn.
@@ -90,9 +95,7 @@ pub fn show(timeline: &mut TimelineModule, ui: &mut egui::Ui, ctx: &mut Context)
         ui.weak("No sequence shown: choose one or create one.");
         return;
     };
-    timeline
-        .selection
-        .retain(|(property, frame)| sequence.track(property).and_then(|t| t.key_at(*frame)).is_some());
+    timeline.selection.retain(|key| sequence.has_key(key));
     playback_bar(timeline, &sequence, &declared, ui, ctx);
     ui.separator();
     dopesheet(timeline, &sequence, &declared, ui, ctx);
@@ -360,7 +363,7 @@ fn finish_editing(timeline: &mut TimelineModule, ctx: &mut Context) {
 }
 
 /// The rows of the dopesheet: every key, then each module's tracks under its name.
-fn rows(sequence: &Sequence) -> Vec<Row> {
+fn rows(sequence: &Sequence, unfolded: &BTreeSet<String>) -> Vec<Row> {
     let mut rows = vec![Row::Summary];
     let mut owners: Vec<&str> = Vec::new();
     for track in &sequence.tracks {
@@ -374,6 +377,9 @@ fn rows(sequence: &Sequence) -> Vec<Row> {
         for (index, track) in sequence.tracks.iter().enumerate() {
             if owner(&track.property) == owner_name {
                 rows.push(Row::Track(index));
+                if unfolded.contains(&track.property) {
+                    rows.extend((0..track.curves.len()).map(|number| Row::Number(index, number)));
+                }
             }
         }
     }
@@ -387,23 +393,52 @@ fn owner(path: &str) -> &str {
 /// The keys a row shows, by frame.
 fn row_keys(sequence: &Sequence, row: &Row) -> BTreeMap<u32, Vec<KeyId>> {
     let mut keys: BTreeMap<u32, Vec<KeyId>> = BTreeMap::new();
-    let tracks: Vec<&Track> = match row {
-        Row::Summary => sequence.tracks.iter().collect(),
-        Row::Group(name) => sequence
-            .tracks
-            .iter()
-            .filter(|track| owner(&track.property) == name)
-            .collect(),
-        Row::Track(index) => vec![&sequence.tracks[*index]],
+    let (tracks, only): (Vec<&Track>, Option<usize>) = match row {
+        Row::Summary => (sequence.tracks.iter().collect(), None),
+        Row::Group(name) => (
+            sequence
+                .tracks
+                .iter()
+                .filter(|track| owner(&track.property) == name)
+                .collect(),
+            None,
+        ),
+        Row::Track(index) => (vec![&sequence.tracks[*index]], None),
+        Row::Number(index, number) => (vec![&sequence.tracks[*index]], Some(*number)),
     };
     for track in tracks {
-        for key in &track.keys {
-            keys.entry(key.frame)
-                .or_default()
-                .push((track.property.clone(), key.frame));
+        for (number, curve) in track.curves.iter().enumerate() {
+            if only.is_some_and(|only| only != number) {
+                continue;
+            }
+            for key in &curve.keys {
+                let frame = frame_of(key);
+                keys.entry(frame)
+                    .or_default()
+                    .push((track.property.clone(), number, frame));
+            }
         }
     }
     keys
+}
+
+/// The names of a property's numbers.
+pub fn number_names(kind: PropertyKind) -> &'static [&'static str] {
+    match kind {
+        PropertyKind::Vector => &["x", "y", "z"],
+        PropertyKind::Colour => &["red", "green", "blue"],
+        PropertyKind::Number | PropertyKind::Boolean => &["value"],
+    }
+}
+
+/// The colour a number's curve is drawn in.
+pub fn number_colour(kind: PropertyKind, number: usize) -> Color32 {
+    match (kind.components(), number) {
+        (3, 0) => Color32::from_rgb(220, 70, 60),
+        (3, 1) => Color32::from_rgb(80, 170, 60),
+        (3, _) => Color32::from_rgb(60, 120, 230),
+        _ => Color32::from_rgb(230, 160, 40),
+    }
 }
 
 fn label(track: &Track, declared: &BTreeMap<String, PropertyInfo>) -> String {
@@ -437,7 +472,7 @@ fn dopesheet(
     let ruler_right = Rect::from_min_max(egui::pos2(left, ruler.top()), ruler.max);
     draw_ruler(timeline, sequence, ui, ruler, ruler_right, view);
 
-    let rows = rows(sequence);
+    let rows = rows(sequence, &timeline.panel.unfolded);
     egui::ScrollArea::vertical()
         .id_salt("timeline-rows")
         .auto_shrink([false, false])
@@ -533,7 +568,8 @@ fn tick_step(pixels_per_frame: f32, frame_rate: u32) -> u32 {
         .unwrap_or(3600 * frame_rate)
 }
 
-/// The left side of a row: a module's name, or a track's property with its value at the playhead.
+/// The left side of a row: a module's name, a property with the values of its numbers at the
+/// playhead, or one of those numbers.
 #[allow(clippy::too_many_arguments)]
 fn properties_row(
     timeline: &mut TimelineModule,
@@ -551,7 +587,7 @@ fn properties_row(
     );
     child.set_clip_rect(rect);
     let ui = &mut child;
-    let track = match row {
+    let (index, only) = match row {
         Row::Summary => {
             ui.weak(timeline.current.clone().unwrap_or_default());
             return;
@@ -560,58 +596,86 @@ fn properties_row(
             ui.strong(name);
             return;
         }
-        Row::Track(index) => &sequence.tracks[*index],
+        Row::Track(index) => (*index, None),
+        Row::Number(index, number) => (*index, Some(*number)),
     };
+    let track = &sequence.tracks[index];
     let info = declared.get(&track.property);
     let name = label(track, declared);
-    ui.add_space(12.0);
-    ui.add_sized(
-        [78.0, ROW - 4.0],
-        egui::Label::new(egui::RichText::new(&name).color(if info.is_some() {
+    let names = number_names(track.kind);
+    let shown_name = match only {
+        Some(number) => format!("{name}.{}", names[number]),
+        None => name.clone(),
+    };
+    let text = |ui: &egui::Ui, text: &str| {
+        egui::RichText::new(text).color(if info.is_some() {
             ui.visuals().text_color()
         } else {
             ui.visuals().weak_text_color()
-        }))
-        .truncate(),
-    )
-    .on_hover_text(if info.is_some() {
-        track.property.clone()
-    } else {
-        format!("{}: no running module declares it", track.property)
-    });
+        })
+    };
+    match only {
+        None => {
+            if track.curves.len() > 1 {
+                let unfolded = timeline.panel.unfolded.contains(&track.property);
+                if icon_button(ui, if unfolded { Icon::Unfolded } else { Icon::Folded })
+                    .on_hover_text("Show or hide a row for each number")
+                    .clicked()
+                    && !timeline.panel.unfolded.remove(&track.property)
+                {
+                    timeline.panel.unfolded.insert(track.property.clone());
+                }
+            } else {
+                ui.add_space(ROW - 4.0 + ui.spacing().item_spacing.x);
+            }
+            ui.add_sized([66.0, ROW - 4.0], egui::Label::new(text(ui, &name)).truncate())
+                .on_hover_text(if info.is_some() {
+                    track.property.clone()
+                } else {
+                    format!("{}: no running module declares it", track.property)
+                });
+        }
+        Some(number) => {
+            ui.add_space(ROW + 8.0);
+            let (swatch, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), Sense::hover());
+            ui.painter().rect_filled(swatch, 2.0, number_colour(track.kind, number));
+            ui.add_sized([52.0, ROW - 4.0], egui::Label::new(text(ui, names[number])).truncate());
+        }
+    }
     let editor = timeline.editor.clone();
+    let current = editor.as_ref().and_then(|e| e.read_property(&track.property).ok());
     let shown = track
-        .evaluate(timeline.playhead)
-        .or_else(|| editor.as_ref().and_then(|e| e.read_property(&track.property).ok()))
+        .evaluate(timeline.playhead, current)
+        .or(current)
         .unwrap_or_else(|| PropertyValue::from_components(track.kind, &[]));
     let mut numbers = shown.components();
+    let before = numbers.clone();
     let range = info.map_or([f64::MIN, f64::MAX], |info| info.range);
     let speed = ((range[1] - range[0]) / 2000.0).clamp(0.005, 1.0);
-    let mut changed = false;
     let mut finished = false;
     ui.add_enabled_ui(info.is_some(), |ui| {
         if track.kind == PropertyKind::Boolean {
             let mut on = numbers[0] >= 0.5;
-            let response = ui.checkbox(&mut on, "");
-            if response.changed() {
+            if ui.checkbox(&mut on, "").changed() {
                 numbers[0] = if on { 1.0 } else { 0.0 };
-                changed = true;
                 finished = true;
             }
         } else {
-            for number in &mut numbers {
+            for (number, value) in numbers.iter_mut().enumerate() {
+                if only.is_some_and(|only| only != number) {
+                    continue;
+                }
                 let response = ui.add_sized(
                     [62.0, ROW - 4.0],
-                    egui::DragValue::new(number)
+                    egui::DragValue::new(value)
                         .speed(speed)
                         .range(range[0]..=range[1])
                         .max_decimals(3)
                         .update_while_editing(false),
                 );
-                changed |= response.changed();
                 finished |= ended(&response);
             }
-            if track.kind == PropertyKind::Colour {
+            if track.kind == PropertyKind::Colour && only.is_none() {
                 let (swatch, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
                 let channel = |n: f64| (n.clamp(0.0, 1.0) * 255.0) as u8;
                 ui.painter().rect_filled(
@@ -622,37 +686,51 @@ fn properties_row(
             }
         }
         if icon_button(ui, Icon::Key)
-            .on_hover_text("Add a key at the playhead with the property's current value")
+            .on_hover_text("Add a key at the playhead with the current value")
             .clicked()
-            && let Some(value) = editor.as_ref().and_then(|e| e.read_property(&track.property).ok())
+            && let Some(value) = current
         {
-            let frame = timeline.playhead.round() as u32;
+            let frame = f64::from(timeline.playhead.round() as u32);
             let mut after = sequence.clone();
             if let Some(edited) = after.track_mut(&track.property) {
-                edited.set_key(frame, value);
+                for (number, (curve, value)) in edited.curves.iter_mut().zip(value.components()).enumerate() {
+                    if only.is_none_or(|only| only == number) {
+                        curve.set_key(frame, value);
+                    }
+                }
             }
-            timeline.edit(ctx, &format!("add a key to {name}"), after);
+            timeline.edit(ctx, &format!("add a key to {shown_name}"), after);
         }
     });
-    if changed {
-        // The key goes at the frame shown, which the playhead then stays on.
+    // Each number changed gets a key on its own curve, at the frame shown, which the playhead
+    // then stays on.
+    let changed: Vec<(usize, f64)> = numbers
+        .iter()
+        .zip(&before)
+        .enumerate()
+        .filter(|(_, (now, was))| now != was)
+        .map(|(number, (now, _))| (number, *now))
+        .collect();
+    if !changed.is_empty() {
         let frame = timeline.playhead.round();
         timeline.playing = None;
         timeline.playhead = frame;
-        let value = PropertyValue::from_components(track.kind, &numbers);
         let property = track.property.clone();
-        change_live(timeline, &format!("set a key of {name}"), |s| {
+        change_live(timeline, &format!("set a key of {shown_name}"), |s| {
             if let Some(edited) = s.track_mut(&property) {
-                edited.set_key(frame as u32, value);
+                for (number, value) in changed {
+                    edited.curves[number].set_key(frame, value);
+                }
             }
         });
     }
     if finished {
         finish_editing(timeline, ctx);
     }
-    if icon_button(ui, Icon::Remove)
-        .on_hover_text("Remove this track")
-        .clicked()
+    if only.is_none()
+        && icon_button(ui, Icon::Remove)
+            .on_hover_text("Remove this track")
+            .clicked()
     {
         let mut after = sequence.clone();
         after.tracks.retain(|t| t.property != track.property);
@@ -787,7 +865,7 @@ fn keys_area(
         }
         if let Some(rect) = selecting {
             for (index, centre, keys) in &diamonds {
-                if matches!(rows[*index], Row::Track(_)) && rect.contains(*centre) {
+                if matches!(rows[*index], Row::Track(_) | Row::Number(..)) && rect.contains(*centre) {
                     timeline.selection.extend(keys.iter().cloned());
                 }
             }
@@ -828,7 +906,8 @@ fn keys_area(
         painter.rect_filled(Rect::from_x_y_ranges(end..=area.right(), area.y_range()), 0.0, outside);
     }
     for (index, row) in rows.iter().enumerate() {
-        let missing = matches!(row, Row::Track(i) if !declared.contains_key(&sequence.tracks[*i].property));
+        let missing =
+            matches!(row, Row::Track(i) | Row::Number(i, _) if !declared.contains_key(&sequence.tracks[*i].property));
         for (frame, keys) in row_keys(&shown, row) {
             let centre = egui::pos2(view.x(f64::from(frame)), centre_y(index));
             let chosen = keys.iter().all(|key| selected.contains(key));
@@ -873,6 +952,10 @@ enum Icon {
     Key,
     /// A cross: remove.
     Remove,
+    /// A triangle pointing right: rows to show.
+    Folded,
+    /// A triangle pointing down: rows shown.
+    Unfolded,
 }
 
 /// A small button with a drawn icon, the fonts having no such characters.
@@ -890,6 +973,22 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon) -> egui::Response {
                 centre + Vec2::new(0.0, size),
                 centre + Vec2::new(-size, 0.0),
             ];
+            painter.add(egui::Shape::convex_polygon(points, style.fg_stroke.color, Stroke::NONE));
+        }
+        Icon::Folded | Icon::Unfolded => {
+            let points = if matches!(icon, Icon::Folded) {
+                vec![
+                    centre + Vec2::new(-size * 0.6, -size),
+                    centre + Vec2::new(size, 0.0),
+                    centre + Vec2::new(-size * 0.6, size),
+                ]
+            } else {
+                vec![
+                    centre + Vec2::new(-size, -size * 0.6),
+                    centre + Vec2::new(size, -size * 0.6),
+                    centre + Vec2::new(0.0, size),
+                ]
+            };
             painter.add(egui::Shape::convex_polygon(points, style.fg_stroke.color, Stroke::NONE));
         }
         Icon::Remove => {

@@ -1,32 +1,24 @@
-//! A sequence: its frame rate, its length, and one track of keys per animated property, kept in a
-//! readable JSON file.
+//! A sequence: its frame rate, its length, and one track per animated property, holding a curve
+//! per number of the property, kept in a readable JSON file.
 
 use std::collections::BTreeSet;
 
+use uniwow_api::curve::{Curve, CurveKey};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::{PropertyKind, PropertyValue};
 
-use crate::curve;
-
-/// A key of a track: a whole frame and a value of the track's type.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Key {
-    pub frame: u32,
-    pub value: PropertyValue,
-}
-
-/// The keys of one animated property.
+/// The curves of one animated property: one per number (x, y and z of a position), each with keys
+/// of its own, at whole frames.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Track {
     /// The property's path, `<module>/<name>`.
     pub property: String,
     pub kind: PropertyKind,
-    /// Sorted by frame, at most one per frame.
-    pub keys: Vec<Key>,
+    pub curves: Vec<Curve>,
 }
 
-/// A key of a sequence: its track's property and its frame.
-pub type KeyId = (String, u32);
+/// A key of a sequence: its track's property, the number its curve stands for, and its frame.
+pub type KeyId = (String, usize, u32);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sequence {
@@ -47,46 +39,69 @@ impl Default for Sequence {
     }
 }
 
+/// The frame of a key, whose time is a whole frame.
+pub fn frame_of(key: &CurveKey) -> u32 {
+    key.time.round().max(0.0) as u32
+}
+
 impl Track {
     pub fn new(property: &str, kind: PropertyKind) -> Self {
         Self {
             property: property.to_owned(),
             kind,
-            keys: Vec::new(),
+            curves: vec![Curve::default(); kind.components()],
         }
     }
 
-    /// Sets the key of `frame`, replacing the one there.
+    /// Sets a key at `frame` on every number, to the numbers of `value`.
     pub fn set_key(&mut self, frame: u32, value: PropertyValue) {
-        let key = Key { frame, value };
-        match self.keys.binary_search_by_key(&frame, |key| key.frame) {
-            Ok(index) => self.keys[index] = key,
-            Err(index) => self.keys.insert(index, key),
+        for (curve, number) in self.curves.iter_mut().zip(value.components()) {
+            curve.set_key(f64::from(frame), number);
         }
     }
 
-    pub fn key_at(&self, frame: u32) -> Option<&Key> {
-        self.keys.iter().find(|key| key.frame == frame)
+    /// The frames holding a key of `number`, or of any number.
+    pub fn key_frames(&self, number: Option<usize>) -> BTreeSet<u32> {
+        self.curves
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| number.is_none_or(|n| n == *index))
+            .flat_map(|(_, curve)| curve.keys.iter().map(frame_of))
+            .collect()
     }
 
-    /// The value at `frame`, which is fractional while playing; `None` without keys.
-    pub fn evaluate(&self, frame: f64) -> Option<PropertyValue> {
-        let first = self.keys.first()?;
-        if self.kind == PropertyKind::Boolean {
-            let held = self.keys.iter().rev().find(|key| f64::from(key.frame) <= frame);
-            return Some(held.unwrap_or(first).value);
+    /// The value at `frame`, which is fractional while playing; a number without keys keeps its
+    /// value in `current`. `None` without any key.
+    pub fn evaluate(&self, frame: f64, current: Option<PropertyValue>) -> Option<PropertyValue> {
+        if self.curves.iter().all(|curve| curve.keys.is_empty()) {
+            return None;
         }
-        let numbers: Vec<f64> = (0..self.kind.components())
-            .map(|component| {
-                let points: Vec<(f64, f64)> = self
-                    .keys
-                    .iter()
-                    .map(|key| (f64::from(key.frame), key.value.components()[component]))
-                    .collect();
-                curve::sample(&points, frame)
+        let base = current.map(|value| value.components()).unwrap_or_default();
+        let numbers: Vec<f64> = self
+            .curves
+            .iter()
+            .enumerate()
+            .map(|(index, curve)| match curve.keys.first() {
+                None => base.get(index).copied().unwrap_or(0.0),
+                // A boolean takes the value of the key before.
+                Some(first) if self.kind == PropertyKind::Boolean => {
+                    curve
+                        .keys
+                        .iter()
+                        .rev()
+                        .find(|key| key.time <= frame)
+                        .unwrap_or(first)
+                        .value
+                }
+                Some(_) => curve.evaluate(frame),
             })
             .collect();
         Some(PropertyValue::from_components(self.kind, &numbers))
+    }
+
+    /// Whether a number has no key: the property's current value then shows through.
+    pub fn has_bare_number(&self) -> bool {
+        self.curves.iter().any(|curve| curve.keys.is_empty())
     }
 }
 
@@ -101,72 +116,90 @@ impl Sequence {
 
     /// Every frame holding a key, of every track.
     pub fn key_frames(&self) -> BTreeSet<u32> {
-        self.tracks
-            .iter()
-            .flat_map(|track| track.keys.iter().map(|key| key.frame))
-            .collect()
+        self.tracks.iter().flat_map(|track| track.key_frames(None)).collect()
+    }
+
+    /// Whether this key exists.
+    pub fn has_key(&self, (property, number, frame): &KeyId) -> bool {
+        self.track(property)
+            .and_then(|track| track.curves.get(*number))
+            .is_some_and(|curve| curve.keys.iter().any(|key| frame_of(key) == *frame))
     }
 
     pub fn remove_keys(&mut self, keys: &BTreeSet<KeyId>) {
         for track in &mut self.tracks {
-            track
-                .keys
-                .retain(|key| !keys.contains(&(track.property.clone(), key.frame)));
+            for (number, curve) in track.curves.iter_mut().enumerate() {
+                curve
+                    .keys
+                    .retain(|key| !keys.contains(&(track.property.clone(), number, frame_of(key))));
+                curve.update_tangents();
+            }
         }
     }
 
-    /// Moves `keys` by `offset` frames, none before frame 0; a moved key replaces a key that is
-    /// not moved at its new frame. Returns where the keys went.
+    /// Moves `keys` by `offset` frames, none before frame 0, with their tangents; a moved key
+    /// replaces a key that is not moved at its new frame. Returns where the keys went.
     pub fn move_keys(&mut self, keys: &BTreeSet<KeyId>, offset: i64) -> BTreeSet<KeyId> {
-        let lowest = keys.iter().map(|(_, frame)| *frame).min().unwrap_or(0);
+        let lowest = keys.iter().map(|(_, _, frame)| *frame).min().unwrap_or(0);
         let offset = offset.max(-i64::from(lowest));
         let mut moved = BTreeSet::new();
         for track in &mut self.tracks {
-            let (going, staying): (Vec<Key>, Vec<Key>) = std::mem::take(&mut track.keys)
-                .into_iter()
-                .partition(|key| keys.contains(&(track.property.clone(), key.frame)));
-            track.keys = staying;
-            for key in going {
-                let frame = u32::try_from(i64::from(key.frame) + offset).unwrap_or(0);
-                track.set_key(frame, key.value);
-                moved.insert((track.property.clone(), frame));
+            for (number, curve) in track.curves.iter_mut().enumerate() {
+                let (going, staying): (Vec<CurveKey>, Vec<CurveKey>) = std::mem::take(&mut curve.keys)
+                    .into_iter()
+                    .partition(|key| keys.contains(&(track.property.clone(), number, frame_of(key))));
+                curve.keys = staying;
+                for mut key in going {
+                    let frame = u32::try_from(i64::from(frame_of(&key)) + offset).unwrap_or(0);
+                    key.time = f64::from(frame);
+                    curve.keys.retain(|other| frame_of(other) != frame);
+                    curve.keys.push(key);
+                    moved.insert((track.property.clone(), number, frame));
+                }
+                curve.sort();
+                curve.update_tangents();
             }
         }
         moved
     }
 
-    /// The text of its file: JSON with each track's property first and one key per line.
+    /// The text of its file, version 2: JSON with each track's property first, then its curves,
+    /// one key per line.
     pub fn to_text(&self) -> String {
         let tracks: Vec<String> = self
             .tracks
             .iter()
             .map(|track| {
-                let keys: Vec<String> = track
-                    .keys
+                let curves: Vec<String> = track
+                    .curves
                     .iter()
-                    .map(|key| {
-                        format!(
-                            "        {}",
-                            json!({ "frame": key.frame, "value": key.value.to_json() })
-                        )
+                    .map(|curve| {
+                        let keys: Vec<String> = curve.to_json()["keys"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(|key| format!("            {key}"))
+                            .collect();
+                        format!("        {{\"keys\": [{}]}}", lines(&keys, "        "))
                     })
                     .collect();
                 format!(
-                    "    {{\n      \"property\": {},\n      \"kind\": \"{}\",\n      \"keys\": [{}]\n    }}",
+                    "    {{\n      \"property\": {},\n      \"kind\": \"{}\",\n      \"curves\": [{}]\n    }}",
                     json!(track.property),
                     track.kind.name(),
-                    lines(&keys, "      ")
+                    lines(&curves, "      ")
                 )
             })
             .collect();
         format!(
-            "{{\n  \"frame_rate\": {},\n  \"length\": {},\n  \"tracks\": [{}]\n}}\n",
+            "{{\n  \"version\": 2,\n  \"frame_rate\": {},\n  \"length\": {},\n  \"tracks\": [{}]\n}}\n",
             self.frame_rate,
             self.length,
             lines(&tracks, "  ")
         )
     }
 
+    /// Reads a sequence of version 2, or of version 1, whose keys held whole values.
     pub fn from_json(value: &Value) -> Result<Self, String> {
         let number = |value: &Value, name: &str, low: u32, high: u32| -> Result<u32, String> {
             value[name]
@@ -175,6 +208,10 @@ impl Sequence {
                 .filter(|n| (low..=high).contains(n))
                 .ok_or_else(|| format!("'{name}' must be a whole number from {low} to {high}"))
         };
+        let version = value["version"].as_u64().unwrap_or(1);
+        if version > 2 {
+            return Err(format!("version {version} is newer than this timeline"));
+        }
         let mut sequence = Self {
             frame_rate: number(value, "frame_rate", 1, MAX_FRAME_RATE)?,
             length: number(value, "length", 1, MAX_LENGTH)?,
@@ -187,14 +224,24 @@ impl Sequence {
                 .and_then(PropertyKind::from_name)
                 .ok_or_else(|| format!("the track of '{property}' has no valid 'kind'"))?;
             let mut read = Track::new(property, kind);
-            for key in track["keys"]
-                .as_array()
-                .ok_or_else(|| format!("the track of '{property}' has no 'keys' list"))?
-            {
-                let frame = number(key, "frame", 0, u32::MAX)?;
-                let value = PropertyValue::from_json(kind, &key["value"])
-                    .map_err(|error| format!("'{property}' at frame {frame}: {error}"))?;
-                read.set_key(frame, value);
+            if version == 2 {
+                let curves = track["curves"]
+                    .as_array()
+                    .filter(|curves| curves.len() == kind.components())
+                    .ok_or_else(|| format!("the track of '{property}' needs {} curves", kind.components()))?;
+                for (slot, curve) in read.curves.iter_mut().zip(curves) {
+                    *slot = Curve::from_json(curve).map_err(|error| format!("'{property}': {error}"))?;
+                }
+            } else {
+                for key in track["keys"]
+                    .as_array()
+                    .ok_or_else(|| format!("the track of '{property}' has no 'keys' list"))?
+                {
+                    let frame = number(key, "frame", 0, u32::MAX)?;
+                    let value = PropertyValue::from_json(kind, &key["value"])
+                        .map_err(|error| format!("'{property}' at frame {frame}: {error}"))?;
+                    read.set_key(frame, value);
+                }
             }
             if sequence.track(property).is_some() {
                 return Err(format!("'{property}' has two tracks"));
@@ -210,15 +257,7 @@ fn lines(items: &[String], indent: &str) -> String {
     if items.is_empty() {
         String::new()
     } else {
-        format!(
-            "
-{}
-{indent}",
-            items.join(
-                ",
-"
-            )
-        )
+        format!("\n{}\n{indent}", items.join(",\n"))
     }
 }
 
@@ -229,6 +268,7 @@ pub const MAX_LENGTH: u32 = 1_000_000;
 mod tests {
     use std::collections::BTreeSet;
 
+    use uniwow_api::curve::TangentMode;
     use uniwow_api::serde_json::{Value, json};
     use uniwow_api::{PropertyKind, PropertyValue};
 
@@ -238,6 +278,9 @@ mod tests {
         let mut position = Track::new("cube/position", PropertyKind::Vector);
         position.set_key(60, PropertyValue::Vector([4.0, 0.0, 1.0]));
         position.set_key(0, PropertyValue::Vector([0.0, 0.0, 1.0]));
+        position.curves[0].set_key(30.0, 3.0);
+        position.curves[0].keys[1].mode = TangentMode::Flat;
+        position.curves[0].update_tangents();
         let mut visible = Track::new("cube/visible", PropertyKind::Boolean);
         visible.set_key(10, PropertyValue::Boolean(false));
         visible.set_key(20, PropertyValue::Boolean(true));
@@ -251,50 +294,78 @@ mod tests {
     fn a_sequence_crosses_its_file_unchanged() {
         let sequence = sample();
         let text = sequence.to_text();
-        assert!(
-            text.contains("\n        {\"frame\":0,\"value\":[0.0,0.0,1.0]}"),
-            "{text}"
-        );
+        assert!(text.contains("\n            {\"time\":0.0,\"value\":0.0}"), "{text}");
         let value: Value = uniwow_api::serde_json::from_str(&text).unwrap();
+        assert_eq!(value["version"], 2);
         assert_eq!(Sequence::from_json(&value), Ok(sequence));
-        assert_eq!(
-            uniwow_api::serde_json::from_str::<Value>(&Sequence::default().to_text()).unwrap()["tracks"],
-            json!([])
-        );
         let mut wrong = value;
         wrong["frame_rate"] = 0.into();
         assert!(Sequence::from_json(&wrong).is_err());
     }
 
     #[test]
-    fn tracks_are_evaluated_between_and_beyond_their_keys() {
-        let sequence = sample();
-        let position = sequence.track("cube/position").unwrap();
-        assert_eq!(position.evaluate(30.0), Some(PropertyValue::Vector([2.0, 0.0, 1.0])));
-        assert_eq!(position.evaluate(90.0), Some(PropertyValue::Vector([4.0, 0.0, 1.0])));
-        let visible = sequence.track("cube/visible").unwrap();
-        assert_eq!(visible.evaluate(0.0), Some(PropertyValue::Boolean(false)));
-        assert_eq!(visible.evaluate(19.5), Some(PropertyValue::Boolean(false)));
-        assert_eq!(visible.evaluate(20.0), Some(PropertyValue::Boolean(true)));
-        assert_eq!(Track::new("x", PropertyKind::Number).evaluate(0.0), None);
+    fn a_file_of_version_1_is_read_into_curves() {
+        let old = json!({
+            "frame_rate": 30,
+            "length": 120,
+            "tracks": [{
+                "property": "cube/position",
+                "kind": "vector",
+                "keys": [
+                    { "frame": 0, "value": [0.0, 0.0, 1.0] },
+                    { "frame": 60, "value": [4.0, 0.0, 1.0] }
+                ]
+            }]
+        });
+        let read = Sequence::from_json(&old).unwrap();
+        let position = read.track("cube/position").unwrap();
+        assert_eq!(position.curves.len(), 3);
+        assert_eq!(
+            position.evaluate(30.0, None),
+            Some(PropertyValue::Vector([2.0, 0.0, 1.0]))
+        );
     }
 
     #[test]
-    fn moved_keys_replace_the_keys_they_land_on() {
-        let mut sequence = sample();
-        let keys = BTreeSet::from([("cube/position".to_owned(), 0)]);
-        let moved = sequence.move_keys(&keys, 60);
-        assert_eq!(moved, BTreeSet::from([("cube/position".to_owned(), 60)]));
+    fn each_number_has_keys_of_its_own() {
+        let sequence = sample();
         let position = sequence.track("cube/position").unwrap();
-        assert_eq!(position.keys.len(), 1);
-        assert_eq!(position.keys[0].value, PropertyValue::Vector([0.0, 0.0, 1.0]));
+        assert_eq!(position.key_frames(Some(0)), BTreeSet::from([0, 30, 60]));
+        assert_eq!(position.key_frames(Some(1)), BTreeSet::from([0, 60]));
+        assert_eq!(
+            position.evaluate(30.0, None),
+            Some(PropertyValue::Vector([3.0, 0.0, 1.0]))
+        );
+        let visible = sequence.track("cube/visible").unwrap();
+        assert_eq!(visible.evaluate(19.5, None), Some(PropertyValue::Boolean(false)));
+        assert_eq!(visible.evaluate(20.0, None), Some(PropertyValue::Boolean(true)));
+        let bare = Track::new("x", PropertyKind::Vector);
+        assert_eq!(bare.evaluate(0.0, None), None);
+        let mut partial = Track::new("x", PropertyKind::Vector);
+        partial.curves[2].set_key(0.0, 5.0);
+        assert_eq!(
+            partial.evaluate(0.0, Some(PropertyValue::Vector([1.0, 2.0, 3.0]))),
+            Some(PropertyValue::Vector([1.0, 2.0, 5.0])),
+            "the numbers without keys keep their current values"
+        );
+    }
+
+    #[test]
+    fn moved_keys_keep_their_tangents_and_replace_the_keys_they_land_on() {
+        let mut sequence = sample();
+        let keys = BTreeSet::from([("cube/position".to_owned(), 0, 30)]);
+        let moved = sequence.move_keys(&keys, 30);
+        assert_eq!(moved, BTreeSet::from([("cube/position".to_owned(), 0, 60)]));
+        let x = &sequence.track("cube/position").unwrap().curves[0];
+        assert_eq!(x.keys.len(), 2);
+        assert_eq!((x.keys[1].value, x.keys[1].mode), (3.0, TangentMode::Flat));
         let back = sequence.move_keys(&moved, -100);
         assert_eq!(
             back,
-            BTreeSet::from([("cube/position".to_owned(), 0)]),
+            BTreeSet::from([("cube/position".to_owned(), 0, 0)]),
             "not before frame 0"
         );
         sequence.remove_keys(&back);
-        assert!(sequence.track("cube/position").unwrap().keys.is_empty());
+        assert!(sequence.track("cube/position").unwrap().curves[0].keys.is_empty());
     }
 }
