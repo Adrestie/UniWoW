@@ -111,13 +111,17 @@ pub fn admissible(value: f64) -> bool {
 }
 
 impl Sequence {
-    /// Whether its file would be read back: every curve follows the rules of `Curve::check`.
+    /// Whether its file would be read back: every curve follows the rules of `Curve::check`, its
+    /// keys at whole frames from 0.
     pub fn check(&self) -> Result<(), String> {
         for track in &self.tracks {
             for curve in &track.curves {
                 curve
                     .check()
                     .map_err(|error| format!("'{}': {error}", track.property))?;
+                if curve.keys.iter().any(|key| key.time < 0.0 || key.time.fract() != 0.0) {
+                    return Err(format!("'{}': keys go at whole frames from 0", track.property));
+                }
             }
         }
         Ok(())
@@ -268,6 +272,7 @@ impl Sequence {
             }
             sequence.tracks.push(read);
         }
+        sequence.check()?;
         Ok(sequence)
     }
 }
@@ -293,6 +298,19 @@ mod tests {
     use uniwow_api::{PropertyKind, PropertyValue};
 
     use super::{Sequence, Track};
+
+    #[test]
+    fn keys_before_the_first_frame_or_between_frames_are_refused() {
+        let file = |time: f64| {
+            json!({ "version": 2, "frame_rate": 30, "length": 120, "tracks": [{
+                "property": "cube/opacity", "kind": "number",
+                "curves": [{ "keys": [{ "time": time, "value": 1.0 }] }],
+            }] })
+        };
+        assert!(Sequence::from_json(&file(-1.0)).is_err());
+        assert!(Sequence::from_json(&file(2.5)).is_err());
+        assert!(Sequence::from_json(&file(2.0)).is_ok());
+    }
 
     fn sample() -> Sequence {
         let mut position = Track::new("cube/position", PropertyKind::Vector);

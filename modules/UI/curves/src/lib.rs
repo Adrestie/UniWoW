@@ -202,6 +202,13 @@ fn snapped(time: f64, options: &CurveOptions) -> f64 {
     options.snap.map_or(time, |step| (time / step).round() * step)
 }
 
+/// Where a key added at `time` goes: snapped, within the span and the limit of the curves.
+fn insertion_time(time: f64, options: &CurveOptions) -> f64 {
+    let [low, high] = options.span.unwrap_or([-curve::LIMIT, curve::LIMIT]);
+    let low = low.max(-curve::LIMIT);
+    snapped(time, options).clamp(low, high.min(curve::LIMIT).max(low))
+}
+
 /// Sets the slope of a side to point at `target`, as dragging its handle does: a key set
 /// automatically becomes Free Smooth, a broken side becomes Free; a weighted side takes the
 /// handle's length.
@@ -643,7 +650,7 @@ impl CurveEditor for Editor {
             && let Some(at) = response.interact_pointer_pos()
             && nearest_key(curves, &graph, at).is_none()
         {
-            let time = snapped(graph.time(at.x), options);
+            let time = insertion_time(graph.time(at.x), options);
             let target = curves
                 .iter()
                 .enumerate()
@@ -852,8 +859,8 @@ mod tests {
     use uniwow_api::egui;
 
     use super::{
-        Choice, Editor, Gesture, MAX_LINES, Side, State, apply_choice, drag_handle, grid_lines, grid_step, keys_of,
-        lock, move_keys,
+        Choice, Editor, Gesture, MAX_LINES, Side, State, apply_choice, drag_handle, grid_lines, grid_step,
+        insertion_time, keys_of, lock, move_keys,
     };
 
     fn shown(points: &[(f64, f64)]) -> ShownCurve {
@@ -990,6 +997,22 @@ mod tests {
         let state = press_delete(state, &mut curves);
         assert_eq!(curves[0].curve.keys.len(), 3);
         assert!(state.menu.is_empty(), "the menu's key 2 is now another key");
+    }
+
+    #[test]
+    fn a_key_added_by_hand_lands_within_the_span_and_the_limit() {
+        let frames = CurveOptions {
+            snap: Some(1.0),
+            span: Some([0.0, 120.0]),
+            ..CurveOptions::default()
+        };
+        assert_eq!(insertion_time(-1.2, &frames), 0.0);
+        assert_eq!(insertion_time(130.4, &frames), 120.0);
+        assert_eq!(insertion_time(31.6, &frames), 32.0);
+        assert_eq!(
+            insertion_time(-1e12, &CurveOptions::default()),
+            -uniwow_api::curve::LIMIT
+        );
     }
 
     #[test]
