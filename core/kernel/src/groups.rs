@@ -69,9 +69,14 @@ impl Groups {
         Ended::Closed(close(self.open.remove(index)))
     }
 
-    /// Where a command applied for this caller on this thread goes, if it has a group open.
+    /// Where a command applied for this caller on this thread goes, if it has a group open; else
+    /// the group opened last on that thread, as a command delegated to another module runs on its
+    /// caller's thread, inside its caller's group.
     pub fn parts_of(&mut self, caller: &str, thread: ThreadId) -> Option<&mut Vec<Part>> {
-        self.find(caller, thread).map(|group| &mut group.parts)
+        let index = self
+            .position(caller, thread)
+            .or_else(|| self.open.iter().rposition(|group| group.thread == thread))?;
+        Some(&mut self.open[index].parts)
     }
 
     /// Closes every group opened on a thread that ended.
@@ -223,6 +228,25 @@ mod tests {
             ("second call", vec!["green".to_owned()])
         );
         assert_eq!(groups.list().len(), 1, "the first thread's group stays open");
+    }
+
+    #[test]
+    fn a_change_made_for_another_module_on_the_thread_joins_its_group() {
+        let (here, elsewhere) = (std::thread::current().id(), other_thread());
+        let mut groups = Groups::default();
+        groups.begin("scripting-lua#cards.lua #1", here, "cards.lua");
+        groups
+            .parts_of("sample-scene", here)
+            .expect("joined")
+            .push(part("card"));
+        assert!(
+            groups.parts_of("sample-scene", elsewhere).is_none(),
+            "not on another thread"
+        );
+        let Ended::Closed(closed) = groups.end("scripting-lua#cards.lua #1", here) else {
+            panic!("closed");
+        };
+        assert_eq!(labels(&closed.parts), vec!["card".to_owned()]);
     }
 
     #[test]
