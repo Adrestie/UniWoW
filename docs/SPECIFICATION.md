@@ -884,7 +884,7 @@ As built:
 - **Limits**: unsaved changes are lost when the editor closes, without a question; the playhead
   moves and the values are written only while the *Timeline* panel is shown.
 
-Complement asked before validation (proposed): a module of the interface shows modal windows for
+Complement asked before validation (validated, in progress): a module of the interface shows modal windows for
 the other modules, as `QDialog`. The module that opens one gives its text and its buttons, and does
 what the button chosen calls for. Changes that would be lost are asked about this way.
 
