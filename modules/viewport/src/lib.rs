@@ -1,5 +1,6 @@
 //! The 3D view. Draws a ground grid and the layers that other modules add through the
-//! "viewport" service, into an offscreen target shown in its panel.
+//! "viewport" service, into an offscreen target shown in its panel. Its camera is offered to every
+//! language: animatable properties and commands (step 8.3).
 
 mod camera;
 mod grid;
@@ -11,10 +12,15 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Poll, Waker};
 use std::time::Instant;
 
+use uniwow_api::glam::Vec3;
+use uniwow_api::serde_json::{Value, json};
 use uniwow_api::viewport::{self, Layer, Target, View};
-use uniwow_api::{Context, DockArea, Event, MODULE_FAILED_TOPIC, Module, Registrar, egui, egui_wgpu, wgpu};
+use uniwow_api::{
+    Context, DockArea, Event, MODULE_FAILED_TOPIC, Module, PropertyKind, PropertyValue, Registrar, egui, egui_wgpu,
+    wgpu,
+};
 
-use camera::OrbitCamera;
+use camera::{FOV, OrbitCamera};
 use grid::Grid;
 
 const TARGET: Target = Target {
@@ -45,6 +51,94 @@ type Layers = Arc<Mutex<LayerList>>;
 /// The layer list, even if a panic left its lock poisoned: layers are taken out while drawn.
 fn lock(layers: &Layers) -> MutexGuard<'_, LayerList> {
     layers.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The camera, moved by the panel, by its properties and by its commands, from any thread.
+type Camera = Arc<Mutex<OrbitCamera>>;
+
+fn camera(camera: &Camera) -> MutexGuard<'_, OrbitCamera> {
+    camera.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// How far from the origin the camera's points go.
+const REACH: f64 = 100_000.0;
+
+/// A number of the camera as a property shows it: the shortest decimal of the f32.
+fn widen(value: f32) -> f64 {
+    value.to_string().parse().unwrap_or(f64::from(value))
+}
+
+fn vector(point: Vec3) -> PropertyValue {
+    PropertyValue::Vector([widen(point.x), widen(point.y), widen(point.z)])
+}
+
+fn point(value: PropertyValue) -> Vec3 {
+    let numbers = value.components();
+    Vec3::new(numbers[0] as f32, numbers[1] as f32, numbers[2] as f32)
+}
+
+/// The camera as the commands give it.
+fn camera_json(camera: &OrbitCamera) -> Value {
+    let three = |p: Vec3| json!([widen(p.x), widen(p.y), widen(p.z)]);
+    json!({ "position": three(camera.eye()), "target": three(camera.target()), "fov": widen(camera.fov()) })
+}
+
+/// The argument `name`: three finite numbers within reach.
+fn point_argument(arguments: &Value, name: &str) -> Result<Vec3, String> {
+    let numbers: Option<Vec<f64>> = arguments[name]
+        .as_array()
+        .map(|items| items.iter().filter_map(Value::as_f64).collect());
+    match numbers.as_deref() {
+        Some([x, y, z]) if [x, y, z].iter().all(|n| n.is_finite() && n.abs() <= REACH) => {
+            Ok(Vec3::new(*x as f32, *y as f32, *z as f32))
+        }
+        _ => Err(format!("'{name}' must be three numbers within {REACH:e}")),
+    }
+}
+
+/// The camera and frame drawn, the camera locked once.
+fn view(shared: &Camera, size: [u32; 2], time: f32) -> View {
+    let camera = camera(shared);
+    View {
+        view_proj: camera.view_proj(size[0] as f32 / size[1] as f32),
+        eye: camera.eye(),
+        size,
+        time,
+    }
+}
+
+/// `viewport.look_at`: the eye at `position`, looking at `target`, with the angle `fov` if given.
+fn look_at(shared: &Camera, arguments: &Value) -> Result<Value, String> {
+    let (position, target) = (
+        point_argument(arguments, "position")?,
+        point_argument(arguments, "target")?,
+    );
+    let fov = match &arguments["fov"] {
+        Value::Null => None,
+        value => Some(
+            value
+                .as_f64()
+                .filter(|fov| fov.is_finite())
+                .ok_or("'fov' must be a number of degrees")?,
+        ),
+    };
+    let mut camera = camera(shared);
+    camera.look_at(position, target);
+    if let Some(fov) = fov {
+        camera.set_fov(fov as f32);
+    }
+    Ok(camera_json(&camera))
+}
+
+/// `viewport.frame`: the box from `min` to `max` in view, seen from the same direction.
+fn frame(shared: &Camera, arguments: &Value) -> Result<Value, String> {
+    let (min, max) = (point_argument(arguments, "min")?, point_argument(arguments, "max")?);
+    if min.cmpgt(max).any() {
+        return Err("'min' must be below 'max' on every axis".to_owned());
+    }
+    let mut camera = camera(shared);
+    camera.frame(min, max);
+    Ok(camera_json(&camera))
 }
 
 /// Removes the layers of `owner`, including those out being drawn at this moment.
@@ -86,7 +180,7 @@ struct Targets {
 
 struct ViewportModule {
     layers: Layers,
-    camera: OrbitCamera,
+    camera: Camera,
     targets: Option<Targets>,
     grid: Option<Grid>,
     start: Instant,
@@ -96,7 +190,7 @@ impl Default for ViewportModule {
     fn default() -> Self {
         Self {
             layers: Arc::default(),
-            camera: OrbitCamera::default(),
+            camera: Arc::default(),
             targets: None,
             grid: None,
             start: Instant::now(),
@@ -113,6 +207,61 @@ impl Module for ViewportModule {
             .provide(viewport::SERVICE, service)
             .subscribe(MODULE_FAILED_TOPIC)
             .menu_item("View", "Reset camera", "reset_camera");
+
+        // The camera for every language: animatable, and moved by commands.
+        let shared = self.camera.clone();
+        let (read, write) = (shared.clone(), shared.clone());
+        reg.animatable(
+            "camera_position",
+            "Camera position",
+            PropertyKind::Vector,
+            [-REACH, REACH],
+            move || vector(camera(&read).eye()),
+            move |value| camera(&write).set_position(point(value)),
+        );
+        let (read, write) = (shared.clone(), shared.clone());
+        reg.animatable(
+            "camera_target",
+            "Camera target",
+            PropertyKind::Vector,
+            [-REACH, REACH],
+            move || vector(camera(&read).target()),
+            move |value| camera(&write).set_target(point(value)),
+        );
+        let (read, write) = (shared.clone(), shared.clone());
+        reg.animatable(
+            "camera_fov",
+            "Camera angle of view",
+            PropertyKind::Number,
+            [f64::from(FOV[0]), f64::from(FOV[1])],
+            move || PropertyValue::Number(widen(camera(&read).fov())),
+            move |value| camera(&write).set_fov(value.components()[0] as f32),
+        );
+        let point = json!({ "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 });
+        let answer = json!({ "type": "object", "properties": { "position": point, "target": point, "fov": { "type": "number" } } });
+        let read = shared.clone();
+        reg.command_on_caller(
+            "viewport.camera",
+            "The camera of the 3D view: its position, the point it looks at, and its vertical angle of view in degrees.",
+            json!({ "type": "object" }),
+            answer.clone(),
+            Arc::new(move |_| Ok(camera_json(&camera(&read)))),
+        );
+        let moved = shared.clone();
+        reg.command_on_caller(
+            "viewport.look_at",
+            "Puts the camera at position, looking at target, with the angle of view fov in degrees if given.",
+            json!({ "type": "object", "properties": { "position": point, "target": point, "fov": { "type": "number" } }, "required": ["position", "target"] }),
+            answer.clone(),
+            Arc::new(move |arguments| look_at(&moved, &arguments)),
+        );
+        reg.command_on_caller(
+            "viewport.frame",
+            "Fits the box from min to max in the 3D view, seen from the same direction.",
+            json!({ "type": "object", "properties": { "min": point, "max": point }, "required": ["min", "max"] }),
+            answer,
+            Arc::new(move |arguments| frame(&shared, &arguments)),
+        );
     }
 
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
@@ -122,7 +271,7 @@ impl Module for ViewportModule {
         };
         let size = ui.available_size().max(egui::vec2(1.0, 1.0));
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-        self.camera.handle_input(ui, &response);
+        camera(&self.camera).handle_input(ui, &response);
 
         let pixels = size * ui.ctx().pixels_per_point();
         let pixels = [pixels.x.round().max(1.0) as u32, pixels.y.round().max(1.0) as u32];
@@ -156,7 +305,7 @@ impl Module for ViewportModule {
 
     fn on_menu(&mut self, action: &str, _ctx: &mut Context) {
         if action == "reset_camera" {
-            self.camera = OrbitCamera::default();
+            *camera(&self.camera) = OrbitCamera::default();
         }
     }
 }
@@ -228,12 +377,7 @@ impl ViewportModule {
     }
 
     fn render(&mut self, gpu: &egui_wgpu::RenderState, size: [u32; 2], ctx: &mut Context) {
-        let view = View {
-            view_proj: self.camera.view_proj(size[0] as f32 / size[1] as f32),
-            eye: self.camera.eye(),
-            size,
-            time: self.start.elapsed().as_secs_f32(),
-        };
+        let view = view(&self.camera, size, self.start.elapsed().as_secs_f32());
         let bundles = self.record_layers(gpu, &view, ctx);
         let targets = self.targets.as_ref().expect("created before rendering");
         let grid = self.grid.get_or_insert_with(|| Grid::new(&gpu.device, &TARGET));
@@ -365,3 +509,43 @@ fn panic_text(payload: Box<dyn Any + Send>) -> String {
 }
 
 uniwow_api::export_module!(ViewportModule::default());
+
+#[cfg(test)]
+mod tests {
+    use uniwow_api::serde_json::json;
+
+    use super::{Camera, camera, frame, look_at, view};
+
+    #[test]
+    fn the_commands_move_the_camera_and_refuse_what_is_not_a_point() {
+        let camera = Camera::default();
+        let moved = look_at(
+            &camera,
+            &json!({ "position": [10, 0, 5], "target": [0, 0, 1], "fov": 60 }),
+        )
+        .unwrap();
+        assert_eq!(moved["position"], json!([10.0, 0.0, 5.0]));
+        assert_eq!(moved["target"], json!([0.0, 0.0, 1.0]));
+        assert_eq!(moved["fov"], json!(60.0));
+        assert!(look_at(&camera, &json!({ "position": [1, 2], "target": [0, 0, 0] })).is_err());
+        assert!(look_at(&camera, &json!({ "position": [1e9, 0, 0], "target": [0, 0, 0] })).is_err());
+        assert!(
+            look_at(
+                &camera,
+                &json!({ "position": [1, 0, 0], "target": [0, 0, 0], "fov": "wide" })
+            )
+            .is_err()
+        );
+        let framed = frame(&camera, &json!({ "min": [-2, -2, 0], "max": [2, 2, 2] })).unwrap();
+        assert_eq!(framed["target"], json!([0.0, 0.0, 1.0]));
+        assert!(frame(&camera, &json!({ "min": [2, 0, 0], "max": [1, 1, 1] })).is_err());
+    }
+
+    #[test]
+    fn a_frame_locks_the_camera_once() {
+        let shared = Camera::default();
+        // A second lock while the first is held would never return.
+        let drawn = view(&shared, [640, 480], 0.0);
+        assert_eq!(drawn.eye, camera(&shared).eye());
+    }
+}

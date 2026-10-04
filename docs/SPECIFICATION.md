@@ -238,7 +238,7 @@ fills it, or *not planned* when no milestone does yet.
 | Modal windows | The command `ui.dialog`; the object `Dialog` | `ui.dialog` through `call`; `Dialog` | `uniwow::Dialog`; `Dialog` | Scripts: `ui.dialog` through `uniwow.call` |
 | The curve editor | The service `curve-editor` | `CurveView` | `uniwow::CurveView`; `CurveView` | Milestones 9 and 10 |
 | Animatable properties: declare, list, read, write | `Registrar::animatable`; `Editor::properties`, `read_property`, `write_property` | `uniwow_module_info.properties` (`uniwow_property`); `properties`, `read_property`, `write_property`, `set_property` | `uniwow::Property`, `describeProperties`, `properties`, `readProperty`, `writeProperty`; `Editor.DeclareProperty`, `Properties`, `ReadProperty`, `WriteProperty`, `SetProperty` | — milestones 9 and 10 |
-| The viewport's camera | Inside the module `viewport` (*View*, *Reset camera*) | — step 8.3 | — step 8.3 | — step 8.3 (commands) |
+| The viewport's camera | Inside the module `viewport` (*View*, *Reset camera*) | The properties `viewport/camera_position`, `camera_target`, `camera_fov`; the commands `viewport.camera`, `viewport.look_at`, `viewport.frame` | The functions of properties; `call` | Scripts: the commands through `uniwow.call`; the properties: milestones 9 and 10 |
 | Sequences and their playback | Inside the Timeline | — step 8.4 | — step 8.4 | — milestones 9 and 10 |
 | The dopesheet | Inside the Timeline's panel | — step 8.5 | — step 8.5 | — milestones 9 and 10 |
 | Tree, table, property grid | egui | — step 8.7 | — step 8.7 | — milestones 9 and 10 |
@@ -1253,6 +1253,19 @@ table up to date, and its review checks it.
 - Other 3D access, proposed for later milestones and not built here: picking
   (`viewport.pick { x, y }`, the object and point hit), layers drawn by other languages (meshes
   given through the API), the selection shown in 3D, handles to move objects.
+
+  As built:
+
+  - The camera is the orbit of the 3D view, shared by its panel, its properties and its commands,
+    which may come from any thread. A position or a target given keeps the other one; the camera
+    then stays within its orbit: at most 1.5 radians above or below the ground, from 0.5 to 100,000
+    units from its target. The angle of view goes from 1 to 170 degrees (45 at start), its points
+    within 100,000 of the origin.
+  - The commands run on the calling thread and give the camera as `{ "position", "target", "fov" }`;
+    `viewport.look_at` and `viewport.frame` refuse what is not three finite numbers within reach, and
+    a box upside down.
+  - The recette found the 3D view locking its camera twice in one frame, which froze the editor: it
+    is locked once, and a test keeps it so.
 
 **Step 8.4, the engine of sequences, in the API:**
 
