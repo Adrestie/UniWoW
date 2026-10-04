@@ -21,6 +21,7 @@ pub mod capi;
 mod command;
 mod commands;
 mod context;
+pub mod curve;
 mod editor;
 mod event;
 mod job;
