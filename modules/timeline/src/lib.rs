@@ -13,7 +13,9 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use uniwow_api::serde_json;
-use uniwow_api::{Command, Context, DockArea, Editor, Module, Registrar, egui, log};
+use uniwow_api::{
+    CallId, Command, Context, DIALOG_ANSWERED_TOPIC, DockArea, Editor, Event, Module, Registrar, egui, log,
+};
 
 use sequence::{KeyId, Sequence};
 
@@ -22,6 +24,15 @@ struct Document {
     sequence: Sequence,
     /// Changed since it was last saved or read.
     dirty: bool,
+}
+
+/// A question about unsaved changes, asked before showing another sequence.
+struct Question {
+    /// The call opening its window, until it answers with the window's number.
+    call: CallId,
+    dialog: Option<u64>,
+    /// The sequence to show then.
+    target: String,
 }
 
 /// Playback under way: the frame it started from, and when.
@@ -48,12 +59,14 @@ struct TimelineModule {
     /// The frame whose values were written last.
     written: Option<f64>,
     selection: BTreeSet<KeyId>,
+    question: Option<Question>,
     panel: panel::State,
 }
 
 impl Module for TimelineModule {
     fn register(&mut self, reg: &mut Registrar) {
-        reg.panel("timeline", "Timeline", DockArea::Bottom);
+        reg.panel("timeline", "Timeline", DockArea::Bottom)
+            .subscribe(DIALOG_ANSWERED_TOPIC);
     }
 
     fn init(&mut self, ctx: &mut Context) {
@@ -75,9 +88,82 @@ impl Module for TimelineModule {
         // What the panel changed shows in the 3D view at once.
         self.write_values();
     }
+
+    fn on_reply(&mut self, call: CallId, result: Result<serde_json::Value, String>, _ctx: &mut Context) {
+        let Some(question) = self.question.as_mut().filter(|q| q.call == call) else {
+            return;
+        };
+        match result.ok().and_then(|answer| answer["dialog"].as_u64()) {
+            Some(dialog) => question.dialog = Some(dialog),
+            None => {
+                self.question = None;
+                self.panel_message("the question about the unsaved changes could not be asked");
+            }
+        }
+    }
+
+    fn on_event(&mut self, event: &Event, _ctx: &mut Context) {
+        let answered = self
+            .question
+            .as_ref()
+            .is_some_and(|q| q.dialog.is_some() && q.dialog == event.payload["dialog"].as_u64());
+        if answered && let Some(button) = event.payload["button"].as_str() {
+            self.answered(button);
+        }
+    }
+
+    fn unsaved(&self) -> Vec<String> {
+        self.documents
+            .iter()
+            .filter(|(_, document)| document.dirty)
+            .map(|(name, _)| format!("Sequence '{name}'"))
+            .collect()
+    }
+
+    fn save_unsaved(&mut self, _ctx: &mut Context) -> Result<(), String> {
+        let names: Vec<String> = self
+            .documents
+            .iter()
+            .filter(|(_, document)| document.dirty)
+            .map(|(name, _)| name.clone())
+            .collect();
+        let failures: Vec<String> = names.iter().filter_map(|name| self.save(name).err()).collect();
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    }
 }
 
 impl TimelineModule {
+    /// Does what the user chose about the unsaved changes of the sequence shown, then shows the
+    /// one asked for, unless the user cancelled.
+    fn answered(&mut self, button: &str) {
+        let Some(question) = self.question.take() else {
+            return;
+        };
+        let current = self.current.clone().unwrap_or_default();
+        match button {
+            "save" => {
+                if let Err(error) = self.save(&current) {
+                    self.panel_message(&error);
+                    return;
+                }
+            }
+            "discard" => {
+                self.documents.remove(&current);
+            }
+            _ => return,
+        }
+        panel::open(self, &question.target);
+    }
+
+    fn panel_message(&mut self, message: &str) {
+        log::warn!("{message}");
+        self.panel.say(message);
+    }
+
     fn sequence(&self) -> Option<&Sequence> {
         self.current
             .as_ref()
@@ -270,7 +356,7 @@ uniwow_api::export_module!(TimelineModule::default());
 
 #[cfg(test)]
 mod tests {
-    use uniwow_api::{Command, PropertyKind};
+    use uniwow_api::{Command, Module, PropertyKind};
 
     use super::{Document, SequenceEdit, TimelineModule};
     use crate::sequence::{Sequence, Track};
@@ -299,5 +385,20 @@ mod tests {
         edit.revert(&mut timeline);
         assert_eq!(timeline.documents["intro"].sequence, Sequence::default());
         assert_eq!(edit.label(), "timeline: add a track");
+    }
+
+    #[test]
+    fn its_unsaved_documents_are_its_sequences_with_unsaved_changes() {
+        let mut timeline = TimelineModule::default();
+        for (name, dirty) in [("intro", true), ("outro", false)] {
+            timeline.documents.insert(
+                name.to_owned(),
+                Document {
+                    sequence: Sequence::default(),
+                    dirty,
+                },
+            );
+        }
+        assert_eq!(timeline.unsaved(), vec!["Sequence 'intro'".to_owned()]);
     }
 }

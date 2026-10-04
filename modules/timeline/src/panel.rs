@@ -4,10 +4,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use uniwow_api::egui::{self, Align, Align2, Color32, FontId, Layout, Pos2, Rect, Sense, Stroke, UiBuilder, Vec2};
-use uniwow_api::{Context, PropertyInfo, PropertyKind, PropertyValue};
+use uniwow_api::serde_json::json;
+use uniwow_api::{Context, DIALOG_COMMAND, PropertyInfo, PropertyKind, PropertyValue};
 
-use crate::TimelineModule;
 use crate::sequence::{KeyId, MAX_FRAME_RATE, MAX_LENGTH, Sequence, Track};
+use crate::{Question, TimelineModule};
 
 /// Height of a row of the dopesheet.
 const ROW: f32 = 22.0;
@@ -32,8 +33,6 @@ pub struct State {
     /// value dragged, recorded as one undo entry when it ends.
     editing: Option<(String, Sequence, bool)>,
     new_name: String,
-    /// A sequence to show once the user said what to do with the unsaved changes.
-    asking: Option<String>,
     message: Option<String>,
 }
 
@@ -83,7 +82,7 @@ pub fn show(timeline: &mut TimelineModule, ui: &mut egui::Ui, ctx: &mut Context)
         .into_iter()
         .map(|info| (info.path.clone(), info))
         .collect();
-    sequence_bar(timeline, ui);
+    sequence_bar(timeline, ui, ctx);
     if let Some(message) = &timeline.panel.message {
         ui.colored_label(ui.visuals().warn_fg_color, message);
     }
@@ -101,7 +100,7 @@ pub fn show(timeline: &mut TimelineModule, ui: &mut egui::Ui, ctx: &mut Context)
 }
 
 /// Chooses, creates and saves sequences.
-fn sequence_bar(timeline: &mut TimelineModule, ui: &mut egui::Ui) {
+fn sequence_bar(timeline: &mut TimelineModule, ui: &mut egui::Ui, ctx: &mut Context) {
     let dirty = timeline
         .current
         .as_ref()
@@ -128,11 +127,7 @@ fn sequence_bar(timeline: &mut TimelineModule, ui: &mut egui::Ui) {
                 }
             });
         if let Some(name) = chosen.filter(|name| timeline.current.as_ref() != Some(name)) {
-            if dirty {
-                timeline.panel.asking = Some(name);
-            } else {
-                open(timeline, &name);
-            }
+            switch(timeline, ctx, name, dirty);
         }
         let save = ui.add_enabled(dirty, egui::Button::new("Save"));
         if save.clicked()
@@ -149,41 +144,63 @@ fn sequence_bar(timeline: &mut TimelineModule, ui: &mut egui::Ui) {
         if ui.button("New").clicked() {
             let name = timeline.panel.new_name.trim().to_owned();
             match timeline.create(&name) {
-                Ok(()) if dirty => timeline.panel.asking = Some(name),
-                Ok(()) => open(timeline, &name),
+                Ok(()) => switch(timeline, ctx, name, dirty),
                 Err(error) => timeline.panel.message = Some(error),
             }
             timeline.panel.new_name.clear();
         }
     });
-    let Some(target) = timeline.panel.asking.clone() else {
+}
+
+/// Shows another sequence. The unsaved changes of the one shown are asked about first, in a
+/// window of the module `dialogs`, which answers later; without that module, they are lost.
+fn switch(timeline: &mut TimelineModule, ctx: &mut Context, target: String, dirty: bool) {
+    if !dirty {
+        open(timeline, &target);
         return;
-    };
+    }
+    if timeline.question.is_some() {
+        return;
+    }
     let current = timeline.current.clone().unwrap_or_default();
-    ui.horizontal(|ui| {
-        ui.colored_label(
-            ui.visuals().warn_fg_color,
-            format!("'{current}' has unsaved changes. Save them before showing '{target}'?"),
-        );
-        if ui.button("Save").clicked() {
-            timeline.panel.asking = None;
-            match timeline.save(&current) {
-                Ok(()) => open(timeline, &target),
-                Err(error) => timeline.panel.message = Some(error),
-            }
-        }
-        if ui.button("Don't save").clicked() {
-            timeline.panel.asking = None;
-            timeline.documents.remove(&current);
-            open(timeline, &target);
-        }
-        if ui.button("Cancel").clicked() {
-            timeline.panel.asking = None;
-        }
+    let asked = timeline
+        .editor
+        .as_ref()
+        .is_some_and(|editor| editor.commands().iter().any(|c| c.name == DIALOG_COMMAND));
+    if !asked {
+        timeline.documents.remove(&current);
+        open(timeline, &target);
+        return;
+    }
+    let call = ctx.call(
+        DIALOG_COMMAND,
+        json!({
+            "title": "Unsaved changes",
+            "text": format!("The sequence '{current}' has unsaved changes. Save them before showing '{target}'?"),
+            "buttons": [
+                { "id": "save", "label": "Save" },
+                { "id": "discard", "label": "Don't save" },
+                { "id": "cancel", "label": "Cancel" },
+            ],
+            "escape": "cancel",
+        }),
+    );
+    timeline.question = Some(Question {
+        call,
+        dialog: None,
+        target,
     });
 }
 
-fn open(timeline: &mut TimelineModule, name: &str) {
+impl State {
+    /// A message shown under the sequence bar.
+    pub fn say(&mut self, message: &str) {
+        self.message = Some(message.to_owned());
+    }
+}
+
+/// Shows the sequence `name`, or says why it cannot.
+pub fn open(timeline: &mut TimelineModule, name: &str) {
     timeline.panel.message = timeline.open(name).err();
     timeline.panel.editing = None;
 }
