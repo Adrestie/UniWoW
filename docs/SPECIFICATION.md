@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 6 built and validated; milestones 7 to 10 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 6 built and validated; milestone 7 proposed; milestones 8 to 11 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -150,7 +150,7 @@ The panels of compiled, Lua and Python modules, written once for every language.
 typed functions of `uniwow.h`, which numbers the objects, properties and signals below; C++ has the
 classes of `sdk/uniwow.hpp` (`uniwow::PushButton`, `button.clicked.connect(...)`), C# those of
 `sdk/UniWoW.cs` with the names of C# (`button.Clicked.Connect(...)`, `UiObject` for `QObject`); Lua
-and Python receive theirs in milestones 9 and 10.
+and Python receive theirs in milestones 10 and 11.
 
 | Object | As in Qt | Properties | Signals |
 |---|---|---|---|
@@ -688,7 +688,7 @@ As built:
 
 An interface API modelled on Qt, defined once in the core for every module that is not written in
 Rust, offered here to compiled modules with classes for C++ and C#; Lua and Python modules receive
-the same objects, with classes in their language, in milestones 9 and 10.
+the same objects, with classes in their language, in milestones 10 and 11.
 
 Measures taken first, with egui 0.36.2 as the editor uses it:
 
@@ -742,7 +742,7 @@ Content:
   coloured cards, each card dragged as one undo entry, a click on a card painting the cube in its
   colour through `cube.paint`, zoom and scroll outside the history, Add card, the selected card
   shown under the view; commands `scene.cards`, `scene.add_card` and `scene.fill` (many cards at
-  once, to measure). The Timeline is a Rust module of its own (milestones 6 to 8).
+  once, to measure). The Timeline is a Rust module of its own (milestones 6 to 9).
 - **Sample C# module** in `examples/modules/sample-csharp/` (.NET 10, NativeAOT): `cs.sum`,
   `cs.paint_from_threads` (each thread's paints as one undo entry), and a panel: a counter changed
   by buttons, a slider and a spin box, each change undoable, with a `PaintArea` drawing its history
@@ -948,34 +948,103 @@ As built:
   lowercase); the kernel loads the modules of the group folder `modules\UI\`; `cargo xtask build`
   deploys there, and removes a deployed module whose folder no longer matches its source.
 
-### Milestone 7: the Timeline in Montage mode (outline)
+### Milestone 7: the Curves view of the Timeline (proposed)
+
+As the Curves view of the Animation window of Unity: every number of an animated property is a
+curve of its own, whose keys and tangents are edited by hand. A module of the interface draws and
+edits the curves; the Timeline uses it, and every language can use it through the Qt of the core.
+The Montage mode follows in milestone 8.
+
+Content:
+
+- **Curves, in the core** (`uniwow_api`), shared by the module that edits them and by the modules
+  that evaluate them. A curve is a list of keys, each with a time, a value and, on each side, a
+  tangent (a slope) and a weight. The tangent mode of a key, as in Unity:
+
+  | Mode | Tangents |
+  |---|---|
+  | Clamped Auto (by default) | Smooth, never overshooting the neighbouring keys (the slopes of milestone 6) |
+  | Auto | Smooth; may overshoot |
+  | Free Smooth | Set by hand, the same slope on both sides |
+  | Flat | Horizontal |
+  | Broken | Each side on its own: Free (set by hand), Linear (pointing at the neighbouring key), Constant (the value holds until the next key) |
+
+  Each side may also be weighted: the length of its handle, a share of the time to the
+  neighbouring key (a third by default), shapes the curve. The core computes the automatic
+  tangents again after each change, and evaluates a curve at any time: a cubic between two keys,
+  in time and value when a side is weighted.
+- **Keys of their own for each number**: each number of a property (x, y and z of a position; red,
+  green and blue of a colour) has its own curve and its own keys, as in Unity. In the dopesheet, a
+  property's row shows a diamond wherever one of its numbers has a key, and unfolds into one row
+  per number; moving or deleting a diamond of the property's row moves or deletes the keys of
+  every number at that frame. Editing a number at the playhead sets a key on its curve only; the
+  key button sets one on each number. Sequence files gain a version: version 2 holds the curves
+  with their tangents; the files of milestone 6 are still read.
+- **Module `curves`** in `modules/UI/curves/` (Rust), the curve editor: a graph of times and
+  values, with its grid and rulers, the curves in their colours and the playhead. Keys are
+  selected by clicking or with a box, moved in time (by whole frames when its caller asks) and in
+  value; the handles of the selected keys' tangents are dragged; a right click on a key chooses
+  its mode (the modes above, then Left, Right or Both tangents: Free, Linear, Constant, Weighted);
+  Delete removes keys; a double click on a curve adds a key; the wheel zooms (with Ctrl the time
+  only, with Shift the values only), the middle button scrolls, F frames the selected keys, or all
+  of them. It tells its caller that the curves changed, while a drag goes on and when it ends, so
+  that the caller records one undo entry per change. It is offered:
+  - to Rust modules, as a service the Timeline uses in its panel;
+  - to every language, as an object of the Qt of the core, `CurveView`, as a `QWidget`: its curves
+    are set and read as JSON (the property `CURVES` through `set_text` and `text`), and its signal
+    `curvesChanged` gives them after each change the user makes, with whether the change is
+    finished. The core has the module `curves` draw it.
+
+  Without the module `curves`, a `CurveView` and the Curves view of the Timeline say that the
+  module is not running; the dopesheet works as before.
+- **Timeline**: the buttons *Dopesheet* and *Curves* switch the right side of the panel; on the
+  left, each number of a property has its colour and can be shown or hidden in the Curves view.
+  Each change of the curves is one undo entry; the cube follows the curves at the playhead.
+- **Sample**: the C# panel *Counter* gains a `CurveView` with a curve of its own, each change one
+  undo entry, so that a module of another language uses the curve editor.
+
+Acceptance:
+
+| Check | Expected result |
+|---|---|
+| *Curves*, with the cube's tracks of milestone 6 | The curves of x, y and z of the position, rotation and scale, and of red, green and blue of the colour, in their colours, through their keys |
+| Drag a key in value, then in time | The curve follows; the cube shows the value at the playhead; one undo entry for each drag; the keys stay on whole frames |
+| Right click a key: Auto, Clamped Auto, Flat, Free Smooth, Broken | The curve changes as in Unity: Auto may overshoot, Clamped Auto never does; the handles of Free Smooth move together, those of Broken each on its own |
+| Both tangents: Constant, then Linear; then Weighted, a handle lengthened | Steps; straight segments; a curve shaped by the handle's length |
+| Double click on the curve of x | A key on x only: the dopesheet shows it on the row of x and on the position's row |
+| Delete on the position's row of the dopesheet | The keys of x, y and z at that frame go |
+| Open a sequence saved by milestone 6, then save it | Same animation; written in version 2 |
+| The curve of the C# panel: drag a key, then Ctrl+Z | The curve changes, then comes back |
+| Remove `modules\UI\curves`, restart | The Curves view and the curve of the C# panel say that the module is not running; the dopesheet works |
+| Tests, `cargo xtask check`, CI | Green |
+
+### Milestone 8: the Timeline in Montage mode (outline)
 
 Sequences of tracks holding clips; a clip moved along its track or to another one, trimmed at
 either end, cut in two at the playhead; edges snapping to the playhead, to the other clips and to
-the frames; each change one undo entry. Specified in detail when milestone 6 is done.
+the frames; each change one undo entry. Specified in detail when milestone 7 is done.
 
-### Milestone 8: curves and recording in the Timeline (outline)
+### Milestone 9: recording and copied keys in the Timeline (outline)
 
-- **Curves**: the curve of each property, its keys' tangents edited (auto, linear, constant, free).
 - **Recording**: while recording, changing a property by hand sets a key at the playhead.
-- **Keys copied and pasted** in the dopesheet.
+- **Keys copied and pasted** in the dopesheet and in the Curves view.
 
-Specified in detail when milestone 7 is done.
+Specified in detail when milestone 8 is done.
 
-### Milestone 9: Lua modules (outline)
+### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
 hosts them through a contract of the core open to the module of any language: their own Lua state
 kept while the editor runs, commands, events, settings, the interface objects of milestone 5 with
-Lua classes, undo. Specified in detail when milestone 8 is done.
+Lua classes, undo. Specified in detail when milestone 9 is done.
 
-### Milestone 10: Python (outline)
+### Milestone 11: Python (outline)
 
 Python scripts, console and modules, with the behaviour of Lua: the host built apart and reaching
 the editor through `uniwow.h`, the embeddable distribution in `interpreters\python-3.14\`, scripts
 by tool in `scripts\python-3.14\` (the tool folder is a package), Stop even when a script catches
 exceptions, the editor starting without Python, the interface objects with Python classes.
-Specified in detail when milestone 9 is done.
+Specified in detail when milestone 10 is done.
 
 Risks verified first:
 
