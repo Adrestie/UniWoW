@@ -102,13 +102,13 @@ impl Module for TimelineModule {
         }
     }
 
-    fn on_event(&mut self, event: &Event, _ctx: &mut Context) {
+    fn on_event(&mut self, event: &Event, ctx: &mut Context) {
         let answered = self
             .question
             .as_ref()
             .is_some_and(|q| q.dialog.is_some() && q.dialog == event.payload["dialog"].as_u64());
         if answered && let Some(button) = event.payload["button"].as_str() {
-            self.answered(button);
+            self.answered(button, ctx);
         }
     }
 
@@ -139,7 +139,7 @@ impl Module for TimelineModule {
 impl TimelineModule {
     /// Does what the user chose about the unsaved changes of the sequence shown, then shows the
     /// one asked for, unless the user cancelled.
-    fn answered(&mut self, button: &str) {
+    fn answered(&mut self, button: &str, ctx: &mut Context) {
         let Some(question) = self.question.take() else {
             return;
         };
@@ -152,7 +152,9 @@ impl TimelineModule {
                 }
             }
             "discard" => {
+                // Undo would otherwise bring back the changes left.
                 self.documents.remove(&current);
+                ctx.forget_document(&current);
             }
             _ => return,
         }
@@ -334,17 +336,17 @@ struct SequenceEdit {
 }
 
 impl SequenceEdit {
-    fn replace(&self, module: &mut dyn Any, sequence: Sequence) -> Sequence {
+    /// Replaces the sequence and returns the one it replaced; nothing for a sequence closed
+    /// without saving, which an edit never opens again.
+    fn replace(&self, module: &mut dyn Any, sequence: Sequence) -> Option<Sequence> {
         let timeline: &mut TimelineModule = module
             .downcast_mut()
             .expect("commands of this module are applied to it");
-        timeline.keys_changed = true;
-        let document = timeline.documents.entry(self.name.clone()).or_insert_with(|| Document {
-            sequence: sequence.clone(),
-            dirty: true,
-        });
+        let document = timeline.documents.get_mut(&self.name)?;
         document.dirty = true;
-        std::mem::replace(&mut document.sequence, sequence)
+        let before = std::mem::replace(&mut document.sequence, sequence);
+        timeline.keys_changed = true;
+        Some(before)
     }
 }
 
@@ -354,13 +356,17 @@ impl Command for SequenceEdit {
     }
 
     fn apply(&mut self, module: &mut dyn Any) {
-        self.before = Some(self.replace(module, self.after.clone()));
+        self.before = self.replace(module, self.after.clone());
     }
 
     fn revert(&mut self, module: &mut dyn Any) {
         if let Some(before) = self.before.clone() {
             self.replace(module, before);
         }
+    }
+
+    fn document(&self) -> Option<String> {
+        Some(self.name.clone())
     }
 }
 
@@ -397,6 +403,23 @@ mod tests {
         edit.revert(&mut timeline);
         assert_eq!(timeline.documents["intro"].sequence, Sequence::default());
         assert_eq!(edit.label(), "timeline: add a track");
+    }
+
+    #[test]
+    fn an_edit_of_a_sequence_closed_without_saving_does_not_open_it_again() {
+        let mut timeline = TimelineModule::default();
+        let mut after = Sequence::default();
+        after.tracks.push(Track::new("cube/scale", PropertyKind::Vector));
+        let mut edit = SequenceEdit {
+            name: "intro".to_owned(),
+            label: "add a track".to_owned(),
+            after,
+            before: None,
+        };
+        assert_eq!(edit.document().as_deref(), Some("intro"));
+        edit.apply(&mut timeline);
+        edit.revert(&mut timeline);
+        assert!(timeline.documents.is_empty() && !timeline.keys_changed);
     }
 
     #[test]

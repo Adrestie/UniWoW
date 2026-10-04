@@ -111,10 +111,19 @@ impl Groups {
 
     /// Removes the commands of a failed module from the open groups; returns how many there were.
     pub fn purge(&mut self, owner: &str) -> usize {
+        self.remove(|part| part.owner == owner)
+    }
+
+    /// Removes from the open groups the changes of the document `document` of `owner`.
+    pub fn forget(&mut self, owner: &str, document: &str) -> usize {
+        self.remove(|part| part.of_document(owner, document))
+    }
+
+    fn remove(&mut self, doomed: impl Fn(&Part) -> bool) -> usize {
         let mut removed = 0;
         for group in &mut self.open {
             let before = group.parts.len();
-            group.parts.retain(|part| part.owner != owner);
+            group.parts.retain(|part| !doomed(part));
             removed += before - group.parts.len();
         }
         removed
@@ -190,6 +199,7 @@ mod tests {
         Part {
             owner: "cube".to_owned(),
             label: label.to_owned(),
+            document: None,
             command: Box::new(Named(label)),
         }
     }
@@ -320,6 +330,7 @@ mod tests {
         parts.push(Part {
             owner: "scripting-lua".to_owned(),
             label: "own".to_owned(),
+            document: None,
             command: Box::new(Named("own")),
         });
         assert_eq!(groups.purge("scripting-lua"), 1);

@@ -17,6 +17,12 @@ pub trait Command {
     fn apply(&mut self, module: &mut dyn Any);
 
     fn revert(&mut self, module: &mut dyn Any);
+
+    /// The document the change belongs to, if any: closing that document without saving forgets
+    /// its changes (`Context::forget_document`).
+    fn document(&self) -> Option<String> {
+        None
+    }
 }
 
 /// A change a module not written in Rust made to its own state, recorded afterwards with

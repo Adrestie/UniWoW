@@ -5,7 +5,16 @@ use uniwow_api::{Command, log};
 pub struct Part {
     pub owner: String,
     pub label: String,
+    /// Its `Command::document`, read with the label.
+    pub document: Option<String>,
     pub command: Box<dyn Command>,
+}
+
+impl Part {
+    /// Whether it is a change of the document `document` of `owner`.
+    pub fn of_document(&self, owner: &str, document: &str) -> bool {
+        self.owner == owner && self.document.as_deref() == Some(document)
+    }
 }
 
 /// One step of the history: a single command, or the commands of one script run or one group
@@ -59,15 +68,23 @@ impl History {
     /// left empty disappear. The other commands stay valid: a command only changes the state of
     /// its own module (F3).
     pub fn purge(&mut self, owner: &str) -> usize {
-        purge(&mut self.done, owner) + purge(&mut self.undone, owner)
+        let of = |part: &Part| part.owner == owner;
+        remove(&mut self.done, of) + remove(&mut self.undone, of)
+    }
+
+    /// Removes the changes of the document `document` of `owner`, done or undone, and returns how
+    /// many there were; entries left empty disappear.
+    pub fn forget(&mut self, owner: &str, document: &str) -> usize {
+        let of = |part: &Part| part.of_document(owner, document);
+        remove(&mut self.done, of) + remove(&mut self.undone, of)
     }
 }
 
-fn purge(entries: &mut Vec<Entry>, owner: &str) -> usize {
+fn remove(entries: &mut Vec<Entry>, doomed: impl Fn(&Part) -> bool) -> usize {
     let mut removed = 0;
     for entry in entries.iter_mut() {
         let before = entry.parts.len();
-        entry.parts.retain(|part| part.owner != owner);
+        entry.parts.retain(|part| !doomed(part));
         removed += before - entry.parts.len();
     }
     entries.retain(|entry| !entry.parts.is_empty());
@@ -120,8 +137,37 @@ mod tests {
         Part {
             owner: owner.to_owned(),
             label: label.to_owned(),
+            document: None,
             command: Box::new(Named(label)),
         }
+    }
+
+    fn of(owner: &str, label: &'static str, document: &str) -> Part {
+        Part {
+            document: Some(document.to_owned()),
+            ..part(owner, label)
+        }
+    }
+
+    #[test]
+    fn a_document_closed_without_saving_takes_its_changes_out_of_the_history() {
+        let mut history = History::default();
+        history.push(of("timeline", "key 1", "intro"));
+        history.push_group(
+            "script".to_owned(),
+            vec![of("timeline", "key 2", "intro"), part("cube", "paint")],
+        );
+        history.push(of("timeline", "key 3", "outro"));
+        history.push(of("timeline", "key 4", "intro"));
+        let undone = history.take_undo(|_| true).expect("one entry");
+        history.undone.push(undone);
+        assert_eq!(history.forget("timeline", "intro"), 3);
+        assert_eq!(
+            labels(&history.done),
+            vec!["script[cube:paint]", "key 3[timeline:key 3]"]
+        );
+        assert!(history.undone.is_empty());
+        assert_eq!(history.forget("cube", "outro"), 0, "only the changes of its owner");
     }
 
     fn labels(entries: &[Entry]) -> Vec<String> {

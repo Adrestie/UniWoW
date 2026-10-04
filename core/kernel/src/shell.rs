@@ -395,14 +395,20 @@ impl Shell {
             match guarded_as(&owner, || command.apply(module)) {
                 Ok(()) => {
                     // A label is module code too: if it panics, the module fails.
-                    let label = match guarded_as(&owner, || command.label()) {
-                        Ok(label) => label,
+                    let read = guarded_as(&owner, || (command.label(), command.document()));
+                    let (label, document) = match read {
+                        Ok(read) => read,
                         Err(message) => {
                             self.fail(index, format!("label of a command: {message}"));
                             continue;
                         }
                     };
-                    let part = history::Part { owner, label, command };
+                    let part = history::Part {
+                        owner,
+                        label,
+                        document,
+                        command,
+                    };
                     match caller.and_then(|(caller, thread)| self.groups.parts_of(caller, thread)) {
                         Some(parts) => parts.push(part),
                         None => self.history.push(part),
@@ -412,6 +418,14 @@ impl Shell {
                     let label = guarded_as(&owner, || command.label()).unwrap_or_else(|_| "?".to_owned());
                     self.fail(index, format!("command '{label}': {message}"));
                 }
+            }
+        }
+        for (owner, document) in std::mem::take(&mut self.host.forgotten) {
+            let forgotten = self.history.forget(&owner, &document) + self.groups.forget(&owner, &document);
+            if forgotten > 0 {
+                log::info!(
+                    "{forgotten} changes of '{document}' ({owner}) left the history: it was closed without saving"
+                );
             }
         }
     }
@@ -636,6 +650,7 @@ impl Shell {
                 let part = history::Part {
                     owner,
                     label: label.clone(),
+                    document: None,
                     command: Box::new(Recorded { label, change }),
                 };
                 match self.groups.parts_of(&caller, thread) {
@@ -1162,7 +1177,12 @@ impl eframe::App for Shell {
 
         // What the panels and menus queued is applied by `logic` at the next frame.
         let host = &self.host;
-        if !host.pending.is_empty() || !host.reported.is_empty() || !host.events.is_empty() || host.settings_changed {
+        if !host.pending.is_empty()
+            || !host.forgotten.is_empty()
+            || !host.reported.is_empty()
+            || !host.events.is_empty()
+            || host.settings_changed
+        {
             ctx.request_repaint();
         }
     }

@@ -26,6 +26,9 @@ pub struct KernelHost {
     pub events: Vec<Event>,
     /// Queued commands with the id of their module.
     pub pending: Vec<(String, Box<dyn Command>)>,
+    /// Documents closed without saving, with the id of their module, whose changes the history
+    /// forgets.
+    pub forgotten: Vec<(String, String)>,
     pub services: HashMap<String, Service>,
     pub gpu: Option<egui_wgpu::RenderState>,
     pub settings: Settings,
@@ -43,6 +46,7 @@ impl KernelHost {
         Self {
             events: Vec::new(),
             pending: Vec::new(),
+            forgotten: Vec::new(),
             services: HashMap::new(),
             gpu,
             settings,
@@ -72,6 +76,10 @@ impl Host for KernelHost {
 
     fn execute(&mut self, owner: &str, command: Box<dyn Command>) {
         self.pending.push((owner.to_owned(), command));
+    }
+
+    fn forget_document(&mut self, owner: &str, document: &str) {
+        self.forgotten.push((owner.to_owned(), document.to_owned()));
     }
 
     fn service(&self, id: &str) -> Option<&(dyn Any + Send + Sync)> {

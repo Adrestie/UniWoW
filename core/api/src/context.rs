@@ -6,6 +6,7 @@ use crate::{CallId, Command, Editor, JobContext, JobFn, JobId, PropertyInfo, Pro
 pub trait Host {
     fn publish(&mut self, source: &str, topic: &str, payload: serde_json::Value);
     fn execute(&mut self, owner: &str, command: Box<dyn Command>);
+    fn forget_document(&mut self, owner: &str, document: &str);
     fn service(&self, id: &str) -> Option<&(dyn Any + Send + Sync)>;
     /// The module providing the service `id`.
     fn service_provider(&self, id: &str) -> Option<String>;
@@ -73,6 +74,13 @@ impl<'a> Context<'a> {
     /// Queues an undoable command on this module.
     pub fn execute(&mut self, command: impl Command + 'static) {
         self.host.execute(self.module, Box::new(command));
+    }
+
+    /// Forgets from the undo history, done or undone, the changes of this module whose
+    /// `Command::document` is `document`: for a document closed without saving, which they would
+    /// otherwise bring back.
+    pub fn forget_document(&mut self, document: &str) {
+        self.host.forget_document(self.module, document);
     }
 
     /// Returns a clone of the service, if a running module provides it.
