@@ -31,6 +31,7 @@ Milestones 1 to 3 (section 9) were written with earlier words: a *feature* was a
 | R6 | A module that fails, or that was built for another version of the core, is refused or disabled and reported; the editor keeps running. |
 | R7 | Speed: the editor uses every processor core. Long or heavy work (reading archives, parsing files, building meshes, extraction, database queries) never runs on the interface thread. |
 | R8 | Modules and scripts may use threads themselves, through what the kernel offers (section 5, threads). |
+| R9 | Parity: whatever a built-in module can do, a module in any language can do through the unified API (S1). Built-in modules may keep egui for their own windows, but every capability and every widget they offer exists in the unified API: an engine, an object of the interface, a property, a command. New built-in modules are designed that way from the start. |
 
 ---
 
@@ -1128,33 +1129,156 @@ As built:
   tells it from the frame it draws it in.
 - **One source for the numbers**: `sdk/bindings.toml` (section 8).
 
-### Milestone 8: the Timeline in Montage mode (outline)
+### Milestone 8: parity of the languages (proposed)
 
-Sequences of tracks holding clips; a clip moved along its track or to another one, trimmed at
-either end, cut in two at the playhead; edges snapping to the playhead, to the other clips and to
-the frames; each change one undo entry. Specified in detail when milestone 7 is done.
+Whatever a built-in module can do, a module in any language can do (R9). This milestone completes
+the unified API where it falls short, and splits the Timeline into an engine, widgets and a window
+using them, so that a module of another language builds a timeline of its own on its own
+properties. Lua and Python reach all of it in milestones 9 and 10, through the same API.
 
-### Milestone 9: recording and copied keys in the Timeline (outline)
+What the unified API lacks today:
 
-- **Recording**: while recording, changing a property by hand sets a key at the playhead.
-- **Keys copied and pasted** in the dopesheet and in the Curves view.
+| Capability | Built-in (Rust) modules | Unified API |
+|---|---|---|
+| Animatable properties: declare, list, read, write | `Registrar::animatable`, `Editor` | Nothing |
+| Sequences, their evaluation, their playback | Inside the Timeline module | Nothing |
+| Dopesheet and tracks | Inside the Timeline's panel | Nothing; only `CurveView` |
+| Tree, table, property grid | egui | Nothing |
+| The viewport's camera | Inside the viewport module | Nothing |
 
-Specified in detail when milestone 8 is done.
+It is built in seven small steps, each checked and validated before the next one.
 
-### Milestone 10: Lua modules (outline)
+**Step 8.1, the rule.** R9 in section 1, and in section 3 a table *Capabilities and their unified
+form*: each capability a built-in module offers, with the object, property, command or function
+that gives it to every language, and the classes of each language. Every later milestone keeps the
+table up to date, and its review checks it.
+
+**Step 8.2, animatable properties for every language** (`uniwow.h` version 4):
+
+- A module declares its properties in `uniwow_module_info`, in a table as for its commands: name,
+  label, kind (number, vector, colour, boolean; their numbers in `sdk/bindings.toml`), range,
+  initial value, and a `write` function called on the module's thread.
+- The kernel keeps the value of each declared property: a read never waits for the module, so that
+  the Timeline, a property grid or another module reads it from any thread without holding the
+  interface. The module tells its own changes with `set_property`, and readers see them. A write
+  from elsewhere (playback, a property grid, another module) is kept within the range, stored, then
+  handed to `write` on the module's thread, in order. Otherwise as in Rust: the path is
+  `<module>/<name>`, a property is listed only while its module runs, and a failing `write` makes
+  the module fail.
+- Functions: `properties` lists them as JSON (path, owner, label, kind, range); `read_property` and
+  `write_property` read and write the numbers of one. Classes: C++ `uniwow::Property` and
+  `uniwow::properties()`, C# `Editor.DeclareProperty`, `Editor.Properties`, `ReadProperty`,
+  `WriteProperty`.
+- A module built with version 3 of the header is refused with the reason, as for every version.
+- Samples: the value of the C# *Counter* and the position of the first card of the C++ scene become
+  animatable; the Timeline animates them as it animates the cube.
+
+**Step 8.3, the viewport's camera:**
+
+- Animatable properties `viewport/camera_position` and `viewport/camera_target` (vectors), and
+  `viewport/camera_fov` (a number, in degrees): the Timeline animates the camera as it animates the
+  cube.
+- Commands `viewport.camera` (its position, target and angle), `viewport.look_at` (a position, a
+  target, an angle if given) and `viewport.frame` (fits a box).
+- Other 3D access, proposed for later milestones and not built here: picking
+  (`viewport.pick { x, y }`, the object and point hit), layers drawn by other languages (meshes
+  given through the API), the selection shown in 3D, handles to move objects.
+
+**Step 8.4, the engine of sequences, in the API:**
+
+- `uniwow_api::sequence`: the model of sequences, today inside the Timeline module, moves to the
+  runtime beside the curves. A sequence has a frame rate, a length and tracks; a track animates one
+  property with one curve per number; evaluating a sequence at a time gives each track's value. Its
+  JSON is that of the version 2 files.
+- Two kinds of objects of the Qt of the core, for every language:
+  - `Sequence`: its tracks as JSON (the property `TRACKS`, through `set_text` and `text`), its
+    frame rate and length;
+  - `Player`, as `QTimeLine`: the sequence it plays (`SEQUENCE`, a handle), its time in frames
+    (`TIME`, fractional), `PLAYING`, `LOOP`, `SPEED`; signals `timeChanged` and `finished`. While it
+    plays, the kernel moves it on at each frame by the time elapsed. Whenever its time changes,
+    played or set by its module, the kernel writes the value of each track at that time into its
+    property, through the catalogue of step 8.2, and nothing where a value did not change.
+- Like every object, a sequence and its player belong to the module that created them; a module may
+  animate any property of the catalogue: its own, the cube's, the camera's. A module records its
+  changes to its sequences in the history as it records its other changes.
+- Sample: the C++ scene plays a sequence of its own on its first card, which moves; pause and loop
+  from its panel.
+
+**Step 8.5, the dopesheet as an object:**
+
+- `DopesheetView`, as a `QWidget`, drawn by a new module of the interface, `modules/UI/dopesheet/`,
+  through a service, as `CurveView` is drawn by `curves`: the rows of a `Sequence` (one per track,
+  unfolding into one per number), the ruler, the keys as diamonds and the playhead of a `Player`;
+  keys selected, moved and deleted, the playhead moved; on the left, each track's label and value
+  at the playhead. Signals `keysChanged` (the tracks as JSON, with whether the change is finished,
+  as `curvesChanged`) and `playheadMoved`. Without the module `dopesheet`, a `DopesheetView` says
+  that it is not running.
+- Sample: the C# *Counter* shows a dopesheet of its own sequence on its value; each change of keys
+  is one undo entry.
+
+**Step 8.6, the Timeline, a client:** the Timeline module keeps its egui window (sequence and
+playback bars, *Add property*), but its sequences are `Sequence` objects, its playback a `Player`,
+its dopesheet a `DopesheetView` and its Curves view a `CurveView`; no sequence logic remains in the
+module. For the user nothing changes: files, undo, unsaved changes, as in milestones 6 and 7.
+
+**Step 8.7, data widgets**, as in Qt:
+
+- `TreeView` (as `QTreeWidget`), drawn by the kernel: items with a text and children, folded or
+  unfolded, one selected; signals `itemClicked`, `currentItemChanged`, `itemExpanded`.
+- `TableView` (as `QTableWidget`), drawn by the kernel: columns with headers, rows of cells, cells
+  edited in place, sorted by a column when the user clicks its header; signals `cellChanged`
+  (row, column, text), `currentCellChanged` and `sortChanged`. Only the rows in sight are drawn, so
+  that 100,000 rows scroll smoothly.
+- `PropertyGrid`, drawn by a new module of the interface, `modules/UI/properties/`, through a
+  service: the properties of the catalogue whose paths it is given, each with its label and an
+  editor for its kind (numbers dragged or typed, a colour, a box); a change by hand writes the
+  property and is one undo entry, *Set <label>*, which belongs to the property's module.
+- The rows of a tree or a table are given as JSON (`ITEMS`, `ROWS`), each with an id the signals
+  give back.
+- Sample: a C# panel with a table of 100,000 rows, a tree, and a property grid of the cube.
+
+Choices proposed, to be confirmed by the review:
+
+- The properties of the modules of other languages are read from the kernel's copy, never by
+  calling the module, so that reading never waits on a module's thread.
+- Players are moved on by the kernel, as part of the objects of the core, so that a module plays its
+  sequences without the Timeline module; the Timeline module itself becomes removable without
+  taking the engine away.
+- `uniwow.h` goes to version 4: the table of functions and `uniwow_module_info` grow at their end.
+- Trees and tables receive their rows as JSON rather than as an object per row, for the speed of
+  large tables.
+
+Acceptance, automated where possible (the shell run without a window, the tests of the SDK):
+
+| Step | Check | Expected result |
+|---|---|---|
+| 8.2 | *Add property* in the Timeline | The value of the C# *Counter* and the card's position are listed beside the cube's properties |
+| 8.2 | Keys on the Counter's value, then the playhead moved | The Counter's panel shows the value at the playhead; no undo entry while the playhead moves |
+| 8.2 | A C# write function that throws | The module fails, with its name and the reason; the editor goes on |
+| 8.3 | Keys on the camera's position, then play | The 3D view follows the camera's path |
+| 8.3 | `viewport.look_at` from the Commands panel | The camera moves there |
+| 8.4 | *Play* in the C++ scene's panel | The first card moves along its sequence; *Pause* stops it; with *Loop*, it starts again |
+| 8.5 | A key dragged in the Counter's dopesheet | The key moves; one undo entry; Ctrl+Z puts it back |
+| 8.6 | The checks of milestones 6 and 7 | The same results |
+| 8.7 | The table of 100,000 rows scrolled, sorted, a cell edited | Smooth; sorted by the column clicked; `cellChanged` received |
+| 8.7 | The cube's colour changed in the property grid | The cube changes; one undo entry |
+| All | Tests, `cargo xtask check`, the tests of the SDK, CI | Green |
+
+### Milestone 9: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
 hosts them through a contract of the core open to the module of any language: their own Lua state
-kept while the editor runs, commands, events, settings, the interface objects of milestone 5 with
-Lua classes, undo. Specified in detail when milestone 9 is done.
+kept while the editor runs, commands, events, settings, the interface objects with Lua classes
+(those of milestone 8 included), animatable properties, sequences and players, undo. Specified in
+detail when milestone 8 is done.
 
-### Milestone 11: Python (outline)
+### Milestone 10: Python (outline)
 
 Python scripts, console and modules, with the behaviour of Lua: the host built apart and reaching
 the editor through `uniwow.h`, the embeddable distribution in `interpreters\python-3.14\`, scripts
 by tool in `scripts\python-3.14\` (the tool folder is a package), Stop even when a script catches
 exceptions, the editor starting without Python, the interface objects with Python classes.
-Specified in detail when milestone 10 is done.
+Specified in detail when milestone 9 is done.
 
 Risks verified first:
 
@@ -1167,6 +1291,28 @@ Risks verified first:
 
 Decisions: Python is embedded by a host built apart; Python 3.14, with its GIL; the .NET 10 SDK
 builds the C# module.
+
+### Milestone 11: acceptance of the extensibility (outline)
+
+Three tools written only with the unified API, without touching the core:
+
+- a SQL tool in Python;
+- the equipment of a creature in Lua, which reads and writes the AzerothCore database (`libs/db`
+  and a module of the database offering its commands);
+- a timeline of particles in Lua, with its own sequences, players and widgets.
+
+Specifying it needs the project model of section 10 decided first.
+
+### Milestone 12: the Timeline in Montage mode (outline)
+
+Sequences of tracks holding clips; a clip moved along its track or to another one, trimmed at
+either end, cut in two at the playhead; edges snapping to the playhead, to the other clips and to
+the frames; each change one undo entry. Built on the engine and widgets of milestone 8.
+
+### Milestone 13: recording and copied keys in the Timeline (outline)
+
+- **Recording**: while recording, changing a property by hand sets a key at the playhead.
+- **Keys copied and pasted** in the dopesheet and in the Curves view.
 
 ---
 
