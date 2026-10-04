@@ -397,7 +397,6 @@ mod tests {
             id: "test".to_owned(),
             editor: OnceLock::new(),
             ui: Ui::new(Arc::new(|job| job())),
-            post: Arc::new(|job| job()),
             apply: OnceLock::new(),
         }));
         let context = std::ptr::from_ref(module).cast_mut().cast::<c_void>();

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::ui::{Post, SharedUi, Ui};
+use crate::ui::{self, Post, SharedUi, Ui};
 use crate::{DockArea, Editor, PanelSpec};
 
 const API_VERSION: u32 = 3;
@@ -99,10 +99,8 @@ pub struct ModuleContext {
     pub id: String,
     /// The module's `Editor`, set when the module starts (`Module::init`).
     pub editor: OnceLock<Editor>,
-    /// Its interface objects.
+    /// Its interface objects; jobs for the module's own thread are posted through them.
     pub ui: SharedUi,
-    /// Runs a job on the module's own thread.
-    post: Post,
     apply: OnceLock<(ApplyFn, UserPointer)>,
 }
 
@@ -187,12 +185,10 @@ fn module_thread(id: &str) -> Post {
 /// Calls the entry point of the compiled module `id` with the table of the C interface, and reads
 /// what it offers. The table and the context live until the process ends, as the module does.
 pub fn start(init: InitFn, id: &str) -> Result<Started, String> {
-    let post = module_thread(id);
     let context: &'static ModuleContext = Box::leak(Box::new(ModuleContext {
         id: id.to_owned(),
         editor: OnceLock::new(),
-        ui: Ui::new(post.clone()),
-        post,
+        ui: Ui::new(module_thread(id)),
         apply: OnceLock::new(),
     }));
     let api: &'static Api = Box::leak(Box::new(Api {
@@ -309,7 +305,7 @@ struct CompiledChange {
 impl CompiledChange {
     fn send(&self, value: CString) {
         let context = self.context;
-        (context.post)(Box::new(move || {
+        ui::lock(&context.ui).post_job(Box::new(move || {
             let (Some((apply, user)), Some(editor)) = (context.apply.get(), context.editor.get()) else {
                 return;
             };

@@ -262,12 +262,44 @@ pub struct Ui {
     next_connection: u64,
     /// Painter, and the area and commands it records.
     painting: HashMap<Handle, (Handle, Vec<PaintCommand>)>,
+    /// The painting areas being painted, with the size asked meanwhile, painted next.
+    in_flight: HashMap<Handle, Option<[f64; 2]>>,
+    /// The last job posted, when it is a mouse move or a curves change still waiting: the same
+    /// signal of the same object sent next replaces its data instead of queuing behind it.
+    waiting: Option<(Handle, u32, Waiting)>,
     /// Changed at each change of a scene's set of items or their order, by scene.
     structure: HashMap<Handle, u64>,
     post: Post,
     wake: Option<egui::Context>,
     /// The store itself, for its jobs on the module's thread to look at it.
     this: Weak<Mutex<Ui>>,
+}
+
+/// A signal waiting for the module's thread; taken when delivered.
+type Waiting = Arc<Mutex<Option<SignalData>>>;
+
+/// Ends a painting, even when a slot panicked: the picture replaces the area's, and a size asked
+/// meanwhile is painted next.
+struct PaintingDone {
+    shared: SharedUi,
+    area: Handle,
+    painter: Handle,
+}
+
+impl Drop for PaintingDone {
+    fn drop(&mut self) {
+        let mut ui = lock(&self.shared);
+        if let Some((area, commands)) = ui.painting.remove(&self.painter)
+            && !std::thread::panicking()
+            && let Some(object) = ui.objects.get_mut(&area)
+        {
+            object.picture = Arc::new(commands);
+        }
+        if let Some(Some(size)) = ui.in_flight.remove(&self.area) {
+            ui.request_paint(&self.shared, self.area, size);
+        }
+        ui.wake();
+    }
 }
 
 /// Calls, on the module's thread, the slots still connected when their turn comes: one
@@ -298,6 +330,8 @@ impl Ui {
                 connections: Vec::new(),
                 next_connection: 1,
                 painting: HashMap::new(),
+                in_flight: HashMap::new(),
+                waiting: None,
                 structure: HashMap::new(),
                 post,
                 wake: None,
@@ -696,28 +730,70 @@ impl Ui {
             .collect()
     }
 
-    /// Sends a signal to the slots connected to it, on the module's thread.
-    pub(crate) fn emit(&self, data: SignalData) {
-        let slots = self.slots(data.sender, data.signal);
+    /// Runs a job on the module's thread, after those posted before.
+    pub fn post_job(&mut self, job: Box<dyn FnOnce() + Send>) {
+        // A signal waiting behind another job is no longer the last one: nothing merges into it.
+        self.waiting = None;
+        (self.post)(job);
+    }
+
+    /// Sends a signal to the slots connected to it, on the module's thread. A mouse move, or a
+    /// curves change still under way, replaces the same one of the same object still waiting.
+    pub(crate) fn emit(&mut self, data: SignalData) {
+        let mergeable =
+            data.signal == Signal::MouseMove as u32 || (data.signal == Signal::CurvesChanged as u32 && !data.boolean);
+        let (sender, signal) = (data.sender, data.signal);
+        if mergeable
+            && let Some((waiting_sender, waiting_signal, waiting)) = &self.waiting
+            && (*waiting_sender, *waiting_signal) == (sender, signal)
+        {
+            let mut waiting = waiting.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(pending) = waiting.as_mut() {
+                *pending = data;
+                return;
+            }
+        }
+        let slots = self.slots(sender, signal);
         if slots.is_empty() {
             return;
         }
         let this = self.this.clone();
-        (self.post)(Box::new(move || deliver(&this, slots, &data)));
+        let waiting: Waiting = Arc::new(Mutex::new(Some(data)));
+        let taken = waiting.clone();
+        self.post_job(Box::new(move || {
+            let data = taken.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(data) = data {
+                deliver(&this, slots, &data);
+            }
+        }));
+        if mergeable {
+            self.waiting = Some((sender, signal, waiting));
+        }
     }
 
     /// Asks the module to paint an area of `size`; the picture replaces the area's once painted.
+    /// One painting at a time per area: a size asked meanwhile is painted when it ends.
     pub(crate) fn request_paint(&mut self, shared: &SharedUi, area: Handle, size: [f64; 2]) {
         let slots = self.slots(area, Signal::Paint as u32);
         if slots.is_empty() {
             return;
         }
+        if let Some(next) = self.in_flight.get_mut(&area) {
+            *next = Some(size);
+            return;
+        }
+        self.in_flight.insert(area, None);
         let painter = self.next;
         self.next += 1;
         self.painting.insert(painter, (area, Vec::new()));
-        let shared = shared.clone();
+        let done = PaintingDone {
+            shared: shared.clone(),
+            area,
+            painter,
+        };
         let this = self.this.clone();
-        (self.post)(Box::new(move || {
+        self.post_job(Box::new(move || {
+            let _done = done;
             let data = SignalData {
                 sender: area,
                 signal: Signal::Paint as u32,
@@ -727,13 +803,6 @@ impl Ui {
                 ..Default::default()
             };
             deliver(&this, slots, &data);
-            let mut ui = lock(&shared);
-            if let Some((area, commands)) = ui.painting.remove(&painter)
-                && let Some(object) = ui.objects.get_mut(&area)
-            {
-                object.picture = Arc::new(commands);
-            }
-            ui.wake();
         }));
     }
 
@@ -898,6 +967,66 @@ mod tests {
         drop(ui);
         run(&jobs);
         assert_eq!(*received.lock().unwrap(), vec![first]);
+    }
+
+    #[test]
+    fn an_area_is_painted_once_at_a_time_then_at_the_last_size_asked() {
+        let (shared, jobs) = queued();
+        let sizes = Arc::new(Mutex::new(Vec::new()));
+        let area = {
+            let mut store = lock(&shared);
+            let area = store.create(Kind::PaintArea, None).unwrap();
+            let seen = sizes.clone();
+            store
+                .connect(
+                    area,
+                    Signal::Paint,
+                    Arc::new(move |data: &SignalData| seen.lock().unwrap().push(data.width)),
+                )
+                .unwrap();
+            for width in [100.0, 200.0, 300.0] {
+                store.request_paint(&shared, area, [width, 50.0]);
+            }
+            area
+        };
+        assert_eq!(jobs.lock().unwrap().len(), 1, "one painting at a time");
+        run(&jobs);
+        run(&jobs);
+        assert_eq!(*sizes.lock().unwrap(), vec![100.0, 300.0]);
+        assert!(!lock(&shared).in_flight.contains_key(&area));
+    }
+
+    #[test]
+    fn mouse_moves_still_waiting_merge_but_never_across_another_signal() {
+        let (shared, jobs) = queued();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut store = lock(&shared);
+        let area = store.create(Kind::PaintArea, None).unwrap();
+        for signal in [Signal::MouseMove, Signal::MouseRelease] {
+            let seen = seen.clone();
+            store
+                .connect(
+                    area,
+                    signal,
+                    Arc::new(move |data: &SignalData| seen.lock().unwrap().push((data.signal, data.x))),
+                )
+                .unwrap();
+        }
+        let event = |signal: Signal, x| SignalData {
+            sender: area,
+            signal: signal as u32,
+            x,
+            ..Default::default()
+        };
+        store.emit(event(Signal::MouseMove, 1.0));
+        store.emit(event(Signal::MouseMove, 2.0));
+        store.emit(event(Signal::MouseRelease, 2.0));
+        store.emit(event(Signal::MouseMove, 3.0));
+        drop(store);
+        assert_eq!(jobs.lock().unwrap().len(), 3);
+        run(&jobs);
+        let (moved, released) = (Signal::MouseMove as u32, Signal::MouseRelease as u32);
+        assert_eq!(*seen.lock().unwrap(), vec![(moved, 2.0), (released, 2.0), (moved, 3.0)]);
     }
 
     #[test]
