@@ -172,6 +172,7 @@ and Python receive theirs in milestones 9 and 10.
 | `TextItem` | `QGraphicsSimpleTextItem` | text, font size, colour | |
 | `ItemGroup` | `QGraphicsItemGroup` | items | |
 | `PaintArea` | a `QWidget` and its `paintEvent` | minimum height | `paint` (painter, width, height), `mousePress`, `mouseMove`, `mouseRelease`, `wheel` (x, y, dx, dy, button, keys) |
+| `Dialog` | `QDialog` | title, the one layout it holds, shown or hidden | `rejected` |
 
 Every widget is enabled or not, visible or not, and has a tooltip. Every item has a position in its
 parent, a pen, a brush, a stacking order, a tooltip, and is visible, movable (along x, y or both,
@@ -192,6 +193,9 @@ within bounds), selectable and selected or not. Colours are `0xRRGGBBAA`, sizes 
 - **Painting**: a painting area asks its module to paint when it is shown, resized, or after
   `update()`. The module paints in points from the top left corner of the area, a text placed by its
   top left corner; the picture stays until the next painting.
+- **Dialogs**: a dialog is a floating window, created hidden. While it is shown, the rest of the
+  editor takes neither clicks nor shortcuts. The user closing it, with Escape or its close button,
+  hides it and sends `rejected`.
 - **Undo**: a module records a change it has made with a label and two JSON values, one undoing it
   and one redoing it. Undo and Redo hand the matching value to the function the module declared,
   on its thread; when that function fails, the module fails and its changes leave the history.
@@ -439,6 +443,7 @@ E:\WoW-editor
   core/kernel/
   libs/<name>/
   modules/<id>/         Rust modules
+  modules/UI/<id>/      Rust modules of the interface, deployed in modules\UI\<id>\
   examples/modules/<id>/  sample modules in C++, C#, Lua and Python, built and installed by
                         `cargo xtask build` as their author would
   sdk/uniwow.h          the C interface of compiled modules (S1)
@@ -881,10 +886,10 @@ As built:
   or the property's current value while the track has no keys. The playhead shows its frame in the
   ruler, and the frame and time (`2:15`) beside it.
 - **File**: JSON with each track's property first and one key per line.
-- **Limits**: unsaved changes are lost when the editor closes, without a question; the playhead
-  moves and the values are written only while the *Timeline* panel is shown.
+- **Limits**: the playhead moves and the values are written only while the *Timeline* panel is
+  shown.
 
-Complement asked before validation (validated, in progress): a module of the interface shows modal windows for
+Complement asked before validation (built): a module of the interface shows modal windows for
 the other modules, as `QDialog`. The module that opens one gives its text and its buttons, and does
 what the button chosen calls for. Changes that would be lost are asked about this way.
 
@@ -929,6 +934,19 @@ Acceptance of the complement:
 | Ctrl+Z while a window is shown | Nothing is undone |
 | Remove `modules\UI\dialogs`, restart | Changing sequence and closing the editor no longer ask: unsaved changes are lost |
 | Tests, `cargo xtask check`, CI | Green |
+
+As built:
+
+- **Contract**: `Module::windows_ui` draws a module's floating windows at every frame;
+  `Module::unsaved` and `Module::save_unsaved` tell and save its unsaved changes. The names
+  `DIALOG_COMMAND` and `DIALOG_ANSWERED_TOPIC` are in `uniwow_api`.
+- **Dialog**: drawn as a modal window of egui, its title and a close button above its layout;
+  Escape closes the window on top only. A Rust module may build with the objects of the core: the
+  module `dialogs` runs their slots once its windows are drawn, on the interface thread.
+- **Closing**: without the module `dialogs`, the log says which unsaved changes were lost.
+- **`modules/UI/`**: the workspace takes `modules/[!U]*` and `modules/UI/*` (module ids are
+  lowercase); the kernel loads the modules of the group folder `modules\UI\`; `cargo xtask build`
+  deploys there, and removes a deployed module whose folder no longer matches its source.
 
 ### Milestone 7: the Timeline in Montage mode (outline)
 
