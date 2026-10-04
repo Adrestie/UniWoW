@@ -368,7 +368,8 @@ public static unsafe class Editor
     /// <summary>Declares an animatable property, `module/name`, before Describe. Its value is one
     /// number, or three for a vector or a colour; <paramref name="initial"/> is the one it has at
     /// start. <paramref name="write"/> receives each value written from elsewhere, on the module's
-    /// thread, and may change it into the value it keeps; throwing makes the module fail.</summary>
+    /// thread, and may change it into the value it keeps; throwing makes the module fail. It records
+    /// nothing: RecordChange and the undo groups are refused while it runs.</summary>
     public static void DeclareProperty(string name, string label, ValueKind kind, double minimum, double maximum,
                                        double[] initial, Action<double[]> write) =>
         declaredProperties.Add(new DeclaredProperty(name, label, kind, minimum, maximum, initial, write));

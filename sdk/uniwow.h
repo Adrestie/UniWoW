@@ -289,8 +289,9 @@ typedef int32_t (*uniwow_apply_change)(void *user, const char *value_json, uniwo
 /* Receives a value written to one of the module's properties, on the module's thread; writes of
    the same property waiting their turn are merged, the last one kept. values holds count numbers,
    which the module may change into the value it keeps instead (a value it refuses: the one it
-   has); the editor's copy follows. Returns 0, or replies an error message and returns non-zero:
-   the module then fails. */
+   has); the editor's copy follows. A write records nothing: record_change, begin_group and
+   end_group are refused while it runs, the editor recording a value changed by hand itself.
+   Returns 0, or replies an error message and returns non-zero: the module then fails. */
 typedef int32_t (*uniwow_property_write)(void *user, double *values, uint32_t count, uniwow_reply error,
                                          void *error_context);
 

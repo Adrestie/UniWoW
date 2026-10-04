@@ -415,6 +415,9 @@ extern "C" fn api_record_change(
     guarded(1, || {
         let module = module(context);
         let result = (|| {
+            if let Some(reason) = properties::writing() {
+                return Err(reason.to_owned());
+            }
             if module.apply.get().is_none() {
                 return Err("the module gives no apply_change".to_owned());
             }
@@ -629,6 +632,10 @@ extern "C" fn api_log(context: *mut c_void, level: i32, message: *const c_char) 
 
 extern "C" fn api_begin_group(context: *mut c_void, label: *const c_char) {
     guarded((), || {
+        if let Some(reason) = properties::writing() {
+            module(context).refuse("begin_group", reason);
+            return;
+        }
         if let Err(error) = read(label).and_then(|label| editor(context)?.begin_group(&label)) {
             log::warn!("a compiled module could not open an undo group: {error}");
         }
@@ -637,6 +644,10 @@ extern "C" fn api_begin_group(context: *mut c_void, label: *const c_char) {
 
 extern "C" fn api_end_group(context: *mut c_void) {
     guarded((), || {
+        if let Some(reason) = properties::writing() {
+            module(context).refuse("end_group", reason);
+            return;
+        }
         if let Err(error) = editor(context).and_then(Editor::end_group) {
             log::warn!("a compiled module could not end an undo group: {error}");
         }
@@ -647,7 +658,7 @@ extern "C" fn api_end_group(context: *mut c_void) {
 #[cfg(test)]
 pub(crate) mod testing {
     use std::ffi::{CStr, CString, c_char, c_void};
-    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicI64, AtomicPtr, AtomicUsize, Ordering};
     use std::sync::{Condvar, Mutex};
 
     use super::properties::PropertyEntry;
@@ -661,6 +672,10 @@ pub(crate) mod testing {
         opened: Condvar,
         level: Mutex<f64>,
         writes: AtomicUsize,
+        /// The module's context, for its write function to call the editor.
+        context: AtomicPtr<c_void>,
+        /// What record_change answered in the last write of 6.
+        recorded: AtomicI64,
     }
 
     thread_local! {
@@ -723,6 +738,11 @@ pub(crate) mod testing {
             error(context, c"seven is refused".as_ptr());
             return 1;
         }
+        if *value == 6.0 {
+            let context = native.context.load(Ordering::SeqCst);
+            let status = api_record_change(context, c"in a write".as_ptr(), c"-1".as_ptr(), c"1".as_ptr());
+            native.recorded.store(i64::from(status), Ordering::SeqCst);
+        }
         if *value == 8.0 {
             let mut open = native.open.lock().unwrap_or_else(|e| e.into_inner());
             while !*open {
@@ -751,12 +771,16 @@ pub(crate) mod testing {
     }
 
     unsafe extern "C-unwind" fn init(
-        _api: *const Api,
+        api: *const Api,
         info: *mut ModuleInfo,
         _error: Reply,
         _context: *mut c_void,
     ) -> i32 {
         let user = STARTING.get() as *mut c_void;
+        // SAFETY: the editor gives a valid table.
+        native_of(user)
+            .context
+            .store(unsafe { (*api).context }, Ordering::SeqCst);
         let command = |name: &'static CStr, handler| CommandEntry {
             name: name.as_ptr(),
             description: c"A command of the tests".as_ptr(),
@@ -815,6 +839,8 @@ pub(crate) mod testing {
             opened: Condvar::new(),
             level: Mutex::new(2.0),
             writes: AtomicUsize::new(0),
+            context: AtomicPtr::new(std::ptr::null_mut()),
+            recorded: AtomicI64::new(-1),
         }));
         STARTING.set(std::ptr::from_ref(state) as usize);
         start(init, id).expect("starts")
@@ -864,6 +890,11 @@ pub(crate) mod testing {
 
     fn context_of(module: &'static ModuleContext) -> *mut c_void {
         std::ptr::from_ref(module).cast_mut().cast()
+    }
+
+    /// What record_change answered in the last write of 6: 0 recorded, non-zero refused.
+    pub fn recorded_in_write(module: &ModuleContext) -> i64 {
+        state(module).recorded.load(Ordering::SeqCst)
     }
 
     /// Lets `native.wait` return.

@@ -95,7 +95,8 @@ inline int32_t run_write(void *user, double *values, uint32_t count, uniwow_repl
 // An animatable property of the module, <module>/<name>, declared before describeProperties: its
 // value is one number, or three for a UNIWOW_VALUE_VECTOR or UNIWOW_VALUE_COLOUR. write receives
 // each value written from elsewhere, on the module's thread, and may change it into the value it
-// keeps; an exception it lets out makes the module fail.
+// keeps; an exception it lets out makes the module fail. It records nothing: recordChange and the
+// undo groups are refused while it runs.
 class Property {
   public:
     Property(const std::string &name, const std::string &label, uint32_t kind, double minimum, double maximum,

@@ -1233,7 +1233,10 @@ table up to date, and its review checks it.
     the module keeps, which the kernel's copy then takes, unless a newer write already waits; a value
     kept that is not finite is refused with a warning, the one before staying. Its failure is
     reported with the property's name and the module's message.
-  - A write records nothing: it neither blocks Undo nor counts as the module's work.
+  - A write records nothing: it neither blocks Undo nor counts as the module's work, and
+    `record_change`, `begin_group` and `end_group` are refused while the write function runs (*a
+    property's write records nothing: the kernel records a value changed by hand*). Undo, which does
+    not wait for writes, would otherwise cross a change recorded there.
   - `set_property` refuses a count that is not the kind's, and numbers that are not finite.
   - C++ also has `describeProperties(info)`, `readProperty` and `writeProperty`, and
     `Property::set`; C# also has `Editor.SetProperty`.

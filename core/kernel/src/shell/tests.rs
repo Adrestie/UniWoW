@@ -838,3 +838,35 @@ fn a_value_a_module_keeps_that_is_not_finite_leaves_the_one_before() {
     );
     assert!(harness.shell.slots[0].state.is_running());
 }
+
+#[test]
+fn a_change_recorded_in_a_property_s_write_is_refused() {
+    let (module, value) = counter("a");
+    let native = CompiledModule::started(capi::testing::native("native"));
+    let mut harness = Harness::with_slots(vec![Slot::loaded("a", module), Slot::compiled("native", native)]);
+    harness.call("a", "a.add", json!({})).unwrap();
+    let thread = harness.shell.slots[1].compiled.expect("compiled");
+    let editor = harness.shell.host.editor(KERNEL);
+    editor
+        .write_property("native/level", uniwow_api::PropertyValue::Number(6.0))
+        .unwrap();
+    harness.settle(thread);
+    harness.frame(RawInput::default());
+    assert_ne!(
+        capi::testing::recorded_in_write(thread),
+        0,
+        "record_change refused in a write"
+    );
+    assert_eq!(
+        harness.shell.history.undo_label().as_deref(),
+        Some("add 1"),
+        "the history did not change"
+    );
+    assert!(harness.shell.blocking_undo().is_none());
+    harness.shell.undo();
+    assert_eq!(*lock(&value), 0, "Undo goes to the change before");
+    // Out of a write, the module records as before.
+    capi::testing::change(thread, "after", 1);
+    harness.frame(RawInput::default());
+    assert_eq!(harness.shell.history.undo_label().as_deref(), Some("after"));
+}

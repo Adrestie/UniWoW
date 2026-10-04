@@ -2,6 +2,7 @@
 //! that reading never waits for a module, and hands each write to the module's thread, merging the
 //! writes still waiting there.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -25,6 +26,19 @@ pub struct PropertyEntry {
     pub initial: [f64; 3],
     pub write: Option<WriteFn>,
     pub user: *mut c_void,
+}
+
+thread_local! {
+    /// Set while a module's write function runs on this thread.
+    static WRITING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Why a module may not record a change now: a write function of its properties runs, whose work
+/// Undo does not wait for.
+pub fn writing() -> Option<&'static str> {
+    WRITING
+        .get()
+        .then_some("a property's write records nothing: the kernel records a value changed by hand")
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -78,6 +92,7 @@ impl CompiledProperty {
         };
         let mut numbers = value.components();
         let mut error = String::new();
+        WRITING.set(true);
         let status = (self.write)(
             self.user.0,
             numbers.as_mut_ptr(),
@@ -85,6 +100,7 @@ impl CompiledProperty {
             collect,
             text_target(&mut error),
         );
+        WRITING.set(false);
         if status != 0 {
             editor.report_failure(&format!("could not write its property '{}': {error}", self.name));
             return;
