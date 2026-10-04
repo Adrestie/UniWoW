@@ -52,7 +52,8 @@ enum {
     UNIWOW_ELLIPSE_ITEM = 18,
     UNIWOW_TEXT_ITEM = 19,
     UNIWOW_ITEM_GROUP = 20,
-    UNIWOW_PAINT_AREA = 21
+    UNIWOW_PAINT_AREA = 21,
+    UNIWOW_DIALOG = 22 /* a modal window; created hidden, shown and hidden through VISIBLE */
 };
 
 /* Properties. Texts go through set_text; everything else through set_numbers: a flag is 0 or 1,
@@ -108,7 +109,8 @@ enum {
     UNIWOW_SIGNAL_MOUSE_PRESS = 14,          /* paint area: x, y, button, modifiers */
     UNIWOW_SIGNAL_MOUSE_MOVE = 15,           /* paint area, while a button is held: x, y */
     UNIWOW_SIGNAL_MOUSE_RELEASE = 16,        /* paint area: x, y */
-    UNIWOW_SIGNAL_WHEEL = 17                 /* paint area: x, y, dx, dy */
+    UNIWOW_SIGNAL_WHEEL = 17,                /* paint area: x, y, dx, dy */
+    UNIWOW_SIGNAL_REJECTED = 18              /* dialog: the user closed it, which hid it */
 };
 
 /* What a slot receives; the fields its signal does not use are zero. button: 1 left, 2 right,
@@ -184,7 +186,7 @@ typedef struct uniwow_api {
     /* Destroys an object and its children. */
     void (*destroy)(void *context, uniwow_handle object);
     /* Places a widget or layout in a layout (row and column for a grid layout), or sets the layout
-       of a panel or group box. */
+       of a panel, group box or dialog. */
     int32_t (*add_to)(void *context, uniwow_handle container, uniwow_handle child, uint32_t row, uint32_t column,
                       uint32_t row_span, uint32_t column_span);
     int32_t (*set_text)(void *context, uniwow_handle object, uint32_t property, const char *text);

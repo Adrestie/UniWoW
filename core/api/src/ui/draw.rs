@@ -53,6 +53,50 @@ impl PanelView {
         }
     }
 
+    /// Draws the dialogs of a module that are shown, each in a modal window over the editor. The
+    /// user closes one with Escape or its close button: it is then hidden and sends `Rejected`.
+    pub fn dialogs(&mut self, shared: &SharedUi, ctx: &egui::Context, gpu: Option<&egui_wgpu::RenderState>) {
+        let mut store = lock(shared);
+        store.set_wake(ctx);
+        let mut events = Vec::new();
+        for handle in store.dialogs() {
+            let Some(object) = store.object(handle).cloned() else {
+                continue;
+            };
+            // Each module numbers its objects from 1: its store tells its dialogs apart.
+            let id = egui::Id::new(("uniwow-dialog", std::sync::Arc::as_ptr(shared) as usize, handle));
+            let modal = egui::Modal::new(id).show(ctx, |ui| {
+                ui.set_min_width(320.0);
+                let closed = ui
+                    .horizontal(|ui| {
+                        ui.strong(&object.title);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), close_button)
+                            .inner
+                    })
+                    .inner;
+                ui.separator();
+                if let Some(layout) = object.children.first() {
+                    self.object(&mut store, shared, *layout, ui, gpu, &mut events);
+                }
+                closed
+            });
+            let escape = modal.is_top_modal && ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            if modal.inner || escape {
+                if let Some(target) = store.object_mut(handle) {
+                    target.visible = false;
+                }
+                events.push(SignalData {
+                    sender: handle,
+                    signal: Signal::Rejected as u32,
+                    ..Default::default()
+                });
+            }
+        }
+        for event in events {
+            store.emit(event);
+        }
+    }
+
     fn object(
         &mut self,
         store: &mut Ui,
@@ -275,6 +319,7 @@ impl PanelView {
             }
             Kind::PaintArea => Some(self.paint_area(store, shared, handle, object, ui, events)),
             Kind::Panel
+            | Kind::Dialog
             | Kind::GraphicsScene
             | Kind::RectItem
             | Kind::LineItem
@@ -403,4 +448,20 @@ impl PanelView {
         }
         response
     }
+}
+
+/// The close button of a dialog: a drawn cross, the fonts having no such character.
+fn close_button(ui: &mut egui::Ui) -> bool {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+    let stroke = egui::Stroke::new(1.5, ui.style().interact(&response).fg_stroke.color);
+    let (centre, size) = (rect.center(), 4.0);
+    ui.painter().line_segment(
+        [centre + egui::Vec2::splat(-size), centre + egui::Vec2::splat(size)],
+        stroke,
+    );
+    ui.painter().line_segment(
+        [centre + egui::vec2(-size, size), centre + egui::vec2(size, -size)],
+        stroke,
+    );
+    response.on_hover_text("Close").clicked()
 }

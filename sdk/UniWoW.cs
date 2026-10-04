@@ -112,7 +112,7 @@ public enum Kind : uint
 {
     Panel = 1, Label, PushButton, CheckBox, Slider, SpinBox, LineEdit, ComboBox, Separator, GroupBox,
     VBoxLayout, HBoxLayout, GridLayout, GraphicsView, GraphicsScene, RectItem, LineItem, EllipseItem,
-    TextItem, ItemGroup, PaintArea,
+    TextItem, ItemGroup, PaintArea, Dialog,
 }
 
 public enum Property : uint
@@ -126,7 +126,7 @@ public enum SignalId : uint
 {
     Clicked = 1, Toggled, ValueChanged, SliderPressed, SliderReleased, TextChanged, EditingFinished,
     CurrentIndexChanged, ItemPressed, ItemMoved, ItemDoubleClicked, SelectionChanged, Paint, MousePress,
-    MouseMove, MouseRelease, Wheel,
+    MouseMove, MouseRelease, Wheel, Rejected,
 }
 
 public enum LogLevel { Error = 1, Warning = 2, Information = 3, Debug = 4 }
@@ -591,6 +591,25 @@ public unsafe class GroupBox : Widget
 
     public void SetTitle(string title) => WriteText(Property.Title, title);
     public void SetLayout(Layout layout) => Table->AddTo(Context, Handle, layout.Handle, 0, 0, 1, 1);
+}
+
+/// <summary>A modal window, as QDialog: while it is shown, the rest of the editor cannot be
+/// used. It is created hidden; the user closing it, with Escape or its close button, hides it and
+/// sends Rejected.</summary>
+public unsafe class Dialog : UiObject
+{
+    public Dialog(string title = "") : base(Make(Kind.Dialog))
+    {
+        SetTitle(title);
+        Rejected = new Signal(Handle, SignalId.Rejected);
+    }
+
+    public Signal Rejected { get; }
+
+    public void SetTitle(string title) => WriteText(Property.Title, title);
+    public void SetLayout(Layout layout) => Table->AddTo(Context, Handle, layout.Handle, 0, 0, 1, 1);
+    public void Show() => WriteNumbers(Property.Visible, 1.0);
+    public void Hide() => WriteNumbers(Property.Visible, 0.0);
 }
 
 /// <summary>A dock panel the module declared with Editor.Describe.</summary>

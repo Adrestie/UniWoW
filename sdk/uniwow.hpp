@@ -276,6 +276,18 @@ class GroupBox : public Widget {
     void setLayout(const Layout &layout) const { api().add_to(detail::context(), handle_, layout.handle(), 0, 0, 1, 1); }
 };
 
+// A modal window, as QDialog: while it is shown, the rest of the editor cannot be used. It is
+// created hidden; the user closing it, with Escape or its close button, hides it and sends rejected.
+class Dialog : public Object {
+  public:
+    explicit Dialog(const std::string &title = "") : Object(make(UNIWOW_DIALOG)) { setTitle(title); }
+    void setTitle(const std::string &title) const { setString(UNIWOW_PROPERTY_TITLE, title); }
+    void setLayout(const Layout &layout) const { api().add_to(detail::context(), handle_, layout.handle(), 0, 0, 1, 1); }
+    void show() const { setNumbers(UNIWOW_PROPERTY_VISIBLE, {1.0}); }
+    void hide() const { setNumbers(UNIWOW_PROPERTY_VISIBLE, {0.0}); }
+    Signal<> rejected{handle_, UNIWOW_SIGNAL_REJECTED};
+};
+
 // A dock panel the module declared in uniwow_module_info.
 class Panel : public Object {
   public:

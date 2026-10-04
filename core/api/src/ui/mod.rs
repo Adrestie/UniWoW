@@ -51,7 +51,7 @@ numbered!(
         Panel = 1, Label = 2, PushButton = 3, CheckBox = 4, Slider = 5, SpinBox = 6, LineEdit = 7,
         ComboBox = 8, Separator = 9, GroupBox = 10, VBoxLayout = 11, HBoxLayout = 12,
         GridLayout = 13, GraphicsView = 14, GraphicsScene = 15, RectItem = 16, LineItem = 17,
-        EllipseItem = 18, TextItem = 19, ItemGroup = 20, PaintArea = 21,
+        EllipseItem = 18, TextItem = 19, ItemGroup = 20, PaintArea = 21, Dialog = 22,
     }
 );
 
@@ -73,7 +73,7 @@ numbered!(
         Clicked = 1, Toggled = 2, ValueChanged = 3, SliderPressed = 4, SliderReleased = 5,
         TextChanged = 6, EditingFinished = 7, CurrentIndexChanged = 8, ItemPressed = 9,
         ItemMoved = 10, ItemDoubleClicked = 11, SelectionChanged = 12, Paint = 13,
-        MousePress = 14, MouseMove = 15, MouseRelease = 16, Wheel = 17,
+        MousePress = 14, MouseMove = 15, MouseRelease = 16, Wheel = 17, Rejected = 18,
     }
 );
 
@@ -91,7 +91,7 @@ impl Kind {
 
     /// A widget that a layout can hold.
     pub fn is_widget(self) -> bool {
-        !self.is_item() && !matches!(self, Kind::Panel | Kind::GraphicsScene)
+        !self.is_item() && !matches!(self, Kind::Panel | Kind::GraphicsScene | Kind::Dialog)
     }
 }
 
@@ -346,7 +346,10 @@ impl Ui {
             (false, None) if kind == Kind::Panel => return Err("panels are declared by the module".to_owned()),
             (false, None) => {}
         }
-        let handle = self.insert(Object::new(kind, parent));
+        let mut object = Object::new(kind, parent);
+        // A dialog shows when its module asks for it.
+        object.visible = kind != Kind::Dialog;
+        let handle = self.insert(object);
         if let Some(parent) = parent {
             self.get_mut(parent)?.children.push(handle);
             self.changed_structure(parent);
@@ -384,19 +387,31 @@ impl Ui {
         Ok(())
     }
 
-    /// Places a widget or layout in a layout, or the layout of a panel or group box.
+    /// The dialogs shown, in the order they were created.
+    pub fn dialogs(&self) -> Vec<Handle> {
+        let mut shown: Vec<Handle> = self
+            .objects
+            .iter()
+            .filter(|(_, object)| object.kind == Kind::Dialog && object.visible)
+            .map(|(handle, _)| *handle)
+            .collect();
+        shown.sort_unstable();
+        shown
+    }
+
+    /// Places a widget or layout in a layout, or the layout of a panel, group box or dialog.
     pub fn add_to(&mut self, container: Handle, child: Handle, cell: [u32; 4]) -> Result<(), String> {
         let container_kind = self.get(container)?.kind;
         let child_kind = self.get(child)?.kind;
         match container_kind {
-            Kind::Panel | Kind::GroupBox if child_kind.is_layout() => {
+            Kind::Panel | Kind::GroupBox | Kind::Dialog if child_kind.is_layout() => {
                 for old in std::mem::take(&mut self.get_mut(container)?.children) {
                     if let Some(object) = self.objects.get_mut(&old) {
                         object.parent = None;
                     }
                 }
             }
-            Kind::Panel | Kind::GroupBox => {
+            Kind::Panel | Kind::GroupBox | Kind::Dialog => {
                 return Err(format!("a {container_kind:?} holds one layout, not a {child_kind:?}"));
             }
             kind if kind.is_layout() && child_kind.is_widget() => {}
@@ -846,5 +861,23 @@ mod tests {
         let structure = ui.structure(scene);
         ui.set_numbers(group, Property::Visible, &[0.0]).unwrap();
         assert!(ui.structure(scene) > structure);
+    }
+
+    #[test]
+    fn a_dialog_starts_hidden_and_holds_one_layout() {
+        let shared = ui();
+        let mut ui = lock(&shared);
+        let dialog = ui.create(Kind::Dialog, None).unwrap();
+        assert!(ui.dialogs().is_empty(), "created hidden");
+        let layout = ui.create(Kind::VBoxLayout, None).unwrap();
+        ui.add_to(dialog, layout, [0, 0, 1, 1]).unwrap();
+        let button = ui.create(Kind::PushButton, None).unwrap();
+        assert!(ui.add_to(dialog, button, [0, 0, 1, 1]).is_err(), "only a layout");
+        assert!(
+            ui.add_to(layout, dialog, [0, 0, 1, 1]).is_err(),
+            "never inside a layout"
+        );
+        ui.set_numbers(dialog, Property::Visible, &[1.0]).unwrap();
+        assert_eq!(ui.dialogs(), vec![dialog]);
     }
 }
