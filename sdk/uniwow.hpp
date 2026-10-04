@@ -61,6 +61,105 @@ inline bool recordChange(const std::string &label, const std::string &undo_json,
 }
 
 namespace detail {
+// An animatable property declared, kept while the module is loaded.
+struct DeclaredProperty {
+    std::string name;
+    std::string label;
+    uint32_t kind;
+    double minimum;
+    double maximum;
+    double initial[3];
+    std::function<void(std::vector<double> &)> write;
+};
+inline std::vector<std::unique_ptr<DeclaredProperty>> &declared_properties() {
+    static std::vector<std::unique_ptr<DeclaredProperty>> declared;
+    return declared;
+}
+inline int32_t run_write(void *user, double *values, uint32_t count, uniwow_reply error, void *error_context) {
+    try {
+        std::vector<double> numbers(values, values + count);
+        static_cast<DeclaredProperty *>(user)->write(numbers);
+        for (size_t index = 0; index < count && index < numbers.size(); ++index) {
+            values[index] = numbers[index];
+        }
+        return 0;
+    } catch (const std::exception &failure) {
+        error(error_context, failure.what());
+    } catch (...) {
+        error(error_context, "the write function threw an exception");
+    }
+    return 1;
+}
+} // namespace detail
+
+// An animatable property of the module, <module>/<name>, declared before describeProperties: its
+// value is one number, or three for a UNIWOW_VALUE_VECTOR or UNIWOW_VALUE_COLOUR. write receives
+// each value written from elsewhere, on the module's thread, and may change it into the value it
+// keeps; an exception it lets out makes the module fail.
+class Property {
+  public:
+    Property(const std::string &name, const std::string &label, uint32_t kind, double minimum, double maximum,
+             std::initializer_list<double> initial, std::function<void(std::vector<double> &)> write)
+        : name_(name) {
+        auto declared = std::make_unique<detail::DeclaredProperty>(
+            detail::DeclaredProperty{name, label, kind, minimum, maximum, {0.0, 0.0, 0.0}, std::move(write)});
+        size_t index = 0;
+        for (double number : initial) {
+            if (index < 3) {
+                declared->initial[index++] = number;
+            }
+        }
+        detail::declared_properties().push_back(std::move(declared));
+    }
+    const std::string &name() const { return name_; }
+    // Tells the value the module's property now has; false when refused.
+    bool set(std::initializer_list<double> values) const {
+        std::vector<double> numbers(values);
+        return api().set_property(detail::context(), name_.c_str(), numbers.data(), uint32_t(numbers.size())) == 0;
+    }
+
+  private:
+    std::string name_;
+};
+
+// Fills the properties of info with those declared; call it in uniwow_module_init.
+inline void describeProperties(uniwow_module_info *info) {
+    auto &declared = detail::declared_properties();
+    auto *entries = new uniwow_property[declared.empty() ? 1 : declared.size()]{};
+    for (size_t index = 0; index < declared.size(); ++index) {
+        const auto &property = *declared[index];
+        entries[index] = uniwow_property{property.name.c_str(), property.label.c_str(), property.kind,
+                                         property.minimum,      property.maximum,
+                                         {property.initial[0], property.initial[1], property.initial[2]},
+                                         &detail::run_write,    declared[index].get()};
+    }
+    info->properties = entries;
+    info->property_count = uint32_t(declared.size());
+    info->property_size = sizeof(uniwow_property);
+}
+
+// The properties of the running modules, as the JSON of properties in uniwow.h.
+inline std::string properties() {
+    std::string text;
+    api().properties(detail::context(), detail::into_string, &text);
+    return text;
+}
+
+// The numbers of a property; none when refused.
+inline std::vector<double> readProperty(const std::string &path) {
+    std::vector<double> values(3);
+    const uint32_t count = api().read_property(detail::context(), path.c_str(), values.data(), 3);
+    values.resize(count < 3 ? count : 3);
+    return values;
+}
+
+// Writes a property, without the history; false when refused.
+inline bool writeProperty(const std::string &path, std::initializer_list<double> values) {
+    std::vector<double> numbers(values);
+    return api().write_property(detail::context(), path.c_str(), numbers.data(), uint32_t(numbers.size())) == 0;
+}
+
+namespace detail {
 using Slot = std::function<void(const uniwow_signal &)>;
 
 // What the module connected and created, as the editor has it. The editor hands back a number

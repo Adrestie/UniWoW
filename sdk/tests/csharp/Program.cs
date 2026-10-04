@@ -33,6 +33,22 @@ static unsafe class Fake
 
     [UnmanagedCallersOnly] public static void Log(IntPtr context, int level, byte* text) { }
 
+    public static string ToldName = "";
+    public static double ToldValue;
+
+    [UnmanagedCallersOnly]
+    public static int SetProperty(IntPtr context, byte* name, double* values, uint count)
+    {
+        ToldName = Utf8.Read(name);
+        ToldValue = count == 1 ? values[0] : -1;
+        return 0;
+    }
+
+    public static string Error = "";
+
+    [UnmanagedCallersOnly]
+    public static void Collect(IntPtr context, byte* text) => Error = Utf8.Read(text);
+
     /// <summary>Calls a slot as the editor would, even after its disconnect.</summary>
     public static void Call((IntPtr Slot, IntPtr User) kept)
     {
@@ -85,6 +101,7 @@ static unsafe class Program
         api->Connect = &Fake.Connect;
         api->Disconnect = &Fake.Disconnect;
         api->Log = &Fake.Log;
+        api->SetProperty = &Fake.SetProperty;
         Editor.Start(api);
 
         var panel = new Panel("main");
@@ -128,6 +145,28 @@ static unsafe class Program
         box.SetLayout(newLayout);
         box.Destroy();
         Expect(!LetGo(movedOutSlot), "a layout replaced in its group box outlives the group box");
+
+        Editor.DeclareProperty("level", "Level", ValueKind.Number, 0, 10, [2], value =>
+        {
+            if (value[0] == 7)
+            {
+                throw new InvalidOperationException("seven is refused");
+            }
+            value[0] = 3;
+        });
+        var info = (ModuleInfo*)NativeMemory.AllocZeroed((nuint)sizeof(ModuleInfo));
+        Editor.Describe(info, "test", "1.0", [], []);
+        var declared = info->Properties[0];
+        Expect(info->PropertyCount == 1 && info->PropertySize == sizeof(NativeProperty), "the property is described");
+        Expect(Utf8.Read(declared.Name) == "level" && declared.Kind == (uint)ValueKind.Number && declared.Minimum == 0 &&
+               declared.Maximum == 10 && declared.Initial[0] == 2, "with its name, kind, range and initial value");
+        double written = 3.4;
+        Expect(declared.Write(declared.User, &written, 1, &Fake.Collect, IntPtr.Zero) == 0 && written == 3,
+               "its write function gives back the value it keeps");
+        written = 7;
+        Expect(declared.Write(declared.User, &written, 1, &Fake.Collect, IntPtr.Zero) != 0 &&
+               Fake.Error == "seven is refused", "an exception of the write function is a failure, with its message");
+        Expect(Editor.SetProperty("level", 5) && Fake.ToldName == "level" && Fake.ToldValue == 5, "SetProperty tells the value");
 
         Console.WriteLine($"{failures} failure(s)");
         return failures == 0 ? 0 : 1;

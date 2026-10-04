@@ -58,6 +58,11 @@ public unsafe struct Api
     public delegate* unmanaged<IntPtr, ulong, double, double, void> Scale;
     public delegate* unmanaged<IntPtr, ulong, void> Save;
     public delegate* unmanaged<IntPtr, ulong, void> Restore;
+
+    public delegate* unmanaged<IntPtr, delegate* unmanaged<IntPtr, byte*, void>, IntPtr, void> Properties;
+    public delegate* unmanaged<IntPtr, byte*, double*, uint, uint> ReadProperty;
+    public delegate* unmanaged<IntPtr, byte*, double*, uint, int> WriteProperty;
+    public delegate* unmanaged<IntPtr, byte*, double*, uint, int> SetProperty;
 }
 
 /// <summary>uniwow_signal: what a slot receives; the fields its signal does not use are zero.</summary>
@@ -106,6 +111,20 @@ public unsafe struct ModuleInfo
     public uint CommandCount, HeaderVersion, CommandSize, PanelCount;
     public NativePanel* Panels;
     public delegate* unmanaged<IntPtr, byte*, delegate* unmanaged<IntPtr, byte*, void>, IntPtr, int> ApplyChange;
+    public IntPtr User;
+    public NativeProperty* Properties;
+    public uint PropertyCount, PropertySize;
+}
+
+/// <summary>uniwow_property of uniwow.h.</summary>
+[StructLayout(LayoutKind.Sequential)]
+public unsafe struct NativeProperty
+{
+    public byte* Name, Label;
+    public uint Kind;
+    public double Minimum, Maximum;
+    public fixed double Initial[3];
+    public delegate* unmanaged<IntPtr, double*, uint, delegate* unmanaged<IntPtr, byte*, void>, IntPtr, int> Write;
     public IntPtr User;
 }
 
@@ -255,7 +274,7 @@ public static class Colors
 /// <summary>The editor, as the module reaches it.</summary>
 public static unsafe class Editor
 {
-    public const uint ApiVersion = 3;
+    public const uint ApiVersion = 4;
 
     static Api* table;
     static Action<string>? applyChange;
@@ -318,6 +337,82 @@ public static unsafe class Editor
         info->PanelCount = (uint)panels.Count;
         info->ApplyChange = applyChange != null ? &RunApplyChange : null;
         info->User = IntPtr.Zero;
+        var properties = (NativeProperty*)NativeMemory.AllocZeroed((nuint)Math.Max(declaredProperties.Count, 1),
+                                                                   (nuint)sizeof(NativeProperty));
+        for (int i = 0; i < declaredProperties.Count; i++)
+        {
+            var property = declaredProperties[i];
+            properties[i].Name = Utf8.Keep(property.Name);
+            properties[i].Label = Utf8.Keep(property.Label);
+            properties[i].Kind = (uint)property.Kind;
+            properties[i].Minimum = property.Minimum;
+            properties[i].Maximum = property.Maximum;
+            for (int n = 0; n < Math.Min(property.Initial.Length, 3); n++)
+            {
+                properties[i].Initial[n] = property.Initial[n];
+            }
+            properties[i].Write = &RunWrite;
+            properties[i].User = (IntPtr)i;
+        }
+        info->Properties = properties;
+        info->PropertyCount = (uint)declaredProperties.Count;
+        info->PropertySize = (uint)sizeof(NativeProperty);
+    }
+
+    /// <summary>An animatable property declared with DeclareProperty.</summary>
+    sealed record DeclaredProperty(string Name, string Label, ValueKind Kind, double Minimum, double Maximum,
+                                   double[] Initial, Action<double[]> Write);
+
+    static readonly List<DeclaredProperty> declaredProperties = [];
+
+    /// <summary>Declares an animatable property, `module/name`, before Describe. Its value is one
+    /// number, or three for a vector or a colour; <paramref name="initial"/> is the one it has at
+    /// start. <paramref name="write"/> receives each value written from elsewhere, on the module's
+    /// thread, and may change it into the value it keeps; throwing makes the module fail.</summary>
+    public static void DeclareProperty(string name, string label, ValueKind kind, double minimum, double maximum,
+                                       double[] initial, Action<double[]> write) =>
+        declaredProperties.Add(new DeclaredProperty(name, label, kind, minimum, maximum, initial, write));
+
+    /// <summary>The properties of the running modules, as the JSON of properties in uniwow.h.</summary>
+    public static string Properties()
+    {
+        using var answer = new Answer();
+        table->Properties(Context, Answer.Reply, answer.Context);
+        return answer.Text;
+    }
+
+    /// <summary>The numbers of a property; none when refused.</summary>
+    public static double[] ReadProperty(string path)
+    {
+        using var text = new Utf8(path);
+        var values = new double[3];
+        uint count;
+        fixed (double* numbers = values)
+        {
+            count = table->ReadProperty(Context, text.Pointer, numbers, 3);
+        }
+        return values[..(int)Math.Min(count, 3)];
+    }
+
+    /// <summary>Writes a property, without the history; false when refused.</summary>
+    public static bool WriteProperty(string path, params double[] values)
+    {
+        using var text = new Utf8(path);
+        fixed (double* numbers = values)
+        {
+            return table->WriteProperty(Context, text.Pointer, numbers, (uint)values.Length) == 0;
+        }
+    }
+
+    /// <summary>Tells the value one of the module's own properties now has; false when
+    /// refused.</summary>
+    public static bool SetProperty(string name, params double[] values)
+    {
+        using var text = new Utf8(name);
+        fixed (double* numbers = values)
+        {
+            return table->SetProperty(Context, text.Pointer, numbers, (uint)values.Length) == 0;
+        }
     }
 
     public static void Log(LogLevel level, string message)
@@ -511,6 +606,31 @@ public static unsafe class Editor
         }
         Reply(reply, replyContext, answer);
         return status;
+    }
+
+    [UnmanagedCallersOnly]
+    static int RunWrite(IntPtr user, double* values, uint count, delegate* unmanaged<IntPtr, byte*, void> error,
+                        IntPtr errorContext)
+    {
+        try
+        {
+            var numbers = new double[count];
+            for (int n = 0; n < count; n++)
+            {
+                numbers[n] = values[n];
+            }
+            declaredProperties[(int)user].Write(numbers);
+            for (int n = 0; n < Math.Min(count, numbers.Length); n++)
+            {
+                values[n] = numbers[n];
+            }
+            return 0;
+        }
+        catch (Exception failure)
+        {
+            Reply(error, errorContext, failure.Message);
+            return 1;
+        }
     }
 
     [UnmanagedCallersOnly]

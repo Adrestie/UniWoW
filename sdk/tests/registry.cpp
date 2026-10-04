@@ -1,5 +1,6 @@
-// Tests of the connections of uniwow.hpp over a fake table, run by cargo xtask test-sdk: a
-// disconnect or a destroy frees the connected function, and a late call reaches nothing.
+// Tests of uniwow.hpp over a fake table, run by cargo xtask test-sdk: a disconnect or a destroy
+// frees the connected function, and a late call reaches nothing; properties are declared, written
+// and told.
 #include "uniwow.hpp"
 
 #include <cstdio>
@@ -25,6 +26,14 @@ uint64_t fake_connect(void *, uniwow_handle, uint32_t, uniwow_slot slot, void *u
 }
 void fake_disconnect(void *, uint64_t connection) { fake_connections.erase(connection); }
 void fake_log(void *, int32_t, const char *message) { std::printf("log: %s\n", message); }
+std::string told_name;
+double told_value = 0.0;
+int32_t fake_set_property(void *, const char *name, const double *values, uint32_t count) {
+    told_name = name;
+    told_value = count == 1 ? values[0] : -1.0;
+    return 0;
+}
+void into(void *target, const char *text) { *static_cast<std::string *>(target) = text; }
 
 // Counts the slot functions destroyed.
 int destroyed_slots = 0;
@@ -50,6 +59,7 @@ int main() {
     api.connect = fake_connect;
     api.disconnect = fake_disconnect;
     api.log = fake_log;
+    api.set_property = fake_set_property;
     uniwow::start(&api);
 
     int calls = 0;
@@ -97,6 +107,28 @@ int main() {
     box.setLayout(new_layout);
     box.destroy();
     expect(destroyed_slots == 3, "a layout replaced in its group box outlives the group box");
+
+    uniwow::Property level("level", "Level", UNIWOW_VALUE_NUMBER, 0.0, 10.0, {2.0}, [](std::vector<double> &value) {
+        if (value[0] == 7.0) {
+            throw std::runtime_error("seven is refused");
+        }
+        value[0] = 3.0;
+    });
+    uniwow_module_info info{};
+    uniwow::describeProperties(&info);
+    const uniwow_property &declared = info.properties[0];
+    expect(info.property_count == 1 && info.property_size == sizeof(uniwow_property), "the property is described");
+    expect(std::string(declared.name) == "level" && declared.kind == UNIWOW_VALUE_NUMBER &&
+               declared.minimum == 0.0 && declared.maximum == 10.0 && declared.initial[0] == 2.0,
+           "with its name, kind, range and initial value");
+    double written = 3.4;
+    std::string error;
+    expect(declared.write(declared.user, &written, 1, into, &error) == 0 && written == 3.0,
+           "its write function gives back the value it keeps");
+    written = 7.0;
+    expect(declared.write(declared.user, &written, 1, into, &error) != 0 && error == "seven is refused",
+           "an exception of the write function is a failure, with its message");
+    expect(level.set({5.0}) && told_name == "level" && told_value == 5.0, "set tells the value");
 
     std::printf("%d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
