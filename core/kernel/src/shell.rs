@@ -106,7 +106,7 @@ impl Shell {
             requests: Some(requests),
             replies: Vec::new(),
             commands_panel: CommandsPanel::default(),
-            groups: Groups::default(),
+            groups: Groups::new(std::thread::current().id()),
             closing: Closing::Open,
         };
         shell.register_all();

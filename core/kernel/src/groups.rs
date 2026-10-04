@@ -37,9 +37,19 @@ pub enum Ended {
 pub struct Groups {
     open: Vec<Open>,
     next_id: u64,
+    /// The interface thread, where the modules' own work is never taken into another group.
+    interface: Option<ThreadId>,
 }
 
 impl Groups {
+    /// Groups for an editor whose interface runs on `interface`.
+    pub fn new(interface: ThreadId) -> Self {
+        Self {
+            interface: Some(interface),
+            ..Self::default()
+        }
+    }
+
     /// Opens a group, or goes one level deeper into the one this caller has open on this thread.
     pub fn begin(&mut self, caller: &str, thread: ThreadId, label: &str) {
         if let Some(group) = self.find(caller, thread) {
@@ -71,11 +81,15 @@ impl Groups {
 
     /// Where a command applied for this caller on this thread goes, if it has a group open; else
     /// the group opened last on that thread, as a command delegated to another module runs on its
-    /// caller's thread, inside its caller's group.
+    /// caller's thread, inside its caller's group. Not on the interface thread, where every module
+    /// works: a group left open there would take all the changes made after it.
     pub fn parts_of(&mut self, caller: &str, thread: ThreadId) -> Option<&mut Vec<Part>> {
-        let index = self
-            .position(caller, thread)
-            .or_else(|| self.open.iter().rposition(|group| group.thread == thread))?;
+        let shared = Some(thread) == self.interface;
+        let index = self.position(caller, thread).or_else(|| {
+            (!shared)
+                .then(|| self.open.iter().rposition(|group| group.thread == thread))
+                .flatten()
+        })?;
         Some(&mut self.open[index].parts)
     }
 
@@ -247,6 +261,18 @@ mod tests {
             panic!("closed");
         };
         assert_eq!(labels(&closed.parts), vec!["card".to_owned()]);
+    }
+
+    #[test]
+    fn a_group_left_open_on_the_interface_thread_takes_no_other_change() {
+        let here = std::thread::current().id();
+        let mut groups = Groups::new(here);
+        groups.begin("scripting-lua", here, "left open");
+        assert!(groups.parts_of("sample-cube", here).is_none());
+        assert!(
+            groups.parts_of("scripting-lua", here).is_some(),
+            "its own changes still go in"
+        );
     }
 
     #[test]
