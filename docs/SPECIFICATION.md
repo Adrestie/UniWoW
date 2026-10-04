@@ -476,7 +476,7 @@ milestone 9 takes up those that concern it.
 
 | Library | Role |
 |---|---|
-| formats | Read and write MPQ, DBC, ADT, WDT, WDL, WMO, M2, BLP. Based on warcraft-rs (MIT/Apache) where its writing is verified, own code otherwise. Milestone 9 proposes to keep it out of the runtime, inside the module `assets`, behind services (see milestone 9) |
+| formats | Read and write MPQ, DBC, ADT, WDT, WDL, WMO, M2, BLP. Based on warcraft-rs (MIT/Apache) where its writing is verified, own code otherwise. Milestone 9 proposes to keep it out of the runtime, inside the module `assets`, behind services, with the modern formats WarcraftXL loads, translated from wow.export (see milestone 9) |
 | defs | DBC layouts for build 12340 (WoWDBDefs). Milestone 9 proposes it inside the module `assets` too |
 | vfs | Client archive chain in the 3.3.5a load order, plus the project's own files on top. Milestone 9 proposes it inside the module `assets` too |
 | gpu | Generic GPU helpers on wgpu (device, shaders, buffers, camera math). Drawing of each kind of object belongs to the module that owns it |
@@ -1645,11 +1645,11 @@ Decisions of the user:
 - **It comes after milestone 8**; the outlined milestones that followed move one number on.
 - **The server runs on the same machine as the editor**: the observer listens on 127.0.0.1 only,
   and asks for a token.
-- **The parts of warcraft-rs `assets` uses are copied into it**, with their licence: each crate of
-  warcraft-rs shares crates with the runtime (13 in all: `log`, `glam`, `thiserror`, `bitflags`,
-  `parking_lot`, `image`, `serde`...), which the rule of section 2 forbids a module, and `wow-mpq`
-  brings `rayon`, a second pool of threads, with no option to leave it out. Modules keep depending
-  on `uniwow-api` and `libs/*` only.
+- **Only WotLK 3.3.5a is targeted, with WarcraftXL**: the player's client loads, through the
+  extensions of WarcraftXL, the modern files exported from the retail game with wow.export, without
+  conversion. The view shows them **from this milestone on**, as the client does.
+- **The readers of the files**: those of 3.3.5a copied from warcraft-rs, the modern ones translated
+  from wow.export, inside the module `assets` (*Components*).
 
 Rules:
 
@@ -1667,19 +1667,38 @@ Rules:
 will change often for a long time, and in the runtime each fix would change its fingerprint and
 make every Rust module be rebuilt, while making the runtime export more. So they live in a module:
 
-- `assets` reads the chain of archives of 3.3.5a in the order of the patches (MPQ), the DBC with the
-  layouts of build 12340 (from WoWDBDefs, its licence to check), and WDT, ADT, WMO, M2 and BLP, read
-  only in this milestone. What can also be **written** correctly is recorded format by format: the
-  terrain and the placement will need it.
-- It offers the services `vfs` (the bytes of a file, whether it exists, the files under a folder)
-  and `formats` (a tile, a model, a texture, the rows of a DBC, parsed), shared between threads
+- `assets` reads two families of files (decisions of the user):
+  - **the files of the 3.3.5a client**: the chain of archives in the order of the patches (MPQ), the
+    DBC with the layouts of build 12340 (from WoWDBDefs, its licence to check), WDT, ADT, WMO, M2
+    and BLP. They are read with the parts of warcraft-rs (MIT/Apache) the milestone uses;
+  - **the modern files WarcraftXL makes the client load directly**, without conversion: the M2 of
+    recent versions (chunked, with their `.skin`, `.anim` and `.bone`), the modern WMO, the split
+    ADT, the DB2 tables, files named by their FileDataID through a listfile. The user exports them
+    from the retail game with wow.export and the client loads them through the extensions of
+    WarcraftXL (`wxl-modern-m2`, `wxl-modern-wmo`, `wxl-modern-adt`, `wxl-db2`), installed with
+    wxl-hub. The editor reads the same files from the same places, so that what the client shows,
+    the view shows. Their readers are written from those of wow.export (MIT, JavaScript),
+    translated with its notice. The BLP did not change and keep one reader.
+  - Read only in this milestone. What can also be **written** correctly is recorded format by
+    format: the terrain and the placement will need it.
+- WarcraftXL is GPL-3: nothing of its code is copied into UniWoW, whose own licence is still to
+  choose (section 10). It stays a dependency of the player's client, not of the editor's code.
+- It offers the services `vfs` (the bytes of a file, whether it exists, the files under a folder,
+  and a modern file by its FileDataID through the listfile) and `formats` (a tile, a model, a texture, the rows of a DBC, parsed), shared between threads
   (T3). Their interfaces, and the plain data they return (heights, layers and alpha maps of a chunk,
   vertices, bones and keyframes of a model, the levels of a texture), are declared in `core/api`:
   they change far less often than the code reading the files.
-- The rule of section 2 stays: a module depends on `uniwow-api` and `libs/*` only. `assets`
-  therefore holds its own copy of the parts of warcraft-rs it uses, with their licence (MIT/Apache),
-  using the crates of the runtime and the kernel's pool instead of their own (decision of the user,
-  above).
+- The rule of section 2 stays as the user chose it: a module depends on `uniwow-api` and `libs/*`
+  only. `assets` therefore holds its own copy of the parts of warcraft-rs it uses and its
+  translation of the readers of wow.export, each with its licence, its authors and the version or
+  commit it comes from (for instance in `modules/assets/THIRD_PARTY.md`); their updates are carried
+  over by hand. The copy drops rayon, a second pool of threads that wow-mpq brings without a way to
+  avoid it: the parallel work goes through the kernel's pool (`Context::spawn`, `parallel_for`), and
+  the copied code uses the crates `uniwow-api` re-exports (`log`, `glam`, `serde`, `serde_json`,
+  `bytemuck`) rather than versions of its own (decision of the user, after the review found that
+  every crate of warcraft-rs shares crates with the runtime). A crate the copy needs that the runtime
+  does not offer, such as the decompressions of the archives (zlib and bzip2 at least), is added to
+  the runtime as section 2 says, in step 9.1: the runtime's fingerprint changes once, then.
 - `libs/server-link` (in the runtime) holds the client of the observer: its protocol is small and
   changes with its version only.
 
@@ -1726,10 +1745,13 @@ built with the AzerothCore source tree; how to build it is documented):
   are matched to those of the view. The view draws in reverse Z with no far plane since step 8.3
   (`Target::depth_compare`): the terrain, the models and the buildings take it, so that a whole
   map is seen with its depth precise near the eye.
-- `terrain`: WDT and ADT, heights, textures and their layers, loaded and unloaded around the camera.
+- `terrain`: WDT and ADT, those of 3.3.5a and the split tiles WarcraftXL loads, heights, textures
+  and their layers, loaded and unloaded around the camera.
 - `models` and its service `models`: M2 (model, skin, textures, the animations *Stand*, *Walk*,
-  *Run* chosen by the movement received) and WMO, loaded in jobs, kept on the GPU, and the instances
-  other modules give drawn in the viewport, each with its transform, its animation and its id.
+  *Run* chosen by the movement received) and WMO, those of 3.3.5a and the modern ones WarcraftXL
+  loads, the same instances whatever their version, loaded in jobs, kept on the GPU, and the
+  instances other modules give drawn in the viewport, each with its transform, its animation and
+  its id.
 - `placement`: the doodads and buildings of the tiles, given to `models` as instances; `liquids`:
   the water of the tiles.
 - `live-world`: the connection to the observer, the entities given to `models` as instances, their
@@ -1870,13 +1892,13 @@ Each step is reviewed before the next one; the milestone is delivered once all a
 
 | Step | Content |
 |---|---|
-| 9.1 | Installations; the module `assets` and its services `vfs` and `formats`, with their interfaces in `core/api`, read from any thread at once: MPQ, the list of files, the DBC `Map`, `AreaTable`, `CreatureDisplayInfo`, `CreatureModelData`, and those the next steps need |
+| 9.1 | Installations; the module `assets` and its services `vfs` and `formats`, with their interfaces in `core/api`, read from any thread at once: MPQ, then the files WarcraftXL adds where it finds them, the list of files and the listfile of FileDataIDs, the DBC `Map`, `AreaTable`, `CreatureDisplayInfo`, `CreatureModelData`, and the DB2 tables WarcraftXL reads where they extend them, and those the next steps need |
 | 9.2a | The additions to the core: `parallel_for`, bundles kept in the viewport with `prepare`, its frame signal |
-| 9.2 | The terrain model that can be edited (point 1 above), loaded in jobs in the order of *Threads*, its uploads submitted by the jobs, the GPU memory budget, drawn chunk by chunk; the free camera |
+| 9.2 | The terrain model that can be edited (point 1 above), from the ADT of 3.3.5a and the split tiles, loaded in jobs in the order of *Threads*, its uploads submitted by the jobs, the GPU memory budget, drawn chunk by chunk; the free camera |
 | 9.3 | The observer and its threads, on both sides; the entities as markers (a coloured shape and the name) moving in real time; the commands and events of L4 |
-| 9.4 | Still M2 models: from the display id to the model, its skin, its textures and its scale |
-| 9.5 | M2 animations: *Stand*, *Walk*, *Run* chosen by the movement received, on the animation thread |
-| 9.6 | Buildings (WMO), doodads and water |
+| 9.4 | Still M2 models, of 3.3.5a and modern: from the display id to the model, its skin, its textures and its scale |
+| 9.5 | M2 animations, of 3.3.5a and modern (`.anim` files): *Stand*, *Walk*, *Run* chosen by the movement received, on the animation thread |
+| 9.6 | Buildings (WMO, of 3.3.5a and modern), doodads and water |
 | 9.7 | Optional, proposed apart: light and sky (`Light.dbc`), the server's time of day |
 
 #### Risks verified first
@@ -1890,13 +1912,15 @@ Each step is reviewed before the next one; the milestone is delivered once all a
 | Reading the archives from many threads at once: does it scale with the cores, or does the disk or a lock limit it? | To measure |
 | The time the interface thread spends per frame while flying fast over a city: handing over, culling, recording | To measure |
 | What warcraft-rs reads and writes correctly in 3.3.5a, format by format; what `assets` copies of it, without `rayon` | To verify |
+| Which versions of the modern formats the extensions of WarcraftXL load, and where they find the files (their folders, loose files, FileDataIDs and listfile): the editor must read the same files from the same places | To verify |
+| What wow.export reads of those formats, and how much of it the translation takes | To verify |
 | Does the active invisible object stay out of the game (no aggro, no AI, not seen by game masters), and is it always removed (unsubscription, disconnection, heartbeat lost)? | To verify |
 
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around
 the camera, its order and the cancelling of what left the zone; rebuilding one terrain chunk from
-the model; reading the formats on small sample files that the tests write themselves (never files
+the model; reading the formats, of 3.3.5a and modern, on small sample files that the tests write themselves (never files
 taken from the client: they are Blizzard's and the repository is public); `parallel_for`, and a job
 of another module started while every thread runs slices; the
 archives read from many threads at once; the snapshot of the entities read from many threads while
@@ -1913,6 +1937,7 @@ On the user's machine, with the client and the server on it:
 |---|---|
 | A map chosen, then flown over | Terrain, buildings, doodads and water right |
 | Creatures and NPCs | At their place, animated, moving as on the server |
+| A creature, a building or a terrain tile exported from the retail game and loaded by WarcraftXL | Shown as the client shows it, animated for a creature |
 | A player connected meanwhile with the real client | Seen moving |
 | The server stopped, then started again | The view says so, then reconnects |
 | Anything changed? | Nothing: no undo entry, no write in the database or the files |
@@ -1984,4 +2009,6 @@ the frames; each change one undo entry. Built on the engine and widgets of miles
 - Project model: what a project contains, where it is stored, how it maps to a WoW-mods module.
 - Installations targeted: client with WXL, server, database connection. Milestone 9 settles part of it:
   the client's folder, and the observer on the same machine (address, port, token).
+- The licence of UniWoW, none today. warcraft-rs and wow.export, whose code `assets` copies or
+  translates, are MIT or Apache; WarcraftXL is GPL-3 and nothing of its code is copied.
 - Order of the features after milestone 1.
