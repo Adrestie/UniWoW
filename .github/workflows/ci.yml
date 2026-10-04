@@ -13,6 +13,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
@@ -21,5 +24,7 @@ jobs:
         run: cargo test --workspace
       - name: Build
         run: cargo xtask build
+      - name: C# module built
+        run: if (-not (Test-Path out/debug/modules/sample-csharp/sample-csharp.dll)) { exit 1 }
       - name: Check
         run: cargo xtask check

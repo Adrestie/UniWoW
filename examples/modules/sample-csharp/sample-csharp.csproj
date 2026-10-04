@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Published with NativeAOT into a DLL exporting uniwow_module_init: cargo xtask build runs
+       dotnet publish -c Release -r win-x64. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AssemblyName>sample-csharp</AssemblyName>
+    <RootNamespace>SampleCsharp</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../../sdk/UniWoW.cs" Link="UniWoW.cs" />
+  </ItemGroup>
+</Project>

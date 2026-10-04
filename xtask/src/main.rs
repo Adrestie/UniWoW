@@ -120,8 +120,9 @@ fn build(release: bool) -> Result<String> {
 }
 
 /// Builds and installs the sample modules of `examples/modules/<id>/` as their author would: their
-/// C and C++ sources compiled with the MSVC compiler found on the machine into the DLL their
-/// `module.toml` names, both copied into `out/<profile>/modules/<id>/`.
+/// C and C++ sources compiled with the MSVC compiler found on the machine, or their C# project
+/// published with NativeAOT by the .NET SDK, into the DLL their `module.toml` names, both copied
+/// into `out/<profile>/modules/<id>/`. Without the .NET 10 SDK, the C# modules are left out.
 fn build_examples(ws: &Workspace, profile: &Profile) -> Result<usize> {
     let mut folders: Vec<PathBuf> = match std::fs::read_dir(ws.root.join("examples").join("modules")) {
         Ok(entries) => entries
@@ -134,16 +135,24 @@ fn build_examples(ws: &Workspace, profile: &Profile) -> Result<usize> {
     folders.sort();
     let mut built = 0;
     for folder in folders {
-        let mut sources: Vec<PathBuf> = std::fs::read_dir(&folder)
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&folder)
             .map_err(|e| e.to_string())?
             .filter_map(|e| e.ok())
             .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "cpp" || e == "c"))
             .collect();
-        if sources.is_empty() {
+        files.sort();
+        let with_extension = |wanted: &[&str]| -> Vec<PathBuf> {
+            files
+                .iter()
+                .filter(|p| p.extension().is_some_and(|e| wanted.iter().any(|w| e == *w)))
+                .cloned()
+                .collect()
+        };
+        let sources = with_extension(&["cpp", "c"]);
+        let project = with_extension(&["csproj"]).into_iter().next();
+        if sources.is_empty() && project.is_none() {
             continue;
         }
-        sources.sort();
         let name = folder.file_name().expect("folder").to_string_lossy().into_owned();
         let manifest_path = folder.join("module.toml");
         let manifest: toml::Table = std::fs::read_to_string(&manifest_path)
@@ -156,41 +165,102 @@ fn build_examples(ws: &Workspace, profile: &Profile) -> Result<usize> {
             .to_owned();
         let work = profile.target.join("examples").join(&name);
         std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
-        let compiler = cc::windows_registry::find_tool("x86_64-pc-windows-msvc", "cl.exe")
-            .ok_or("no MSVC compiler found: install the Visual Studio C++ build tools")?;
-        let output = compiler
-            .to_command()
-            .current_dir(&work)
-            .args([
-                "/nologo",
-                "/LD",
-                "/MD",
-                "/O2",
-                "/EHsc",
-                "/std:c++17",
-                "/utf-8",
-                "/W4",
-                "/WX",
-            ])
-            .arg(format!("/I{}", ws.root.join("sdk").display()))
-            .args(&sources)
-            .arg(format!("/Fe:{dll}"))
-            .args(["/link", "/Brepro"])
-            .output()
-            .map_err(|e| format!("could not start the MSVC compiler: {e}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "module {name} failed to compile:\n{}",
-                String::from_utf8_lossy(&output.stdout).trim()
-            ));
-        }
+        let output = match &project {
+            Some(project) => {
+                let Some(published) = publish_csharp(project, &work)? else {
+                    println!("module {name} left out: the .NET 10 SDK is not installed");
+                    continue;
+                };
+                published
+            }
+            None => compile_c(ws, &name, &sources, &dll, &work)?,
+        };
         let destination = profile.out.join("modules").join(&name);
         std::fs::create_dir_all(&destination).map_err(|e| e.to_string())?;
-        copy_if_changed(&work.join(&dll), &destination.join(&dll))?;
+        copy_if_changed(&output.join(&dll), &destination.join(&dll))?;
         copy_if_changed(&manifest_path, &destination.join("module.toml"))?;
         built += 1;
     }
     Ok(built)
+}
+
+/// Compiles C and C++ sources into `work/<dll>`; returns `work`.
+fn compile_c(ws: &Workspace, name: &str, sources: &[PathBuf], dll: &str, work: &Path) -> Result<PathBuf> {
+    let compiler = cc::windows_registry::find_tool("x86_64-pc-windows-msvc", "cl.exe")
+        .ok_or("no MSVC compiler found: install the Visual Studio C++ build tools")?;
+    let output = compiler
+        .to_command()
+        .current_dir(work)
+        .args([
+            "/nologo",
+            "/LD",
+            "/MD",
+            "/O2",
+            "/EHsc",
+            "/std:c++17",
+            "/utf-8",
+            "/W4",
+            "/WX",
+        ])
+        .arg(format!("/I{}", ws.root.join("sdk").display()))
+        .args(sources)
+        .arg(format!("/Fe:{dll}"))
+        .args(["/link", "/Brepro"])
+        .output()
+        .map_err(|e| format!("could not start the MSVC compiler: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "module {name} failed to compile:\n{}",
+            String::from_utf8_lossy(&output.stdout).trim()
+        ));
+    }
+    Ok(work.to_owned())
+}
+
+/// Publishes a C# project with NativeAOT into `work/publish`; returns that folder, or `None` when
+/// the .NET 10 SDK is not installed.
+fn publish_csharp(project: &Path, work: &Path) -> Result<Option<PathBuf>> {
+    let sdks = match Command::new("dotnet").arg("--list-sdks").output() {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).into_owned(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("could not start dotnet: {error}")),
+    };
+    if !sdks.lines().any(|line| line.starts_with("10.")) {
+        return Ok(None);
+    }
+    // NativeAOT finds the MSVC linker through vswhere.exe, which needs `ProgramFiles(x86)`: some
+    // shells, such as Git Bash, do not pass that variable on.
+    let program_files = std::env::var_os("ProgramFiles(x86)")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)"));
+    let mut path = program_files
+        .join("Microsoft Visual Studio")
+        .join("Installer")
+        .into_os_string();
+    if let Some(current) = std::env::var_os("PATH") {
+        path.push(";");
+        path.push(current);
+    }
+    let published = work.join("publish");
+    let output = Command::new("dotnet")
+        .arg("publish")
+        .arg(project)
+        .args(["-c", "Release", "-r", "win-x64", "--nologo", "--artifacts-path"])
+        .arg(work)
+        .arg("-o")
+        .arg(&published)
+        .env("PATH", path)
+        .env("ProgramFiles(x86)", &program_files)
+        .output()
+        .map_err(|e| format!("could not start dotnet: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{} failed to publish:\n{}",
+            project.display(),
+            String::from_utf8_lossy(&output.stdout).trim()
+        ));
+    }
+    Ok(Some(published))
 }
 
 /// Copies the scripts of `scripts/` into `out/<profile>/scripts`, overwriting those of the same

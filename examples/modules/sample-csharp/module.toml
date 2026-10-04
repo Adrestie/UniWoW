@@ -1,0 +1,8 @@
+# Written by the module's author, beside the DLL.
+id = "sample-csharp"
+name = "Sample C# counter"
+version = "0.1.0"
+kind = "compiled"
+category = "Samples"
+description = "A counter changed by buttons, a slider and a spin box, each change undoable, written in C# with NativeAOT"
+dll = "sample-csharp.dll"
