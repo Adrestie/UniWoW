@@ -236,7 +236,7 @@ fills it, or *not planned* when no milestone does yet.
 | Widgets, layouts, a scene, painting | egui | The objects of this section | The classes named as in Qt | Milestones 9 and 10 |
 | Modal windows | The command `ui.dialog`; the object `Dialog` | `ui.dialog` through `call`; `Dialog` | `uniwow::Dialog`; `Dialog` | Scripts: `ui.dialog` through `uniwow.call` |
 | The curve editor | The service `curve-editor` | `CurveView` | `uniwow::CurveView`; `CurveView` | Milestones 9 and 10 |
-| Animatable properties: declare, list, read, write | `Registrar::animatable`; `Editor::properties`, `read_property`, `write_property` | — step 8.2 | — step 8.2 | — milestones 9 and 10 |
+| Animatable properties: declare, list, read, write | `Registrar::animatable`; `Editor::properties`, `read_property`, `write_property` | `uniwow_module_info.properties` (`uniwow_property`); `properties`, `read_property`, `write_property`, `set_property` | `uniwow::Property`, `describeProperties`, `properties`, `readProperty`, `writeProperty`; `Editor.DeclareProperty`, `Properties`, `ReadProperty`, `WriteProperty`, `SetProperty` | — milestones 9 and 10 |
 | The viewport's camera | Inside the module `viewport` (*View*, *Reset camera*) | — step 8.3 | — step 8.3 | — step 8.3 (commands) |
 | Sequences and their playback | Inside the Timeline | — step 8.4 | — step 8.4 | — milestones 9 and 10 |
 | The dopesheet | Inside the Timeline's panel | — step 8.5 | — step 8.5 | — milestones 9 and 10 |
@@ -1212,9 +1212,8 @@ table up to date, and its review checks it.
   follows; a module may also tell it later with `set_property`.
 - The writes of one property still waiting for the module's thread are merged, the last one
   winning: playback writing at each frame never fills the queue of a slow module.
-- A value changed by hand (a property grid, the fields of the Timeline) is one undo entry the kernel
-  records, owned by the property's module (section 3, undo of the state the kernel keeps); a write
-  by playback is none.
+- A value changed by hand (a property grid) is one undo entry the kernel records, owned by the
+  property's module (section 3, undo of the state the kernel keeps); a write by playback is none.
 - Functions: `properties` lists them as JSON (path, owner, label, kind, range); `read_property` and
   `write_property` read and write the numbers of one. Classes: C++ `uniwow::Property` and
   `uniwow::properties()`, C# `Editor.DeclareProperty`, `Editor.Properties`, `ReadProperty`,
@@ -1222,6 +1221,24 @@ table up to date, and its review checks it.
 - A module built with version 3 of the header is refused with the reason, as for every version.
 - Samples: the value of the C# *Counter* and the position of the first card of the C++ scene become
   animatable; the Timeline animates them as it animates the cube.
+
+  As built:
+
+  - `uniwow_property` holds name, label, kind (`UNIWOW_VALUE_NUMBER`, `VECTOR`, `COLOUR`,
+    `BOOLEAN`, generated from `sdk/bindings.toml` with `PropertyKind` and C#'s `ValueKind`), range,
+    initial value, `write` and its `user`; `uniwow_module_info` ends with `properties`,
+    `property_count` and `property_size`.
+  - `write` receives the numbers written in a buffer it may change: what it leaves there is the value
+    the module keeps, which the kernel's copy then takes, unless a newer write already waits. Its
+    failure is reported with the property's name and the module's message.
+  - `set_property` refuses a count that is not the kind's, and numbers that are not finite.
+  - C++ also has `describeProperties(info)`, `readProperty` and `writeProperty`, and
+    `Property::set`; C# also has `Editor.SetProperty`.
+  - The C# *Counter* keeps whole values from 0 to 100, and has *Fail to write the value* to check
+    a failing `write`; the scene's first card keeps a z of 0.
+  - The undo of a value changed by hand comes with the property grid of step 8.7, the first place
+    where a value is changed by hand: in the Timeline, the fields set keys, which the Timeline's own
+    history keeps.
 
 **Step 8.3, the viewport's camera:**
 

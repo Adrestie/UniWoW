@@ -1,6 +1,6 @@
 // Sample compiled module in C++ on the graphics scene: a board of coloured cards. Dragging a card
 // is one undo entry, a double click on a card paints the cube in its colour, the wheel zooms and
-// the middle or right button scrolls.
+// the middle or right button scrolls. The position of the first card is an animatable property.
 
 #include "uniwow.hpp"
 
@@ -52,6 +52,8 @@ struct Board {
 };
 
 Board *board = nullptr;
+// The position of the first card, an animatable property: x, y, and a z kept at 0.
+uniwow::Property *first_card = nullptr;
 
 // The number following "key": in a flat JSON object; enough for this sample.
 double number_after(const char *json, const char *key, double fallback = 0.0) {
@@ -134,6 +136,9 @@ int32_t apply_change(void *, const char *value, uniwow_reply error, void *error_
             return 1;
         }
         board->cards[size_t(card)].group.setPos(number_after(value, "x"), number_after(value, "y"));
+        if (card == 0) {
+            first_card->set({number_after(value, "x"), number_after(value, "y"), 0.0});
+        }
         return 0;
     }
     set_visible(size_t(number_after(value, "first")), size_t(number_after(value, "last")),
@@ -231,6 +236,9 @@ void build_panel() {
         if (card < 0) {
             return;
         }
+        if (card == 0) {
+            first_card->set({event.x, event.y, 0.0});
+        }
         uniwow::recordChange("move a card",
                              format("{\"card\":%.0f,\"x\":%g,\"y\":%g}", card, event.x - event.dx, event.y - event.dy),
                              format("{\"card\":%.0f,\"x\":%g,\"y\":%g}", card, event.x, event.y));
@@ -280,6 +288,14 @@ extern "C" __declspec(dllexport) int32_t uniwow_module_init(const uniwow_api *ap
             add_cards(6, false);
         }
         build_panel();
+        first_card = new uniwow::Property(
+            "first_card", "First card", UNIWOW_VALUE_VECTOR, -10000.0, 10000.0, {0.0, 0.0, 0.0},
+            [](std::vector<double> &value) {
+                // The board is flat: the card keeps a z of 0, which the editor then shows.
+                value[2] = 0.0;
+                std::lock_guard<std::mutex> guard(board->lock);
+                board->cards[0].group.setPos(value[0], value[1]);
+            });
     } catch (const std::exception &failure) {
         error(error_context, failure.what());
         return 1;
@@ -294,5 +310,6 @@ extern "C" __declspec(dllexport) int32_t uniwow_module_init(const uniwow_api *ap
     info->panel_count = sizeof Panels / sizeof Panels[0];
     info->apply_change = apply_change;
     info->user = nullptr;
+    uniwow::describeProperties(info);
     return 0;
 }

@@ -1,6 +1,7 @@
 // Sample compiled module in C#, published with NativeAOT: a counter changed by buttons, a slider
 // and a spin box, each change one undo entry, with its history painted as bars; a curve edited in
-// the curve editor of the module curves, each change one undo entry; and two commands.
+// the curve editor of the module curves, each change one undo entry; the counter's value as an
+// animatable property; and two commands.
 
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -24,6 +25,9 @@ static unsafe class Module
     // The values the counter took, one per change.
     static readonly List<int> history = [];
     static bool failToApply;
+    static bool failToWrite;
+    // Set once the module is described: its property can be told from then on.
+    static bool described;
 
     static Label shown = null!;
     static Slider slider = null!;
@@ -60,7 +64,9 @@ static unsafe class Module
             }
             Editor.Start(api);
             BuildPanel();
+            Editor.DeclareProperty("value", "Value", ValueKind.Number, Minimum, Maximum, [counter], WriteValue);
             Editor.Describe(info, "sample-csharp", "0.1.0", Commands, Panels, ApplyChange);
+            described = true;
             return 0;
         }
         catch (Exception failure)
@@ -137,6 +143,9 @@ static unsafe class Module
         var fail = new CheckBox("Fail to apply undo and redo");
         fail.SetToolTip("The module then fails at the next undo or redo of its changes.");
         fail.Toggled.Connect(on => failToApply = on);
+        var failWrite = new CheckBox("Fail to write the value");
+        failWrite.SetToolTip("The module then fails at the next write of its property, by the Timeline for one.");
+        failWrite.Toggled.Connect(on => failToWrite = on);
         var wait = new PushButton("Wait 2 seconds");
         wait.SetToolTip("A slot taking two seconds: the signals that follow wait their turn.");
         wait.Clicked.Connect(() =>
@@ -147,6 +156,7 @@ static unsafe class Module
         });
         var trials = new HBoxLayout();
         trials.AddWidget(fail);
+        trials.AddWidget(failWrite);
         trials.AddWidget(wait);
 
         var layout = new VBoxLayout();
@@ -213,6 +223,19 @@ static unsafe class Module
         Show();
     }
 
+    // The value written to the property `value`, by the Timeline for one, without the history: a
+    // whole number within the range, which the editor then shows.
+    static void WriteValue(double[] value)
+    {
+        if (failToWrite)
+        {
+            throw new InvalidOperationException("asked to fail by its check box");
+        }
+        counter = Math.Clamp((int)Math.Round(value[0]), Minimum, Maximum);
+        value[0] = counter;
+        Show();
+    }
+
     // The counter in every widget, and the bars painted again.
     static void Show()
     {
@@ -226,6 +249,10 @@ static unsafe class Module
     {
         shown.SetText(Invariant($"Counter: {counter}"));
         bars.Update();
+        if (described)
+        {
+            Editor.SetProperty("value", counter);
+        }
     }
 
     static void Paint(Painter painter, double width, double height)
