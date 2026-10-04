@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use uniwow_api::curve::{self, CurveEditor};
@@ -44,6 +44,8 @@ pub struct KernelHost {
     pub views: HashMap<(String, usize), PanelView>,
     /// Whether a modal window was drawn this frame: it takes the keyboard from the editor.
     pub modal_shown: bool,
+    /// The layers of every modal window the kernel has drawn, to tell them from those of modules.
+    pub kernel_modals: HashSet<egui::LayerId>,
     next_call: u64,
 }
 
@@ -84,6 +86,7 @@ impl KernelHost {
             forgotten: Vec::new(),
             views: HashMap::new(),
             modal_shown: false,
+            kernel_modals: HashSet::new(),
             services: HashMap::new(),
             gpu,
             settings,
@@ -143,7 +146,9 @@ impl Host for KernelHost {
         let editor = self.curve_editor();
         let view = self.views.entry(view_key(owner, objects)).or_default();
         view.set_curve_editor(editor);
-        self.modal_shown |= view.dialogs(objects, egui, self.gpu.as_ref());
+        let layers = view.dialogs(objects, egui, self.gpu.as_ref());
+        self.modal_shown |= !layers.is_empty();
+        self.kernel_modals.extend(layers);
         self.report_editor_failure(owner, objects);
     }
 

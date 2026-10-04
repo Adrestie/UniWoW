@@ -429,6 +429,27 @@ fn a_modal_window_takes_the_keyboard_until_escape_closes_it() {
     assert_eq!(*lock(&value), 0);
 }
 
+/// A Rust module drawing a modal window of its own with egui.
+struct OwnModal;
+
+impl Module for OwnModal {
+    fn register(&mut self, _reg: &mut Registrar) {}
+
+    fn windows_ui(&mut self, egui: &egui::Context, _ctx: &mut Context) {
+        egui::Modal::new(egui::Id::new("own modal")).show(egui, |ui| ui.label("Busy"));
+    }
+}
+
+#[test]
+fn a_modal_window_a_rust_module_draws_with_egui_takes_the_keyboard_too() {
+    let (module, value) = counter("a");
+    let mut harness = Harness::new(vec![("a", module), ("own", Box::new(OwnModal))]);
+    harness.call("a", "a.add", json!({})).unwrap();
+    harness.frame(RawInput::default());
+    harness.frame(key(Key::Z, true));
+    assert_eq!(*lock(&value), 1, "no shortcut under the module's modal window");
+}
+
 #[test]
 fn a_compiled_module_command_called_from_the_interface_runs_on_its_thread() {
     let native = CompiledModule::started(capi::testing::native("native"));

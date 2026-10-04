@@ -159,9 +159,14 @@ impl Shell {
                 self.fail(index, format!("windows: {message}"));
             }
         }
-        // A modal window takes the keyboard from the editor, from the frame it is drawn in to the
-        // last one: egui knows of it only from the frame after.
-        let modal = std::mem::take(&mut self.host.modal_shown);
+        // A modal window takes the keyboard from the editor: one the kernel draws, from the frame it
+        // is drawn in to the last one; one a Rust module draws with egui, as egui knows it, from
+        // the frame after.
+        let kernel_modal = std::mem::take(&mut self.host.modal_shown);
+        let module_modal = ctx
+            .memory(|memory| memory.top_modal_layer())
+            .is_some_and(|layer| !self.host.kernel_modals.contains(&layer));
+        let modal = kernel_modal || module_modal;
         // Nor while something is dragged: undoing under a drag would change what it moves.
         let dragging = ctx.dragged_id().is_some();
         if !ctx.egui_wants_keyboard_input() && !modal && !dragging {
