@@ -80,7 +80,8 @@ impl PropertyValue {
         }
     }
 
-    /// The same value with each number kept within `range`.
+    /// The same value with each number kept within `range`; a number that is not one (NaN) becomes
+    /// the value of the range nearest 0.
     pub fn clamped(&self, range: [f64; 2]) -> Self {
         match *self {
             Self::Boolean(_) => *self,
@@ -88,7 +89,7 @@ impl PropertyValue {
                 let numbers: Vec<f64> = self
                     .components()
                     .into_iter()
-                    .map(|n| n.clamp(range[0], range[1]))
+                    .map(|n| if n.is_nan() { 0.0 } else { n }.clamp(range[0], range[1]))
                     .collect();
                 Self::from_components(self.kind(), &numbers)
             }
@@ -172,6 +173,10 @@ mod tests {
         assert_eq!(
             PropertyValue::Colour([1.5, 0.5, -1.0]).clamped([0.0, 1.0]),
             PropertyValue::Colour([1.0, 0.5, 0.0])
+        );
+        assert_eq!(
+            PropertyValue::Vector([f64::NAN, f64::INFINITY, 2.0]).clamped([1.0, 10.0]),
+            PropertyValue::Vector([1.0, 10.0, 2.0])
         );
         assert_eq!(
             PropertyValue::from_components(PropertyKind::Boolean, &[0.7]),

@@ -263,7 +263,11 @@ fn playback_bar(
         ui.label("Frame");
         let mut frame = at;
         if ui
-            .add(egui::DragValue::new(&mut frame).range(0..=sequence.length))
+            .add(
+                egui::DragValue::new(&mut frame)
+                    .range(0..=sequence.length)
+                    .clamp_existing_to_range(false),
+            )
             .changed()
         {
             timeline.playing = None;
@@ -671,7 +675,9 @@ fn properties_row(
         .or(current)
         .unwrap_or_else(|| PropertyValue::from_components(track.kind, &[]));
     let mut numbers = shown.components();
-    let before = numbers.clone();
+    // Only what the user did sets keys: a field that brings a value back within its range on its
+    // own must not.
+    let mut edited: Vec<usize> = Vec::new();
     let range = info.map_or([f64::MIN, f64::MAX], |info| info.range);
     let speed = ((range[1] - range[0]) / 2000.0).clamp(0.005, 1.0);
     let mut finished = false;
@@ -680,6 +686,7 @@ fn properties_row(
             let mut on = numbers[0] >= 0.5;
             if ui.checkbox(&mut on, "").changed() {
                 numbers[0] = if on { 1.0 } else { 0.0 };
+                edited.push(0);
                 finished = true;
             }
         } else {
@@ -692,9 +699,13 @@ fn properties_row(
                     egui::DragValue::new(value)
                         .speed(speed)
                         .range(range[0]..=range[1])
+                        .clamp_existing_to_range(false)
                         .max_decimals(3)
                         .update_while_editing(false),
                 );
+                if response.changed() {
+                    edited.push(number);
+                }
                 finished |= ended(&response);
             }
             if track.kind == PropertyKind::Colour && only.is_none() {
@@ -726,13 +737,7 @@ fn properties_row(
     });
     // Each number changed gets a key on its own curve, at the frame shown, which the playhead
     // then stays on.
-    let changed: Vec<(usize, f64)> = numbers
-        .iter()
-        .zip(&before)
-        .enumerate()
-        .filter(|(_, (now, was))| now != was)
-        .map(|(number, (now, _))| (number, *now))
-        .collect();
+    let changed: Vec<(usize, f64)> = edited.into_iter().map(|number| (number, numbers[number])).collect();
     if !changed.is_empty() {
         let frame = timeline.playhead.round();
         timeline.playing = None;
