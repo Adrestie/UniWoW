@@ -4,6 +4,7 @@
 //! visible items only.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::painter::{color, text_pixels};
 use super::{Handle, Kind, Object, Signal, SignalData, Ui};
@@ -51,7 +52,19 @@ struct Targets {
     size: [u32; 2],
     msaa: wgpu::TextureView,
     resolved: wgpu::TextureView,
-    texture_id: egui::TextureId,
+    texture: ViewTexture,
+}
+
+/// The texture egui shows a view through, freed with the view.
+struct ViewTexture {
+    id: egui::TextureId,
+    renderer: Arc<egui::mutex::RwLock<egui_wgpu::Renderer>>,
+}
+
+impl Drop for ViewTexture {
+    fn drop(&mut self) {
+        self.renderer.write().free_texture(&self.id);
+    }
 }
 
 /// Where an item's mesh sits in the buffers.
@@ -274,7 +287,7 @@ impl SceneView {
                 self.render(gpu, rect, ui.ctx().pixels_per_point(), scale as f32, offset, background);
                 if let Some(targets) = &self.gpu.as_ref().and_then(|g| g.targets.as_ref()) {
                     let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                    ui.painter().image(targets.texture_id, rect, uv, egui::Color32::WHITE);
+                    ui.painter().image(targets.texture.id, rect, uv, egui::Color32::WHITE);
                 }
             }
             None => {
@@ -752,24 +765,29 @@ impl SceneView {
                 1,
                 wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             );
-            let mut renderer = render.renderer.write();
-            let texture_id = match &gpu.targets {
+            let texture = match gpu.targets.take() {
                 Some(old) => {
-                    renderer.update_egui_texture_from_wgpu_texture(
+                    render.renderer.write().update_egui_texture_from_wgpu_texture(
                         device,
                         &resolved,
                         wgpu::FilterMode::Linear,
-                        old.texture_id,
+                        old.texture.id,
                     );
-                    old.texture_id
+                    old.texture
                 }
-                None => renderer.register_native_texture(device, &resolved, wgpu::FilterMode::Linear),
+                None => ViewTexture {
+                    id: render
+                        .renderer
+                        .write()
+                        .register_native_texture(device, &resolved, wgpu::FilterMode::Linear),
+                    renderer: render.renderer.clone(),
+                },
             };
             gpu.targets = Some(Targets {
                 size,
                 msaa,
                 resolved,
-                texture_id,
+                texture,
             });
         }
         let uniform = ViewUniform {

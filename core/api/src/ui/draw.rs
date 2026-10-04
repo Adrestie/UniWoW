@@ -61,10 +61,20 @@ impl PanelView {
         self.editor_failure.take()
     }
 
+    /// Forgets what it kept of the objects that are gone; a view's texture goes with it.
+    fn forget_gone(&mut self, store: &Ui) {
+        let alive = |handle: &Handle| store.object(*handle).is_some();
+        self.scenes.retain(|handle, _| alive(handle));
+        self.painted.retain(|handle, _| alive(handle));
+        self.sizes.retain(|handle, _| alive(handle));
+        self.time_axes.retain(|handle, _| alive(handle));
+    }
+
     /// Draws the panel `panel` of a module.
     pub fn show(&mut self, shared: &SharedUi, panel: &str, ui: &mut egui::Ui, gpu: Option<&egui_wgpu::RenderState>) {
         let mut store = lock(shared);
         store.set_wake(ui.ctx());
+        self.forget_gone(&store);
         let layout = store
             .find_panel(panel)
             .and_then(|handle| store.object(handle))
@@ -85,6 +95,7 @@ impl PanelView {
     pub fn dialogs(&mut self, shared: &SharedUi, ctx: &egui::Context, gpu: Option<&egui_wgpu::RenderState>) {
         let mut store = lock(shared);
         store.set_wake(ctx);
+        self.forget_gone(&store);
         let mut events = Vec::new();
         for handle in store.dialogs() {
             let Some(object) = store.object(handle).cloned() else {
@@ -529,4 +540,44 @@ fn close_button(ui: &mut egui::Ui) -> bool {
         stroke,
     );
     response.on_hover_text("Close").clicked()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::PanelView;
+    use crate::egui;
+    use crate::ui::{Kind, Property, Ui, lock};
+
+    #[test]
+    fn what_was_kept_of_a_destroyed_view_is_forgotten() {
+        let shared = Ui::new(Arc::new(|_job| {}));
+        let (layout, view, area, label) = {
+            let mut store = lock(&shared);
+            let panel = store.panel("p");
+            let layout = store.create(Kind::VBoxLayout, None).unwrap();
+            store.add_to(panel, layout, [0, 0, 1, 1]).unwrap();
+            let view = store.create(Kind::GraphicsView, None).unwrap();
+            store.add_to(layout, view, [0, 0, 1, 1]).unwrap();
+            let area = store.create(Kind::PaintArea, None).unwrap();
+            store.set_numbers(area, Property::MinimumHeight, &[50.0]).unwrap();
+            store.add_to(layout, area, [0, 0, 1, 1]).unwrap();
+            let label = store.create(Kind::Label, None).unwrap();
+            store.add_to(layout, label, [0, 0, 1, 1]).unwrap();
+            (layout, view, area, label)
+        };
+        let mut panels = PanelView::default();
+        let ctx = egui::Context::default();
+        let frame = |panels: &mut PanelView| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| panels.show(&shared, "p", ui, None));
+            output.textures_delta.clear();
+        };
+        frame(&mut panels);
+        assert!(panels.scenes.contains_key(&view) && panels.painted.contains_key(&area));
+        assert!(panels.sizes.contains_key(&label));
+        lock(&shared).destroy(layout).unwrap();
+        frame(&mut panels);
+        assert!(panels.scenes.is_empty() && panels.sizes.is_empty() && !panels.painted.contains_key(&area));
+    }
 }
