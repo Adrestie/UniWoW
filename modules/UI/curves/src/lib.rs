@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use uniwow_api::curve::{
-    self, CurveChange, CurveEditor, CurveOptions, DEFAULT_WEIGHT, ShownCurve, SideMode, TangentMode, TimeAxis,
+    self, Curve, CurveChange, CurveEditor, CurveOptions, DEFAULT_WEIGHT, ShownCurve, SideMode, TangentMode, TimeAxis,
 };
 use uniwow_api::egui::{self, Align2, Color32, FontId, PointerButton, Pos2, Rect, Sense, Stroke, Vec2};
 use uniwow_api::{Module, Registrar};
@@ -227,6 +227,56 @@ fn drag_handle(shown: &mut ShownCurve, k: usize, side: Side, target: (f64, f64))
     }
     tangent.weight = weight_of(tangent.weight);
     shown.curve.update_tangents();
+}
+
+/// How far in time the keys of `start` may move together, from where they started: never onto or
+/// past a key that stays, never before the start of the span.
+fn admissible(curves: &[ShownCurve], start: &[(KeyRef, f64, f64)], options: &CurveOptions) -> [f64; 2] {
+    let gap = options.snap.unwrap_or(1e-3);
+    let moving: BTreeSet<KeyRef> = start.iter().map(|(key, _, _)| *key).collect();
+    let (mut low, mut high) = (-2.0 * curve::LIMIT, 2.0 * curve::LIMIT);
+    for &((c, _), time, _) in start {
+        let Some(shown) = curves.get(c) else {
+            continue;
+        };
+        for (index, other) in shown.curve.keys.iter().enumerate() {
+            if moving.contains(&(c, index)) {
+                continue;
+            }
+            if other.time < time {
+                low = low.max(other.time - time + gap);
+            } else {
+                high = high.min(other.time - time - gap);
+            }
+        }
+        if let Some([first, _]) = options.span {
+            low = low.max(first - time);
+        }
+        low = low.max(-curve::LIMIT - time);
+        high = high.min(curve::LIMIT - time);
+    }
+    [low, high]
+}
+
+/// Moves the keys of `start` by `dt` in time, as much as they all may, and by `dv` in value, from
+/// where they started; the keys of each curve stay in time order, each at a time of its own.
+fn move_keys(curves: &mut [ShownCurve], start: &[(KeyRef, f64, f64)], dt: f64, dv: f64, options: &CurveOptions) {
+    let [low, high] = admissible(curves, start, options);
+    let wanted = options.snap.map_or(dt, |step| (dt / step).round() * step);
+    let dt = if low <= high { wanted.clamp(low, high) } else { 0.0 };
+    let before: Vec<Curve> = curves.iter().map(|shown| shown.curve.clone()).collect();
+    for &((c, k), time, value) in start {
+        if let Some(key) = curves.get_mut(c).and_then(|shown| shown.curve.keys.get_mut(k)) {
+            key.time = time + dt;
+            key.value = (value + dv).clamp(-curve::LIMIT, curve::LIMIT);
+        }
+    }
+    for (shown, before) in curves.iter_mut().zip(before) {
+        if shown.curve.check().is_err() {
+            shown.curve = before;
+        }
+        shown.curve.update_tangents();
+    }
 }
 
 /// Applies a choice of the context menu to `keys`.
@@ -528,25 +578,7 @@ impl CurveEditor for Editor {
                         f64::from(delta.x / graph.time.pixels_per_unit),
                         -f64::from(delta.y / graph.pixels_per_value),
                     );
-                    let moving: BTreeSet<KeyRef> = start.iter().map(|(key, _, _)| *key).collect();
-                    let gap = options.snap.unwrap_or(1e-3);
-                    for &((c, k), time, value) in start.iter() {
-                        let keys = &curves[c].curve.keys;
-                        let low = k
-                            .checked_sub(1)
-                            .filter(|p| !moving.contains(&(c, *p)))
-                            .map_or(f64::MIN, |p| keys[p].time + gap);
-                        let high = keys
-                            .get(k + 1)
-                            .filter(|_| !moving.contains(&(c, k + 1)))
-                            .map_or(f64::MAX, |n| n.time - gap);
-                        let key = &mut curves[c].curve.keys[k];
-                        key.time = snapped(time + dt, options).clamp(low, high);
-                        key.value = (value + dv).clamp(-curve::LIMIT, curve::LIMIT);
-                    }
-                    for shown in curves.iter_mut() {
-                        shown.curve.update_tangents();
-                    }
+                    move_keys(curves, start, dt, dv, options);
                     change = CurveChange::Changing;
                 }
                 Gesture::Handle { key: (c, k), side } => {
@@ -775,9 +807,9 @@ uniwow_api::export_module!(CurvesModule);
 
 #[cfg(test)]
 mod tests {
-    use uniwow_api::curve::{Curve, ShownCurve, SideMode, TangentMode};
+    use uniwow_api::curve::{Curve, CurveOptions, ShownCurve, SideMode, TangentMode};
 
-    use super::{Choice, MAX_LINES, Side, apply_choice, drag_handle, grid_lines, grid_step};
+    use super::{Choice, MAX_LINES, Side, apply_choice, drag_handle, grid_lines, grid_step, move_keys};
 
     fn shown(points: &[(f64, f64)]) -> ShownCurve {
         let mut curve = Curve::default();
@@ -825,6 +857,33 @@ mod tests {
         assert!((key.right.slope + 1.0).abs() < 1e-9);
         assert_eq!(key.left.slope, 0.0, "the other side stays");
         assert!((key.right.weight.unwrap() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn keys_moved_together_never_cross_nor_land_on_the_keys_that_stay() {
+        let mut curves = vec![shown(&[(0.0, 0.0), (10.0, 1.0), (20.0, 2.0), (25.0, 3.0)])];
+        let start = vec![((0, 1), 10.0, 1.0), ((0, 2), 20.0, 2.0)];
+        let options = CurveOptions {
+            snap: Some(1.0),
+            span: Some([0.0, 100.0]),
+            ..CurveOptions::default()
+        };
+        for dt in [14.0, 20.0] {
+            move_keys(&mut curves, &start, dt, 0.0, &options);
+            let times: Vec<f64> = curves[0].curve.keys.iter().map(|key| key.time).collect();
+            assert_eq!(times, vec![0.0, 14.0, 24.0, 25.0], "moved by {dt}");
+            assert!(curves[0].curve.evaluate(19.0).is_finite());
+        }
+        move_keys(&mut curves, &start, -40.0, 0.0, &options);
+        let times: Vec<f64> = curves[0].curve.keys.iter().map(|key| key.time).collect();
+        assert_eq!(
+            times,
+            vec![0.0, 1.0, 11.0, 25.0],
+            "never onto the first key, nor before the span"
+        );
+        let mut first = vec![shown(&[(5.0, 0.0), (10.0, 1.0)])];
+        move_keys(&mut first, &[((0, 0), 5.0, 0.0)], -9.0, 0.0, &options);
+        assert_eq!(first[0].curve.keys[0].time, 0.0, "not before the start of the sequence");
     }
 
     #[test]
