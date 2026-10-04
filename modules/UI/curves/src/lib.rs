@@ -53,6 +53,14 @@ struct State {
     left: Vec<Vec<(f64, f64)>>,
 }
 
+impl State {
+    /// The editor removed or inserted keys itself: a gesture or a menu holding their numbers ends.
+    fn keys_renumbered(&mut self) {
+        self.gesture = Gesture::None;
+        self.menu.clear();
+    }
+}
+
 fn keys_of(curves: &[ShownCurve]) -> Vec<Vec<(f64, f64)>> {
     curves
         .iter()
@@ -647,6 +655,7 @@ impl CurveEditor for Editor {
                 let value = curves[c].curve.evaluate(time);
                 let k = curves[c].curve.set_key(time, value);
                 state.selection = BTreeSet::from([(c, k)]);
+                state.keys_renumbered();
                 change = CurveChange::Finished;
             }
         }
@@ -678,18 +687,24 @@ impl CurveEditor for Editor {
             Some(MenuAction::Delete) => {
                 remove_keys(curves, &keys.iter().copied().collect());
                 state.selection.clear();
+                state.keys_renumbered();
                 change = CurveChange::Finished;
             }
             None => {}
         }
 
-        // Delete removes the selected keys; F frames them, or all the keys.
+        // Delete removes the selected keys, but not under a gesture, which holds their numbers;
+        // F frames them, or all the keys.
         let typing = ui.ctx().memory(|memory| memory.focused().is_some());
         if ui.rect_contains_pointer(rect) && !typing {
-            if !state.selection.is_empty() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Delete))
+            let idle = matches!(state.gesture, Gesture::None);
+            if idle
+                && !state.selection.is_empty()
+                && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Delete))
             {
                 remove_keys(curves, &state.selection);
                 state.selection.clear();
+                state.keys_renumbered();
                 change = CurveChange::Finished;
             }
             if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F)) {
@@ -837,8 +852,8 @@ mod tests {
     use uniwow_api::egui;
 
     use super::{
-        Choice, Editor, Gesture, MAX_LINES, Side, State, apply_choice, drag_handle, grid_lines, grid_step, lock,
-        move_keys,
+        Choice, Editor, Gesture, MAX_LINES, Side, State, apply_choice, drag_handle, grid_lines, grid_step, keys_of,
+        lock, move_keys,
     };
 
     fn shown(points: &[(f64, f64)]) -> ShownCurve {
@@ -916,6 +931,65 @@ mod tests {
         let state = &states[&id];
         assert!(matches!(state.gesture, Gesture::None));
         assert!(state.menu.is_empty() && state.selection.is_empty());
+    }
+
+    /// Delete pressed with the pointer over the editor, which shows `curves` from `state`.
+    fn press_delete(state: State, curves: &mut [ShownCurve]) -> State {
+        let editor = Editor::default();
+        let id = egui::Id::new("curves");
+        lock(&editor.states).insert(id, state);
+        let input = egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(egui::pos2(100.0, 100.0)),
+                egui::Event::Key {
+                    key: egui::Key::Delete,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..egui::RawInput::default()
+        };
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(input, |ui| {
+            editor.show(ui, id, curves, &mut TimeAxis::default(), &CurveOptions::default());
+        });
+        output.textures_delta.clear();
+        lock(&editor.states).remove(&id).expect("kept")
+    }
+
+    #[test]
+    fn delete_does_nothing_while_a_key_is_dragged() {
+        let points = [(0.0, 0.0), (10.0, 1.0), (20.0, 5.0), (30.0, 3.0)];
+        let mut curves = vec![shown(&points)];
+        let state = State {
+            selection: BTreeSet::from([(0, 1)]),
+            gesture: Gesture::Move {
+                from: egui::pos2(100.0, 100.0),
+                start: vec![((0, 1), 10.0, 1.0)],
+            },
+            left: keys_of(&curves),
+            ..State::default()
+        };
+        let state = press_delete(state, &mut curves);
+        assert_eq!(curves[0].curve.keys.len(), 4, "the dragged key stays");
+        assert!(matches!(state.gesture, Gesture::Move { .. }), "the drag goes on");
+    }
+
+    #[test]
+    fn keys_the_editor_removes_close_the_menu_holding_their_numbers() {
+        let points = [(0.0, 0.0), (10.0, 1.0), (20.0, 5.0), (30.0, 3.0)];
+        let mut curves = vec![shown(&points)];
+        let state = State {
+            selection: BTreeSet::from([(0, 1)]),
+            menu: vec![(0, 2)],
+            left: keys_of(&curves),
+            ..State::default()
+        };
+        let state = press_delete(state, &mut curves);
+        assert_eq!(curves[0].curve.keys.len(), 3);
+        assert!(state.menu.is_empty(), "the menu's key 2 is now another key");
     }
 
     #[test]
