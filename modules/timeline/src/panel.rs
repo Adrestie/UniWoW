@@ -1,0 +1,906 @@
+//! The panel of the timeline: the sequence and playback bars, the animated properties on the
+//! left, and the dopesheet on the right, with its ruler and playhead.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use uniwow_api::egui::{self, Align, Align2, Color32, FontId, Layout, Pos2, Rect, Sense, Stroke, UiBuilder, Vec2};
+use uniwow_api::{Context, PropertyInfo, PropertyKind, PropertyValue};
+
+use crate::TimelineModule;
+use crate::sequence::{KeyId, MAX_FRAME_RATE, MAX_LENGTH, Sequence, Track};
+
+/// Height of a row of the dopesheet.
+const ROW: f32 = 22.0;
+const RULER: f32 = 22.0;
+/// Width of the properties, left of the dopesheet.
+const LEFT: f32 = 400.0;
+/// Half the width of a key's diamond.
+const DIAMOND: f32 = 5.0;
+const ZOOM: [f32; 2] = [0.2, 200.0];
+const PLAYHEAD: Color32 = Color32::from_rgb(225, 65, 55);
+
+/// What the panel keeps between frames.
+#[derive(Default)]
+pub struct State {
+    /// The frame at the left edge of the dopesheet.
+    first_frame: f64,
+    pixels_per_frame: f32,
+    /// Set once the dopesheet fits the sequence shown.
+    pub fitted: bool,
+    gesture: Gesture,
+    /// The sequence and its unsaved mark before a change made over several frames, such as a
+    /// value dragged, recorded as one undo entry when it ends.
+    editing: Option<(String, Sequence, bool)>,
+    new_name: String,
+    /// A sequence to show once the user said what to do with the unsaved changes.
+    asking: Option<String>,
+    message: Option<String>,
+}
+
+#[derive(Default)]
+enum Gesture {
+    #[default]
+    None,
+    /// The selected keys dragged, from and to these x.
+    Move { from: f32, to: f32 },
+    /// A selection box.
+    Select { from: Pos2, to: Pos2 },
+}
+
+/// A row of the dopesheet, with the keys it shows.
+enum Row {
+    /// Every key of the sequence.
+    Summary,
+    /// The keys of one module's tracks.
+    Group(String),
+    Track(usize),
+}
+
+/// Where frames are drawn.
+#[derive(Clone, Copy)]
+struct View {
+    left: f32,
+    first: f64,
+    pixels_per_frame: f32,
+}
+
+impl View {
+    fn x(self, frame: f64) -> f32 {
+        self.left + ((frame - self.first) as f32) * self.pixels_per_frame
+    }
+
+    fn frame(self, x: f32) -> f64 {
+        self.first + f64::from((x - self.left) / self.pixels_per_frame)
+    }
+}
+
+pub fn show(timeline: &mut TimelineModule, ui: &mut egui::Ui, ctx: &mut Context) {
+    let declared: BTreeMap<String, PropertyInfo> = timeline
+        .editor
+        .as_ref()
+        .map(|editor| editor.properties())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|info| (info.path.clone(), info))
+        .collect();
+    sequence_bar(timeline, ui);
+    if let Some(message) = &timeline.panel.message {
+        ui.colored_label(ui.visuals().warn_fg_color, message);
+    }
+    let Some(sequence) = timeline.sequence().cloned() else {
+        ui.weak("No sequence shown: choose one or create one.");
+        return;
+    };
+    timeline
+        .selection
+        .retain(|(property, frame)| sequence.track(property).and_then(|t| t.key_at(*frame)).is_some());
+    playback_bar(timeline, &sequence, &declared, ui, ctx);
+    ui.separator();
+    dopesheet(timeline, &sequence, &declared, ui, ctx);
+    keyboard(timeline, &sequence, ui, ctx);
+}
+
+/// Chooses, creates and saves sequences.
+fn sequence_bar(timeline: &mut TimelineModule, ui: &mut egui::Ui) {
+    let dirty = timeline
+        .current
+        .as_ref()
+        .and_then(|name| timeline.documents.get(name))
+        .is_some_and(|document| document.dirty);
+    ui.horizontal(|ui| {
+        ui.label("Sequence");
+        let shown = match &timeline.current {
+            Some(name) if dirty => format!("{name} *"),
+            Some(name) => name.clone(),
+            None => "none".to_owned(),
+        };
+        let mut chosen = None;
+        egui::ComboBox::from_id_salt("timeline-sequence")
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                for name in &timeline.names {
+                    if ui
+                        .selectable_label(timeline.current.as_ref() == Some(name), name)
+                        .clicked()
+                    {
+                        chosen = Some(name.clone());
+                    }
+                }
+            });
+        if let Some(name) = chosen.filter(|name| timeline.current.as_ref() != Some(name)) {
+            if dirty {
+                timeline.panel.asking = Some(name);
+            } else {
+                open(timeline, &name);
+            }
+        }
+        let save = ui.add_enabled(dirty, egui::Button::new("Save"));
+        if save.clicked()
+            && let Some(name) = timeline.current.clone()
+        {
+            timeline.panel.message = timeline.save(&name).err();
+        }
+        ui.separator();
+        ui.add(
+            egui::TextEdit::singleline(&mut timeline.panel.new_name)
+                .hint_text("name")
+                .desired_width(120.0),
+        );
+        if ui.button("New").clicked() {
+            let name = timeline.panel.new_name.trim().to_owned();
+            match timeline.create(&name) {
+                Ok(()) if dirty => timeline.panel.asking = Some(name),
+                Ok(()) => open(timeline, &name),
+                Err(error) => timeline.panel.message = Some(error),
+            }
+            timeline.panel.new_name.clear();
+        }
+    });
+    let Some(target) = timeline.panel.asking.clone() else {
+        return;
+    };
+    let current = timeline.current.clone().unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!("'{current}' has unsaved changes. Save them before showing '{target}'?"),
+        );
+        if ui.button("Save").clicked() {
+            timeline.panel.asking = None;
+            match timeline.save(&current) {
+                Ok(()) => open(timeline, &target),
+                Err(error) => timeline.panel.message = Some(error),
+            }
+        }
+        if ui.button("Don't save").clicked() {
+            timeline.panel.asking = None;
+            timeline.documents.remove(&current);
+            open(timeline, &target);
+        }
+        if ui.button("Cancel").clicked() {
+            timeline.panel.asking = None;
+        }
+    });
+}
+
+fn open(timeline: &mut TimelineModule, name: &str) {
+    timeline.panel.message = timeline.open(name).err();
+    timeline.panel.editing = None;
+}
+
+/// Playback, the frame, the frame rate and the length, and the properties to add.
+fn playback_bar(
+    timeline: &mut TimelineModule,
+    sequence: &Sequence,
+    declared: &BTreeMap<String, PropertyInfo>,
+    ui: &mut egui::Ui,
+    ctx: &mut Context,
+) {
+    let frames = sequence.key_frames();
+    let at = timeline.playhead.round() as u32;
+    ui.horizontal(|ui| {
+        if ui.button("⏮").on_hover_text("First frame").clicked() {
+            timeline.playing = None;
+            timeline.playhead = 0.0;
+        }
+        let previous = frames.range(..at).next_back().copied();
+        if ui
+            .add_enabled(previous.is_some(), egui::Button::new("◀"))
+            .on_hover_text("Previous key")
+            .clicked()
+        {
+            timeline.playing = None;
+            timeline.playhead = f64::from(previous.unwrap_or(0));
+        }
+        let playing = timeline.playing.is_some();
+        if ui
+            .button(if playing { "⏸" } else { "▶" })
+            .on_hover_text("Play or pause (Space)")
+            .clicked()
+        {
+            toggle_playback(timeline);
+        }
+        let next = frames.range(at + 1..).next().copied();
+        if ui
+            .add_enabled(next.is_some(), egui::Button::new("▶|"))
+            .on_hover_text("Next key")
+            .clicked()
+        {
+            timeline.playing = None;
+            timeline.playhead = f64::from(next.unwrap_or(0));
+        }
+        if ui.button("⏭").on_hover_text("Last frame").clicked() {
+            timeline.playing = None;
+            timeline.playhead = f64::from(sequence.length);
+        }
+        ui.checkbox(&mut timeline.looping, "Loop");
+        ui.separator();
+
+        ui.label("Frame");
+        let mut frame = at;
+        if ui
+            .add(egui::DragValue::new(&mut frame).range(0..=sequence.length))
+            .changed()
+        {
+            timeline.playing = None;
+            timeline.playhead = f64::from(frame);
+        }
+        ui.label("Frame rate");
+        let mut frame_rate = sequence.frame_rate;
+        let response = ui.add(
+            egui::DragValue::new(&mut frame_rate)
+                .range(1..=MAX_FRAME_RATE)
+                .update_while_editing(false),
+        );
+        if response.changed() {
+            change_live(timeline, "frame rate", |s| s.frame_rate = frame_rate);
+        }
+        let mut finished = ended(&response);
+        ui.label("Length");
+        let mut length = sequence.length;
+        let response = ui.add(
+            egui::DragValue::new(&mut length)
+                .range(1..=MAX_LENGTH)
+                .update_while_editing(false),
+        );
+        if response.changed() {
+            change_live(timeline, "length", |s| s.length = length);
+        }
+        finished |= ended(&response);
+        if finished {
+            finish_editing(timeline, ctx);
+        }
+        ui.separator();
+
+        let addable: Vec<&PropertyInfo> = declared
+            .values()
+            .filter(|info| sequence.track(&info.path).is_none())
+            .collect();
+        ui.add_enabled_ui(!addable.is_empty(), |ui| {
+            ui.menu_button("Add property", |ui| {
+                for info in addable {
+                    if ui.button(format!("{}: {}", info.owner, info.label)).clicked() {
+                        let mut after = sequence.clone();
+                        after.tracks.push(Track::new(&info.path, info.kind));
+                        timeline.edit(ctx, &format!("add {}", info.label), after);
+                        ui.close();
+                    }
+                }
+            });
+        });
+    });
+}
+
+fn toggle_playback(timeline: &mut TimelineModule) {
+    if timeline.playing.take().is_none() {
+        timeline.play();
+    }
+}
+
+/// Whether a value being changed over several frames is done with.
+fn ended(response: &egui::Response) -> bool {
+    response.drag_stopped()
+        || response.lost_focus()
+        || (response.changed() && !response.dragged() && !response.has_focus())
+}
+
+/// Changes the shown sequence at once, for a change made over several frames: `finish_editing`
+/// records it as one undo entry.
+fn change_live(timeline: &mut TimelineModule, label: &str, change: impl FnOnce(&mut Sequence)) {
+    let Some(document) = timeline
+        .current
+        .as_ref()
+        .and_then(|name| timeline.documents.get_mut(name))
+    else {
+        return;
+    };
+    if timeline.panel.editing.is_none() {
+        timeline.panel.editing = Some((label.to_owned(), document.sequence.clone(), document.dirty));
+    }
+    change(&mut document.sequence);
+    document.dirty = true;
+    timeline.keys_changed = true;
+}
+
+/// Puts the sequence back as it was before the change, and records the change as one undo entry.
+fn finish_editing(timeline: &mut TimelineModule, ctx: &mut Context) {
+    let Some((label, before, dirty)) = timeline.panel.editing.take() else {
+        return;
+    };
+    let Some(document) = timeline
+        .current
+        .as_ref()
+        .and_then(|name| timeline.documents.get_mut(name))
+    else {
+        return;
+    };
+    let after = std::mem::replace(&mut document.sequence, before);
+    if after == document.sequence {
+        document.dirty = dirty;
+    } else {
+        timeline.edit(ctx, &label, after);
+    }
+}
+
+/// The rows of the dopesheet: every key, then each module's tracks under its name.
+fn rows(sequence: &Sequence) -> Vec<Row> {
+    let mut rows = vec![Row::Summary];
+    let mut owners: Vec<&str> = Vec::new();
+    for track in &sequence.tracks {
+        let owner = owner(&track.property);
+        if !owners.contains(&owner) {
+            owners.push(owner);
+        }
+    }
+    for owner_name in owners {
+        rows.push(Row::Group(owner_name.to_owned()));
+        for (index, track) in sequence.tracks.iter().enumerate() {
+            if owner(&track.property) == owner_name {
+                rows.push(Row::Track(index));
+            }
+        }
+    }
+    rows
+}
+
+fn owner(path: &str) -> &str {
+    path.split_once('/').map_or(path, |(owner, _)| owner)
+}
+
+/// The keys a row shows, by frame.
+fn row_keys(sequence: &Sequence, row: &Row) -> BTreeMap<u32, Vec<KeyId>> {
+    let mut keys: BTreeMap<u32, Vec<KeyId>> = BTreeMap::new();
+    let tracks: Vec<&Track> = match row {
+        Row::Summary => sequence.tracks.iter().collect(),
+        Row::Group(name) => sequence
+            .tracks
+            .iter()
+            .filter(|track| owner(&track.property) == name)
+            .collect(),
+        Row::Track(index) => vec![&sequence.tracks[*index]],
+    };
+    for track in tracks {
+        for key in &track.keys {
+            keys.entry(key.frame)
+                .or_default()
+                .push((track.property.clone(), key.frame));
+        }
+    }
+    keys
+}
+
+fn label(track: &Track, declared: &BTreeMap<String, PropertyInfo>) -> String {
+    declared.get(&track.property).map_or_else(
+        || track.property.rsplit('/').next().unwrap_or(&track.property).to_owned(),
+        |info| info.label.clone(),
+    )
+}
+
+fn dopesheet(
+    timeline: &mut TimelineModule,
+    sequence: &Sequence,
+    declared: &BTreeMap<String, PropertyInfo>,
+    ui: &mut egui::Ui,
+    ctx: &mut Context,
+) {
+    let (ruler, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), RULER), Sense::hover());
+    let left = ruler.left() + LEFT;
+    let state = &mut timeline.panel;
+    if !state.fitted || state.pixels_per_frame <= 0.0 {
+        let width = (ruler.right() - left - 24.0).max(50.0);
+        state.pixels_per_frame = (width / sequence.length as f32).clamp(ZOOM[0], ZOOM[1]);
+        state.first_frame = -f64::from(12.0 / state.pixels_per_frame);
+        state.fitted = true;
+    }
+    let view = View {
+        left,
+        first: state.first_frame,
+        pixels_per_frame: state.pixels_per_frame,
+    };
+    let ruler_right = Rect::from_min_max(egui::pos2(left, ruler.top()), ruler.max);
+    draw_ruler(timeline, sequence, ui, ruler, ruler_right, view);
+
+    let rows = rows(sequence);
+    egui::ScrollArea::vertical()
+        .id_salt("timeline-rows")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let height = (rows.len() as f32 * ROW).max(ui.available_height());
+            let (area, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::hover());
+            for (index, row) in rows.iter().enumerate() {
+                let rect = Rect::from_min_size(area.min + egui::vec2(0.0, index as f32 * ROW), egui::vec2(LEFT, ROW));
+                properties_row(timeline, sequence, declared, row, rect, ui, ctx);
+            }
+            let keys = Rect::from_min_max(egui::pos2(left, area.top()), area.max);
+            let dope = keys.union(ruler_right);
+            navigate(timeline, ui, dope, view);
+            keys_area(timeline, sequence, declared, &rows, keys, view, ui, ctx);
+        });
+}
+
+fn draw_ruler(
+    timeline: &mut TimelineModule,
+    sequence: &Sequence,
+    ui: &mut egui::Ui,
+    ruler: Rect,
+    right: Rect,
+    view: View,
+) {
+    let response = ui.interact(right, ui.id().with("timeline-ruler"), Sense::click_and_drag());
+    if (response.is_pointer_button_down_on() || response.clicked())
+        && let Some(pointer) = response.interact_pointer_pos()
+    {
+        timeline.playing = None;
+        timeline.playhead = view.frame(pointer.x).round().clamp(0.0, f64::from(sequence.length));
+    }
+    let painter = ui.painter_at(ruler);
+    let visuals = ui.visuals();
+    painter.rect_filled(right, 0.0, visuals.faint_bg_color);
+    painter.text(
+        ruler.left_center() + egui::vec2(6.0, 0.0),
+        Align2::LEFT_CENTER,
+        format!(
+            "Frame {} ({})",
+            timeline.playhead.round(),
+            time_label(timeline.playhead.round() as i64, sequence.frame_rate)
+        ),
+        FontId::proportional(12.0),
+        visuals.text_color(),
+    );
+    let painter = ui.painter_at(right);
+    let step = tick_step(view.pixels_per_frame, sequence.frame_rate);
+    let first = (view.frame(right.left()).floor() as i64).max(0);
+    let last = view.frame(right.right()).ceil() as i64;
+    let mut frame = first - first % i64::from(step);
+    while frame <= last {
+        let x = view.x(frame as f64);
+        painter.line_segment(
+            [egui::pos2(x, right.bottom() - 6.0), egui::pos2(x, right.bottom())],
+            Stroke::new(1.0, visuals.weak_text_color()),
+        );
+        painter.text(
+            egui::pos2(x + 3.0, right.top() + 2.0),
+            Align2::LEFT_TOP,
+            time_label(frame, sequence.frame_rate),
+            FontId::proportional(11.0),
+            visuals.weak_text_color(),
+        );
+        frame += i64::from(step);
+    }
+    let x = view.x(timeline.playhead);
+    let marker = Rect::from_center_size(egui::pos2(x, right.center().y), egui::vec2(28.0, RULER - 4.0));
+    painter.rect_filled(marker, 3.0, PLAYHEAD);
+    painter.text(
+        marker.center(),
+        Align2::CENTER_CENTER,
+        format!("{}", timeline.playhead.round()),
+        FontId::proportional(11.0),
+        Color32::WHITE,
+    );
+}
+
+/// Seconds and frames, as `1:15`.
+fn time_label(frame: i64, frame_rate: u32) -> String {
+    let rate = i64::from(frame_rate.max(1));
+    format!("{}:{:02}", frame / rate, frame % rate)
+}
+
+/// Frames between two labels of the ruler, at least 50 pixels apart.
+fn tick_step(pixels_per_frame: f32, frame_rate: u32) -> u32 {
+    let mut steps: Vec<u32> = vec![1, 2, 5, 10];
+    steps.extend([1, 2, 5, 10, 30, 60, 120, 300, 600, 1800, 3600].map(|seconds| seconds * frame_rate));
+    steps.sort_unstable();
+    steps
+        .into_iter()
+        .find(|step| *step as f32 * pixels_per_frame >= 50.0)
+        .unwrap_or(3600 * frame_rate)
+}
+
+/// The left side of a row: a module's name, or a track's property with its value at the playhead.
+#[allow(clippy::too_many_arguments)]
+fn properties_row(
+    timeline: &mut TimelineModule,
+    sequence: &Sequence,
+    declared: &BTreeMap<String, PropertyInfo>,
+    row: &Row,
+    rect: Rect,
+    ui: &mut egui::Ui,
+    ctx: &mut Context,
+) {
+    let mut child = ui.new_child(
+        UiBuilder::new()
+            .max_rect(rect.shrink2(egui::vec2(6.0, 1.0)))
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    child.set_clip_rect(rect);
+    let ui = &mut child;
+    let track = match row {
+        Row::Summary => {
+            ui.weak(timeline.current.clone().unwrap_or_default());
+            return;
+        }
+        Row::Group(name) => {
+            ui.strong(name);
+            return;
+        }
+        Row::Track(index) => &sequence.tracks[*index],
+    };
+    let info = declared.get(&track.property);
+    let name = label(track, declared);
+    ui.add_space(12.0);
+    ui.add_sized(
+        [78.0, ROW - 4.0],
+        egui::Label::new(egui::RichText::new(&name).color(if info.is_some() {
+            ui.visuals().text_color()
+        } else {
+            ui.visuals().weak_text_color()
+        }))
+        .truncate(),
+    )
+    .on_hover_text(if info.is_some() {
+        track.property.clone()
+    } else {
+        format!("{}: no running module declares it", track.property)
+    });
+    let editor = timeline.editor.clone();
+    let shown = track
+        .evaluate(timeline.playhead)
+        .or_else(|| editor.as_ref().and_then(|e| e.read_property(&track.property).ok()))
+        .unwrap_or_else(|| PropertyValue::from_components(track.kind, &[]));
+    let mut numbers = shown.components();
+    let range = info.map_or([f64::MIN, f64::MAX], |info| info.range);
+    let speed = ((range[1] - range[0]) / 2000.0).clamp(0.005, 1.0);
+    let mut changed = false;
+    let mut finished = false;
+    ui.add_enabled_ui(info.is_some(), |ui| {
+        if track.kind == PropertyKind::Boolean {
+            let mut on = numbers[0] >= 0.5;
+            let response = ui.checkbox(&mut on, "");
+            if response.changed() {
+                numbers[0] = if on { 1.0 } else { 0.0 };
+                changed = true;
+                finished = true;
+            }
+        } else {
+            for number in &mut numbers {
+                let response = ui.add_sized(
+                    [62.0, ROW - 4.0],
+                    egui::DragValue::new(number)
+                        .speed(speed)
+                        .range(range[0]..=range[1])
+                        .max_decimals(3)
+                        .update_while_editing(false),
+                );
+                changed |= response.changed();
+                finished |= ended(&response);
+            }
+            if track.kind == PropertyKind::Colour {
+                let (swatch, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
+                let channel = |n: f64| (n.clamp(0.0, 1.0) * 255.0) as u8;
+                ui.painter().rect_filled(
+                    swatch,
+                    2.0,
+                    Color32::from_rgb(channel(numbers[0]), channel(numbers[1]), channel(numbers[2])),
+                );
+            }
+        }
+        if icon_button(ui, Icon::Key)
+            .on_hover_text("Add a key at the playhead with the property's current value")
+            .clicked()
+            && let Some(value) = editor.as_ref().and_then(|e| e.read_property(&track.property).ok())
+        {
+            let frame = timeline.playhead.round() as u32;
+            let mut after = sequence.clone();
+            if let Some(edited) = after.track_mut(&track.property) {
+                edited.set_key(frame, value);
+            }
+            timeline.edit(ctx, &format!("add a key to {name}"), after);
+        }
+    });
+    if changed {
+        // The key goes at the frame shown, which the playhead then stays on.
+        let frame = timeline.playhead.round();
+        timeline.playing = None;
+        timeline.playhead = frame;
+        let value = PropertyValue::from_components(track.kind, &numbers);
+        let property = track.property.clone();
+        change_live(timeline, &format!("set a key of {name}"), |s| {
+            if let Some(edited) = s.track_mut(&property) {
+                edited.set_key(frame as u32, value);
+            }
+        });
+    }
+    if finished {
+        finish_editing(timeline, ctx);
+    }
+    if icon_button(ui, Icon::Remove)
+        .on_hover_text("Remove this track")
+        .clicked()
+    {
+        let mut after = sequence.clone();
+        after.tracks.retain(|t| t.property != track.property);
+        timeline.edit(ctx, &format!("remove {name}"), after);
+    }
+}
+
+/// The wheel zooms the time around the pointer, the middle button scrolls it.
+fn navigate(timeline: &mut TimelineModule, ui: &mut egui::Ui, dope: Rect, view: View) {
+    if !ui.rect_contains_pointer(dope) {
+        return;
+    }
+    let (scroll, middle, delta, pointer) = ui.input_mut(|i| {
+        let scroll = std::mem::take(&mut i.smooth_scroll_delta);
+        (
+            scroll,
+            i.pointer.middle_down(),
+            i.pointer.delta(),
+            i.pointer.hover_pos(),
+        )
+    });
+    let state = &mut timeline.panel;
+    if scroll.y != 0.0
+        && let Some(pointer) = pointer
+    {
+        let anchored = view.frame(pointer.x);
+        state.pixels_per_frame = (state.pixels_per_frame * (scroll.y * 0.004).exp()).clamp(ZOOM[0], ZOOM[1]);
+        state.first_frame = anchored - f64::from((pointer.x - view.left) / state.pixels_per_frame);
+    }
+    if middle && delta.x != 0.0 {
+        state.first_frame -= f64::from(delta.x / state.pixels_per_frame);
+    }
+}
+
+/// The keys as diamonds, their selection, moves and box, and the playhead across the rows.
+#[allow(clippy::too_many_arguments)]
+fn keys_area(
+    timeline: &mut TimelineModule,
+    sequence: &Sequence,
+    declared: &BTreeMap<String, PropertyInfo>,
+    rows: &[Row],
+    area: Rect,
+    view: View,
+    ui: &mut egui::Ui,
+    ctx: &mut Context,
+) {
+    let response = ui.interact(area, ui.id().with("timeline-keys"), Sense::click_and_drag());
+    let command = ui.input(|i| i.modifiers.command);
+    let centre_y = |index: usize| area.top() + (index as f32 + 0.5) * ROW;
+    let diamonds: Vec<(usize, Pos2, Vec<KeyId>)> = rows
+        .iter()
+        .enumerate()
+        .flat_map(|(index, row)| {
+            row_keys(sequence, row)
+                .into_iter()
+                .map(move |(frame, keys)| (index, egui::pos2(view.x(f64::from(frame)), centre_y(index)), keys))
+        })
+        .collect();
+    let hit = |at: Pos2| -> Option<Vec<KeyId>> {
+        diamonds
+            .iter()
+            .filter(|(_, centre, _)| (centre.x - at.x).abs() <= DIAMOND + 3.0 && (centre.y - at.y).abs() <= ROW / 2.0)
+            .min_by(|a, b| (a.1.x - at.x).abs().total_cmp(&(b.1.x - at.x).abs()))
+            .map(|(_, _, keys)| keys.clone())
+    };
+    let selection = &mut timeline.selection;
+    if response.drag_started_by(egui::PointerButton::Primary)
+        && let Some(origin) = ui.input(|i| i.pointer.press_origin())
+    {
+        timeline.panel.gesture = match hit(origin) {
+            Some(keys) => {
+                if !keys.iter().all(|key| selection.contains(key)) {
+                    if !command {
+                        selection.clear();
+                    }
+                    selection.extend(keys);
+                }
+                Gesture::Move {
+                    from: origin.x,
+                    to: origin.x,
+                }
+            }
+            None => {
+                if !command {
+                    selection.clear();
+                }
+                Gesture::Select {
+                    from: origin,
+                    to: origin,
+                }
+            }
+        };
+    }
+    if response.clicked()
+        && let Some(at) = response.interact_pointer_pos()
+    {
+        match hit(at) {
+            Some(keys) if command && keys.iter().all(|key| selection.contains(key)) => {
+                for key in &keys {
+                    selection.remove(key);
+                }
+            }
+            Some(keys) if command => selection.extend(keys),
+            Some(keys) => *selection = keys.into_iter().collect(),
+            None if !command => selection.clear(),
+            None => {}
+        }
+    }
+    if response.dragged()
+        && let Some(pointer) = response.interact_pointer_pos()
+    {
+        match &mut timeline.panel.gesture {
+            Gesture::Move { to, .. } => *to = pointer.x,
+            Gesture::Select { to, .. } => *to = pointer,
+            Gesture::None => {}
+        }
+    }
+    let offset = match timeline.panel.gesture {
+        Gesture::Move { from, to } => ((to - from) / view.pixels_per_frame).round() as i64,
+        _ => 0,
+    };
+    let selecting = match timeline.panel.gesture {
+        Gesture::Select { from, to } => Some(Rect::from_two_pos(from, to)),
+        _ => None,
+    };
+    if response.drag_stopped() {
+        if offset != 0 {
+            let mut after = sequence.clone();
+            let moved = after.move_keys(&timeline.selection, offset);
+            timeline.edit(ctx, "move keys", after);
+            timeline.selection = moved;
+        }
+        if let Some(rect) = selecting {
+            for (index, centre, keys) in &diamonds {
+                if matches!(rows[*index], Row::Track(_)) && rect.contains(*centre) {
+                    timeline.selection.extend(keys.iter().cloned());
+                }
+            }
+        }
+        timeline.panel.gesture = Gesture::None;
+    }
+
+    // Drawn as they will be once a move ends.
+    let (shown, selected) = if offset == 0 {
+        (sequence.clone(), timeline.selection.clone())
+    } else {
+        let mut preview = sequence.clone();
+        let moved = preview.move_keys(&timeline.selection, offset);
+        (preview, moved)
+    };
+    let painter = ui.painter_at(area);
+    let visuals = ui.visuals();
+    for (index, row) in rows.iter().enumerate() {
+        let band = Rect::from_min_size(
+            egui::pos2(area.left(), area.top() + index as f32 * ROW),
+            egui::vec2(area.width(), ROW),
+        );
+        if matches!(row, Row::Summary | Row::Group(_)) {
+            painter.rect_filled(band, 0.0, visuals.faint_bg_color);
+        }
+        painter.line_segment(
+            [band.left_bottom(), band.right_bottom()],
+            Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color.gamma_multiply(0.5)),
+        );
+    }
+    let outside = Color32::from_black_alpha(28);
+    let start = view.x(0.0);
+    let end = view.x(f64::from(sequence.length));
+    if start > area.left() {
+        painter.rect_filled(Rect::from_x_y_ranges(area.left()..=start, area.y_range()), 0.0, outside);
+    }
+    if end < area.right() {
+        painter.rect_filled(Rect::from_x_y_ranges(end..=area.right(), area.y_range()), 0.0, outside);
+    }
+    for (index, row) in rows.iter().enumerate() {
+        let missing = matches!(row, Row::Track(i) if !declared.contains_key(&sequence.tracks[*i].property));
+        for (frame, keys) in row_keys(&shown, row) {
+            let centre = egui::pos2(view.x(f64::from(frame)), centre_y(index));
+            let chosen = keys.iter().all(|key| selected.contains(key));
+            let fill = if chosen {
+                visuals.selection.bg_fill
+            } else if missing {
+                visuals.weak_text_color()
+            } else {
+                visuals.text_color()
+            };
+            diamond(&painter, centre, fill, visuals.extreme_bg_color);
+        }
+    }
+    if let Some(rect) = selecting {
+        painter.rect(
+            rect,
+            0.0,
+            visuals.selection.bg_fill.gamma_multiply(0.15),
+            Stroke::new(1.0, visuals.selection.bg_fill),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let x = view.x(timeline.playhead);
+    painter.line_segment(
+        [egui::pos2(x, area.top()), egui::pos2(x, area.bottom())],
+        Stroke::new(1.5, PLAYHEAD),
+    );
+}
+
+fn diamond(painter: &egui::Painter, centre: Pos2, fill: Color32, outline: Color32) {
+    let points = vec![
+        centre + Vec2::new(0.0, -DIAMOND),
+        centre + Vec2::new(DIAMOND, 0.0),
+        centre + Vec2::new(0.0, DIAMOND),
+        centre + Vec2::new(-DIAMOND, 0.0),
+    ];
+    painter.add(egui::Shape::convex_polygon(points, fill, Stroke::new(1.0, outline)));
+}
+
+enum Icon {
+    /// A diamond: add a key.
+    Key,
+    /// A cross: remove.
+    Remove,
+}
+
+/// A small button with a drawn icon, the fonts having no such characters.
+fn icon_button(ui: &mut egui::Ui, icon: Icon) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(ROW - 4.0, ROW - 4.0), Sense::click());
+    let style = ui.style().interact(&response);
+    let painter = ui.painter();
+    painter.rect_filled(rect, 2.0, style.weak_bg_fill);
+    let (centre, size) = (rect.center(), 4.0);
+    match icon {
+        Icon::Key => {
+            let points = vec![
+                centre + Vec2::new(0.0, -size),
+                centre + Vec2::new(size, 0.0),
+                centre + Vec2::new(0.0, size),
+                centre + Vec2::new(-size, 0.0),
+            ];
+            painter.add(egui::Shape::convex_polygon(points, style.fg_stroke.color, Stroke::NONE));
+        }
+        Icon::Remove => {
+            let stroke = Stroke::new(1.5, style.fg_stroke.color);
+            painter.line_segment([centre + Vec2::splat(-size), centre + Vec2::splat(size)], stroke);
+            painter.line_segment(
+                [centre + Vec2::new(-size, size), centre + Vec2::new(size, -size)],
+                stroke,
+            );
+        }
+    }
+    response
+}
+
+/// Space plays or pauses and Delete removes the selected keys, while the pointer is over the
+/// panel and no field has the keyboard.
+fn keyboard(timeline: &mut TimelineModule, sequence: &Sequence, ui: &mut egui::Ui, ctx: &mut Context) {
+    let typing = ui.ctx().memory(|memory| memory.focused().is_some());
+    if typing || !ui.ui_contains_pointer() {
+        return;
+    }
+    if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space)) {
+        toggle_playback(timeline);
+    }
+    if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Delete)) && !timeline.selection.is_empty() {
+        let mut after = sequence.clone();
+        after.remove_keys(&timeline.selection);
+        timeline.edit(ctx, "delete keys", after);
+        timeline.selection = BTreeSet::new();
+    }
+}

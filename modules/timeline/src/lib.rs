@@ -1,0 +1,303 @@
+//! The Timeline, in Animation mode, as the Animation window of Unity: keys on the animatable
+//! properties the modules declare, a dopesheet, a playhead whose values are written to the
+//! properties as it moves, and playback. Sequences are JSON files in `sequences\` beside the
+//! executable.
+
+mod curve;
+mod panel;
+mod sequence;
+
+use std::any::Any;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
+use std::time::Instant;
+
+use uniwow_api::serde_json;
+use uniwow_api::{Command, Context, DockArea, Editor, Module, Registrar, egui, log};
+
+use sequence::{KeyId, Sequence};
+
+/// A sequence opened during this session.
+struct Document {
+    sequence: Sequence,
+    /// Changed since it was last saved or read.
+    dirty: bool,
+}
+
+/// Playback under way: the frame it started from, and when.
+struct Playing {
+    from: f64,
+    since: Instant,
+}
+
+#[derive(Default)]
+struct TimelineModule {
+    editor: Option<Editor>,
+    folder: PathBuf,
+    /// The sequences of the folder, by name.
+    names: Vec<String>,
+    /// The sequences opened during this session, by name.
+    documents: BTreeMap<String, Document>,
+    current: Option<String>,
+    /// The frame at the playhead; fractional while playing.
+    playhead: f64,
+    playing: Option<Playing>,
+    looping: bool,
+    /// Set when the keys change: the values at the playhead are then written again.
+    keys_changed: bool,
+    /// The frame whose values were written last.
+    written: Option<f64>,
+    selection: BTreeSet<KeyId>,
+    panel: panel::State,
+}
+
+impl Module for TimelineModule {
+    fn register(&mut self, reg: &mut Registrar) {
+        reg.panel("timeline", "Timeline", DockArea::Bottom);
+    }
+
+    fn init(&mut self, ctx: &mut Context) {
+        self.editor = Some(ctx.editor());
+        self.folder = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("sequences")))
+            .unwrap_or_else(|| PathBuf::from("sequences"));
+        if let Err(error) = std::fs::create_dir_all(&self.folder) {
+            log::warn!("{}: {error}", self.folder.display());
+        }
+        self.refresh_names();
+    }
+
+    fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
+        self.advance(ui.ctx());
+        self.write_values();
+        panel::show(self, ui, ctx);
+        // What the panel changed shows in the 3D view at once.
+        self.write_values();
+    }
+}
+
+impl TimelineModule {
+    fn sequence(&self) -> Option<&Sequence> {
+        self.current
+            .as_ref()
+            .and_then(|name| self.documents.get(name))
+            .map(|document| &document.sequence)
+    }
+
+    fn refresh_names(&mut self) {
+        let mut names: Vec<String> = std::fs::read_dir(&self.folder)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.path())
+                    .filter(|path| path.extension().is_some_and(|e| e == "json"))
+                    .filter_map(|path| path.file_stem().map(|stem| stem.to_string_lossy().into_owned()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        self.names = names;
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        self.folder.join(format!("{name}.json"))
+    }
+
+    /// Shows the sequence `name`, read from its file unless it was opened already.
+    fn open(&mut self, name: &str) -> Result<(), String> {
+        if !self.documents.contains_key(name) {
+            let path = self.path(name);
+            let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let value: serde_json::Value =
+                serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+            let sequence = Sequence::from_json(&value).map_err(|e| format!("{}: {e}", path.display()))?;
+            self.documents
+                .insert(name.to_owned(), Document { sequence, dirty: false });
+        }
+        self.current = Some(name.to_owned());
+        self.playing = None;
+        self.playhead = 0.0;
+        self.selection.clear();
+        self.keys_changed = true;
+        self.panel.fitted = false;
+        Ok(())
+    }
+
+    /// Writes the sequence `name` to its file, through a temporary file so that a failure leaves
+    /// the previous one whole.
+    fn save(&mut self, name: &str) -> Result<(), String> {
+        let path = self.path(name);
+        let document = self.documents.get_mut(name).ok_or("nothing to save")?;
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, document.sequence.to_text())
+            .and_then(|()| std::fs::rename(&temporary, &path))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        document.dirty = false;
+        self.refresh_names();
+        Ok(())
+    }
+
+    /// Creates an empty sequence and its file.
+    fn create(&mut self, name: &str) -> Result<(), String> {
+        let valid = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-' || c == '_');
+        if !valid {
+            return Err("a name is made of letters, digits, spaces, '-' and '_'".to_owned());
+        }
+        if self.names.iter().any(|existing| existing == name) {
+            return Err(format!("'{name}' exists already"));
+        }
+        self.documents.insert(
+            name.to_owned(),
+            Document {
+                sequence: Sequence::default(),
+                dirty: false,
+            },
+        );
+        self.save(name)
+    }
+
+    /// Moves the playhead while playing.
+    fn advance(&mut self, ctx: &egui::Context) {
+        let (Some(playing), Some(sequence)) = (&self.playing, self.sequence()) else {
+            self.playing = None;
+            return;
+        };
+        let length = f64::from(sequence.length);
+        let mut frame = playing.from + playing.since.elapsed().as_secs_f64() * f64::from(sequence.frame_rate);
+        if frame >= length {
+            if self.looping {
+                frame %= length;
+            } else {
+                frame = length;
+                self.playing = None;
+            }
+        }
+        self.playhead = frame;
+        if self.playing.is_some() {
+            ctx.request_repaint();
+        }
+    }
+
+    fn play(&mut self) {
+        let Some(length) = self.sequence().map(|s| f64::from(s.length)) else {
+            return;
+        };
+        if self.playhead >= length {
+            self.playhead = 0.0;
+        }
+        self.playing = Some(Playing {
+            from: self.playhead,
+            since: Instant::now(),
+        });
+    }
+
+    /// Writes the values at the playhead to the properties, when the playhead or the keys moved.
+    fn write_values(&mut self) {
+        if self.written == Some(self.playhead) && !self.keys_changed {
+            return;
+        }
+        self.written = Some(self.playhead);
+        self.keys_changed = false;
+        let (Some(editor), Some(sequence)) = (&self.editor, self.sequence()) else {
+            return;
+        };
+        for track in &sequence.tracks {
+            if let Some(value) = track.evaluate(self.playhead) {
+                // A property no module declares now is shown greyed; there is nothing to write.
+                let _ = editor.write_property(&track.property, value);
+            }
+        }
+    }
+
+    /// Replaces the shown sequence by `after`, as one undo entry.
+    fn edit(&mut self, ctx: &mut Context, label: &str, after: Sequence) {
+        if let Some(name) = self.current.clone() {
+            ctx.execute(SequenceEdit {
+                name,
+                label: label.to_owned(),
+                after,
+                before: None,
+            });
+        }
+    }
+}
+
+/// A change of a sequence, as one undo entry: the sequence it replaces is read when applied (see
+/// `Command`).
+struct SequenceEdit {
+    name: String,
+    label: String,
+    after: Sequence,
+    before: Option<Sequence>,
+}
+
+impl SequenceEdit {
+    fn replace(&self, module: &mut dyn Any, sequence: Sequence) -> Sequence {
+        let timeline: &mut TimelineModule = module
+            .downcast_mut()
+            .expect("commands of this module are applied to it");
+        timeline.keys_changed = true;
+        let document = timeline.documents.entry(self.name.clone()).or_insert_with(|| Document {
+            sequence: sequence.clone(),
+            dirty: true,
+        });
+        document.dirty = true;
+        std::mem::replace(&mut document.sequence, sequence)
+    }
+}
+
+impl Command for SequenceEdit {
+    fn label(&self) -> String {
+        format!("timeline: {}", self.label)
+    }
+
+    fn apply(&mut self, module: &mut dyn Any) {
+        self.before = Some(self.replace(module, self.after.clone()));
+    }
+
+    fn revert(&mut self, module: &mut dyn Any) {
+        if let Some(before) = self.before.clone() {
+            self.replace(module, before);
+        }
+    }
+}
+
+uniwow_api::export_module!(TimelineModule::default());
+
+#[cfg(test)]
+mod tests {
+    use uniwow_api::{Command, PropertyKind};
+
+    use super::{Document, SequenceEdit, TimelineModule};
+    use crate::sequence::{Sequence, Track};
+
+    #[test]
+    fn an_edit_is_undone_and_redone_and_marks_the_sequence() {
+        let mut timeline = TimelineModule::default();
+        timeline.documents.insert(
+            "intro".to_owned(),
+            Document {
+                sequence: Sequence::default(),
+                dirty: false,
+            },
+        );
+        let mut after = Sequence::default();
+        after.tracks.push(Track::new("cube/scale", PropertyKind::Vector));
+        let mut edit = SequenceEdit {
+            name: "intro".to_owned(),
+            label: "add a track".to_owned(),
+            after: after.clone(),
+            before: None,
+        };
+        edit.apply(&mut timeline);
+        assert_eq!(timeline.documents["intro"].sequence, after);
+        assert!(timeline.documents["intro"].dirty && timeline.keys_changed);
+        edit.revert(&mut timeline);
+        assert_eq!(timeline.documents["intro"].sequence, Sequence::default());
+        assert_eq!(edit.label(), "timeline: add a track");
+    }
+}
