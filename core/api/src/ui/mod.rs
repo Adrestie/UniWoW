@@ -219,6 +219,8 @@ pub struct Ui {
     /// Changed at each change of a scene's set of items or their order, by scene.
     structure: HashMap<Handle, u64>,
     post: Post,
+    /// Where jobs that record nothing go, if the module's thread tells them apart.
+    uncounted: Option<Post>,
     wake: Option<egui::Context>,
     /// The store itself, for its jobs on the module's thread to look at it.
     this: Weak<Mutex<Ui>>,
@@ -283,6 +285,7 @@ impl Ui {
                 waiting: None,
                 structure: HashMap::new(),
                 post,
+                uncounted: None,
                 wake: None,
                 this: this.clone(),
             })
@@ -678,6 +681,19 @@ impl Ui {
             .filter(|c| c.sender == sender && c.signal as u32 == signal)
             .map(|c| (c.id, c.slot.clone()))
             .collect()
+    }
+
+    /// Where to post the jobs that record nothing in the history, such as the writes of a property:
+    /// they then neither block Undo nor count as the module's work.
+    pub fn set_uncounted_post(&mut self, post: Post) {
+        self.uncounted = Some(post);
+    }
+
+    /// Runs on the module's thread, after the jobs posted before, a job that records nothing in the
+    /// history.
+    pub fn post_uncounted_job(&mut self, job: Box<dyn FnOnce() + Send>) {
+        self.waiting = None;
+        (self.uncounted.as_ref().unwrap_or(&self.post))(job);
     }
 
     /// Runs a job on the module's thread, after those posted before.

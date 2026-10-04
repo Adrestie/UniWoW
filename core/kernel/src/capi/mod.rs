@@ -181,66 +181,78 @@ pub struct Started {
 /// and the Modules panel tells a module that no longer answers.
 #[derive(Default)]
 pub struct Activity {
-    /// Jobs posted and not finished, the running one included.
+    /// Counted jobs posted and not finished, the running one included: signals, paintings, undo and
+    /// redo values, commands. The writes of properties, which record nothing, are not.
     pending: AtomicUsize,
-    /// When the running job started.
-    since: Mutex<Option<Instant>>,
+    /// When the running job started, and whether it is counted.
+    running: Mutex<Option<(Instant, bool)>>,
 }
 
 impl Activity {
-    /// How many jobs wait or run.
+    /// How many counted jobs wait or run.
     pub fn pending(&self) -> usize {
         self.pending.load(Ordering::Acquire)
     }
 
-    /// How long the running job has been running.
+    /// How long the module's thread has been busy with its running job: a counted one, or one that
+    /// records nothing while counted work waits behind it.
     pub fn running_for(&self) -> Option<Duration> {
-        self.since
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .map(|since| since.elapsed())
+        let running = *self.running.lock().unwrap_or_else(|e| e.into_inner());
+        running
+            .filter(|(_, counted)| *counted || self.pending() > 0)
+            .map(|(since, _)| since.elapsed())
     }
 }
 
-/// The thread a module's signals, paintings and undo values run on, in order.
-fn module_thread(id: &str) -> (Post, Arc<Activity>) {
-    let (sender, receiver) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
+type Job = Box<dyn FnOnce() + Send>;
+
+/// The thread a module's signals, paintings, undo values and property writes run on, in order.
+/// Returns where to post counted jobs, where to post those that record nothing, and its activity.
+fn module_thread(id: &str) -> (Post, Post, Arc<Activity>) {
+    let (sender, receiver) = mpsc::channel::<(Job, bool)>();
     let name = id.to_owned();
     let activity = Arc::new(Activity::default());
     let worker = activity.clone();
     let spawned = std::thread::Builder::new()
         .name(format!("uniwow module {id}"))
         .spawn(move || {
-            for job in receiver {
-                *worker.since.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+            for (job, counted) in receiver {
+                *worker.running.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), counted));
                 if catch_unwind(AssertUnwindSafe(job)).is_err() {
                     log::error!("module '{name}': a call on its thread panicked in the editor");
                 }
-                *worker.since.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                worker.pending.fetch_sub(1, Ordering::Release);
+                *worker.running.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                if counted {
+                    worker.pending.fetch_sub(1, Ordering::Release);
+                }
             }
         });
     if let Err(error) = spawned {
         log::error!("module '{id}': its thread could not start: {error}");
     }
-    let counter = activity.clone();
+    let (counter, counted_sender) = (activity.clone(), sender.clone());
     let post: Post = Arc::new(move |job| {
         counter.pending.fetch_add(1, Ordering::AcqRel);
-        if sender.send(job).is_err() {
+        if counted_sender.send((job, true)).is_err() {
             counter.pending.fetch_sub(1, Ordering::Release);
         }
     });
-    (post, activity)
+    let uncounted: Post = Arc::new(move |job| {
+        let _ = sender.send((job, false));
+    });
+    (post, uncounted, activity)
 }
 
 /// Calls the entry point of the compiled module `id` with the table of the C interface, and reads
 /// what it offers. The table and the context live until the process ends, as the module does.
 pub fn start(init: InitFn, id: &str) -> Result<Started, String> {
-    let (post, activity) = module_thread(id);
+    let (post, uncounted, activity) = module_thread(id);
+    let ui = Ui::new(post);
+    ui::lock(&ui).set_uncounted_post(uncounted);
     let context: &'static ModuleContext = Box::leak(Box::new(ModuleContext {
         id: id.to_owned(),
         editor: OnceLock::new(),
-        ui: Ui::new(post),
+        ui,
         activity,
         apply: OnceLock::new(),
         properties: OnceLock::new(),
@@ -711,8 +723,30 @@ pub(crate) mod testing {
             error(context, c"seven is refused".as_ptr());
             return 1;
         }
+        if *value == 8.0 {
+            let mut open = native.open.lock().unwrap_or_else(|e| e.into_inner());
+            while !*open {
+                open = native.opened.wait(open).unwrap_or_else(|e| e.into_inner());
+            }
+        }
         *value = value.round();
         *native.level.lock().unwrap_or_else(|e| e.into_inner()) = *value;
+        0
+    }
+
+    /// Writes `free`, keeping an infinity for 1.
+    extern "C-unwind" fn write_free(
+        _user: *mut c_void,
+        values: *mut f64,
+        _count: u32,
+        _error: Reply,
+        _context: *mut c_void,
+    ) -> i32 {
+        // SAFETY: the editor passes one number for a number.
+        let value = unsafe { &mut *values };
+        if *value == 1.0 {
+            *value = f64::INFINITY;
+        }
         0
     }
 
@@ -745,18 +779,30 @@ pub(crate) mod testing {
         info.command_size = std::mem::size_of::<CommandEntry>() as u32;
         info.apply_change = Some(apply);
         info.user = user;
-        let properties: &'static [PropertyEntry] = Box::leak(Box::new([PropertyEntry {
-            name: c"level".as_ptr(),
-            label: c"Level".as_ptr(),
-            kind: uniwow_api::PropertyKind::Number as u32,
-            minimum: 0.0,
-            maximum: 10.0,
-            initial: [2.0, 0.0, 0.0],
-            write: Some(write_level),
-            user,
-        }]));
+        let properties: &'static [PropertyEntry] = Box::leak(Box::new([
+            PropertyEntry {
+                name: c"level".as_ptr(),
+                label: c"Level".as_ptr(),
+                kind: uniwow_api::PropertyKind::Number as u32,
+                minimum: 0.0,
+                maximum: 10.0,
+                initial: [2.0, 0.0, 0.0],
+                write: Some(write_level),
+                user,
+            },
+            PropertyEntry {
+                name: c"free".as_ptr(),
+                label: c"Free".as_ptr(),
+                kind: uniwow_api::PropertyKind::Number as u32,
+                minimum: f64::NEG_INFINITY,
+                maximum: f64::INFINITY,
+                initial: [0.0; 3],
+                write: Some(write_free),
+                user,
+            },
+        ]));
         info.properties = properties.as_ptr();
-        info.property_count = 1;
+        info.property_count = properties.len() as u32;
         info.property_size = std::mem::size_of::<PropertyEntry>() as u32;
         0
     }

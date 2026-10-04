@@ -90,6 +90,15 @@ impl Harness {
             .run_command(caller, std::thread::current().id(), name, arguments)
     }
 
+    /// Runs frames until the jobs posted so far on a compiled module's thread have run.
+    fn settle(&mut self, thread: &'static capi::ModuleContext) {
+        let (done, ran) = std::sync::mpsc::channel();
+        ui::lock(&thread.ui).post_job(Box::new(move || {
+            let _ = done.send(());
+        }));
+        self.until("the module's thread done", |_| ran.try_recv().is_ok());
+    }
+
     fn index(&self, id: &str) -> usize {
         self.shell.running_index(id).expect("running")
     }
@@ -694,11 +703,8 @@ fn a_compiled_module_s_property_is_read_at_once_and_written_on_its_thread_merged
     let module = harness.shell.slots[0].compiled.expect("compiled");
     let editor = harness.shell.host.editor(KERNEL);
     let listed = editor.properties();
-    assert_eq!(listed.len(), 1);
-    assert_eq!(
-        (listed[0].path.as_str(), listed[0].range),
-        ("native/level", [0.0, 10.0])
-    );
+    let level = listed.iter().find(|p| p.path == "native/level").expect("listed");
+    assert_eq!(level.range, [0.0, 10.0]);
     assert_eq!(
         editor.read_property("native/level"),
         Ok(uniwow_api::PropertyValue::Number(2.0))
@@ -718,7 +724,7 @@ fn a_compiled_module_s_property_is_read_at_once_and_written_on_its_thread_merged
         Ok(uniwow_api::PropertyValue::Number(4.2))
     );
     release.send(()).unwrap();
-    harness.until("the module's work done", |shell| shell.blocking_undo().is_none());
+    harness.settle(module);
     assert_eq!(
         capi::testing::level(module),
         (4.0, 1),
@@ -754,8 +760,13 @@ fn a_compiled_module_lists_reads_writes_and_tells_properties_through_the_c_funct
     let mut harness = Harness::with_slots(vec![Slot::compiled("native", native)]);
     let module = harness.shell.slots[0].compiled.expect("compiled");
     let listed: Value = uniwow_api::serde_json::from_str(&capi::testing::properties_json(module)).unwrap();
-    assert_eq!(listed[0]["path"], json!("native/level"));
-    assert_eq!(listed[0]["kind"], json!("number"));
+    let level = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["path"] == json!("native/level"))
+        .expect("listed");
+    assert_eq!(level["kind"], json!("number"));
     assert_eq!(capi::testing::read_number(module, c"native/level"), (1, 2.0));
     assert_eq!(capi::testing::write_numbers(module, c"native/level", &[9.0]), 0);
     assert_eq!(
@@ -763,7 +774,7 @@ fn a_compiled_module_lists_reads_writes_and_tells_properties_through_the_c_funct
         1,
         "a number is one number"
     );
-    harness.until("the write delivered", |shell| shell.blocking_undo().is_none());
+    harness.settle(module);
     assert_eq!(capi::testing::level(module).0, 9.0);
     assert_eq!(capi::testing::tell_numbers(module, c"level", &[5.0]), 0);
     assert_eq!(capi::testing::read_number(module, c"native/level"), (1, 5.0));
@@ -775,4 +786,55 @@ fn a_compiled_module_lists_reads_writes_and_tells_properties_through_the_c_funct
         (1, 10.0),
         "kept within its range"
     );
+}
+
+#[test]
+fn the_writes_of_a_property_neither_block_undo_nor_show_the_module_busy() {
+    let (module, value) = counter("a");
+    let native = CompiledModule::started(capi::testing::native("native"));
+    let mut harness = Harness::with_slots(vec![Slot::loaded("a", module), Slot::compiled("native", native)]);
+    harness.call("a", "a.add", json!({})).unwrap();
+    let thread = harness.shell.slots[1].compiled.expect("compiled");
+    let editor = harness.shell.host.editor(KERNEL);
+    // A write the module takes its time over: 8 waits until the gate opens.
+    editor
+        .write_property("native/level", uniwow_api::PropertyValue::Number(8.0))
+        .unwrap();
+    harness.until("the write running", |_| {
+        thread.activity.running_for().is_some() || capi::testing::level(thread).1 > 0
+    });
+    assert!(
+        harness.shell.blocking_undo().is_none(),
+        "a write records nothing: Undo is not blocked"
+    );
+    assert!(
+        thread.activity.running_for().is_none(),
+        "nor is the module busy, with nothing waiting behind"
+    );
+    harness.shell.undo();
+    assert_eq!(*lock(&value), 0, "Undo ran during the write");
+    // Counted work waiting behind the write: the module is busy.
+    ui::lock(&thread.ui).post_job(Box::new(|| {}));
+    assert!(harness.shell.blocking_undo().is_some());
+    assert!(thread.activity.running_for().is_some());
+    capi::testing::open(thread);
+    harness.until("the module's work done", |shell| shell.blocking_undo().is_none());
+}
+
+#[test]
+fn a_value_a_module_keeps_that_is_not_finite_leaves_the_one_before() {
+    let native = CompiledModule::started(capi::testing::native("native"));
+    let mut harness = Harness::with_slots(vec![Slot::compiled("native", native)]);
+    let thread = harness.shell.slots[0].compiled.expect("compiled");
+    let editor = harness.shell.host.editor(KERNEL);
+    editor
+        .write_property("native/free", uniwow_api::PropertyValue::Number(1.0))
+        .unwrap();
+    harness.settle(thread);
+    assert_eq!(
+        editor.read_property("native/free"),
+        Ok(uniwow_api::PropertyValue::Number(1.0)),
+        "the infinity the module kept is refused"
+    );
+    assert!(harness.shell.slots[0].state.is_running());
 }

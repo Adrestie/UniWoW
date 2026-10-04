@@ -7,7 +7,7 @@ use std::ffi::{c_char, c_void};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use uniwow_api::serde_json::{Value, json};
-use uniwow_api::{PropertyKind, PropertyValue, ui};
+use uniwow_api::{PropertyKind, PropertyValue, log, ui};
 
 use super::{ModuleContext, Reply, UserPointer, collect, editor, guarded, module, read, reply_with, text_target};
 
@@ -58,8 +58,9 @@ impl CompiledProperty {
         if lock(&self.waiting).replace(value).is_some() {
             return;
         }
+        // A write records nothing in the history: it neither blocks Undo nor counts as work.
         let property = self.clone();
-        ui::lock(&self.context.ui).post_job(Box::new(move || property.deliver()));
+        ui::lock(&self.context.ui).post_uncounted_job(Box::new(move || property.deliver()));
     }
 
     /// The value the module tells its property now has.
@@ -86,6 +87,14 @@ impl CompiledProperty {
         );
         if status != 0 {
             editor.report_failure(&format!("could not write its property '{}': {error}", self.name));
+            return;
+        }
+        if !numbers.iter().all(|number| number.is_finite()) {
+            log::warn!(
+                "module '{}': the value its property '{}' kept is not a finite number: the one before stays",
+                self.context.id,
+                self.name
+            );
             return;
         }
         // What the module kept is what readers see, unless a newer write waits already.

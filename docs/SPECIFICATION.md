@@ -205,8 +205,9 @@ within bounds), selectable and selected or not. Colours are `0xRRGGBBAA`, sizes 
   and one redoing it. Undo and Redo hand the matching value to the function the module declared,
   on its thread; when that function fails, the module fails and its changes leave the history.
   While a compiled module's thread still has signals, changes or commands to handle, Undo and
-  Redo are refused with the reason; one job running for more than 3 seconds shows the module as
-  not responding in the Modules panel, where it can be disabled: its changes leave the history and
+  Redo are refused with the reason; the writes of its properties, which record nothing, do not
+  count. One job running for more than 3 seconds shows the module as not responding in the Modules
+  panel (a write only when other work waits behind it), where it can be disabled: its changes leave the history and
   Undo comes back. The Commands panel never waits for an answer: another call replaces the one
   awaited, or the wait is given up.
 - **Undo of the state the kernel keeps** (milestone 8): for the objects whose state the kernel
@@ -1229,8 +1230,10 @@ table up to date, and its review checks it.
     initial value, `write` and its `user`; `uniwow_module_info` ends with `properties`,
     `property_count` and `property_size`.
   - `write` receives the numbers written in a buffer it may change: what it leaves there is the value
-    the module keeps, which the kernel's copy then takes, unless a newer write already waits. Its
-    failure is reported with the property's name and the module's message.
+    the module keeps, which the kernel's copy then takes, unless a newer write already waits; a value
+    kept that is not finite is refused with a warning, the one before staying. Its failure is
+    reported with the property's name and the module's message.
+  - A write records nothing: it neither blocks Undo nor counts as the module's work.
   - `set_property` refuses a count that is not the kind's, and numbers that are not finite.
   - C++ also has `describeProperties(info)`, `readProperty` and `writeProperty`, and
     `Property::set`; C# also has `Editor.SetProperty`.
