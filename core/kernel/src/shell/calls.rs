@@ -117,7 +117,7 @@ impl Shell {
                 let part = history::Part {
                     owner,
                     label: label.clone(),
-                    document: None,
+                    document: change.document(),
                     command: Box::new(Recorded { label, change }),
                 };
                 match self.groups.parts_of(&caller, thread) {

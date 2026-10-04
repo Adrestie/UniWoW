@@ -1,21 +1,24 @@
-//! The playback bar: play, the frame, the frame rate and the length, and the properties to add.
+//! The playback bar: play, the frame, the frame rate and the length, the view shown, and the
+//! properties to add.
 
-use super::*;
+use std::collections::BTreeMap;
 
-/// Playback, the frame, the frame rate and the length, and the properties to add.
-pub(super) fn playback_bar(
-    timeline: &mut TimelineModule,
-    sequence: &Sequence,
-    declared: &BTreeMap<String, PropertyInfo>,
-    ui: &mut egui::Ui,
-    ctx: &mut Context,
-) {
+use uniwow_api::egui;
+use uniwow_api::sequence::{MAX_FRAME_RATE, MAX_LENGTH, Sequence, Track};
+use uniwow_api::ui::Property;
+use uniwow_api::{Context, PropertyInfo, log};
+
+use super::{change_live, ended, finish_editing};
+use crate::TimelineModule;
+
+/// Playback, the frame, the frame rate and the length, the view shown, and the properties to add.
+pub(super) fn playback_bar(timeline: &mut TimelineModule, sequence: &Sequence, ui: &mut egui::Ui, ctx: &mut Context) {
     let frames = sequence.key_frames();
-    let at = timeline.playhead.round() as u32;
+    let (time, playing, looping) = timeline.objects.playback();
+    let at = time.round() as u32;
     ui.horizontal(|ui| {
         if ui.button("⏮").on_hover_text("First frame").clicked() {
-            timeline.playing = None;
-            timeline.playhead = 0.0;
+            timeline.objects.seek(0.0);
         }
         let previous = frames.range(..at).next_back().copied();
         if ui
@@ -23,16 +26,14 @@ pub(super) fn playback_bar(
             .on_hover_text("Previous key")
             .clicked()
         {
-            timeline.playing = None;
-            timeline.playhead = f64::from(previous.unwrap_or(0));
+            timeline.objects.seek(f64::from(previous.unwrap_or(0)));
         }
-        let playing = timeline.playing.is_some();
         if ui
             .button(if playing { "⏸" } else { "▶" })
             .on_hover_text("Play or pause (Space)")
             .clicked()
         {
-            toggle_playback(timeline);
+            timeline.objects.toggle_playback();
         }
         let next = frames.range(at + 1..).next().copied();
         if ui
@@ -40,14 +41,18 @@ pub(super) fn playback_bar(
             .on_hover_text("Next key")
             .clicked()
         {
-            timeline.playing = None;
-            timeline.playhead = f64::from(next.unwrap_or(0));
+            timeline.objects.seek(f64::from(next.unwrap_or(0)));
         }
         if ui.button("⏭").on_hover_text("Last frame").clicked() {
-            timeline.playing = None;
-            timeline.playhead = f64::from(sequence.length);
+            timeline.objects.seek(f64::from(sequence.length));
         }
-        ui.checkbox(&mut timeline.looping, "Loop");
+        let mut looped = looping;
+        if ui.checkbox(&mut looped, "Loop").changed() {
+            let player = timeline.objects.player;
+            timeline
+                .objects
+                .set(player, Property::Loop, if looped { 1.0 } else { 0.0 });
+        }
         ui.separator();
 
         ui.label("Frame");
@@ -60,8 +65,7 @@ pub(super) fn playback_bar(
             )
             .changed()
         {
-            timeline.playing = None;
-            timeline.playhead = f64::from(frame);
+            timeline.objects.seek(f64::from(frame));
         }
         ui.label("Frame rate");
         let mut frame_rate = sequence.frame_rate;
@@ -71,7 +75,7 @@ pub(super) fn playback_bar(
                 .update_while_editing(false),
         );
         if response.changed() {
-            change_live(timeline, "frame rate", |s| s.frame_rate = frame_rate);
+            change_live(timeline, "frame rate", Property::FrameRate, f64::from(frame_rate));
         }
         let mut finished = ended(&response);
         ui.label("Length");
@@ -82,98 +86,64 @@ pub(super) fn playback_bar(
                 .update_while_editing(false),
         );
         if response.changed() {
-            change_live(timeline, "length", |s| s.length = length);
+            change_live(timeline, "length", Property::Length, f64::from(length));
         }
         finished |= ended(&response);
         if finished {
             finish_editing(timeline, ctx);
         }
         ui.separator();
-        if ui.selectable_label(!timeline.panel.curves, "Dopesheet").clicked() {
-            timeline.panel.curves = false;
+        let mut curves = timeline.panel.curves;
+        if ui.selectable_label(!curves, "Dopesheet").clicked() {
+            curves = false;
         }
-        if ui.selectable_label(timeline.panel.curves, "Curves").clicked() {
-            timeline.panel.curves = true;
+        if ui.selectable_label(curves, "Curves").clicked() {
+            curves = true;
+        }
+        if curves != timeline.panel.curves {
+            timeline.panel.curves = curves;
+            timeline.objects.show_curves(curves);
         }
         ui.separator();
-
-        let addable: Vec<&PropertyInfo> = declared
-            .values()
-            .filter(|info| sequence.track(&info.path).is_none())
-            .collect();
-        ui.add_enabled_ui(!addable.is_empty(), |ui| {
-            ui.menu_button("Add property", |ui| {
-                for info in addable {
-                    if ui.button(format!("{}: {}", info.owner, info.label)).clicked() {
-                        let mut after = sequence.clone();
-                        after.tracks.push(Track::new(&info.path, info.kind));
-                        timeline.edit(ctx, &format!("add {}", info.label), after);
-                        ui.close();
-                    }
-                }
-            });
-        });
+        add_property(timeline, sequence, ui);
     });
 }
 
-pub(super) fn toggle_playback(timeline: &mut TimelineModule) {
-    if timeline.playing.take().is_none() {
-        timeline.play();
-    }
-}
-
-pub(super) enum Icon {
-    /// A diamond: add a key.
-    Key,
-    /// A cross: remove.
-    Remove,
-    /// A triangle pointing right: rows to show.
-    Folded,
-    /// A triangle pointing down: rows shown.
-    Unfolded,
-}
-
-/// A small button with a drawn icon, the fonts having no such characters.
-pub(super) fn icon_button(ui: &mut egui::Ui, icon: Icon) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(ROW - 4.0, ROW - 4.0), Sense::click());
-    let style = ui.style().interact(&response);
-    let painter = ui.painter();
-    painter.rect_filled(rect, 2.0, style.weak_bg_fill);
-    let (centre, size) = (rect.center(), 4.0);
-    match icon {
-        Icon::Key => {
-            let points = vec![
-                centre + Vec2::new(0.0, -size),
-                centre + Vec2::new(size, 0.0),
-                centre + Vec2::new(0.0, size),
-                centre + Vec2::new(-size, 0.0),
-            ];
-            painter.add(egui::Shape::convex_polygon(points, style.fg_stroke.color, Stroke::NONE));
-        }
-        Icon::Folded | Icon::Unfolded => {
-            let points = if matches!(icon, Icon::Folded) {
-                vec![
-                    centre + Vec2::new(-size * 0.6, -size),
-                    centre + Vec2::new(size, 0.0),
-                    centre + Vec2::new(-size * 0.6, size),
-                ]
-            } else {
-                vec![
-                    centre + Vec2::new(-size, -size * 0.6),
-                    centre + Vec2::new(size, -size * 0.6),
-                    centre + Vec2::new(0.0, size),
-                ]
-            };
-            painter.add(egui::Shape::convex_polygon(points, style.fg_stroke.color, Stroke::NONE));
-        }
-        Icon::Remove => {
-            let stroke = Stroke::new(1.5, style.fg_stroke.color);
-            painter.line_segment([centre + Vec2::splat(-size), centre + Vec2::splat(size)], stroke);
-            painter.line_segment(
-                [centre + Vec2::new(-size, size), centre + Vec2::new(size, -size)],
-                stroke,
-            );
-        }
-    }
-    response
+/// The menu adding a track for a property of a running module the sequence does not animate yet.
+fn add_property(timeline: &mut TimelineModule, sequence: &Sequence, ui: &mut egui::Ui) {
+    let declared: BTreeMap<String, PropertyInfo> = timeline
+        .editor
+        .as_ref()
+        .map(|editor| editor.properties())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|info| (info.path.clone(), info))
+        .collect();
+    let addable: Vec<&PropertyInfo> = declared
+        .values()
+        .filter(|info| sequence.track(&info.path).is_none())
+        .collect();
+    let Some(handle) = timeline
+        .current
+        .as_ref()
+        .and_then(|name| timeline.documents.get(name))
+        .map(|document| document.sequence)
+    else {
+        return;
+    };
+    ui.add_enabled_ui(!addable.is_empty(), |ui| {
+        ui.menu_button("Add property", |ui| {
+            for info in addable {
+                if ui.button(format!("{}: {}", info.owner, info.label)).clicked() {
+                    let mut tracks = sequence.tracks.clone();
+                    tracks.push(Track::new(&info.path, info.kind));
+                    let label = format!("add {}", info.label);
+                    if let Err(error) = timeline.objects.lock().change_tracks(handle, tracks, &label) {
+                        log::warn!("{error}");
+                    }
+                    ui.close();
+                }
+            }
+        });
+    });
 }

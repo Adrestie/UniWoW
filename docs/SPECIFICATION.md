@@ -226,7 +226,9 @@ within bounds), selectable and selected or not. Colours are `0xRRGGBBAA`, sizes 
   module of another language changed by hand. The entry belongs to the module owning the object or
   the property. A change the module makes, such as its `TRACKS`, joins the group the module has
   open on the thread making it (S4); a change made by hand in a view is recorded from the interface
-  thread, where the module has no group open, and is an entry of its own, as the user's gesture. The author of a tool in any language has nothing to
+  thread, where the module has no group open, and is an entry of its own, as the user's gesture.
+  The title of a `Sequence` names the document its changes belong to: `Context::forget_document`
+  forgets them with the module's own commands. The author of a tool in any language has nothing to
   write for these; `record_change` stays for the module's own data. Rust modules using these
   objects hand them to the kernel with `Context::adopt_objects` and get the same.
 
@@ -250,8 +252,8 @@ fills it, or *not planned* when no milestone does yet.
 | The curve editor | The service `curve-editor` | `CurveView` | `uniwow::CurveView`; `CurveView` | Milestones 9 and 10 |
 | Animatable properties: declare, list, read, write | `Registrar::animatable`; `Editor::properties`, `read_property`, `write_property` | `uniwow_module_info.properties` (`uniwow_property`); `properties`, `read_property`, `write_property`, `set_property` | `uniwow::Property`, `describeProperties`, `properties`, `readProperty`, `writeProperty`; `Editor.DeclareProperty`, `Properties`, `ReadProperty`, `WriteProperty`, `SetProperty` | — milestones 9 and 10 |
 | The viewport's camera | Inside the module `viewport` (*View*, *Reset camera*) | The properties `viewport/camera_position`, `camera_target`, `camera_fov`; the commands `viewport.camera`, `viewport.look_at`, `viewport.frame` | The functions of properties; `call` | Scripts: the commands through `uniwow.call`; the properties: milestones 9 and 10 |
-| Sequences and their playback | Inside the Timeline; `uniwow_api::sequence`, the objects `Sequence` and `Player` handed to the kernel with `Context::adopt_objects` | `Sequence`, `Player` | `uniwow::Sequence`, `uniwow::Player`; `Sequence`, `Player` | — milestones 9 and 10 |
-| The dopesheet | Inside the Timeline's panel; the service `dopesheet` | `DopesheetView`; `CurveView` showing a `Sequence` | `uniwow::DopesheetView`; `DopesheetView` | — milestones 9 and 10 |
+| Sequences and their playback | `uniwow_api::sequence`; the objects `Sequence` and `Player` handed to the kernel with `Context::adopt_objects`, as the Timeline does | `Sequence`, `Player` | `uniwow::Sequence`, `uniwow::Player`; `Sequence`, `Player` | — milestones 9 and 10 |
+| The dopesheet | The service `dopesheet`; the objects `DopesheetView` and `CurveView`, as the Timeline does | `DopesheetView`; `CurveView` showing a `Sequence` | `uniwow::DopesheetView`; `DopesheetView` | — milestones 9 and 10 |
 | Tree, table, property grid | egui | — step 8.7 | — step 8.7 | — milestones 9 and 10 |
 | Drawing in the 3D view | The service `viewport` and its layers | — not planned (an other 3D access of step 8.3) | — | — |
 | Unsaved changes, asked about when the editor closes | `Module::unsaved`, `save_unsaved` | — not planned | — | — |
@@ -1428,6 +1430,27 @@ As built, first part (8.6a), the views doing what the Timeline does by hand:
   service; the tracks the view set, not the version of the sequence, tell a change made elsewhere,
   so that a change of the length during a drag leaves where it began; the properties the views
   show are read once a frame for a module, whatever panels and dialogs are drawn.
+
+As built, second part (8.6b), the Timeline a client:
+
+- The Timeline keeps its files, its bars and its question about unsaved changes. Each sequence
+  opened is a `Sequence` object, made with its content (`Ui::create_sequence`, which records
+  nothing) and titled with its name; the playback bar drives a `Player`; the dopesheet and the
+  Curves view are a `DopesheetView` and a `CurveView`, which the Timeline hands to the kernel
+  (`Context::adopt_objects`) and draws with `Context::draw_objects`. Its own dopesheet, curves and
+  playback are gone, and the module holds no sequence logic.
+- A sequence is unsaved while its object differs from what its file holds: undoing back to it
+  marks it saved again.
+- The changes of keys and tracks are recorded by the kernel; *Add property* is one, *add <label>*.
+  The frame rate and the length, which the kernel does not record, stay undoable by a command of
+  the Timeline, one entry for a field dragged. The undo entries lose their prefix *timeline:*.
+- The title of a sequence names the document its changes belong to (`AppliedChange::document`): a
+  sequence left without saving is destroyed, and `Context::forget_document` forgets the kernel's
+  entries of its tracks with the Timeline's own.
+- What differs from milestones 6 and 7: in the Curves view the playhead moves from the playback
+  bar, the view having no ruler; the dopesheet and the Curves view each keep their own time axis,
+  which no longer follow each other nor fit a sequence shown again; a key of a value beyond 1e9
+  is not added, without a message.
 
 **Step 8.7, data widgets**, as in Qt:
 

@@ -1,30 +1,33 @@
-//! The Timeline, in Animation mode, as the Animation window of Unity: keys on the animatable
-//! properties the modules declare, a dopesheet, a playhead whose values are written to the
-//! properties as it moves, and playback. Sequences are JSON files in `sequences\` beside the
-//! executable.
+//! The Timeline, in Animation mode, as the Animation window of Unity: sequences of keys on the
+//! animatable properties the modules declare, kept in readable JSON files in `sequences\` beside
+//! the executable. Its sequences, their playback, the dopesheet and the Curves view are objects of
+//! the core (section 3): a `Sequence` per sequence opened, a `Player`, a `DopesheetView` and a
+//! `CurveView`. The module keeps the files and its bars.
 
 mod panel;
 #[cfg(test)]
 mod testing;
 
 use std::any::Any;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::sync::Arc;
 
+use uniwow_api::sequence::Sequence;
 use uniwow_api::serde_json;
+use uniwow_api::ui::{self, Handle, Kind, Property, SharedUi, Ui};
 use uniwow_api::{
     CallId, Command, Context, DIALOG_ANSWERED_TOPIC, DockArea, Editor, Event, Module, Registrar, egui, log,
 };
 
-use uniwow_api::sequence::{KeyId, Sequence};
+/// The panel of the objects, which holds the dopesheet and the Curves view.
+const VIEWS: &str = "views";
 
-/// A sequence opened during this session.
+/// A sequence opened during this session: its object, and what its file holds.
 struct Document {
-    sequence: Sequence,
-    /// Changed since it was last saved or read.
-    dirty: bool,
+    sequence: Handle,
+    saved: Sequence,
 }
 
 /// A question about unsaved changes, asked before showing another sequence.
@@ -36,13 +39,105 @@ struct Question {
     target: String,
 }
 
-/// Playback under way: the frame it started from, and when.
-struct Playing {
-    from: f64,
-    since: Instant,
+/// The objects the Timeline shows and plays its sequences with.
+struct Objects {
+    store: SharedUi,
+    player: Handle,
+    dopesheet: Handle,
+    curves: Handle,
 }
 
-#[derive(Default)]
+impl Objects {
+    fn new() -> Self {
+        // The Timeline connects no slot: no job reaches its objects.
+        let store = Ui::new(Arc::new(|_job| {}));
+        let (player, dopesheet, curves) = {
+            let mut objects = ui::lock(&store);
+            let made = (|| {
+                let player = objects.create(Kind::Player, None)?;
+                let dopesheet = objects.create(Kind::DopesheetView, None)?;
+                let curves = objects.create(Kind::CurveView, None)?;
+                let layout = objects.create(Kind::VBoxLayout, None)?;
+                for view in [dopesheet, curves] {
+                    objects.set_numbers(view, Property::Player, &[player as f64])?;
+                    objects.add_to(layout, view, [0, 0, 1, 1])?;
+                }
+                objects.set_numbers(curves, Property::Visible, &[0.0])?;
+                let panel = objects.panel(VIEWS);
+                objects.add_to(panel, layout, [0, 0, 1, 1])?;
+                Ok::<_, String>((player, dopesheet, curves))
+            })();
+            made.unwrap_or_else(|error| {
+                log::error!("the Timeline's objects could not be made: {error}");
+                (0, 0, 0)
+            })
+        };
+        Self {
+            store,
+            player,
+            dopesheet,
+            curves,
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Ui> {
+        ui::lock(&self.store)
+    }
+
+    /// The player's time, whether it plays, and whether it loops.
+    fn playback(&self) -> (f64, bool, bool) {
+        let objects = self.lock();
+        let number = |property| {
+            objects
+                .numbers(self.player, property)
+                .ok()
+                .and_then(|numbers| numbers.first().copied())
+                .unwrap_or(0.0)
+        };
+        (
+            number(Property::Time),
+            number(Property::Playing) != 0.0,
+            number(Property::Loop) != 0.0,
+        )
+    }
+
+    fn set(&self, object: Handle, property: Property, value: f64) {
+        if let Err(error) = self.lock().set_numbers(object, property, &[value]) {
+            log::warn!("{error}");
+        }
+    }
+
+    /// The playhead at `frame`, paused.
+    fn seek(&self, frame: f64) {
+        self.set(self.player, Property::Playing, 0.0);
+        self.set(self.player, Property::Time, frame);
+    }
+
+    fn toggle_playback(&self) {
+        let (_, playing, _) = self.playback();
+        self.set(self.player, Property::Playing, if playing { 0.0 } else { 1.0 });
+    }
+
+    /// The sequence the views show, under its name, and the player plays, from frame 0.
+    fn show(&self, sequence: Handle, name: &str) {
+        for object in [self.player, self.dopesheet, self.curves] {
+            self.set(object, Property::Sequence, sequence as f64);
+        }
+        for view in [self.dopesheet, self.curves] {
+            if let Err(error) = self.lock().set_text(view, Property::Title, name) {
+                log::warn!("{error}");
+            }
+        }
+        self.seek(0.0);
+    }
+
+    /// The dopesheet shown, or the Curves view.
+    fn show_curves(&self, curves: bool) {
+        self.set(self.dopesheet, Property::Visible, if curves { 0.0 } else { 1.0 });
+        self.set(self.curves, Property::Visible, if curves { 1.0 } else { 0.0 });
+    }
+}
+
 struct TimelineModule {
     editor: Option<Editor>,
     folder: PathBuf,
@@ -51,17 +146,24 @@ struct TimelineModule {
     /// The sequences opened during this session, by name.
     documents: BTreeMap<String, Document>,
     current: Option<String>,
-    /// The frame at the playhead; fractional while playing.
-    playhead: f64,
-    playing: Option<Playing>,
-    looping: bool,
-    /// Set when the keys change: the values at the playhead are then written again.
-    keys_changed: bool,
-    /// The frame whose values were written last.
-    written: Option<f64>,
-    selection: BTreeSet<KeyId>,
+    objects: Objects,
     question: Option<Question>,
     panel: panel::State,
+}
+
+impl Default for TimelineModule {
+    fn default() -> Self {
+        Self {
+            editor: None,
+            folder: PathBuf::new(),
+            names: Vec::new(),
+            documents: BTreeMap::new(),
+            current: None,
+            objects: Objects::new(),
+            question: None,
+            panel: panel::State::default(),
+        }
+    }
 }
 
 impl Module for TimelineModule {
@@ -72,6 +174,7 @@ impl Module for TimelineModule {
 
     fn init(&mut self, ctx: &mut Context) {
         self.editor = Some(ctx.editor());
+        ctx.adopt_objects(&self.objects.store);
         self.folder = std::env::current_exe()
             .ok()
             .and_then(|exe| exe.parent().map(|dir| dir.join("sequences")))
@@ -83,11 +186,7 @@ impl Module for TimelineModule {
     }
 
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
-        self.advance(ui.ctx());
-        self.write_values();
         panel::show(self, ui, ctx);
-        // What the panel changed shows in the 3D view at once.
-        self.write_values();
     }
 
     fn on_reply(&mut self, call: CallId, result: Result<serde_json::Value, String>, _ctx: &mut Context) {
@@ -115,19 +214,14 @@ impl Module for TimelineModule {
 
     fn unsaved(&self) -> Vec<String> {
         self.documents
-            .iter()
-            .filter(|(_, document)| document.dirty)
-            .map(|(name, _)| format!("Sequence '{name}'"))
+            .keys()
+            .filter(|name| self.dirty(name))
+            .map(|name| format!("Sequence '{name}'"))
             .collect()
     }
 
     fn save_unsaved(&mut self, _ctx: &mut Context) -> Result<(), String> {
-        let names: Vec<String> = self
-            .documents
-            .iter()
-            .filter(|(_, document)| document.dirty)
-            .map(|(name, _)| name.clone())
-            .collect();
+        let names: Vec<String> = self.documents.keys().filter(|name| self.dirty(name)).cloned().collect();
         let failures: Vec<String> = names.iter().filter_map(|name| self.save(name).err()).collect();
         if failures.is_empty() {
             Ok(())
@@ -158,9 +252,12 @@ impl TimelineModule {
         panel::open(self, &question.target);
     }
 
-    /// Drops the unsaved changes of the sequence `name`: Undo would otherwise bring them back.
+    /// Drops the unsaved changes of the sequence `name`: its object, and its changes, which Undo
+    /// would otherwise bring back.
     fn discard(&mut self, name: &str, ctx: &mut Context) {
-        self.documents.remove(name);
+        if let Some(document) = self.documents.remove(name) {
+            let _ = self.objects.lock().destroy(document.sequence);
+        }
         ctx.forget_document(name);
     }
 
@@ -169,11 +266,21 @@ impl TimelineModule {
         self.panel.say(message);
     }
 
-    fn sequence(&self) -> Option<&Sequence> {
-        self.current
-            .as_ref()
-            .and_then(|name| self.documents.get(name))
-            .map(|document| &document.sequence)
+    /// What the sequence `name` holds now.
+    fn data(&self, name: &str) -> Option<Arc<Sequence>> {
+        let document = self.documents.get(name)?;
+        self.objects.lock().sequence(document.sequence).ok()
+    }
+
+    /// The sequence shown.
+    fn sequence(&self) -> Option<Arc<Sequence>> {
+        self.data(self.current.as_ref()?)
+    }
+
+    /// Whether the sequence `name` differs from its file.
+    fn dirty(&self, name: &str) -> bool {
+        let saved = self.documents.get(name).map(|document| &document.saved);
+        self.data(name).is_some_and(|data| Some(&*data) != saved)
     }
 
     fn refresh_names(&mut self) {
@@ -195,23 +302,41 @@ impl TimelineModule {
         self.folder.join(format!("{name}.json"))
     }
 
-    /// Shows the sequence `name`, read from its file unless it was opened already.
+    /// The object of the sequence `name`, made from `sequence` and named after its document.
+    fn adopt(&mut self, name: &str, sequence: Sequence) -> Result<(), String> {
+        let handle = {
+            let mut objects = self.objects.lock();
+            let handle = objects.create_sequence(sequence.clone())?;
+            objects.set_text(handle, Property::Title, name)?;
+            handle
+        };
+        self.documents.insert(
+            name.to_owned(),
+            Document {
+                sequence: handle,
+                saved: sequence,
+            },
+        );
+        Ok(())
+    }
+
+    /// Shows the sequence `name`, read from its file unless it was opened already. A frame rate or
+    /// a length being dragged is put back.
     fn open(&mut self, name: &str) -> Result<(), String> {
+        panel::cancel_editing(self);
         if !self.documents.contains_key(name) {
             let path = self.path(name);
             let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             let value: serde_json::Value =
                 serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
             let sequence = Sequence::from_json(&value).map_err(|e| format!("{}: {e}", path.display()))?;
-            self.documents
-                .insert(name.to_owned(), Document { sequence, dirty: false });
+            self.adopt(name, sequence)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
         }
         self.current = Some(name.to_owned());
-        self.playing = None;
-        self.playhead = 0.0;
-        self.selection.clear();
-        self.keys_changed = true;
-        self.panel.fitted = false;
+        if let Some(document) = self.documents.get(name) {
+            self.objects.show(document.sequence, name);
+        }
         Ok(())
     }
 
@@ -219,17 +344,17 @@ impl TimelineModule {
     /// the previous one whole.
     fn save(&mut self, name: &str) -> Result<(), String> {
         let path = self.path(name);
-        let document = self.documents.get_mut(name).ok_or("nothing to save")?;
+        let data = self.data(name).ok_or("nothing to save")?;
         // A file the Timeline could not read back is never written.
-        document
-            .sequence
-            .check()
+        data.check()
             .map_err(|error| format!("'{name}' is not saved: {error}"))?;
         let temporary = path.with_extension("json.tmp");
-        std::fs::write(&temporary, document.sequence.to_text())
+        std::fs::write(&temporary, data.to_text())
             .and_then(|()| std::fs::rename(&temporary, &path))
             .map_err(|e| format!("{}: {e}", path.display()))?;
-        document.dirty = false;
+        if let Some(document) = self.documents.get_mut(name) {
+            document.saved = (*data).clone();
+        }
         self.refresh_names();
         Ok(())
     }
@@ -256,128 +381,52 @@ impl TimelineModule {
             .open(&path)
             .and_then(|mut file| file.write_all(sequence.to_text().as_bytes()))
             .map_err(|e| format!("{}: {e}", path.display()))?;
-        self.documents
-            .insert(name.to_owned(), Document { sequence, dirty: false });
+        self.adopt(name, sequence)?;
         self.refresh_names();
         Ok(())
     }
 
-    /// Moves the playhead while playing.
-    fn advance(&mut self, ctx: &egui::Context) {
-        let (Some(playing), Some(sequence)) = (&self.playing, self.sequence()) else {
-            self.playing = None;
-            return;
-        };
-        let length = f64::from(sequence.length);
-        let mut frame = playing.from + playing.since.elapsed().as_secs_f64() * f64::from(sequence.frame_rate);
-        if frame >= length {
-            if self.looping {
-                frame %= length;
-            } else {
-                frame = length;
-                self.playing = None;
-            }
-        }
-        self.playhead = frame;
-        if self.playing.is_some() {
-            ctx.request_repaint();
-        }
-    }
-
-    fn play(&mut self) {
-        let Some(length) = self.sequence().map(|s| f64::from(s.length)) else {
-            return;
-        };
-        if self.playhead >= length {
-            self.playhead = 0.0;
-        }
-        self.playing = Some(Playing {
-            from: self.playhead,
-            since: Instant::now(),
-        });
-    }
-
-    /// Writes the values at the playhead to the properties, when the playhead or the keys moved.
-    fn write_values(&mut self) {
-        if self.written == Some(self.playhead) && !self.keys_changed {
-            return;
-        }
-        self.written = Some(self.playhead);
-        self.keys_changed = false;
-        let (Some(editor), Some(sequence)) = (&self.editor, self.sequence()) else {
-            return;
-        };
-        for track in &sequence.tracks {
-            // A number without keys keeps the value the property has.
-            let current = if track.has_bare_number() {
-                editor.read_property(&track.property).ok()
-            } else {
-                None
-            };
-            if let Some(value) = track.evaluate(self.playhead, current) {
-                // A property no module declares now is shown greyed; there is nothing to write.
-                let _ = editor.write_property(&track.property, value);
-            }
-        }
-    }
-
-    /// Replaces the shown sequence by `after`, as one undo entry.
-    /// Records the change as one undo entry; refused, with a message, when the sequence could not
-    /// be saved afterwards.
-    fn edit(&mut self, ctx: &mut Context, label: &str, after: Sequence) -> bool {
-        if let Err(error) = after.check() {
-            self.panel_message(&format!("not changed: {error}"));
-            return false;
-        }
-        let Some(name) = self.current.clone() else {
-            return false;
-        };
-        ctx.execute(SequenceEdit {
-            name,
-            label: label.to_owned(),
-            after,
-            before: None,
-        });
-        true
-    }
-}
-
-/// A change of a sequence, as one undo entry: the sequence it replaces is read when applied (see
-/// `Command`).
-struct SequenceEdit {
-    name: String,
-    label: String,
-    after: Sequence,
-    before: Option<Sequence>,
-}
-
-impl SequenceEdit {
-    /// Replaces the sequence and returns the one it replaced; nothing for a sequence closed
-    /// without saving, which an edit never opens again.
-    fn replace(&self, module: &mut dyn Any, sequence: Sequence) -> Option<Sequence> {
-        let timeline: &mut TimelineModule = module
-            .downcast_mut()
-            .expect("commands of this module are applied to it");
-        let document = timeline.documents.get_mut(&self.name)?;
-        document.dirty = true;
-        let before = std::mem::replace(&mut document.sequence, sequence);
-        timeline.keys_changed = true;
+    /// Sets the frame rate or the length of the sequence `name`, returning the value it had; nothing
+    /// for a sequence closed without saving, which a change never opens again.
+    fn set_number(&mut self, name: &str, property: Property, value: f64) -> Option<f64> {
+        let sequence = self.documents.get(name)?.sequence;
+        let mut objects = self.objects.lock();
+        let before = objects.numbers(sequence, property).ok()?.first().copied()?;
+        objects.set_numbers(sequence, property, &[value]).ok()?;
         Some(before)
     }
 }
 
-impl Command for SequenceEdit {
+/// A change of a sequence's frame rate or length, as one undo entry: the value it replaces is read
+/// when applied (see `Command`).
+struct NumberEdit {
+    name: String,
+    label: String,
+    property: Property,
+    after: f64,
+    before: Option<f64>,
+}
+
+impl NumberEdit {
+    fn timeline(module: &mut dyn Any) -> &mut TimelineModule {
+        module
+            .downcast_mut()
+            .expect("commands of this module are applied to it")
+    }
+}
+
+impl Command for NumberEdit {
     fn label(&self) -> String {
-        format!("timeline: {}", self.label)
+        self.label.clone()
     }
 
     fn apply(&mut self, module: &mut dyn Any) {
-        self.before = self.replace(module, self.after.clone());
+        self.before = Self::timeline(module).set_number(&self.name, self.property, self.after);
     }
 
     fn revert(&mut self, module: &mut dyn Any) {
-        if let Some(before) = self.before.clone() {
-            self.replace(module, before);
+        if let Some(before) = self.before {
+            Self::timeline(module).set_number(&self.name, self.property, before);
         }
     }
 
@@ -390,164 +439,132 @@ uniwow_api::export_module!(TimelineModule::default());
 
 #[cfg(test)]
 mod tests {
+    use uniwow_api::sequence::{Sequence, Track};
+    use uniwow_api::ui::Property;
     use uniwow_api::{Command, Module, PropertyKind};
 
-    use super::{Document, SequenceEdit, TimelineModule};
+    use super::{NumberEdit, TimelineModule};
     use crate::testing::FakeHost;
-    use uniwow_api::sequence::{Sequence, Track};
 
-    #[test]
-    fn an_edit_is_undone_and_redone_and_marks_the_sequence() {
-        let mut timeline = TimelineModule::default();
-        timeline.documents.insert(
-            "intro".to_owned(),
-            Document {
-                sequence: Sequence::default(),
-                dirty: false,
-            },
-        );
-        let mut after = Sequence::default();
-        after.tracks.push(Track::new("cube/scale", PropertyKind::Vector));
-        let mut edit = SequenceEdit {
-            name: "intro".to_owned(),
-            label: "add a track".to_owned(),
-            after: after.clone(),
-            before: None,
-        };
-        edit.apply(&mut timeline);
-        assert_eq!(timeline.documents["intro"].sequence, after);
-        assert!(timeline.documents["intro"].dirty && timeline.keys_changed);
-        edit.revert(&mut timeline);
-        assert_eq!(timeline.documents["intro"].sequence, Sequence::default());
-        assert_eq!(edit.label(), "timeline: add a track");
-    }
-
-    #[test]
-    fn an_edit_of_a_sequence_closed_without_saving_does_not_open_it_again() {
-        let mut timeline = TimelineModule::default();
-        let mut after = Sequence::default();
-        after.tracks.push(Track::new("cube/scale", PropertyKind::Vector));
-        let mut edit = SequenceEdit {
-            name: "intro".to_owned(),
-            label: "add a track".to_owned(),
-            after,
-            before: None,
-        };
-        assert_eq!(edit.document().as_deref(), Some("intro"));
-        edit.apply(&mut timeline);
-        edit.revert(&mut timeline);
-        assert!(timeline.documents.is_empty() && !timeline.keys_changed);
-    }
-
-    #[test]
-    fn leaving_an_unsaved_sequence_without_a_window_to_ask_in_forgets_its_changes() {
-        let folder = std::env::temp_dir().join(format!("uniwow-timeline-leave-{}", std::process::id()));
+    /// A Timeline over a folder of its own, made for the test `name`.
+    fn timeline(name: &str) -> (TimelineModule, std::path::PathBuf) {
+        let folder = std::env::temp_dir().join(format!("uniwow-timeline-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&folder).unwrap();
-        std::fs::write(folder.join("outro.json"), Sequence::default().to_text()).unwrap();
-        let mut timeline = TimelineModule {
+        let timeline = TimelineModule {
             folder: folder.clone(),
-            current: Some("intro".to_owned()),
             ..TimelineModule::default()
         };
-        timeline.documents.insert(
-            "intro".to_owned(),
-            Document {
-                sequence: Sequence::default(),
-                dirty: true,
-            },
-        );
+        (timeline, folder)
+    }
+
+    fn frame_rate(timeline: &TimelineModule, name: &str) -> u32 {
+        timeline.data(name).unwrap().frame_rate
+    }
+
+    #[test]
+    fn a_sequence_read_from_its_file_is_shown_unchanged_and_no_change_to_undo() {
+        let (mut timeline, folder) = timeline("open");
+        let mut sequence = Sequence::default();
+        sequence.tracks.push(Track::new("cube/scale", PropertyKind::Vector));
+        std::fs::write(folder.join("intro.json"), sequence.to_text()).unwrap();
+        timeline.open("intro").unwrap();
+        assert_eq!(*timeline.sequence().unwrap(), sequence);
+        assert!(!timeline.dirty("intro"));
+        let (time, playing, _) = timeline.objects.playback();
+        assert!(time == 0.0 && !playing, "shown from frame 0, paused");
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn a_change_of_frame_rate_is_undone_and_redone_and_marks_the_sequence() {
+        let (mut timeline, folder) = timeline("rate");
+        timeline.create("intro").unwrap();
+        let mut edit = NumberEdit {
+            name: "intro".to_owned(),
+            label: "frame rate".to_owned(),
+            property: Property::FrameRate,
+            after: 24.0,
+            before: None,
+        };
+        edit.apply(&mut timeline);
+        assert_eq!(frame_rate(&timeline, "intro"), 24);
+        assert!(timeline.dirty("intro"));
+        edit.revert(&mut timeline);
+        assert_eq!(frame_rate(&timeline, "intro"), 30);
+        assert!(!timeline.dirty("intro"), "back as saved");
+        assert_eq!(edit.document().as_deref(), Some("intro"));
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn a_change_of_a_sequence_closed_without_saving_does_not_open_it_again() {
+        let mut timeline = TimelineModule::default();
+        let mut edit = NumberEdit {
+            name: "intro".to_owned(),
+            label: "length".to_owned(),
+            property: Property::Length,
+            after: 60.0,
+            before: None,
+        };
+        edit.apply(&mut timeline);
+        edit.revert(&mut timeline);
+        assert!(timeline.documents.is_empty());
+    }
+
+    #[test]
+    fn leaving_an_unsaved_sequence_without_a_window_to_ask_in_forgets_it_and_its_changes() {
+        let (mut timeline, folder) = timeline("leave");
+        std::fs::write(folder.join("outro.json"), Sequence::default().to_text()).unwrap();
+        timeline.create("intro").unwrap();
+        timeline.open("intro").unwrap();
+        let sequence = timeline.documents["intro"].sequence;
+        timeline.set_number("intro", Property::Length, 60.0);
         let mut host = FakeHost::default();
         crate::panel::switch(&mut timeline, &mut host.context(), "outro".to_owned(), true);
         assert_eq!(host.forgotten, vec!["intro".to_owned()]);
         assert!(!timeline.documents.contains_key("intro"));
+        assert!(
+            timeline.objects.lock().object(sequence).is_none(),
+            "its object destroyed"
+        );
         assert_eq!(timeline.current.as_deref(), Some("outro"));
         std::fs::remove_dir_all(&folder).unwrap();
     }
 
     #[test]
-    fn a_sequence_its_loader_would_refuse_is_neither_saved_nor_recorded() {
-        let folder = std::env::temp_dir().join(format!("uniwow-timeline-check-{}", std::process::id()));
-        std::fs::create_dir_all(&folder).unwrap();
-        let mut broken = Sequence::default();
-        let mut track = Track::new("cube/scale", PropertyKind::Vector);
-        track.curves[0].set_key(0.0, f64::NAN);
-        broken.tracks.push(track);
-        let mut timeline = TimelineModule {
-            folder: folder.clone(),
-            current: Some("intro".to_owned()),
-            ..TimelineModule::default()
-        };
-        timeline.documents.insert(
-            "intro".to_owned(),
-            Document {
-                sequence: broken.clone(),
-                dirty: true,
-            },
-        );
-        assert!(timeline.save("intro").is_err());
-        assert!(!folder.join("intro.json").exists(), "no file it could not read back");
-        let mut host = FakeHost::default();
-        assert!(!timeline.edit(&mut host.context(), "break it", broken));
-        assert!(host.executed.is_empty());
+    fn a_saved_sequence_is_its_file_and_no_more_unsaved() {
+        let (mut timeline, folder) = timeline("save");
+        timeline.create("intro").unwrap();
+        timeline.set_number("intro", Property::Length, 60.0);
+        assert_eq!(timeline.unsaved(), vec!["Sequence 'intro'".to_owned()]);
+        timeline.save("intro").unwrap();
+        assert!(timeline.unsaved().is_empty());
+        let text = std::fs::read_to_string(folder.join("intro.json")).unwrap();
+        assert!(text.contains("\"length\": 60"), "{text}");
         std::fs::remove_dir_all(&folder).unwrap();
     }
 
     #[test]
-    fn a_change_under_way_dropped_puts_the_sequence_back_as_it_was() {
-        let mut timeline = TimelineModule {
-            current: Some("intro".to_owned()),
-            ..TimelineModule::default()
-        };
-        timeline.documents.insert(
-            "intro".to_owned(),
-            Document {
-                sequence: Sequence::default(),
-                dirty: false,
-            },
-        );
-        crate::panel::change_live(&mut timeline, "edit curves", |s| {
-            s.tracks.push(Track::new("cube/scale", PropertyKind::Vector));
-        });
+    fn a_frame_rate_dragged_then_dropped_puts_the_sequence_back_as_it_was() {
+        let (mut timeline, folder) = timeline("drop");
+        timeline.create("intro").unwrap();
+        timeline.open("intro").unwrap();
+        crate::panel::change_live(&mut timeline, "frame rate", Property::FrameRate, 24.0);
+        assert_eq!(frame_rate(&timeline, "intro"), 24);
         crate::panel::cancel_editing(&mut timeline);
-        assert_eq!(timeline.documents["intro"].sequence, Sequence::default());
-        assert!(!timeline.documents["intro"].dirty);
-        // Changed since, as by an undo: the next change starts from there, not from the old snapshot.
-        let mut since = Sequence::default();
-        since.tracks.push(Track::new("cube/position", PropertyKind::Vector));
-        timeline.documents.get_mut("intro").unwrap().sequence = since.clone();
-        crate::panel::change_live(&mut timeline, "edit curves", |s| s.tracks.clear());
-        crate::panel::cancel_editing(&mut timeline);
-        assert_eq!(timeline.documents["intro"].sequence, since);
+        assert_eq!(frame_rate(&timeline, "intro"), 30);
+        assert!(!timeline.dirty("intro"));
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     #[test]
     fn a_new_sequence_never_replaces_a_file_whose_name_differs_by_its_case() {
-        let folder = std::env::temp_dir().join(format!("uniwow-timeline-{}", std::process::id()));
-        std::fs::create_dir_all(&folder).unwrap();
+        let (mut timeline, folder) = timeline("case");
         std::fs::write(folder.join("Intro.json"), "kept").unwrap();
-        let mut timeline = TimelineModule {
-            folder: folder.clone(),
-            ..TimelineModule::default()
-        };
         assert!(timeline.create("intro").is_err());
         assert_eq!(std::fs::read_to_string(folder.join("Intro.json")).unwrap(), "kept");
         assert!(timeline.create("outro").is_ok());
         assert!(timeline.names.contains(&"outro".to_owned()));
         std::fs::remove_dir_all(&folder).unwrap();
-    }
-
-    #[test]
-    fn its_unsaved_documents_are_its_sequences_with_unsaved_changes() {
-        let mut timeline = TimelineModule::default();
-        for (name, dirty) in [("intro", true), ("outro", false)] {
-            timeline.documents.insert(
-                name.to_owned(),
-                Document {
-                    sequence: Sequence::default(),
-                    dirty,
-                },
-            );
-        }
-        assert_eq!(timeline.unsaved(), vec!["Sequence 'intro'".to_owned()]);
     }
 }

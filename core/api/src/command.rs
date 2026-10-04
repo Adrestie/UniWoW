@@ -31,4 +31,9 @@ pub trait Command {
 pub trait AppliedChange: Send {
     fn undo(&mut self);
     fn redo(&mut self);
+
+    /// The document the change belongs to, if any, as `Command::document`.
+    fn document(&self) -> Option<String> {
+        None
+    }
 }

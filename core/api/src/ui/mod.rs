@@ -248,12 +248,13 @@ pub struct PlayerFrame {
 }
 
 /// A change of a sequence's tracks, recorded for the module owning it: undoing and redoing set the
-/// tracks back, recording nothing.
+/// tracks back, recording nothing. The title of the sequence names its document.
 struct TracksChange {
     objects: Weak<Mutex<Ui>>,
     sequence: Handle,
     before: Vec<Track>,
     after: Vec<Track>,
+    document: Option<String>,
 }
 
 impl TracksChange {
@@ -272,6 +273,10 @@ impl AppliedChange for TracksChange {
 
     fn redo(&mut self) {
         self.set(&self.after);
+    }
+
+    fn document(&self) -> Option<String> {
+        self.document.clone()
     }
 }
 
@@ -613,6 +618,15 @@ impl Ui {
             .ok_or_else(|| format!("a {:?} is not a sequence", object.kind))
     }
 
+    /// Creates a sequence holding `sequence`, which is no change to undo: one read from a file, for
+    /// one. It follows the rules of a file.
+    pub fn create_sequence(&mut self, sequence: Sequence) -> Result<Handle, String> {
+        sequence.check()?;
+        let handle = self.create(Kind::Sequence, None)?;
+        self.get_mut(handle)?.sequence = Some(Arc::new(sequence));
+        Ok(handle)
+    }
+
     /// Sets the tracks of a sequence. A change is one undo entry, which the kernel records once it
     /// has adopted the objects; a change it refuses is not made.
     pub fn set_tracks(&mut self, handle: Handle, tracks: Vec<Track>) -> Result<(), String> {
@@ -651,11 +665,13 @@ impl Ui {
             };
         }
         if let Some(record) = &self.recorder {
+            let title = &self.get(handle)?.title;
             let change = TracksChange {
                 objects: self.this.clone(),
                 sequence: handle,
                 before,
                 after: tracks.clone(),
+                document: (!title.is_empty()).then(|| title.clone()),
             };
             record(label, Box::new(change))?;
         }
@@ -1806,5 +1822,26 @@ mod tests {
             *seen.lock().unwrap(),
             vec![("b".to_owned(), false), ("c".to_owned(), true)]
         );
+    }
+
+    #[test]
+    fn a_sequence_created_with_its_content_records_nothing() {
+        let shared = ui();
+        let mut ui = lock(&shared);
+        let recorded = Arc::new(Mutex::new(0));
+        let count = recorded.clone();
+        ui.set_recorder(Arc::new(move |_, _| {
+            *count.lock().unwrap() += 1;
+            Ok(())
+        }));
+        let mut sequence = crate::sequence::Sequence {
+            tracks: super::read_tracks(&tracks(0.5)).unwrap(),
+            ..Default::default()
+        };
+        let handle = ui.create_sequence(sequence.clone()).unwrap();
+        assert_eq!(*ui.sequence(handle).unwrap(), sequence);
+        assert_eq!(*recorded.lock().unwrap(), 0);
+        sequence.tracks[0].curves[0].keys[0].time = 2.5;
+        assert!(ui.create_sequence(sequence).is_err(), "a key between frames");
     }
 }

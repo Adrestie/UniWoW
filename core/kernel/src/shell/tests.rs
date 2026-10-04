@@ -1226,3 +1226,29 @@ fn a_track_no_property_can_take_is_told_once_per_player() {
     );
     assert_eq!(capi::testing::level(thread).1, 0, "nothing written");
 }
+
+#[test]
+fn a_document_forgotten_takes_the_changes_of_the_tracks_of_its_sequence_with_it() {
+    let objects = Ui::new(Arc::new(|job| job()));
+    let adopting = Adopting {
+        objects: objects.clone(),
+    };
+    let mut harness = Harness::with_slots(vec![Slot::loaded("rust", Box::new(adopting))]);
+    {
+        let mut store = ui::lock(&objects);
+        let intro = store.create(Kind::Sequence, None).unwrap();
+        store.set_text(intro, Property::Title, "intro").unwrap();
+        store
+            .set_text(intro, Property::Tracks, &level_tracks(&[(0, 1.0)]))
+            .unwrap();
+        let other = store.create(Kind::Sequence, None).unwrap();
+        store
+            .set_text(other, Property::Tracks, &level_tracks(&[(0, 2.0)]))
+            .unwrap();
+    }
+    harness.frame(RawInput::default());
+    assert_eq!(harness.shell.history.done.len(), 2);
+    uniwow_api::Host::forget_document(&mut harness.shell.host, "rust", "intro");
+    harness.frame(RawInput::default());
+    assert_eq!(harness.shell.history.done.len(), 1, "the other sequence's change stays");
+}
