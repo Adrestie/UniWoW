@@ -14,6 +14,23 @@ pub struct PanelView {
     scenes: HashMap<Handle, SceneView>,
     /// The size each painting area was last asked to paint.
     painted: HashMap<Handle, [f64; 2]>,
+    /// The height, or width, each child of a box layout that does not expand took last frame.
+    sizes: HashMap<Handle, f32>,
+}
+
+/// Whether an object takes the room left in its layout, as a widget whose size policy expands
+/// does in Qt: a graphics view, a painting area, or a layout or group box holding one.
+fn expands(store: &Ui, handle: Handle) -> bool {
+    store.object(handle).is_some_and(|object| {
+        object.visible
+            && match object.kind {
+                Kind::GraphicsView | Kind::PaintArea => true,
+                Kind::VBoxLayout | Kind::HBoxLayout | Kind::GridLayout | Kind::GroupBox => {
+                    object.children.iter().any(|child| expands(store, *child))
+                }
+                _ => false,
+            }
+    })
 }
 
 impl PanelView {
@@ -105,6 +122,7 @@ impl PanelView {
             Kind::Slider => {
                 let mut value = object.value;
                 let mut slider = egui::Slider::new(&mut value, object.minimum..=object.maximum)
+                    .show_value(false)
                     .fixed_decimals(object.decimals as usize);
                 if object.step > 0.0 {
                     slider = slider.step_by(object.step);
@@ -216,19 +234,11 @@ impl PanelView {
                 .response,
             ),
             Kind::VBoxLayout => {
-                ui.vertical(|ui| {
-                    for child in &object.children {
-                        self.object(store, shared, *child, ui, gpu, events);
-                    }
-                });
+                ui.vertical(|ui| self.boxed(store, shared, &object.children, true, ui, gpu, events));
                 None
             }
             Kind::HBoxLayout => {
-                ui.horizontal(|ui| {
-                    for child in &object.children {
-                        self.object(store, shared, *child, ui, gpu, events);
-                    }
-                });
+                ui.horizontal(|ui| self.boxed(store, shared, &object.children, false, ui, gpu, events));
                 None
             }
             Kind::GridLayout => {
@@ -271,6 +281,48 @@ impl PanelView {
             | Kind::EllipseItem
             | Kind::TextItem
             | Kind::ItemGroup => None,
+        }
+    }
+
+    /// The children of a box layout one after the other, as in Qt: those that expand share the
+    /// room the others leave, as the others measured at the previous frame.
+    #[allow(clippy::too_many_arguments)]
+    fn boxed(
+        &mut self,
+        store: &mut Ui,
+        shared: &SharedUi,
+        children: &[Handle],
+        vertical: bool,
+        ui: &mut egui::Ui,
+        gpu: Option<&egui_wgpu::RenderState>,
+        events: &mut Vec<SignalData>,
+    ) {
+        let expanding: Vec<bool> = children.iter().map(|child| expands(store, *child)).collect();
+        let along = |size: egui::Vec2| if vertical { size.y } else { size.x };
+        let fixed: f32 = children
+            .iter()
+            .zip(&expanding)
+            .filter(|(_, expands)| !**expands)
+            .map(|(child, _)| self.sizes.get(child).copied().unwrap_or(0.0))
+            .sum::<f32>()
+            + along(ui.spacing().item_spacing) * children.len().saturating_sub(1) as f32;
+        let count = expanding.iter().filter(|expands| **expands).count().max(1);
+        let share = ((along(ui.available_size()) - fixed) / count as f32).max(0.0);
+        for (child, expands) in children.iter().zip(expanding) {
+            if expands {
+                let size = if vertical {
+                    egui::vec2(ui.available_width(), share)
+                } else {
+                    egui::vec2(share, ui.available_height())
+                };
+                ui.allocate_ui(size, |ui| self.object(store, shared, *child, ui, gpu, events));
+            } else {
+                let rect = ui
+                    .scope(|ui| self.object(store, shared, *child, ui, gpu, events))
+                    .response
+                    .rect;
+                self.sizes.insert(*child, along(rect.size()));
+            }
         }
     }
 
