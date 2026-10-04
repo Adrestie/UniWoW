@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 5 built and validated; milestone 6 built, awaiting validation; milestones 7 to 10 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 6 built and validated; milestones 7 to 10 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -800,7 +800,7 @@ As built:
   `scene.fill` with 10,000 cards took 0.66 s; the first frame after it, which builds the meshes,
   88 ms.
 
-### Milestone 6: animatable properties and the Timeline in Animation mode (built, awaiting validation)
+### Milestone 6: animatable properties and the Timeline in Animation mode (done)
 
 The Animation mode comes first, as the user asked: dragging the playhead shows the cube's position,
 rotation, scale and colour change in the 3D view as it moves. The Montage mode follows in
@@ -889,7 +889,7 @@ As built:
 - **Limits**: the playhead moves and the values are written only while the *Timeline* panel is
   shown.
 
-Complement asked before validation (built): a module of the interface shows modal windows for
+Complement asked before validation (done): a module of the interface shows modal windows for
 the other modules, as `QDialog`. The module that opens one gives its text and its buttons, and does
 what the button chosen calls for. Changes that would be lost are asked about this way.
 
