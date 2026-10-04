@@ -6,6 +6,7 @@ use std::ffi::{c_char, c_void};
 use std::sync::Arc;
 
 use super::{Reply, UserPointer, c_text, guarded, module, read, reply_with};
+use crate::curve::ShownCurve;
 use crate::ui::{self, Kind, PaintCommand, Property, Signal, SignalData, Ui};
 
 /// What a slot receives; the fields its signal does not use are zero.
@@ -142,8 +143,16 @@ extern "C" fn add_to(
 }
 
 extern "C" fn set_text(context: *mut c_void, object: u64, which: u32, text: *const c_char) -> i32 {
-    with_ui(context, "set_text", 1, |ui| {
-        status(ui.set_text(object, property(which)?, &read(text)?))
+    let which = property(which);
+    let text = read(text);
+    // Curves are read before taking the lock: a long text would hold the interface waiting.
+    let curves = match (&which, &text) {
+        (Ok(Property::Curves), Ok(text)) => Some(ui::read_curves(text)),
+        _ => None,
+    };
+    with_ui(context, "set_text", 1, |ui| match curves {
+        Some(curves) => status(ui.set_curves(object, curves?)),
+        None => status(ui.set_text(object, which?, &text?)),
     })
 }
 
@@ -158,6 +167,12 @@ extern "C" fn set_numbers(context: *mut c_void, object: u64, which: u32, values:
     })
 }
 
+/// A text copied under the lock, to be answered once it is released.
+enum Copied {
+    Text(String),
+    Curves(Vec<ShownCurve>),
+}
+
 extern "C" fn text(
     context: *mut c_void,
     object: u64,
@@ -165,10 +180,27 @@ extern "C" fn text(
     reply: Option<Reply>,
     reply_context: *mut c_void,
 ) -> i32 {
-    with_ui(context, "text", 1, |ui| {
-        let text = ui.text(object, property(which)?)?;
-        reply_with(reply, reply_context, &text);
-        Ok(0)
+    guarded(1, || {
+        let module = module(context);
+        let copied = property(which).and_then(|which| {
+            let ui = ui::lock(&module.ui);
+            match which {
+                Property::Curves => ui.curves(object).map(Copied::Curves),
+                _ => ui.text(object, which).map(Copied::Text),
+            }
+        });
+        // The lock is released: the reply is the module's code, which may call its objects again.
+        match copied {
+            Ok(Copied::Text(text)) => reply_with(reply, reply_context, &text),
+            Ok(Copied::Curves(curves)) => {
+                reply_with(reply, reply_context, &ShownCurve::list_to_json(&curves).to_string())
+            }
+            Err(error) => {
+                module.refuse("text", &error);
+                return 1;
+            }
+        }
+        0
     })
 }
 
@@ -332,4 +364,57 @@ extern "C" fn save(context: *mut c_void, painter: u64) {
 
 extern "C" fn restore(context: *mut c_void, painter: u64) {
     paint(context, painter, PaintCommand::Restore);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::{CStr, c_char, c_void};
+    use std::sync::{Arc, OnceLock};
+
+    use super::{create, panel, set_text, text};
+    use crate::capi::ModuleContext;
+    use crate::ui::{Kind, Property, Ui};
+
+    /// What `answer` saw: the text, and whether the module could take its objects' lock.
+    #[derive(Default)]
+    struct Seen {
+        context: usize,
+        text: String,
+        free: bool,
+    }
+
+    extern "C-unwind" fn answer(target: *mut c_void, text: *const c_char) {
+        // SAFETY: `target` is the `Seen` of the test, `text` a NUL-terminated string.
+        let seen = unsafe { &mut *target.cast::<Seen>() };
+        seen.text = unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned();
+        let module = unsafe { &*(seen.context as *const ModuleContext) };
+        seen.free = module.ui.try_lock().is_ok();
+    }
+
+    #[test]
+    fn a_text_is_answered_once_the_lock_of_the_objects_is_released() {
+        let module: &'static ModuleContext = Box::leak(Box::new(ModuleContext {
+            id: "test".to_owned(),
+            editor: OnceLock::new(),
+            ui: Ui::new(Arc::new(|job| job())),
+            post: Arc::new(|job| job()),
+            apply: OnceLock::new(),
+        }));
+        let context = std::ptr::from_ref(module).cast_mut().cast::<c_void>();
+        let root = panel(context, c"p".as_ptr());
+        let view = create(context, Kind::CurveView as u32, 0);
+        assert_ne!(root, 0);
+        assert_ne!(view, 0);
+        let curves = c"[{\"label\":\"x\",\"keys\":[{\"time\":0,\"value\":1}]}]";
+        assert_eq!(set_text(context, view, Property::Curves as u32, curves.as_ptr()), 0);
+        let mut seen = Seen {
+            context: context as usize,
+            ..Seen::default()
+        };
+        let target = std::ptr::from_mut(&mut seen).cast::<c_void>();
+        assert_eq!(text(context, view, Property::Curves as u32, Some(answer), target), 0);
+        assert!(seen.free, "the reply ran under the lock");
+        assert!(seen.text.contains("\"value\":1.0"), "{}", seen.text);
+        assert_eq!(set_text(context, view, Property::Curves as u32, c"[{".as_ptr()), 1);
+    }
 }

@@ -19,6 +19,12 @@ use crate::egui;
 /// Identifies an object of one module.
 pub type Handle = u64;
 
+/// Reads the curves of a curve view from their JSON text (`ShownCurve::list_from_json`).
+pub fn read_curves(text: &str) -> Result<Vec<ShownCurve>, String> {
+    let value = serde_json::from_str(text).map_err(|error| format!("the curves are not JSON: {error}"))?;
+    ShownCurve::list_from_json(&value)
+}
+
 /// The highest row, column or span of a grid layout: a wrapped negative number would otherwise
 /// ask for billions of cells.
 pub const MAX_CELL: u32 = 10_000;
@@ -454,13 +460,10 @@ impl Ui {
 
     /// Sets a text property.
     pub fn set_text(&mut self, handle: Handle, property: Property, text: &str) -> Result<(), String> {
-        let object = self.get_mut(handle)?;
         if property == Property::Curves {
-            let value = serde_json::from_str(text).map_err(|error| format!("the curves are not JSON: {error}"))?;
-            object.curves = ShownCurve::list_from_json(&value)?;
-            self.changed(handle);
-            return Ok(());
+            return self.set_curves(handle, read_curves(text)?);
         }
+        let object = self.get_mut(handle)?;
         let field = match property {
             Property::Text => &mut object.text,
             Property::ToolTip => &mut object.tooltip,
@@ -471,6 +474,18 @@ impl Ui {
         text.clone_into(field);
         self.changed(handle);
         Ok(())
+    }
+
+    /// Sets the curves a curve view shows.
+    pub fn set_curves(&mut self, handle: Handle, curves: Vec<ShownCurve>) -> Result<(), String> {
+        self.get_mut(handle)?.curves = curves;
+        self.changed(handle);
+        Ok(())
+    }
+
+    /// A copy of the curves a curve view shows.
+    pub fn curves(&self, handle: Handle) -> Result<Vec<ShownCurve>, String> {
+        Ok(self.get(handle)?.curves.clone())
     }
 
     pub fn text(&self, handle: Handle, property: Property) -> Result<String, String> {
