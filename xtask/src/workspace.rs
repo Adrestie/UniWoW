@@ -42,6 +42,18 @@ pub struct Package {
 }
 
 impl Package {
+    /// Where the module goes under `modules\` beside the executable: `<id>`, or `UI\<id>` for a
+    /// module of `modules/UI/`.
+    pub fn module_folder(&self) -> Option<PathBuf> {
+        let id = self.module_id()?;
+        let group = self.dir.parent()?.file_name()?.to_string_lossy().into_owned();
+        Some(if group == "modules" {
+            PathBuf::from(id)
+        } else {
+            PathBuf::from(group).join(id)
+        })
+    }
+
     pub fn module_id(&self) -> Option<String> {
         self.meta_str("id").map(str::to_owned)
     }
@@ -212,7 +224,7 @@ fn layer_of(root: &Path, dir: &Path) -> Layer {
         ["core", "api"] => Layer::Api,
         ["core", "kernel"] => Layer::Kernel,
         ["libs", _] => Layer::Lib,
-        ["modules", _] => Layer::Module,
+        ["modules", _] | ["modules", "UI", _] => Layer::Module,
         ["xtask"] => Layer::Xtask,
         _ => Layer::Unknown,
     }

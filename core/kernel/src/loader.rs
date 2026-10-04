@@ -71,13 +71,11 @@ pub struct Discovery {
     pub slots: Vec<Slot>,
 }
 
-/// Scans `<exe dir>\modules`, checks every module against the runtime and loads the valid ones.
-pub fn discover(exe_dir: &Path, disabled: &BTreeSet<String>) -> Discovery {
-    let runtime_fingerprint = manifest::hash_file(&exe_dir.join(RUNTIME_DLL)).ok();
-    let shadow_dir = prepare_shadow_dir();
-    let mut slots: Vec<Slot> = Vec::new();
+/// Folders of `modules\` that hold modules of one family, such as those of the interface.
+const GROUPS: [&str; 1] = ["UI"];
 
-    let mut folders: Vec<PathBuf> = std::fs::read_dir(exe_dir.join("modules"))
+fn subfolders(folder: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(folder)
         .map(|entries| {
             entries
                 .filter_map(|e| e.ok())
@@ -85,7 +83,25 @@ pub fn discover(exe_dir: &Path, disabled: &BTreeSet<String>) -> Discovery {
                 .filter(|p| p.is_dir())
                 .collect()
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// Scans `<exe dir>\modules`, and its group folders, checks every module against the runtime and
+/// loads the valid ones.
+pub fn discover(exe_dir: &Path, disabled: &BTreeSet<String>) -> Discovery {
+    let runtime_fingerprint = manifest::hash_file(&exe_dir.join(RUNTIME_DLL)).ok();
+    let shadow_dir = prepare_shadow_dir();
+    let mut slots: Vec<Slot> = Vec::new();
+
+    let mut folders = Vec::new();
+    for folder in subfolders(&exe_dir.join("modules")) {
+        let name = folder.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        if GROUPS.iter().any(|group| group.eq_ignore_ascii_case(&name)) && !folder.join(manifest::FILE_NAME).exists() {
+            folders.extend(subfolders(&folder));
+        } else {
+            folders.push(folder);
+        }
+    }
     folders.sort();
 
     for folder in folders {

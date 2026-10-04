@@ -403,7 +403,10 @@ fn deploy_module(profile: &Profile, package: &Package, runtime: &str) -> Result 
         .module_id()
         .ok_or_else(|| format!("{}: missing [package.metadata.uniwow] id", package.name))?;
     let source = profile.target.join(format!("{}.dll", package.name.replace('-', "_")));
-    let folder = profile.out.join("modules").join(&id);
+    let folder = profile
+        .out
+        .join("modules")
+        .join(package.module_folder().unwrap_or_else(|| PathBuf::from(&id)));
     std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
     let dll = format!("{id}.dll");
     copy_if_changed(&source, &folder.join(&dll))?;
@@ -426,24 +429,45 @@ fn deploy_module(profile: &Profile, package: &Package, runtime: &str) -> Result 
     write(&folder.join("module.toml"), &text)
 }
 
-/// Removes the deployed workspace modules whose source folder no longer exists.
+/// Removes the deployed workspace modules whose source folder no longer exists, or which are no
+/// longer deployed there, such as a module moved into `modules/UI/`.
 fn remove_stale(profile: &Profile, modules: &[&Package]) -> Result {
-    let ids: Vec<String> = modules.iter().filter_map(|p| p.module_id()).collect();
-    let Ok(entries) = std::fs::read_dir(profile.out.join("modules")) else {
-        return Ok(());
+    let root = profile.out.join("modules");
+    let expected: Vec<PathBuf> = modules.iter().filter_map(|p| p.module_folder()).collect();
+    let subfolders = |folder: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(folder)
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir())
+                    .collect()
+            })
+            .unwrap_or_default()
     };
-    for entry in entries.filter_map(|e| e.ok()) {
-        let Ok(text) = std::fs::read_to_string(entry.path().join("module.toml")) else {
+    let mut deployed = Vec::new();
+    for folder in subfolders(&root) {
+        if folder.join("module.toml").exists() {
+            deployed.push(folder);
+        } else {
+            deployed.extend(subfolders(&folder));
+        }
+    }
+    for folder in deployed {
+        let Ok(text) = std::fs::read_to_string(folder.join("module.toml")) else {
             continue;
         };
         let Ok(manifest) = toml::from_str::<toml::Table>(&text) else {
             continue;
         };
-        let id = manifest.get("id").and_then(|v| v.as_str()).unwrap_or_default();
         let from_workspace = manifest.get("origin").and_then(|v| v.as_str()) == Some("workspace");
-        if from_workspace && !ids.iter().any(|i| i == id) {
-            std::fs::remove_dir_all(entry.path()).map_err(|e| e.to_string())?;
-            println!("removed modules/{id}: its source folder no longer exists");
+        let relative = folder.strip_prefix(&root).map(Path::to_path_buf).unwrap_or_default();
+        if from_workspace && !expected.contains(&relative) {
+            std::fs::remove_dir_all(&folder).map_err(|e| e.to_string())?;
+            println!(
+                "removed modules/{}: no module of the workspace goes there",
+                relative.display()
+            );
         }
     }
     Ok(())

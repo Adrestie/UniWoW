@@ -1,7 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["app", "core/*", "libs/*", "modules/*", "xtask"]
-default-members = ["app", "core/*", "libs/*", "modules/*"]
+# Module ids are lowercase: `modules/[!U]*` takes every module but the group folder `modules/UI`,
+# whose modules `modules/UI/*` takes.
+members = ["app", "core/*", "libs/*", "modules/[!U]*", "modules/UI/*", "xtask"]
+default-members = ["app", "core/*", "libs/*", "modules/[!U]*", "modules/UI/*"]
 
 [workspace.package]
 version = "0.1.0"
