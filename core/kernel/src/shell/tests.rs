@@ -481,17 +481,63 @@ fn undo_waits_while_a_compiled_module_has_work_on_its_thread() {
     assert_eq!(*lock(&value), 0);
 }
 
-/// One change of a compiled module, undone and redone by its thread's value.
-struct Step(Arc<Mutex<i64>>);
+#[test]
+fn undo_refuses_when_a_call_it_serves_starts_work_on_a_compiled_module() {
+    let (module, value) = counter("a");
+    let native = CompiledModule::started(capi::testing::native("native"));
+    let mut harness = Harness::with_slots(vec![Slot::loaded("a", module), Slot::compiled("native", native)]);
+    harness.call("a", "a.add", json!({})).unwrap();
+    // Queued during the frame, as Context::call or the Commands panel does: served by Undo itself.
+    let (reply, answer) = std::sync::mpsc::channel();
+    harness.shell.host.bridge.queue(Request::Call {
+        caller: KERNEL.to_owned(),
+        thread: std::thread::current().id(),
+        name: "native.wait".to_owned(),
+        arguments: json!({}),
+        reply: ReplyTo::Thread(reply),
+    });
+    harness.shell.undo();
+    assert_eq!(
+        *lock(&value),
+        1,
+        "Undo refused: the call it served keeps the module working"
+    );
+    let thread = harness.shell.slots[1].compiled.expect("compiled");
+    capi::testing::open(thread);
+    harness.until("the module's answer", |_| answer.try_recv().is_ok());
+    harness.until("the module's work done", |shell| shell.blocking_undo().is_none());
+    harness.shell.undo();
+    assert_eq!(*lock(&value), 0);
+}
 
-impl uniwow_api::AppliedChange for Step {
-    fn undo(&mut self) {
-        *lock(&self.0) -= 1;
-    }
-
-    fn redo(&mut self) {
-        *lock(&self.0) += 1;
-    }
+#[test]
+fn undo_refuses_when_a_call_it_serves_puts_a_first_change_into_a_group() {
+    let (module, value) = counter("a");
+    let mut harness = Harness::new(vec![("a", module)]);
+    harness.call("a", "a.add", json!({})).unwrap();
+    // A script's group, still empty, and its first change, both waiting in the queue.
+    let script = std::thread::spawn(|| std::thread::current().id()).join().unwrap();
+    let bridge = harness.shell.host.bridge.clone();
+    bridge.queue(Request::BeginGroup {
+        caller: "a".to_owned(),
+        thread: script,
+        label: "script".to_owned(),
+    });
+    let (reply, _answer) = std::sync::mpsc::channel();
+    bridge.queue(Request::Call {
+        caller: "a".to_owned(),
+        thread: script,
+        name: "a.add".to_owned(),
+        arguments: json!({ "by": 5 }),
+        reply: ReplyTo::Thread(reply),
+    });
+    harness.shell.undo();
+    assert_eq!(
+        *lock(&value),
+        6,
+        "the script's change is applied, and Undo refused while its group holds it"
+    );
+    assert!(harness.shell.blocking_undo().is_some());
 }
 
 #[test]
@@ -499,21 +545,17 @@ fn undo_at_random_moments_never_crosses_a_compiled_module_s_changes() {
     let native = CompiledModule::started(capi::testing::native("native"));
     let mut harness = Harness::with_slots(vec![Slot::compiled("native", native)]);
     let module = harness.shell.slots[0].compiled.expect("compiled");
-    let editor = module.editor.get().cloned().expect("given at init");
-    let value = Arc::new(Mutex::new(0));
     const CHANGES: usize = 60;
     for seed in 1..=3 {
         let mut random = Random::new(seed);
         let mut posted = 0;
         while posted < CHANGES || module.activity.pending() > 0 {
             if posted < CHANGES && random.below(3) == 0 {
-                let (editor, value, pause) = (editor.clone(), value.clone(), random.below(300));
-                let label = format!("{seed}/{posted}");
+                let (label, pause) = (format!("{seed}/{posted}"), random.below(300));
                 posted += 1;
                 ui::lock(&module.ui).post_job(Box::new(move || {
                     std::thread::sleep(Duration::from_micros(pause));
-                    *lock(&value) += 1;
-                    editor.record_change(&label, Box::new(Step(value.clone()))).unwrap();
+                    capi::testing::change(module, &label, 1);
                 }));
             }
             if random.below(4) == 0 {
@@ -545,6 +587,12 @@ fn undo_at_random_moments_never_crosses_a_compiled_module_s_changes() {
                 .chain(&shell.history.undone)
                 .any(|entry| entry.label == last)
         });
-        assert_eq!(*lock(&value), harness.shell.history.done.len() as i64, "seed {seed}");
+        // The undo values went through the module's thread: it agrees with the history.
+        harness.until("the module's work done", |shell| shell.blocking_undo().is_none());
+        assert_eq!(
+            capi::testing::value(module),
+            harness.shell.history.done.len() as i64,
+            "seed {seed}"
+        );
     }
 }

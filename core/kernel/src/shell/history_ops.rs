@@ -71,16 +71,31 @@ impl Shell {
         })
     }
 
+    /// Whether Undo or Redo, named `verb` in the log, may run now. The calls waiting are served
+    /// first, so that the changes they make reach the history before it; what they start, work on a
+    /// compiled module's thread or a first change in a group, blocks it again.
+    fn may_replay(&mut self, verb: &str) -> bool {
+        if let Some(reason) = self.blocking_undo() {
+            log::warn!("{verb} ignored: {reason}");
+            return false;
+        }
+        if self.serve_calls(CALL_BUDGET) {
+            log::warn!("{verb} ignored: calls are still waiting");
+            return false;
+        }
+        self.apply_pending();
+        if let Some(reason) = self.blocking_undo() {
+            log::warn!("{verb} ignored: {reason}");
+            return false;
+        }
+        true
+    }
+
     /// Reverts the last entry, its commands in reverse order. A command whose revert fails makes
     /// its module fail; the other commands of the entry are reverted all the same. Refused while
     /// an undo group is open.
     pub(super) fn undo(&mut self) {
-        if let Some(reason) = self.blocking_undo() {
-            log::warn!("Undo ignored: {reason}");
-            return;
-        }
-        if self.serve_calls(CALL_BUDGET) {
-            log::warn!("Undo ignored: calls are still waiting");
+        if !self.may_replay("Undo") {
             return;
         }
         let running = self.running_ids();
@@ -98,12 +113,7 @@ impl Shell {
     }
 
     pub(super) fn redo(&mut self) {
-        if let Some(reason) = self.blocking_undo() {
-            log::warn!("Redo ignored: {reason}");
-            return;
-        }
-        if self.serve_calls(CALL_BUDGET) {
-            log::warn!("Redo ignored: calls are still waiting");
+        if !self.may_replay("Redo") {
             return;
         }
         let running = self.running_ids();

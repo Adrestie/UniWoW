@@ -610,9 +610,29 @@ extern "C" fn api_end_group(context: *mut c_void) {
 /// A compiled module defined in the process, for the tests of the kernel.
 #[cfg(test)]
 pub(crate) mod testing {
-    use std::ffi::{CString, c_char, c_void};
+    use std::ffi::{CStr, CString, c_char, c_void};
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::sync::{Condvar, Mutex};
 
-    use super::{API_VERSION, Api, CommandEntry, ModuleInfo, Reply, Started, start};
+    use super::{API_VERSION, Api, CommandEntry, ModuleContext, ModuleInfo, Reply, Started, api_record_change, start};
+
+    /// What the module keeps: a value its undo and redo values change, and a gate `native.wait`
+    /// waits on.
+    pub struct Native {
+        value: AtomicI64,
+        open: Mutex<bool>,
+        opened: Condvar,
+    }
+
+    thread_local! {
+        /// The state of the module being started, for `init`.
+        static STARTING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn native_of(user: *mut c_void) -> &'static Native {
+        // SAFETY: `user` is the leaked `Native` given in `init`.
+        unsafe { &*user.cast::<Native>() }
+    }
 
     /// Answers the name of the thread it runs on.
     extern "C-unwind" fn where_it_runs(
@@ -627,34 +647,99 @@ pub(crate) mod testing {
         0
     }
 
+    /// Waits until the test opens the gate.
+    extern "C-unwind" fn wait(user: *mut c_void, _arguments: *const c_char, reply: Reply, context: *mut c_void) -> i32 {
+        let native = native_of(user);
+        let mut open = native.open.lock().unwrap_or_else(|e| e.into_inner());
+        while !*open {
+            open = native.opened.wait(open).unwrap_or_else(|e| e.into_inner());
+        }
+        reply(context, c"null".as_ptr());
+        0
+    }
+
+    /// Adds an undo or redo value, a number, to the module's value.
+    extern "C-unwind" fn apply(user: *mut c_void, value: *const c_char, _error: Reply, _context: *mut c_void) -> i32 {
+        // SAFETY: the editor passes a NUL-terminated string.
+        let text = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+        native_of(user)
+            .value
+            .fetch_add(text.parse::<i64>().unwrap_or(0), Ordering::SeqCst);
+        0
+    }
+
     unsafe extern "C-unwind" fn init(
         _api: *const Api,
         info: *mut ModuleInfo,
         _error: Reply,
         _context: *mut c_void,
     ) -> i32 {
-        let commands: &'static [CommandEntry] = Box::leak(Box::new([CommandEntry {
-            name: c"native.where".as_ptr(),
-            description: c"Answers the name of its thread".as_ptr(),
+        let user = STARTING.get() as *mut c_void;
+        let command = |name: &'static CStr, handler| CommandEntry {
+            name: name.as_ptr(),
+            description: c"A command of the tests".as_ptr(),
             arguments_schema: c"{}".as_ptr(),
             result_schema: c"{}".as_ptr(),
-            handler: Some(where_it_runs),
-            user: std::ptr::null_mut(),
-        }]));
+            handler: Some(handler),
+            user,
+        };
+        let commands: &'static [CommandEntry] = Box::leak(Box::new([
+            command(c"native.where", where_it_runs),
+            command(c"native.wait", wait),
+        ]));
         // SAFETY: the editor gives a valid `info`.
         let info = unsafe { &mut *info };
         info.name = c"native".as_ptr();
         info.version = c"1.0".as_ptr();
         info.commands = commands.as_ptr();
-        info.command_count = 1;
+        info.command_count = commands.len() as u32;
         info.header_version = API_VERSION;
         info.command_size = std::mem::size_of::<CommandEntry>() as u32;
+        info.apply_change = Some(apply);
+        info.user = user;
         0
     }
 
-    /// The module `id`, offering `native.where`.
+    /// The module `id`, offering `native.where` and `native.wait`.
     pub fn native(id: &str) -> Started {
+        let state: &'static Native = Box::leak(Box::new(Native {
+            value: AtomicI64::new(0),
+            open: Mutex::new(false),
+            opened: Condvar::new(),
+        }));
+        STARTING.set(std::ptr::from_ref(state) as usize);
         start(init, id).expect("starts")
+    }
+
+    fn state(module: &ModuleContext) -> &'static Native {
+        native_of(module.apply.get().expect("given at start").1.0)
+    }
+
+    /// The module's value.
+    pub fn value(module: &ModuleContext) -> i64 {
+        state(module).value.load(Ordering::SeqCst)
+    }
+
+    /// Lets `native.wait` return.
+    pub fn open(module: &ModuleContext) {
+        let native = state(module);
+        *native.open.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        native.opened.notify_all();
+    }
+
+    /// Adds `by` to the module's value, then records it through the C function, as a module does.
+    pub fn change(module: &'static ModuleContext, label: &str, by: i64) {
+        state(module).value.fetch_add(by, Ordering::SeqCst);
+        let context = std::ptr::from_ref(module).cast_mut().cast::<c_void>();
+        let (label, undo, redo) = (
+            CString::new(label).expect("no NUL"),
+            CString::new((-by).to_string()).expect("no NUL"),
+            CString::new(by.to_string()).expect("no NUL"),
+        );
+        assert_eq!(
+            api_record_change(context, label.as_ptr(), undo.as_ptr(), redo.as_ptr()),
+            0
+        );
     }
 }
 
