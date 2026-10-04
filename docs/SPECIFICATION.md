@@ -218,6 +218,38 @@ within bounds), selectable and selected or not. Colours are `0xRRGGBBAA`, sizes 
   write for these; `record_change` stays for the module's own data. Rust modules using these
   objects get the same.
 
+### Capabilities and their unified form
+
+What a built-in module can do, and how a module in any language does the same (R9). Every
+milestone keeps this table up to date, and its review checks it. A dash is a gap: the step that
+fills it, or *not planned* when no milestone does yet.
+
+| Capability | Built-in (Rust) modules | Unified API (`uniwow.h`) | C++ and C# | Lua and Python |
+|---|---|---|---|---|
+| Named commands: offer, list, call | `Registrar::command`, `command_on_caller`; `Context::call`, `Editor::call` | `uniwow_module_info.commands`; `commands`, `call` | `uniwow::call`; `Editor.Call`, `Command` | Scripts: `uniwow.commands`, `uniwow.call`; modules: milestones 9 and 10 |
+| Events | `Registrar::subscribe`, `Module::on_event`, `Context::publish_as`; `Editor::subscribe`, `next_event` | `publish`, `subscribe`, `next_event`, `unsubscribe` | The table (`uniwow::api()`, `Editor.Table`) | Scripts: `uniwow.publish`, `subscribe`, `next_event`, `unsubscribe` |
+| Settings | `Context::setting`, `set_setting` | `setting`, `set_setting` | The table | Scripts: `uniwow.setting`, `set_setting` |
+| Log | The `log` crate | `log` | `uniwow::log`; `Editor.Log` | Scripts: `uniwow.log`, `print` |
+| Undo of the module's own data | `Command`, `Context::execute` | `record_change`, with `uniwow_module_info.apply_change` | `uniwow::recordChange`; `Editor.RecordChange` | Milestones 9 and 10 |
+| Undo groups | The commands of one call | `begin_group`, `end_group` | The table; `Editor.BeginGroup`, `EndGroup` | Scripts: `uniwow.begin_group`, `end_group` |
+| Panels | `Registrar::panel`, `Module::panel_ui` (egui) | `uniwow_module_info.panels`, `panel`, the objects | `uniwow::Panel`; `Panel` | Milestones 9 and 10 |
+| Widgets, layouts, a scene, painting | egui | The objects of this section | The classes named as in Qt | Milestones 9 and 10 |
+| Modal windows | The command `ui.dialog`; the object `Dialog` | `ui.dialog` through `call`; `Dialog` | `uniwow::Dialog`; `Dialog` | Scripts: `ui.dialog` through `uniwow.call` |
+| The curve editor | The service `curve-editor` | `CurveView` | `uniwow::CurveView`; `CurveView` | Milestones 9 and 10 |
+| Animatable properties: declare, list, read, write | `Registrar::animatable`; `Editor::properties`, `read_property`, `write_property` | — step 8.2 | — step 8.2 | — milestones 9 and 10 |
+| The viewport's camera | Inside the module `viewport` (*View*, *Reset camera*) | — step 8.3 | — step 8.3 | — step 8.3 (commands) |
+| Sequences and their playback | Inside the Timeline | — step 8.4 | — step 8.4 | — milestones 9 and 10 |
+| The dopesheet | Inside the Timeline's panel | — step 8.5 | — step 8.5 | — milestones 9 and 10 |
+| Tree, table, property grid | egui | — step 8.7 | — step 8.7 | — milestones 9 and 10 |
+| Drawing in the 3D view | The service `viewport` and its layers | — not planned (an other 3D access of step 8.3) | — | — |
+| Unsaved changes, asked about when the editor closes | `Module::unsaved`, `save_unsaved` | — not planned | — | — |
+| Menu items | `Registrar::menu_item`, `Module::on_menu` | — not planned | — | — |
+| Jobs of the kernel's pool, with progress and *Cancel* in the Jobs panel | `Context::spawn`, `spawn_thread` | — not planned; compiled modules run threads of their own (T7) | — | Scripts run on threads of their own (T6) |
+| Reporting another module as the culprit of a failure (F5) | `Context::report_failure` | — not planned | — | — |
+| Services between modules | `Registrar::provide`, `Context::service` | Commands, events and the objects are their form for every language (S1) | | |
+
+The four gaps *not planned* are for the review to place in a milestone.
+
 ---
 
 ## 4. Discovery and loading
