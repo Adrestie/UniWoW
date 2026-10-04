@@ -722,7 +722,7 @@ pub(crate) mod testing {
         0
     }
 
-    /// Writes `level`, rounded to a whole number; 7 is an error.
+    /// Writes `level`, rounded to a whole number; 7 is an error, 1 unwinds.
     extern "C-unwind" fn write_level(
         user: *mut c_void,
         values: *mut f64,
@@ -737,6 +737,9 @@ pub(crate) mod testing {
         if *value == 7.0 {
             error(context, c"seven is refused".as_ptr());
             return 1;
+        }
+        if *value == 1.0 {
+            panic!("one unwinds");
         }
         if *value == 6.0 {
             let context = native.context.load(Ordering::SeqCst);
@@ -906,6 +909,11 @@ pub(crate) mod testing {
 
     /// Adds `by` to the module's value, then records it through the C function, as a module does.
     pub fn change(module: &'static ModuleContext, label: &str, by: i64) {
+        assert_eq!(record(module, label, by), 0);
+    }
+
+    /// As `change`, giving what record_change answered: 0 recorded, non-zero refused.
+    pub fn record(module: &'static ModuleContext, label: &str, by: i64) -> i32 {
         state(module).value.fetch_add(by, Ordering::SeqCst);
         let context = std::ptr::from_ref(module).cast_mut().cast::<c_void>();
         let (label, undo, redo) = (
@@ -913,10 +921,7 @@ pub(crate) mod testing {
             CString::new((-by).to_string()).expect("no NUL"),
             CString::new(by.to_string()).expect("no NUL"),
         );
-        assert_eq!(
-            api_record_change(context, label.as_ptr(), undo.as_ptr(), redo.as_ptr()),
-            0
-        );
+        api_record_change(context, label.as_ptr(), undo.as_ptr(), redo.as_ptr())
     }
 }
 

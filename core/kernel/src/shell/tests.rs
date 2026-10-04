@@ -870,3 +870,24 @@ fn a_change_recorded_in_a_property_s_write_is_refused() {
     harness.frame(RawInput::default());
     assert_eq!(harness.shell.history.undo_label().as_deref(), Some("after"));
 }
+
+#[test]
+fn a_write_that_unwinds_leaves_the_module_s_thread_recording() {
+    let native = CompiledModule::started(capi::testing::native("native"));
+    let mut harness = Harness::with_slots(vec![Slot::compiled("native", native)]);
+    let thread = harness.shell.slots[0].compiled.expect("compiled");
+    let editor = harness.shell.host.editor(KERNEL);
+    editor
+        .write_property("native/level", uniwow_api::PropertyValue::Number(1.0))
+        .unwrap();
+    harness.settle(thread);
+    // A change recorded on the module's thread, out of a write.
+    let (done, recorded) = std::sync::mpsc::channel();
+    ui::lock(&thread.ui).post_job(Box::new(move || {
+        let _ = done.send(capi::testing::record(thread, "after an unwind", 1));
+    }));
+    harness.settle(thread);
+    assert_eq!(recorded.try_recv(), Ok(0), "recorded once the write unwound");
+    harness.frame(RawInput::default());
+    assert_eq!(harness.shell.history.undo_label().as_deref(), Some("after an unwind"));
+}

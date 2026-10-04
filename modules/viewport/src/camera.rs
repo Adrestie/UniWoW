@@ -7,6 +7,9 @@ const PITCH: f32 = 1.5;
 pub const DISTANCE: [f32; 2] = [0.5, 100_000.0];
 /// The narrowest and widest angle of view, in degrees.
 pub const FOV: [f32; 2] = [1.0, 170.0];
+/// How far from the origin the target goes on each axis; the eye goes as far again, its distance
+/// to the target being at most as much.
+pub const REACH: f64 = 100_000.0;
 
 /// Camera turning around a target point. Z is up.
 pub struct OrbitCamera {
@@ -102,6 +105,16 @@ impl OrbitCamera {
         proj * view
     }
 
+    /// Moves the target across the view by `delta` points, within reach of the origin.
+    fn pan(&mut self, delta: egui::Vec2) {
+        let forward = (self.target - self.eye()).normalize();
+        let right = forward.cross(Vec3::Z).normalize_or_zero();
+        let up = right.cross(forward);
+        let scale = self.distance * 0.0015;
+        let reach = Vec3::splat(REACH as f32);
+        self.target = (self.target + (-right * delta.x + up * delta.y) * scale).clamp(-reach, reach);
+    }
+
     /// Left drag orbits, right or middle drag pans, the wheel zooms.
     pub fn handle_input(&mut self, ui: &egui::Ui, response: &egui::Response) {
         let delta = response.drag_delta();
@@ -111,11 +124,7 @@ impl OrbitCamera {
         } else if response.dragged_by(egui::PointerButton::Secondary)
             || response.dragged_by(egui::PointerButton::Middle)
         {
-            let forward = (self.target - self.eye()).normalize();
-            let right = forward.cross(Vec3::Z).normalize_or_zero();
-            let up = right.cross(forward);
-            let scale = self.distance * 0.0015;
-            self.target += (-right * delta.x + up * delta.y) * scale;
+            self.pan(delta);
         }
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
@@ -128,9 +137,10 @@ impl OrbitCamera {
 
 #[cfg(test)]
 mod tests {
+    use uniwow_api::egui;
     use uniwow_api::glam::Vec3;
 
-    use super::{DISTANCE, OrbitCamera};
+    use super::{DISTANCE, OrbitCamera, REACH};
 
     fn close(a: Vec3, b: Vec3) -> bool {
         (a - b).length() < 1e-3
@@ -158,6 +168,18 @@ mod tests {
         assert!(camera.eye().z < 10.0, "not straight above: the orbit stops before");
         camera.set_fov(500.0);
         assert_eq!(camera.fov(), 170.0);
+    }
+
+    #[test]
+    fn a_pan_keeps_the_target_within_reach_and_the_eye_within_twice() {
+        let mut camera = OrbitCamera::default();
+        camera.look_at(Vec3::new(0.0, -100_000.0, 0.0), Vec3::ZERO);
+        for _ in 0..100 {
+            camera.pan(egui::vec2(-10_000.0, 10_000.0));
+        }
+        let reach = REACH as f32;
+        assert!(camera.target().abs().max_element() <= reach, "{}", camera.target());
+        assert!(camera.eye().abs().max_element() <= 2.0 * reach, "{}", camera.eye());
     }
 
     /// The clip coordinates of `point`: x, y and the depth, divided by w.

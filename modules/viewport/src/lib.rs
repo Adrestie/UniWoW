@@ -20,7 +20,7 @@ use uniwow_api::{
     wgpu,
 };
 
-use camera::{FOV, OrbitCamera};
+use camera::{FOV, OrbitCamera, REACH};
 use grid::Grid;
 
 const TARGET: Target = Target {
@@ -60,10 +60,6 @@ type Camera = Arc<Mutex<OrbitCamera>>;
 fn camera(camera: &Camera) -> MutexGuard<'_, OrbitCamera> {
     camera.lock().unwrap_or_else(|e| e.into_inner())
 }
-
-/// How far from the origin the camera's target goes; its eye goes as far again, its distance to
-/// the target being at most as much.
-const REACH: f64 = 100_000.0;
 
 /// A number of the camera as a property shows it: the shortest decimal of the f32.
 fn widen(value: f32) -> f64 {

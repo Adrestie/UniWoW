@@ -41,6 +41,22 @@ pub fn writing() -> Option<&'static str> {
         .then_some("a property's write records nothing: the kernel records a value changed by hand")
 }
 
+/// Marks this thread as running a write function until dropped, by a return or an unwind.
+struct Writing;
+
+impl Writing {
+    fn start() -> Self {
+        WRITING.set(true);
+        Self
+    }
+}
+
+impl Drop for Writing {
+    fn drop(&mut self) {
+        WRITING.set(false);
+    }
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -92,15 +108,16 @@ impl CompiledProperty {
         };
         let mut numbers = value.components();
         let mut error = String::new();
-        WRITING.set(true);
-        let status = (self.write)(
-            self.user.0,
-            numbers.as_mut_ptr(),
-            numbers.len() as u32,
-            collect,
-            text_target(&mut error),
-        );
-        WRITING.set(false);
+        let status = {
+            let _writing = Writing::start();
+            (self.write)(
+                self.user.0,
+                numbers.as_mut_ptr(),
+                numbers.len() as u32,
+                collect,
+                text_target(&mut error),
+            )
+        };
         if status != 0 {
             editor.report_failure(&format!("could not write its property '{}': {error}", self.name));
             return;
