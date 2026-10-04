@@ -3,6 +3,15 @@
 
 use crate::egui;
 
+/// The largest text drawn, in pixels: egui builds the glyphs of each size it is asked for.
+pub const MAX_TEXT: f32 = 512.0;
+
+/// The size in pixels to draw a text of `size` at, from 1 to `MAX_TEXT`; none for a size that
+/// is not a number or is infinite.
+pub fn text_pixels(size: f32) -> Option<f32> {
+    size.is_finite().then(|| size.clamp(1.0, MAX_TEXT))
+}
+
 /// One command of a painter. Colours are 0xRRGGBBAA; positions are in the painting area, in
 /// points, through the current transform.
 #[derive(Clone, Debug, PartialEq)]
@@ -105,8 +114,10 @@ pub fn replay(painter: &egui::Painter, rect: egui::Rect, picture: &[PaintCommand
                 }));
             }
             PaintCommand::DrawText { x, y, text, size } => {
-                let font = egui::FontId::proportional((size * state.scale.y).max(1.0));
-                painter.text(at(&state, *x, *y), egui::Align2::LEFT_TOP, text, font, state.pen.color);
+                if let Some(pixels) = text_pixels(size * state.scale.y) {
+                    let font = egui::FontId::proportional(pixels);
+                    painter.text(at(&state, *x, *y), egui::Align2::LEFT_TOP, text, font, state.pen.color);
+                }
             }
             PaintCommand::Translate { dx, dy } => state.offset += sized(&state, *dx, *dy),
             PaintCommand::Scale { sx, sy } => state.scale = egui::vec2(state.scale.x * sx, state.scale.y * sy),
@@ -122,7 +133,16 @@ pub fn replay(painter: &egui::Painter, rect: egui::Rect, picture: &[PaintCommand
 
 #[cfg(test)]
 mod tests {
-    use super::color;
+    use super::{MAX_TEXT, color, text_pixels};
+
+    #[test]
+    fn texts_are_drawn_from_1_to_512_pixels_and_never_at_an_infinite_size() {
+        assert_eq!(text_pixels(f32::INFINITY), None);
+        assert_eq!(text_pixels(f32::NAN), None);
+        assert_eq!(text_pixels(1e30), Some(MAX_TEXT));
+        assert_eq!(text_pixels(-3.0), Some(1.0));
+        assert_eq!(text_pixels(13.0), Some(13.0));
+    }
 
     #[test]
     fn colours_are_read_as_rrggbbaa() {

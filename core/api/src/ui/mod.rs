@@ -520,7 +520,8 @@ impl Ui {
             Property::Selectable => object.selectable = first != 0.0,
             Property::Selected => object.selected = first != 0.0,
             Property::MoveBounds => object.bounds = Some([values[0], values[1], values[2], values[3]]),
-            Property::FontSize => object.font_size = first.max(1.0),
+            Property::FontSize if !first.is_finite() => return Err("a font size is a finite number".to_owned()),
+            Property::FontSize => object.font_size = first.clamp(1.0, f64::from(painter::MAX_TEXT)),
             Property::MinimumHeight => object.minimum_height = first.max(0.0),
             Property::ViewScale => object.view_scale = first.clamp(0.01, 100.0),
             Property::ViewCenter => object.view_center = [values[0], values[1]],
@@ -919,6 +920,18 @@ mod tests {
                 .take_editor_failure()
                 .is_some_and(|m| m.contains("broken editor"))
         );
+    }
+
+    #[test]
+    fn a_text_item_refuses_an_infinite_font_size() {
+        let shared = ui();
+        let mut ui = lock(&shared);
+        let scene = ui.create(Kind::GraphicsScene, None).unwrap();
+        let text = ui.create(Kind::TextItem, Some(scene)).unwrap();
+        assert!(ui.set_numbers(text, Property::FontSize, &[f64::INFINITY]).is_err());
+        assert!(ui.set_numbers(text, Property::FontSize, &[f64::NAN]).is_err());
+        ui.set_numbers(text, Property::FontSize, &[1e12]).unwrap();
+        assert_eq!(ui.numbers(text, Property::FontSize).unwrap(), vec![512.0]);
     }
 
     #[test]

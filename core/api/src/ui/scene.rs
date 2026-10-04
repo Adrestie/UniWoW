@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use super::painter::color;
+use super::painter::{color, text_pixels};
 use super::{Handle, Kind, Object, Signal, SignalData, Ui};
 use crate::{bytemuck, egui, egui_wgpu, wgpu};
 
@@ -291,9 +291,11 @@ impl SceneView {
             let Some(object) = store.object(*item) else { continue };
             let at = absolute(store, *item);
             if object.kind == Kind::TextItem {
-                let size = (object.font_size * scale) as f32;
                 let position = to_screen(at);
-                if size >= 4.0 && rect.expand(size * 20.0).contains(position) {
+                if let Some(size) = text_pixels((object.font_size * scale) as f32)
+                    && size >= 4.0
+                    && rect.expand(size * 20.0).contains(position)
+                {
                     painter.text(
                         position,
                         egui::Align2::LEFT_TOP,

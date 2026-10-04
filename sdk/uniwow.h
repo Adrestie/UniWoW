@@ -85,7 +85,7 @@ enum {
     UNIWOW_PROPERTY_SELECTABLE = 23,
     UNIWOW_PROPERTY_SELECTED = 24,
     UNIWOW_PROPERTY_MOVE_BOUNDS = 25,    /* movable item: x, y, width, height its position stays in */
-    UNIWOW_PROPERTY_FONT_SIZE = 26,      /* text item */
+    UNIWOW_PROPERTY_FONT_SIZE = 26,      /* text item, 1 to 512, finite */
     UNIWOW_PROPERTY_MINIMUM_HEIGHT = 27, /* graphics view, paint area */
     UNIWOW_PROPERTY_VIEW_SCALE = 28,     /* graphics view: zoom */
     UNIWOW_PROPERTY_VIEW_CENTER = 29,    /* graphics view: x, y of the scene at its centre */
@@ -216,6 +216,7 @@ typedef struct uniwow_api {
     void (*draw_rect)(void *context, uniwow_handle painter, double x, double y, double width, double height,
                       double radius);
     void (*draw_ellipse)(void *context, uniwow_handle painter, double x, double y, double width, double height);
+    /* The text is drawn from 1 to 512 pixels high; not at all for an infinite size. */
     void (*draw_text)(void *context, uniwow_handle painter, double x, double y, const char *text, double size);
     void (*translate)(void *context, uniwow_handle painter, double dx, double dy);
     void (*scale)(void *context, uniwow_handle painter, double sx, double sy);
