@@ -263,6 +263,7 @@ fills it, or *not planned* when no milestone does yet.
 | Tree, table, property grid | egui; the service `property-grid` | `TreeView`, `TableView`, with `set_cell`, `insert_rows`, `remove_rows`; `PropertyGrid` | `uniwow::TreeView`, `uniwow::TableView`, `uniwow::PropertyGrid`; `TreeView`, `TableView`, `PropertyGrid` | — milestones 10 and 11 |
 | Drawing in the 3D view | The service `viewport` and its layers | — not planned (an other 3D access of step 8.3) | — | — |
 | The live world: entities of the server around a point, their moves | Inside the module `live-world` | — step 9.3 (commands and events) | — step 9.3 | — milestones 10 and 11 |
+| Splitting work over the cores, `parallel_for` | `uniwow_api::parallel_for` — step 9.2a | — not planned; compiled modules run threads of their own (T7) | — | — |
 | Picking in the 3D view, the selection shown in 3D | — designed in milestone 9, not built | — | — | — |
 | Editing the world: terrain, painting, objects and creatures placed | — designed in milestone 9, not built | — | — | — |
 | Unsaved changes, asked about when the editor closes | `Module::unsaved`, `save_unsaved` | — not planned | — | — |
@@ -1208,7 +1209,7 @@ As built:
   tells it from the frame it draws it in.
 - **One source for the numbers**: `sdk/bindings.toml` (section 8).
 
-### Milestone 8: parity of the languages (specified)
+### Milestone 8: parity of the languages (built)
 
 Whatever a built-in module can do, a module in any language can do (R9). This milestone completes
 the unified API where it falls short, and splits the Timeline into an engine, widgets and a window
@@ -1621,8 +1622,8 @@ Acceptance, automated where possible (the shell run without a window, the tests 
 ### Milestone 9: live view of the world (proposed)
 
 *Written by the external review from the user's request, brought up to date with milestone 8 as
-built; to be completed and corrected by the instance and validated by the user before anything is
-built.*
+built, then completed and corrected against the code by the instance; to be validated by the user
+before anything is built.*
 
 The world of WoW as it runs now on the AzerothCore server, shown in the editor: a map with its
 terrain, buildings, doodads and water, and the creatures, NPCs, game objects and players where they
@@ -1644,6 +1645,11 @@ Decisions of the user:
 - **It comes after milestone 8**; the outlined milestones that followed move one number on.
 - **The server runs on the same machine as the editor**: the observer listens on 127.0.0.1 only,
   and asks for a token.
+- **The parts of warcraft-rs `assets` uses are copied into it**, with their licence: each crate of
+  warcraft-rs shares crates with the runtime (13 in all: `log`, `glam`, `thiserror`, `bitflags`,
+  `parking_lot`, `image`, `serde`...), which the rule of section 2 forbids a module, and `wow-mpq`
+  brings `rayon`, a second pool of threads, with no option to leave it out. Modules keep depending
+  on `uniwow-api` and `libs/*` only.
 
 Rules:
 
@@ -1670,11 +1676,10 @@ make every Rust module be rebuilt, while making the runtime export more. So they
   (T3). Their interfaces, and the plain data they return (heights, layers and alpha maps of a chunk,
   vertices, bones and keyframes of a model, the levels of a texture), are declared in `core/api`:
   they change far less often than the code reading the files.
-- The rule of section 2 stays as the user chose it: a module depends on `uniwow-api` and `libs/*`
-  only. `assets` therefore holds its own copy of the parts of warcraft-rs it uses, with their
-  licence (MIT/Apache). The other way, to decide in review: let a module depend on crates outside
-  the runtime when no crate of their tree is in the runtime's tree, which `cargo xtask check` can
-  verify on the resolved graph, so that no option merged by Cargo can rebuild the runtime.
+- The rule of section 2 stays: a module depends on `uniwow-api` and `libs/*` only. `assets`
+  therefore holds its own copy of the parts of warcraft-rs it uses, with their licence (MIT/Apache),
+  using the crates of the runtime and the kernel's pool instead of their own (decision of the user,
+  above).
 - `libs/server-link` (in the runtime) holds the client of the observer: its protocol is small and
   changes with its version only.
 
@@ -1746,13 +1751,13 @@ which stays on the interface thread.
 | Handing ready resources to the drawing | The interface thread | A bounded amount per frame, within a time budget (2 ms to start with), so that a burst of loads never makes a frame late |
 | The connection to the observer: reading, decoding a binary protocol, keeping the state of every entity | A thread of its own (`Context::spawn_thread`: work that waits) | Writes a new snapshot of the entities, shared between threads (an `Arc` swapped under a brief lock); its readers never wait for the network |
 | Interpolating the moves of the live entities between two updates | A thread of `live-world`, woken at each frame by the viewport's frame signal (below) | Reads the snapshot and gives `models` the transform and movement of each entity for frame N+1 while frame N is drawn |
-| Choosing the animations and computing the bones of every animated instance: creatures, and the doodads that move (torches, trees) | A thread of the `models` service, woken at each frame | The bones of hundreds of instances split with `parallel_for`; the instance and bone buffers written to the GPU from that thread (T5), two of each in turn, so that a frame never draws data half written |
+| Choosing the animations and computing the bones of every animated instance: creatures, and the doodads that move (torches, trees) | A thread of the `models` service, woken at each frame | The bones of hundreds of instances split with `parallel_for`; the data of the frame to come written to the GPU from that thread (T5) with `Queue::write_buffer`, one call per buffer, the instances and the bones they use in the same buffer: wgpu applies a write whole at the next submission, so that a frame draws the old data or the new, never half of it, and the bundles kept go on drawing the same buffers. Written after the frame signal, which comes once a frame is submitted, it is drawn by the next frame |
 | Culling and recording the draws | The interface thread | Culling by tile and by group of instances, not by object: the bundle of a layer is recorded again only when the set of tiles or groups in sight, or what is loaded, changes, which flying does far less often than once per frame. Instanced draws, one per model and material, so that a frame's work follows the number of models in sight, not of objects; the camera and the animated instances change through buffers, not through the draws |
 | Commands that read the live world | The calling thread (T4) | Read the shared snapshot and answer at once, from any thread |
 | Events of the live world | Published by the connection thread, delivered on the interface thread | Batched, as L4 says |
 | Rebuilding one terrain chunk (the editing to come) | A job | Its new GPU resources take the place of the old ones at the next frame |
 
-Additions to the core this milestone needs, specified and reviewed with step 9.2:
+Additions to the core this milestone needs, specified and reviewed with step 9.2a:
 
 - **Fork-join on the pool, `parallel_for`**: a job, or a thread of its own, splits a slice of work
   over the threads of the pool and waits for them, working on its own slices while it waits, never on
@@ -1761,16 +1766,37 @@ Additions to the core this milestone needs, specified and reviewed with step 9.2
   ordinary job, or the kernel's own work (the sorts of large tables of step 8.7, `Pool::background`),
   before any slice, so that a job of another module waits at most for one slice: that is
   what keeps a thread for the others, more than the limit of *cores − 1* loading jobs, whose slices
-  use every thread. Offered to every module; T2 says that waiting in `parallel_for` is not waiting
-  without a limit.
+  use every thread. T2 says that waiting in `parallel_for` is not waiting without a limit.
+  - The pool has one queue today, a channel its workers read in order; it gets two: the jobs and the
+    kernel's work in one, the slices in the other, a worker taking from the first whenever it can.
+  - It is offered to the Rust modules and services as `uniwow_api::parallel_for`, a function of the
+    runtime the kernel sets when it starts, as it sets `ui::set_background`; before that, in the
+    tests of a module for one, the slices run on the calling thread. It needs neither a job nor a
+    `Context`: a service such as `formats` uses it inside the job that calls it.
+  - The work may borrow the caller's data: `parallel_for` returns only once every slice has ended,
+    even when one panicked, and the first panic is then resumed in the caller, whose module it is.
+    A slice may call `parallel_for` in turn.
+  - The other languages: not planned in this milestone; their modules run threads of their own (T7).
+    The table of capabilities says so.
 - **Bundles kept in the viewport**: a layer may keep its recorded render bundle from one frame to
   the next and record it again only when what it draws changes; the viewport validates a bundle
   once, when it is recorded, as today. A layer gains a step run at each frame before the drawing,
   `prepare`, with the view of that frame, which writes its buffers (the camera, the instances) without
   recording anything: today `draw` receives the view only while it records.
+  - The trait `Layer` gains `prepare` and a version of what it draws, none by default: a layer
+    without a version is recorded at every frame as today, as the cube's and the faulty sample's
+    layers are, unchanged. A layer with one is recorded again when it changes.
+  - `prepare` runs, as `draw` does, inside an error scope and `catch_unwind`: a layer failing there
+    is removed and its module reported (F5).
+  - Every bundle is recorded again when the device is created again (device lost, below).
 - **A frame signal in the viewport service**: threads of modules wait on it to prepare the next
   frame while the current one is drawn, with the time of the frame to come; shared between threads
   (T3).
+  - It is given once the viewport has submitted a frame, so that what a thread writes then is drawn
+    by the next frame, with the number of that frame and its time, estimated from the frames
+    before. It is not given while the view is not drawn.
+  - A thread waits at most 100 ms at a time, then checks its cancellation: the viewport does not
+    know which module a waiting thread belongs to.
 - The table *Who runs what* of section 5 gains the slices of `parallel_for` on the workers of the
   pool, and the threads of modules waiting for the frame signal.
 
@@ -1782,8 +1808,8 @@ concern.
 When a module fails or the editor closes:
 
 - Its threads of their own end: the connection reads the network with a short time limit (100 ms)
-  and checks its cancellation between reads; a thread waiting for the frame signal wakes on its
-  cancellation too. None keeps writing after its module failed.
+  and checks its cancellation between reads; a thread waiting for the frame signal waits 100 ms at
+  most at a time and checks its cancellation as well. None keeps writing after its module failed.
 - The `models` service removes the instances of a module that failed, as the viewport removes its
   layers, and the loads only it had asked for are cancelled.
 
@@ -1863,7 +1889,7 @@ Each step is reviewed before the next one; the milestone is delivered once all a
 | Speed of the terrain and the models in a city (the goal to fix), and the cost of rebuilding one terrain chunk alone, for the editing to come | To measure |
 | Reading the archives from many threads at once: does it scale with the cores, or does the disk or a lock limit it? | To measure |
 | The time the interface thread spends per frame while flying fast over a city: handing over, culling, recording | To measure |
-| What warcraft-rs reads and writes correctly in 3.3.5a, format by format; what `assets` copies of it | To verify |
+| What warcraft-rs reads and writes correctly in 3.3.5a, format by format; what `assets` copies of it, without `rayon` | To verify |
 | Does the active invisible object stay out of the game (no aggro, no AI, not seen by game masters), and is it always removed (unsubscription, disconnection, heartbeat lost)? | To verify |
 
 #### Tests
