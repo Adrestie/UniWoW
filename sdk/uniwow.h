@@ -53,7 +53,8 @@ enum {
     UNIWOW_TEXT_ITEM = 19,
     UNIWOW_ITEM_GROUP = 20,
     UNIWOW_PAINT_AREA = 21,
-    UNIWOW_DIALOG = 22 /* a modal window; created hidden, shown and hidden through VISIBLE */
+    UNIWOW_DIALOG = 22,     /* a modal window; created hidden, shown and hidden through VISIBLE */
+    UNIWOW_CURVE_VIEW = 23  /* curves edited by hand, drawn by the module curves */
 };
 
 /* Properties. Texts go through set_text; everything else through set_numbers: a flag is 0 or 1,
@@ -88,7 +89,9 @@ enum {
     UNIWOW_PROPERTY_MINIMUM_HEIGHT = 27, /* graphics view, paint area */
     UNIWOW_PROPERTY_VIEW_SCALE = 28,     /* graphics view: zoom */
     UNIWOW_PROPERTY_VIEW_CENTER = 29,    /* graphics view: x, y of the scene at its centre */
-    UNIWOW_PROPERTY_COUNT = 30           /* read only: entries of a combo box, children otherwise */
+    UNIWOW_PROPERTY_COUNT = 30,          /* read only: entries of a combo box, children otherwise */
+    UNIWOW_PROPERTY_CURVES = 31          /* curve view, text: JSON [{label, colour: [r, g, b], visible, keys: [{time,
+                                            value, mode, left, right}]}] */
 };
 
 /* Signals, named as in Qt. Each tells what the user did, never a change the module made. */
@@ -110,7 +113,8 @@ enum {
     UNIWOW_SIGNAL_MOUSE_MOVE = 15,           /* paint area, while a button is held: x, y */
     UNIWOW_SIGNAL_MOUSE_RELEASE = 16,        /* paint area: x, y */
     UNIWOW_SIGNAL_WHEEL = 17,                /* paint area: x, y, dx, dy */
-    UNIWOW_SIGNAL_REJECTED = 18              /* dialog: the user closed it, which hid it */
+    UNIWOW_SIGNAL_REJECTED = 18,             /* dialog: the user closed it, which hid it */
+    UNIWOW_SIGNAL_CURVES_CHANGED = 19        /* curve view: text, the curves; boolean, whether the change is done */
 };
 
 /* What a slot receives; the fields its signal does not use are zero. button: 1 left, 2 right,

@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 pub use draw::PanelView;
 pub use painter::PaintCommand;
 
+use crate::curve::ShownCurve;
 use crate::egui;
 
 /// Identifies an object of one module.
@@ -51,7 +52,7 @@ numbered!(
         Panel = 1, Label = 2, PushButton = 3, CheckBox = 4, Slider = 5, SpinBox = 6, LineEdit = 7,
         ComboBox = 8, Separator = 9, GroupBox = 10, VBoxLayout = 11, HBoxLayout = 12,
         GridLayout = 13, GraphicsView = 14, GraphicsScene = 15, RectItem = 16, LineItem = 17,
-        EllipseItem = 18, TextItem = 19, ItemGroup = 20, PaintArea = 21, Dialog = 22,
+        EllipseItem = 18, TextItem = 19, ItemGroup = 20, PaintArea = 21, Dialog = 22, CurveView = 23,
     }
 );
 
@@ -62,7 +63,7 @@ numbered!(
         Maximum = 8, Step = 9, Decimals = 10, Placeholder = 11, CurrentIndex = 12, Title = 13,
         Pos = 14, Rect = 15, Line = 16, PenColor = 17, PenWidth = 18, BrushColor = 19,
         Radius = 20, ZValue = 21, Movable = 22, Selectable = 23, Selected = 24, MoveBounds = 25,
-        FontSize = 26, MinimumHeight = 27, ViewScale = 28, ViewCenter = 29, Count = 30,
+        FontSize = 26, MinimumHeight = 27, ViewScale = 28, ViewCenter = 29, Count = 30, Curves = 31,
     }
 );
 
@@ -73,7 +74,7 @@ numbered!(
         Clicked = 1, Toggled = 2, ValueChanged = 3, SliderPressed = 4, SliderReleased = 5,
         TextChanged = 6, EditingFinished = 7, CurrentIndexChanged = 8, ItemPressed = 9,
         ItemMoved = 10, ItemDoubleClicked = 11, SelectionChanged = 12, Paint = 13,
-        MousePress = 14, MouseMove = 15, MouseRelease = 16, Wheel = 17, Rejected = 18,
+        MousePress = 14, MouseMove = 15, MouseRelease = 16, Wheel = 17, Rejected = 18, CurvesChanged = 19,
     }
 );
 
@@ -176,6 +177,8 @@ pub struct Object {
     pub repaint: bool,
     /// Changed at each change of the object, so that the scene draws it again.
     pub generation: u64,
+    /// The curves of a curve view.
+    pub curves: Vec<ShownCurve>,
 }
 
 impl Object {
@@ -216,7 +219,7 @@ impl Object {
             selected: false,
             bounds: None,
             font_size: 13.0,
-            minimum_height: if kind == Kind::GraphicsView || kind == Kind::PaintArea {
+            minimum_height: if matches!(kind, Kind::GraphicsView | Kind::PaintArea | Kind::CurveView) {
                 200.0
             } else {
                 0.0
@@ -227,6 +230,7 @@ impl Object {
             picture: Arc::default(),
             repaint: true,
             generation: 0,
+            curves: Vec::new(),
         }
     }
 }
@@ -444,6 +448,12 @@ impl Ui {
     /// Sets a text property.
     pub fn set_text(&mut self, handle: Handle, property: Property, text: &str) -> Result<(), String> {
         let object = self.get_mut(handle)?;
+        if property == Property::Curves {
+            let value = serde_json::from_str(text).map_err(|error| format!("the curves are not JSON: {error}"))?;
+            object.curves = ShownCurve::list_from_json(&value)?;
+            self.changed(handle);
+            return Ok(());
+        }
         let field = match property {
             Property::Text => &mut object.text,
             Property::ToolTip => &mut object.tooltip,
@@ -463,6 +473,7 @@ impl Ui {
             Property::ToolTip => object.tooltip.clone(),
             Property::Placeholder => object.placeholder.clone(),
             Property::Title => object.title.clone(),
+            Property::Curves => ShownCurve::list_to_json(&object.curves).to_string(),
             other => return Err(format!("{other:?} is not a text")),
         })
     }

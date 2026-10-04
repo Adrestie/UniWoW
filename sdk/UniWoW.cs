@@ -112,21 +112,21 @@ public enum Kind : uint
 {
     Panel = 1, Label, PushButton, CheckBox, Slider, SpinBox, LineEdit, ComboBox, Separator, GroupBox,
     VBoxLayout, HBoxLayout, GridLayout, GraphicsView, GraphicsScene, RectItem, LineItem, EllipseItem,
-    TextItem, ItemGroup, PaintArea, Dialog,
+    TextItem, ItemGroup, PaintArea, Dialog, CurveView,
 }
 
 public enum Property : uint
 {
     Text = 1, ToolTip, Enabled, Visible, Checked, Value, Minimum, Maximum, Step, Decimals, Placeholder,
     CurrentIndex, Title, Pos, Rect, Line, PenColor, PenWidth, BrushColor, Radius, ZValue, Movable,
-    Selectable, Selected, MoveBounds, FontSize, MinimumHeight, ViewScale, ViewCenter, Count,
+    Selectable, Selected, MoveBounds, FontSize, MinimumHeight, ViewScale, ViewCenter, Count, Curves,
 }
 
 public enum SignalId : uint
 {
     Clicked = 1, Toggled, ValueChanged, SliderPressed, SliderReleased, TextChanged, EditingFinished,
     CurrentIndexChanged, ItemPressed, ItemMoved, ItemDoubleClicked, SelectionChanged, Paint, MousePress,
-    MouseMove, MouseRelease, Wheel, Rejected,
+    MouseMove, MouseRelease, Wheel, Rejected, CurvesChanged,
 }
 
 public enum LogLevel { Error = 1, Warning = 2, Information = 3, Debug = 4 }
@@ -591,6 +591,22 @@ public unsafe class GroupBox : Widget
 
     public void SetTitle(string title) => WriteText(Property.Title, title);
     public void SetLayout(Layout layout) => Table->AddTo(Context, Handle, layout.Handle, 0, 0, 1, 1);
+}
+
+/// <summary>Curves edited by hand, drawn by the module curves: SetCurves and Curves take the JSON
+/// of the property CURVES of uniwow.h; CurvesChanged gives the curves and whether the change is
+/// done.</summary>
+public class CurveView : Widget
+{
+    public CurveView() : base(Make(Kind.CurveView)) =>
+        CurvesChanged = new Signal<(string Json, bool Finished)>(Handle, SignalId.CurvesChanged,
+                                                                   s => (s.Text, s.Boolean != 0));
+
+    public Signal<(string Json, bool Finished)> CurvesChanged { get; }
+
+    public void SetCurves(string json) => WriteText(Property.Curves, json);
+    public string Curves() => ReadText(Property.Curves);
+    public void SetMinimumHeight(double height) => WriteNumbers(Property.MinimumHeight, height);
 }
 
 /// <summary>A modal window, as QDialog: while it is shown, the rest of the editor cannot be

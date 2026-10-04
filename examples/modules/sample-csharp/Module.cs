@@ -1,5 +1,6 @@
 // Sample compiled module in C#, published with NativeAOT: a counter changed by buttons, a slider
-// and a spin box, each change one undo entry, with its history painted as bars; and two commands.
+// and a spin box, each change one undo entry, with its history painted as bars; a curve edited in
+// the curve editor of the module curves, each change one undo entry; and two commands.
 
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -28,6 +29,12 @@ static unsafe class Module
     static Slider slider = null!;
     static SpinBox spin = null!;
     static PaintArea bars = null!;
+    static CurveView curve = null!;
+    // The curve as last recorded: what the next change of it undoes to.
+    static string committedCurve = "";
+
+    const string StartCurve =
+        """[{"label":"easing","colour":[230,160,40],"keys":[{"time":0,"value":0},{"time":1,"value":1}]}]""";
 
     static readonly Command[] Commands =
     [
@@ -112,6 +119,21 @@ static unsafe class Module
         bars.SetMinimumHeight(140);
         bars.Paint(Paint);
 
+        curve = new CurveView();
+        curve.SetMinimumHeight(160);
+        curve.SetCurves(StartCurve);
+        committedCurve = curve.Curves();
+        curve.CurvesChanged.Connect(change =>
+        {
+            if (!change.Finished || change.Json == committedCurve)
+            {
+                return;
+            }
+            Editor.RecordChange("edit the curve", Invariant($$"""{"curve":{{committedCurve}}}"""),
+                                Invariant($$"""{"curve":{{change.Json}}}"""));
+            committedCurve = change.Json;
+        });
+
         var fail = new CheckBox("Fail to apply undo and redo");
         fail.SetToolTip("The module then fails at the next undo or redo of its changes.");
         fail.Toggled.Connect(on => failToApply = on);
@@ -132,6 +154,7 @@ static unsafe class Module
         layout.AddLayout(buttons);
         layout.AddLayout(values);
         layout.AddWidget(bars);
+        layout.AddWidget(curve);
         layout.AddWidget(new Separator());
         layout.AddLayout(trials);
         new Panel("counter").SetLayout(layout);
@@ -166,6 +189,12 @@ static unsafe class Module
             throw new InvalidOperationException("asked to fail by its check box");
         }
         using var document = JsonDocument.Parse(value);
+        if (document.RootElement.TryGetProperty("curve", out var recorded))
+        {
+            committedCurve = recorded.GetRawText();
+            curve.SetCurves(committedCurve);
+            return;
+        }
         int target = document.RootElement.GetProperty("value").GetInt32();
         int count = document.RootElement.GetProperty("bars").GetInt32();
         if (count == history.Count + 1)

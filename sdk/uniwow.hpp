@@ -276,6 +276,17 @@ class GroupBox : public Widget {
     void setLayout(const Layout &layout) const { api().add_to(detail::context(), handle_, layout.handle(), 0, 0, 1, 1); }
 };
 
+// Curves edited by hand, drawn by the module curves: setCurves and curves take the JSON of
+// UNIWOW_PROPERTY_CURVES; curvesChanged gives the curves and whether the change is done.
+class CurveView : public Widget {
+  public:
+    CurveView() : Widget(make(UNIWOW_CURVE_VIEW)) {}
+    void setCurves(const std::string &json) const { setString(UNIWOW_PROPERTY_CURVES, json); }
+    std::string curves() const { return string(UNIWOW_PROPERTY_CURVES); }
+    void setMinimumHeight(double height) const { setNumbers(UNIWOW_PROPERTY_MINIMUM_HEIGHT, {height}); }
+    Signal<std::string, bool> curvesChanged{handle_, UNIWOW_SIGNAL_CURVES_CHANGED};
+};
+
 // A modal window, as QDialog: while it is shown, the rest of the editor cannot be used. It is
 // created hidden; the user closing it, with Escape or its close button, hides it and sends rejected.
 class Dialog : public Object {

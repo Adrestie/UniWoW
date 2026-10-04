@@ -2,10 +2,12 @@
 //! what the user does into signals.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::painter::replay;
 use super::scene::{SceneView, modifiers};
 use super::{Handle, Kind, Object, SharedUi, Signal, SignalData, Ui, lock};
+use crate::curve::{CurveChange, CurveEditor, CurveOptions, ShownCurve, TimeAxis};
 use crate::{egui, egui_wgpu};
 
 /// What the interface thread keeps of a module's panels between frames.
@@ -16,6 +18,10 @@ pub struct PanelView {
     painted: HashMap<Handle, [f64; 2]>,
     /// The height, or width, each child of a box layout that does not expand took last frame.
     sizes: HashMap<Handle, f32>,
+    /// The curve editor of the module `curves`, which draws the curve views, when it runs.
+    curve_editor: Option<Arc<dyn CurveEditor>>,
+    /// The time axis of each curve view.
+    time_axes: HashMap<Handle, TimeAxis>,
 }
 
 /// Whether an object takes the room left in its layout, as a widget whose size policy expands
@@ -24,7 +30,7 @@ fn expands(store: &Ui, handle: Handle) -> bool {
     store.object(handle).is_some_and(|object| {
         object.visible
             && match object.kind {
-                Kind::GraphicsView | Kind::PaintArea => true,
+                Kind::GraphicsView | Kind::PaintArea | Kind::CurveView => true,
                 Kind::VBoxLayout | Kind::HBoxLayout | Kind::GridLayout | Kind::GroupBox => {
                     object.children.iter().any(|child| expands(store, *child))
                 }
@@ -34,6 +40,11 @@ fn expands(store: &Ui, handle: Handle) -> bool {
 }
 
 impl PanelView {
+    /// The curve editor to draw the curve views with, from the service of the module `curves`.
+    pub fn set_curve_editor(&mut self, editor: Option<Arc<dyn CurveEditor>>) {
+        self.curve_editor = editor;
+    }
+
     /// Draws the panel `panel` of a module.
     pub fn show(&mut self, shared: &SharedUi, panel: &str, ui: &mut egui::Ui, gpu: Option<&egui_wgpu::RenderState>) {
         let mut store = lock(shared);
@@ -318,6 +329,40 @@ impl PanelView {
                 None
             }
             Kind::PaintArea => Some(self.paint_area(store, shared, handle, object, ui, events)),
+            Kind::CurveView => {
+                let size = egui::vec2(
+                    ui.available_width(),
+                    ui.available_height().max(object.minimum_height as f32),
+                );
+                let Some(editor) = self.curve_editor.clone() else {
+                    return Some(
+                        ui.allocate_ui(size, |ui| ui.weak("No curve editor: the module curves is not running."))
+                            .response,
+                    );
+                };
+                let mut curves = object.curves.clone();
+                let time = self.time_axes.entry(handle).or_default();
+                let inner = ui.allocate_ui(size, |ui| {
+                    editor.show(
+                        ui,
+                        ui.id().with(("uniwow-curves", handle)),
+                        &mut curves,
+                        time,
+                        &CurveOptions::default(),
+                    )
+                });
+                if inner.inner != CurveChange::None {
+                    events.push(SignalData {
+                        text: ShownCurve::list_to_json(&curves).to_string(),
+                        boolean: inner.inner == CurveChange::Finished,
+                        ..signal(Signal::CurvesChanged)
+                    });
+                    if let Some(target) = store.object_mut(handle) {
+                        target.curves = curves;
+                    }
+                }
+                Some(inner.response)
+            }
             Kind::Panel
             | Kind::Dialog
             | Kind::GraphicsScene

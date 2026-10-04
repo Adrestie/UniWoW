@@ -7,7 +7,7 @@ use std::sync::Arc;
 use libloading::os::windows::{LOAD_WITH_ALTERED_SEARCH_PATH, Library};
 use uniwow_api::capi::{self, InitFn, Started};
 use uniwow_api::ui::PanelView;
-use uniwow_api::{Context, Module, Registrar, egui, log};
+use uniwow_api::{Context, Module, Registrar, curve, egui, log};
 
 /// Its commands are declared on its behalf (delegated, F6), its panels are drawn from its
 /// interface objects, and the C interface acts through an `Editor` of the module itself.
@@ -38,10 +38,12 @@ impl Module for CompiledModule {
     }
 
     fn panel_ui(&mut self, panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
+        self.view.set_curve_editor(ctx.service(curve::SERVICE));
         self.view.show(&self.started.context.ui, panel, ui, ctx.gpu());
     }
 
     fn windows_ui(&mut self, egui: &egui::Context, ctx: &mut Context) {
+        self.view.set_curve_editor(ctx.service(curve::SERVICE));
         self.view.dialogs(&self.started.context.ui, egui, ctx.gpu());
     }
 }
