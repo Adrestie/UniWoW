@@ -51,9 +51,10 @@ impl Module for CompiledModule {
 }
 
 impl CompiledModule {
-    /// What waits for or runs on its thread.
-    pub fn activity(&self) -> Arc<capi::Activity> {
-        self.started.context.activity.clone()
+    /// What the C interface knows of it: its objects, through which jobs reach its thread, and
+    /// the work waiting there.
+    pub fn context(&self) -> &'static capi::ModuleContext {
+        self.started.context
     }
 
     /// A panic of the curve editor in a curve view is its provider's fault, not this module's (F5).

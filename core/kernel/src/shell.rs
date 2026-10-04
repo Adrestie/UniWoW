@@ -4,10 +4,11 @@ use std::sync::{Arc, mpsc};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
+use uniwow_api::capi;
 use uniwow_api::egui_dock::tab_viewer::OnCloseResponse;
 use uniwow_api::egui_dock::{DockArea, DockState, Style, TabViewer};
 use uniwow_api::{
-    CallId, CommandInfo, Context, DIALOG_ANSWERED_TOPIC, DIALOG_COMMAND, DockArea as Area, Event, Host,
+    CallId, CommandHandler, CommandInfo, Context, DIALOG_ANSWERED_TOPIC, DIALOG_COMMAND, DockArea as Area, Event, Host,
     MODULE_FAILED_TOPIC, Module, PropertyInfo, Registrar, RunsOn, eframe, egui, log, serde_json,
 };
 
@@ -453,7 +454,7 @@ impl Shell {
             self.slots
                 .iter()
                 .find(|slot| {
-                    slot.state.is_running() && slot.activity.as_ref().is_some_and(|activity| activity.pending() > 0)
+                    slot.state.is_running() && slot.compiled.is_some_and(|module| module.activity.pending() > 0)
                 })
                 .map(|slot| format!("'{}' is still working on its thread", slot.id))
         })
@@ -640,19 +641,34 @@ impl Shell {
             } => {
                 // What the caller published before calling goes first.
                 self.collect_from_threads();
+                if self.host.bridge.active(&caller).is_ok()
+                    && let Some((owner, handler, module)) = self.compiled_command(&name)
+                {
+                    // Its module's thread runs it and answers later: the interface goes on (T4).
+                    let bridge = self.host.bridge.clone();
+                    uniwow_api::ui::lock(&module.ui).post_job(Box::new(move || {
+                        // Its module may have failed meanwhile.
+                        let result = bridge
+                            .lookup(&name)
+                            .and_then(|_| bridge.run_on_caller(&owner, &name, &handler, arguments));
+                        bridge.queue(Request::Answer {
+                            caller,
+                            name,
+                            reply,
+                            result,
+                        });
+                    }));
+                    return;
+                }
                 let result = self.run_command(&caller, thread, &name, arguments);
-                if let Err(error) = &result {
-                    log::warn!("call of '{name}' by '{caller}' failed: {error}");
-                }
-                match reply {
-                    ReplyTo::Thread(reply) => {
-                        // The caller may have given up; nothing to do then.
-                        let _ = reply.send(result);
-                    }
-                    ReplyTo::Module(caller, call) => self.replies.push((caller, call, result)),
-                    ReplyTo::Kernel(call) => self.commands_panel.answer(call, result),
-                }
+                self.reply(&caller, &name, reply, result);
             }
+            Request::Answer {
+                caller,
+                name,
+                reply,
+                result,
+            } => self.reply(&caller, &name, reply, result),
             Request::BeginGroup { caller, thread, label } => {
                 if self.host.bridge.active(&caller).is_ok() {
                     self.groups.begin(&caller, thread, &label);
@@ -691,6 +707,29 @@ impl Shell {
                 }
             }
         }
+    }
+
+    /// Hands the result of a call to whoever waits for it.
+    fn reply(&mut self, caller: &str, name: &str, reply: ReplyTo, result: Result<serde_json::Value, String>) {
+        if let Err(error) = &result {
+            log::warn!("call of '{name}' by '{caller}' failed: {error}");
+        }
+        match reply {
+            ReplyTo::Thread(reply) => {
+                // The caller may have given up; nothing to do then.
+                let _ = reply.send(result);
+            }
+            ReplyTo::Module(caller, call) => self.replies.push((caller, call, result)),
+            ReplyTo::Kernel(call) => self.commands_panel.answer(call, result),
+        }
+    }
+
+    /// The command `name` when a running compiled module offers it, with its handler and the
+    /// module's thread to run it on.
+    fn compiled_command(&self, name: &str) -> Option<(String, CommandHandler, &'static capi::ModuleContext)> {
+        let (owner, handler) = self.host.bridge.lookup(name).ok()?;
+        let module = self.slots[self.running_index(&owner)?].compiled?;
+        Some((owner, handler?, module))
     }
 
     fn run_command(
@@ -1065,7 +1104,7 @@ impl eframe::App for Shell {
         let busy = self
             .slots
             .iter()
-            .any(|slot| slot.activity.as_ref().is_some_and(|activity| activity.pending() > 0));
+            .any(|slot| slot.compiled.is_some_and(|module| module.activity.pending() > 0));
         if busy {
             // Undo comes back, and the Modules panel tells a module not responding, without input.
             ctx.request_repaint_after(Duration::from_millis(250));
@@ -1339,9 +1378,8 @@ impl Viewer<'_> {
                     ui.label(&slot.id);
                     ui.label(slot.manifest.as_ref().map_or("", |m| m.version.as_str()));
                     let stuck = slot
-                        .activity
-                        .as_ref()
-                        .and_then(|activity| activity.running_for())
+                        .compiled
+                        .and_then(|module| module.activity.running_for())
                         .filter(|running| *running >= NOT_RESPONDING);
                     match stuck {
                         Some(running) if slot.state.is_running() => {

@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::ffi::CStr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use uniwow_api::capi;
 use uniwow_api::{CREATE_SYMBOL, CreateFn, MenuItemSpec, Module, PACKAGE_SYMBOL, PackageFn, PanelSpec, RUNTIME_DLL};
@@ -42,8 +41,8 @@ pub struct Slot {
     pub subscriptions: Vec<String>,
     /// The commands it declared, with the reason of those the catalogue set aside (F6).
     pub commands: Vec<(String, Option<String>)>,
-    /// What waits for or runs on its thread, for a compiled module.
-    pub activity: Option<Arc<capi::Activity>>,
+    /// For a compiled module, what the C interface knows of it: its thread and the work there.
+    pub compiled: Option<&'static capi::ModuleContext>,
 }
 
 impl Slot {
@@ -58,7 +57,7 @@ impl Slot {
             menu_items: Vec::new(),
             subscriptions: Vec::new(),
             commands: Vec::new(),
-            activity: None,
+            compiled: None,
         }
     }
 
@@ -143,7 +142,7 @@ pub fn discover(exe_dir: &Path, disabled: &BTreeSet<String>) -> Discovery {
                 Kind::Rust => load(&dll, &shadow_dir, &slot),
                 Kind::Compiled => compiled::load(&dll, &slot.id)
                     .map(|module| {
-                        slot.activity = Some(module.activity());
+                        slot.compiled = Some(module.context());
                         Box::new(module) as Box<dyn Module>
                     })
                     .map_err(State::Refused),

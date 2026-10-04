@@ -71,6 +71,13 @@ pub enum Request {
     ThreadEnded {
         thread: ThreadId,
     },
+    /// The answer of a call run on the thread of the compiled module offering the command.
+    Answer {
+        caller: String,
+        name: String,
+        reply: ReplyTo,
+        result: Result<Value, String>,
+    },
 }
 
 /// Chooses, once every module has registered, which declaration of each command name the
