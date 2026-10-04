@@ -8,7 +8,7 @@ mod painter;
 mod scene;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 pub use draw::PanelView;
 pub use painter::PaintCommand;
@@ -266,6 +266,20 @@ pub struct Ui {
     structure: HashMap<Handle, u64>,
     post: Post,
     wake: Option<egui::Context>,
+    /// The store itself, for its jobs on the module's thread to look at it.
+    this: Weak<Mutex<Ui>>,
+}
+
+/// Calls, on the module's thread, the slots still connected when their turn comes: one
+/// disconnected or destroyed before, from that thread or by an earlier slot, is no longer called.
+fn deliver(ui: &Weak<Mutex<Ui>>, slots: Vec<(u64, Slot)>, data: &SignalData) {
+    for (connection, slot) in slots {
+        let Some(shared) = ui.upgrade() else { return };
+        let connected = lock(&shared).connections.iter().any(|c| c.id == connection);
+        if connected {
+            slot(data);
+        }
+    }
 }
 
 /// Locks the objects of a module, even after a panic in another thread.
@@ -276,18 +290,20 @@ pub fn lock(ui: &SharedUi) -> MutexGuard<'_, Ui> {
 impl Ui {
     /// The objects of a module, whose signals run through `post`.
     pub fn new(post: Post) -> SharedUi {
-        let ui = Ui {
-            objects: HashMap::new(),
-            next: 1,
-            panels: Vec::new(),
-            connections: Vec::new(),
-            next_connection: 1,
-            painting: HashMap::new(),
-            structure: HashMap::new(),
-            post,
-            wake: None,
-        };
-        Arc::new(Mutex::new(ui))
+        Arc::new_cyclic(|this| {
+            Mutex::new(Ui {
+                objects: HashMap::new(),
+                next: 1,
+                panels: Vec::new(),
+                connections: Vec::new(),
+                next_connection: 1,
+                painting: HashMap::new(),
+                structure: HashMap::new(),
+                post,
+                wake: None,
+                this: this.clone(),
+            })
+        })
     }
 
     fn insert(&mut self, object: Object) -> Handle {
@@ -671,32 +687,28 @@ impl Ui {
         Ok(())
     }
 
+    /// The slots connected to a signal of `sender`, with their connections.
+    fn slots(&self, sender: Handle, signal: u32) -> Vec<(u64, Slot)> {
+        self.connections
+            .iter()
+            .filter(|c| c.sender == sender && c.signal as u32 == signal)
+            .map(|c| (c.id, c.slot.clone()))
+            .collect()
+    }
+
     /// Sends a signal to the slots connected to it, on the module's thread.
     pub(crate) fn emit(&self, data: SignalData) {
-        let slots: Vec<Slot> = self
-            .connections
-            .iter()
-            .filter(|c| c.sender == data.sender && c.signal as u32 == data.signal)
-            .map(|c| c.slot.clone())
-            .collect();
+        let slots = self.slots(data.sender, data.signal);
         if slots.is_empty() {
             return;
         }
-        (self.post)(Box::new(move || {
-            for slot in slots {
-                slot(&data);
-            }
-        }));
+        let this = self.this.clone();
+        (self.post)(Box::new(move || deliver(&this, slots, &data)));
     }
 
     /// Asks the module to paint an area of `size`; the picture replaces the area's once painted.
     pub(crate) fn request_paint(&mut self, shared: &SharedUi, area: Handle, size: [f64; 2]) {
-        let slots: Vec<Slot> = self
-            .connections
-            .iter()
-            .filter(|c| c.sender == area && c.signal == Signal::Paint)
-            .map(|c| c.slot.clone())
-            .collect();
+        let slots = self.slots(area, Signal::Paint as u32);
         if slots.is_empty() {
             return;
         }
@@ -704,6 +716,7 @@ impl Ui {
         self.next += 1;
         self.painting.insert(painter, (area, Vec::new()));
         let shared = shared.clone();
+        let this = self.this.clone();
         (self.post)(Box::new(move || {
             let data = SignalData {
                 sender: area,
@@ -713,9 +726,7 @@ impl Ui {
                 painter,
                 ..Default::default()
             };
-            for slot in slots {
-                slot(&data);
-            }
+            deliver(&this, slots, &data);
             let mut ui = lock(&shared);
             if let Some((area, commands)) = ui.painting.remove(&painter)
                 && let Some(object) = ui.objects.get_mut(&area)
@@ -777,9 +788,25 @@ mod tests {
     use crate::curve::{CurveChange, CurveEditor, CurveOptions, ShownCurve, TimeAxis};
     use crate::egui;
 
+    type Jobs = Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
+
     /// A Ui whose posted jobs run at once on the calling thread.
     fn ui() -> super::SharedUi {
         Ui::new(Arc::new(|job| job()))
+    }
+
+    /// A Ui whose posted jobs wait for `run`, as on the module's thread.
+    fn queued() -> (super::SharedUi, Jobs) {
+        let jobs: Jobs = Arc::default();
+        let queue = jobs.clone();
+        (Ui::new(Arc::new(move |job| queue.lock().unwrap().push(job))), jobs)
+    }
+
+    fn run(jobs: &Jobs) {
+        let waiting = std::mem::take(&mut *jobs.lock().unwrap());
+        for job in waiting {
+            job();
+        }
     }
 
     #[test]
@@ -843,7 +870,7 @@ mod tests {
 
     #[test]
     fn a_signal_reaches_only_its_slots() {
-        let shared = ui();
+        let (shared, jobs) = queued();
         let received = Arc::new(Mutex::new(Vec::new()));
         let mut ui = lock(&shared);
         let first = ui.create(Kind::PushButton, None).unwrap();
@@ -863,9 +890,65 @@ mod tests {
         };
         ui.emit(click(first));
         ui.emit(click(second));
+        drop(ui);
+        run(&jobs);
+        let mut ui = lock(&shared);
         ui.disconnect(connection);
         ui.emit(click(first));
+        drop(ui);
+        run(&jobs);
         assert_eq!(*received.lock().unwrap(), vec![first]);
+    }
+
+    #[test]
+    fn a_slot_disconnected_or_destroyed_before_its_turn_is_not_called() {
+        let (shared, jobs) = queued();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut store = lock(&shared);
+        let button = store.create(Kind::PushButton, None).unwrap();
+        let other = store.create(Kind::PushButton, None).unwrap();
+        let second = Arc::new(Mutex::new(0));
+        // The first slot disconnects the second, as a module does from its own thread.
+        let (ui_of_first, second_of_first, seen) = (shared.clone(), second.clone(), calls.clone());
+        store
+            .connect(
+                button,
+                Signal::Clicked,
+                Arc::new(move |_: &SignalData| {
+                    seen.lock().unwrap().push("first");
+                    lock(&ui_of_first).disconnect(*second_of_first.lock().unwrap());
+                }),
+            )
+            .unwrap();
+        let seen = calls.clone();
+        let id = store
+            .connect(
+                button,
+                Signal::Clicked,
+                Arc::new(move |_: &SignalData| seen.lock().unwrap().push("second")),
+            )
+            .unwrap();
+        *second.lock().unwrap() = id;
+        let seen = calls.clone();
+        store
+            .connect(
+                other,
+                Signal::Clicked,
+                Arc::new(move |_: &SignalData| seen.lock().unwrap().push("other")),
+            )
+            .unwrap();
+        let click = |sender| SignalData {
+            sender,
+            signal: Signal::Clicked as u32,
+            ..Default::default()
+        };
+        store.emit(click(button));
+        store.emit(click(other));
+        // Destroyed after its signal was sent, before it was delivered.
+        store.destroy(other).unwrap();
+        drop(store);
+        run(&jobs);
+        assert_eq!(*calls.lock().unwrap(), vec!["first"]);
     }
 
     #[test]

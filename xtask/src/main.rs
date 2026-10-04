@@ -18,7 +18,8 @@ usage: cargo xtask <command>
   build [--release]             build everything and lay out out/<profile>
   build-module <id> [--release]  build and deploy one module, leaving the editor untouched
   run [--release]               build everything, then start the editor
-  check                         check the dependency rules and the runtime size";
+  check                         check the dependency rules and the runtime size
+  test-sdk                      run the tests of the C++ and C# classes of sdk/";
 
 const RUNTIME_DLL: &str = "uniwow_api.dll";
 const EXECUTABLE: &str = "UniWoW.exe";
@@ -39,6 +40,7 @@ fn main() -> ExitCode {
         ["build-module", id] => build_module(id, release),
         ["run"] => run(release),
         ["check"] => check::run(),
+        ["test-sdk"] => test_sdk(),
         _ => Err(USAGE.to_owned()),
     };
     match result {
@@ -184,25 +186,22 @@ fn build_examples(ws: &Workspace, profile: &Profile) -> Result<usize> {
     Ok(built)
 }
 
-/// Compiles C and C++ sources into `work/<dll>`; returns `work`.
-fn compile_c(ws: &Workspace, name: &str, sources: &[PathBuf], dll: &str, work: &Path) -> Result<PathBuf> {
+/// The MSVC compiler, with the options of the C and C++ modules and `sdk/` to include from.
+fn msvc(ws: &Workspace, work: &Path) -> Result<Command> {
     let compiler = cc::windows_registry::find_tool("x86_64-pc-windows-msvc", "cl.exe")
         .ok_or("no MSVC compiler found: install the Visual Studio C++ build tools")?;
-    let output = compiler
-        .to_command()
+    let mut command = compiler.to_command();
+    command
         .current_dir(work)
-        .args([
-            "/nologo",
-            "/LD",
-            "/MD",
-            "/O2",
-            "/EHsc",
-            "/std:c++17",
-            "/utf-8",
-            "/W4",
-            "/WX",
-        ])
-        .arg(format!("/I{}", ws.root.join("sdk").display()))
+        .args(["/nologo", "/MD", "/O2", "/EHsc", "/std:c++17", "/utf-8", "/W4", "/WX"])
+        .arg(format!("/I{}", ws.root.join("sdk").display()));
+    Ok(command)
+}
+
+/// Compiles C and C++ sources into `work/<dll>`; returns `work`.
+fn compile_c(ws: &Workspace, name: &str, sources: &[PathBuf], dll: &str, work: &Path) -> Result<PathBuf> {
+    let output = msvc(ws, work)?
+        .arg("/LD")
         .args(sources)
         .arg(format!("/Fe:{dll}"))
         .args(["/link", "/Brepro"])
@@ -220,12 +219,7 @@ fn compile_c(ws: &Workspace, name: &str, sources: &[PathBuf], dll: &str, work: &
 /// Publishes a C# project with NativeAOT into `work/publish`; returns that folder, or `None` when
 /// the .NET 10 SDK is not installed.
 fn publish_csharp(project: &Path, work: &Path) -> Result<Option<PathBuf>> {
-    let sdks = match Command::new("dotnet").arg("--list-sdks").output() {
-        Ok(output) => String::from_utf8_lossy(&output.stdout).into_owned(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("could not start dotnet: {error}")),
-    };
-    if !sdks.lines().any(|line| line.starts_with("10.")) {
+    if !dotnet_10()? {
         return Ok(None);
     }
     // NativeAOT finds the MSVC linker through vswhere.exe, which needs `ProgramFiles(x86)`: some
@@ -261,6 +255,58 @@ fn publish_csharp(project: &Path, work: &Path) -> Result<Option<PathBuf>> {
         ));
     }
     Ok(Some(published))
+}
+
+/// Whether the .NET 10 SDK is installed.
+fn dotnet_10() -> Result<bool> {
+    match Command::new("dotnet").arg("--list-sdks").output() {
+        Ok(output) => Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line.starts_with("10."))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("could not start dotnet: {error}")),
+    }
+}
+
+/// Compiles and runs the tests of `sdk/tests/` over a fake table: those of the C++ classes with
+/// the MSVC compiler, those of the C# classes with the .NET 10 SDK, left out without it.
+fn test_sdk() -> Result {
+    let ws = Workspace::load()?;
+    let tests = ws.root.join("sdk").join("tests");
+    let work = ws.target_dir.join("sdk-tests");
+    std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+    let output = msvc(&ws, &work)?
+        .arg(tests.join("registry.cpp"))
+        .arg("/Fe:registry.exe")
+        .output()
+        .map_err(|e| format!("could not start the MSVC compiler: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "the C++ tests failed to compile:\n{}",
+            String::from_utf8_lossy(&output.stdout).trim()
+        ));
+    }
+    let cpp = Command::new(work.join("registry.exe"))
+        .status()
+        .map_err(|e| format!("could not start the C++ tests: {e}"))?;
+    if !cpp.success() {
+        return Err("the C++ tests failed".to_owned());
+    }
+    if !dotnet_10()? {
+        println!("C# tests left out: the .NET 10 SDK is not installed");
+        return Ok(());
+    }
+    let csharp = Command::new("dotnet")
+        .args(["run", "-c", "Release", "--project"])
+        .arg(tests.join("csharp").join("sdk-tests.csproj"))
+        .arg("--artifacts-path")
+        .arg(work.join("csharp"))
+        .status()
+        .map_err(|e| format!("could not start dotnet: {e}"))?;
+    if !csharp.success() {
+        return Err("the C# tests failed".to_owned());
+    }
+    Ok(())
 }
 
 /// Copies the scripts of `scripts/` into `out/<profile>/scripts`, overwriting those of the same

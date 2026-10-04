@@ -207,6 +207,9 @@ typedef struct uniwow_api {
     int32_t (*update)(void *context, uniwow_handle paint_area);
     /* Returns the connection, or 0 when refused. */
     uint64_t (*connect)(void *context, uniwow_handle sender, uint32_t signal, uniwow_slot slot, void *user);
+    /* Once disconnect, or destroy on the sender, returns on the module's thread (in a slot, for
+       instance), the slot is never called again: its user data may be freed. Called from another
+       thread, it does not wait for a call already under way. */
     void (*disconnect)(void *context, uint64_t connection);
 
     /* --- Painting, as QPainter, inside a slot of UNIWOW_SIGNAL_PAINT, with its painter. --- */

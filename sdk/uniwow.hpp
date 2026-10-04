@@ -4,6 +4,7 @@
 // the handle, not the object; destroy() destroys it. Signals connect to functions with
 // connect(), as in Qt for Python: button.clicked.connect([] { ... }). Slots run on the module's own
 // thread, never on the editor's interface thread; an exception a slot lets out is logged.
+// disconnect(), and destroy() on the sender or one of its parents, free the connected function.
 
 #pragma once
 
@@ -12,8 +13,13 @@
 #include <exception>
 #include <functional>
 #include <initializer_list>
+#include <iterator>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -54,6 +60,127 @@ inline bool recordChange(const std::string &label, const std::string &undo_json,
     return api().record_change(detail::context(), label.c_str(), undo_json.c_str(), redo_json.c_str()) == 0;
 }
 
+namespace detail {
+using Slot = std::function<void(const uniwow_signal &)>;
+
+// What the module connected and created, as the editor has it. The editor hands back a number
+// with each signal, not the function: a disconnect or a destroy frees the function, and a call
+// under way keeps it until it returns.
+struct Registry {
+    struct Connected {
+        uint64_t connection;
+        uniwow_handle sender;
+        std::shared_ptr<const Slot> slot;
+    };
+    std::mutex lock;
+    uintptr_t next = 1;
+    std::unordered_map<uintptr_t, Connected> connected;
+    // The parent of each object, to free what a destroy takes with it.
+    std::unordered_map<uniwow_handle, uniwow_handle> parents;
+    // The panels, which the editor does not destroy.
+    std::unordered_set<uniwow_handle> panels;
+};
+inline Registry &registry() {
+    static Registry instance;
+    return instance;
+}
+
+inline void run_slot(void *user, const uniwow_signal *signal) {
+    std::shared_ptr<const Slot> slot;
+    {
+        std::lock_guard<std::mutex> guard(registry().lock);
+        const auto found = registry().connected.find(reinterpret_cast<uintptr_t>(user));
+        if (found == registry().connected.end()) {
+            return;
+        }
+        slot = found->second.slot;
+    }
+    try {
+        (*slot)(*signal);
+    } catch (const std::exception &failure) {
+        log(LogLevel::Error, std::string("a slot threw: ") + failure.what());
+    } catch (...) {
+        log(LogLevel::Error, "a slot threw an exception");
+    }
+}
+
+inline uint64_t connect(uniwow_handle sender, uint32_t signal, Slot slot) {
+    auto kept = std::make_shared<const Slot>(std::move(slot));
+    Registry &kept_in = registry();
+    // Held across connect: a signal sent at once from another thread waits for its function.
+    std::lock_guard<std::mutex> guard(kept_in.lock);
+    const uintptr_t key = kept_in.next++;
+    const uint64_t connection = api().connect(context(), sender, signal, &run_slot, reinterpret_cast<void *>(key));
+    if (connection != 0) {
+        kept_in.connected.emplace(key, Registry::Connected{connection, sender, std::move(kept)});
+    }
+    return connection;
+}
+
+// Forgets the connections `drop` picks; their functions are freed once the lock is released.
+inline void forget(const std::function<bool(const Registry::Connected &)> &drop) {
+    std::vector<std::shared_ptr<const Slot>> freed;
+    std::lock_guard<std::mutex> guard(registry().lock);
+    auto &connected = registry().connected;
+    for (auto it = connected.begin(); it != connected.end();) {
+        if (drop(it->second)) {
+            freed.push_back(std::move(it->second.slot));
+            it = connected.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+inline void disconnect(uint64_t connection) {
+    api().disconnect(context(), connection);
+    forget([connection](const Registry::Connected &c) { return c.connection == connection; });
+}
+
+// Records that `container` holds `child`; `alone` for the one layout of a panel, group box or dialog.
+inline void placed(uniwow_handle container, uniwow_handle child, bool alone) {
+    std::lock_guard<std::mutex> guard(registry().lock);
+    auto &parents = registry().parents;
+    if (alone) {
+        for (auto it = parents.begin(); it != parents.end();) {
+            it = it->second == container ? parents.erase(it) : std::next(it);
+        }
+    }
+    parents[child] = container;
+}
+
+inline uniwow_handle panel(const std::string &id) {
+    const uniwow_handle handle = api().panel(context(), id.c_str());
+    std::lock_guard<std::mutex> guard(registry().lock);
+    registry().panels.insert(handle);
+    return handle;
+}
+
+// Frees the functions connected to a destroyed object and to its children.
+inline void destroyed(uniwow_handle handle) {
+    std::unordered_set<uniwow_handle> gone{handle};
+    {
+        std::lock_guard<std::mutex> guard(registry().lock);
+        if (registry().panels.count(handle) != 0) {
+            return;
+        }
+        auto &parents = registry().parents;
+        for (bool grew = true; grew;) {
+            grew = false;
+            for (const auto &[child, parent] : parents) {
+                if (gone.count(parent) != 0 && gone.insert(child).second) {
+                    grew = true;
+                }
+            }
+        }
+        for (const uniwow_handle object : gone) {
+            parents.erase(object);
+        }
+    }
+    forget([&gone](const Registry::Connected &c) { return gone.count(c.sender) != 0; });
+}
+} // namespace detail
+
 // What a signal of a scene item or of the mouse carries.
 struct ItemEvent {
     uniwow_handle item;
@@ -93,24 +220,14 @@ template <typename... Args> class Signal {
     Signal(uniwow_handle sender, uint32_t id) : sender_(sender), id_(id) {}
 
     uint64_t connect(std::function<void(Args...)> slot) const {
-        // Kept while the module is loaded, as the connection may be.
-        auto *function = new std::function<void(Args...)>(std::move(slot));
-        return api().connect(detail::context(), sender_, id_, &Signal::call, function);
+        return detail::connect(sender_, id_, [slot = std::move(slot)]([[maybe_unused]] const uniwow_signal &signal) {
+            slot(detail::Payload<Args>::from(signal)...);
+        });
     }
 
-    static void disconnect(uint64_t connection) { api().disconnect(detail::context(), connection); }
+    static void disconnect(uint64_t connection) { detail::disconnect(connection); }
 
   private:
-    static void call(void *user, const uniwow_signal *signal) {
-        try {
-            (*static_cast<std::function<void(Args...)> *>(user))(detail::Payload<Args>::from(*signal)...);
-        } catch (const std::exception &failure) {
-            log(LogLevel::Error, std::string("a slot threw: ") + failure.what());
-        } catch (...) {
-            log(LogLevel::Error, "a slot threw an exception");
-        }
-    }
-
     uniwow_handle sender_;
     uint32_t id_;
 };
@@ -123,12 +240,24 @@ class Object {
     explicit operator bool() const { return handle_ != 0; }
     void destroy() {
         api().destroy(detail::context(), handle_);
+        detail::destroyed(handle_);
         handle_ = 0;
     }
 
   protected:
     static uniwow_handle make(uint32_t kind, uniwow_handle parent = 0) {
-        return api().create(detail::context(), kind, parent);
+        const uniwow_handle handle = api().create(detail::context(), kind, parent);
+        if (handle != 0 && parent != 0) {
+            detail::placed(parent, handle, false);
+        }
+        return handle;
+    }
+    // Places a widget or layout in this layout, or sets the one layout of this container.
+    void hold(const Object &child, bool alone, uint32_t row = 0, uint32_t column = 0, uint32_t rowSpan = 1,
+              uint32_t columnSpan = 1) const {
+        if (api().add_to(detail::context(), handle_, child.handle(), row, column, rowSpan, columnSpan) == 0) {
+            detail::placed(handle_, child.handle(), alone);
+        }
     }
     void setString(uint32_t property, const std::string &text) const {
         api().set_text(detail::context(), handle_, property, text.c_str());
@@ -247,7 +376,7 @@ class Separator : public Widget {
 class Layout : public Object {
   public:
     using Object::Object;
-    void addWidget(const Object &widget) const { api().add_to(detail::context(), handle_, widget.handle(), 0, 0, 1, 1); }
+    void addWidget(const Object &widget) const { hold(widget, false); }
     void addLayout(const Object &layout) const { addWidget(layout); }
 };
 
@@ -269,8 +398,7 @@ class GridLayout : public Layout {
         if (row < 0 || column < 0 || rowSpan < 1 || columnSpan < 1) {
             throw std::invalid_argument("a grid cell has a row and a column from 0 and spans from 1");
         }
-        api().add_to(detail::context(), handle_, widget.handle(), uint32_t(row), uint32_t(column), uint32_t(rowSpan),
-                     uint32_t(columnSpan));
+        hold(widget, false, uint32_t(row), uint32_t(column), uint32_t(rowSpan), uint32_t(columnSpan));
     }
 };
 
@@ -278,7 +406,7 @@ class GroupBox : public Widget {
   public:
     explicit GroupBox(const std::string &title = "") : Widget(make(UNIWOW_GROUP_BOX)) { setTitle(title); }
     void setTitle(const std::string &title) const { setString(UNIWOW_PROPERTY_TITLE, title); }
-    void setLayout(const Layout &layout) const { api().add_to(detail::context(), handle_, layout.handle(), 0, 0, 1, 1); }
+    void setLayout(const Layout &layout) const { hold(layout, true); }
 };
 
 // Curves edited by hand, drawn by the module curves: setCurves and curves take the JSON of
@@ -298,7 +426,7 @@ class Dialog : public Object {
   public:
     explicit Dialog(const std::string &title = "") : Object(make(UNIWOW_DIALOG)) { setTitle(title); }
     void setTitle(const std::string &title) const { setString(UNIWOW_PROPERTY_TITLE, title); }
-    void setLayout(const Layout &layout) const { api().add_to(detail::context(), handle_, layout.handle(), 0, 0, 1, 1); }
+    void setLayout(const Layout &layout) const { hold(layout, true); }
     void show() const { setNumbers(UNIWOW_PROPERTY_VISIBLE, {1.0}); }
     void hide() const { setNumbers(UNIWOW_PROPERTY_VISIBLE, {0.0}); }
     Signal<> rejected{handle_, UNIWOW_SIGNAL_REJECTED};
@@ -307,8 +435,8 @@ class Dialog : public Object {
 // A dock panel the module declared in uniwow_module_info.
 class Panel : public Object {
   public:
-    explicit Panel(const std::string &id) : Object(api().panel(detail::context(), id.c_str())) {}
-    void setLayout(const Layout &layout) const { api().add_to(detail::context(), handle_, layout.handle(), 0, 0, 1, 1); }
+    explicit Panel(const std::string &id) : Object(detail::panel(id)) {}
+    void setLayout(const Layout &layout) const { hold(layout, true); }
 };
 
 class GraphicsScene : public Object {
@@ -436,24 +564,14 @@ class PaintArea : public Widget {
     void update() const { api().update(detail::context(), handle_); }
     // Sets how the area is painted: called with a painter, the width and the height.
     uint64_t paint(std::function<void(const Painter &, double, double)> paint) const {
-        auto *function = new std::function<void(const Painter &, double, double)>(std::move(paint));
-        return api().connect(detail::context(), handle_, UNIWOW_SIGNAL_PAINT, &PaintArea::call, function);
+        return detail::connect(handle_, UNIWOW_SIGNAL_PAINT, [paint = std::move(paint)](const uniwow_signal &signal) {
+            paint(Painter(signal.painter), signal.width, signal.height);
+        });
     }
     Signal<MouseEvent> mousePressed{handle_, UNIWOW_SIGNAL_MOUSE_PRESS};
     Signal<MouseEvent> mouseMoved{handle_, UNIWOW_SIGNAL_MOUSE_MOVE};
     Signal<MouseEvent> mouseReleased{handle_, UNIWOW_SIGNAL_MOUSE_RELEASE};
     Signal<MouseEvent> wheel{handle_, UNIWOW_SIGNAL_WHEEL};
-
-  private:
-    static void call(void *user, const uniwow_signal *signal) {
-        try {
-            const Painter painter(signal->painter);
-            (*static_cast<std::function<void(const Painter &, double, double)> *>(user))(painter, signal->width,
-                                                                                       signal->height);
-        } catch (...) {
-            log(LogLevel::Error, "a paint function threw an exception");
-        }
-    }
 };
 
 } // namespace uniwow

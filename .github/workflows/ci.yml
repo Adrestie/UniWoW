@@ -26,5 +26,7 @@ jobs:
         run: cargo xtask build
       - name: C# module built
         run: if (-not (Test-Path out/debug/modules/sample-csharp/sample-csharp.dll)) { exit 1 }
+      - name: SDK tests
+        run: cargo xtask test-sdk
       - name: Check
         run: cargo xtask check

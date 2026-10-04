@@ -4,7 +4,8 @@
 // Call Editor.Start(api) first in the module's entry point, and Editor.Describe(info, ...) last.
 // Objects are handles: Destroy() destroys the object. Signals connect to functions, as in Qt for
 // Python: button.Clicked.Connect(() => ...). Slots run on the module's own thread, never on the
-// editor's interface thread; an exception a slot lets out is logged. A command handler or the
+// editor's interface thread; an exception a slot lets out is logged. Disconnect, and Destroy on
+// the sender or one of its parents, let the connected function go. A command handler or the
 // function applying undo and redo values reports a failure by throwing.
 
 using System;
@@ -270,22 +271,135 @@ public static unsafe class Editor
 
     public static void EndGroup() => table->EndGroup(Context);
 
-    /// <summary>Connects a slot receiving the raw signal; kept while the module is loaded, as the
-    /// connection may be.</summary>
+    /// <summary>A slot connected, under the number the editor hands back with each signal.</summary>
+    sealed record Connected(ulong Connection, ulong Sender, Action<SignalData> Slot);
+
+    static readonly object gate = new();
+    static long nextSlot = 1;
+    static readonly Dictionary<long, Connected> connected = new();
+    /// <summary>The parent of each object, to let go what a destroy takes with it.</summary>
+    static readonly Dictionary<ulong, ulong> parents = new();
+    /// <summary>The panels, which the editor does not destroy.</summary>
+    static readonly HashSet<ulong> panels = new();
+
+    /// <summary>Connects a slot receiving the raw signal.</summary>
     public static ulong Connect(ulong sender, SignalId signal, Action<SignalData> slot)
     {
-        var user = GCHandle.ToIntPtr(GCHandle.Alloc(slot));
-        return table->Connect(Context, sender, (uint)signal, &RunSlot, user);
+        // Held across Connect: a signal sent at once from another thread waits for its slot.
+        lock (gate)
+        {
+            var key = nextSlot++;
+            var connection = table->Connect(Context, sender, (uint)signal, &RunSlot, (IntPtr)key);
+            if (connection != 0)
+            {
+                connected[key] = new Connected(connection, sender, slot);
+            }
+            return connection;
+        }
     }
 
-    public static void Disconnect(ulong connection) => table->Disconnect(Context, connection);
+    public static void Disconnect(ulong connection)
+    {
+        table->Disconnect(Context, connection);
+        Forget(entry => entry.Connection == connection);
+    }
+
+    static void Forget(Func<Connected, bool> drop)
+    {
+        lock (gate)
+        {
+            var dropped = new List<long>();
+            foreach (var (key, entry) in connected)
+            {
+                if (drop(entry))
+                {
+                    dropped.Add(key);
+                }
+            }
+            foreach (var key in dropped)
+            {
+                connected.Remove(key);
+            }
+        }
+    }
+
+    /// <summary>Records that <paramref name="container"/> holds <paramref name="child"/>;
+    /// <paramref name="alone"/> for the one layout of a panel, group box or dialog.</summary>
+    internal static void Placed(ulong container, ulong child, bool alone)
+    {
+        lock (gate)
+        {
+            if (alone)
+            {
+                var replaced = new List<ulong>();
+                foreach (var (held, parent) in parents)
+                {
+                    if (parent == container)
+                    {
+                        replaced.Add(held);
+                    }
+                }
+                foreach (var held in replaced)
+                {
+                    parents.Remove(held);
+                }
+            }
+            parents[child] = container;
+        }
+    }
+
+    internal static void AddPanel(ulong handle)
+    {
+        lock (gate)
+        {
+            panels.Add(handle);
+        }
+    }
+
+    /// <summary>Lets go the slots connected to a destroyed object and to its children.</summary>
+    internal static void Destroyed(ulong handle)
+    {
+        var gone = new HashSet<ulong> { handle };
+        lock (gate)
+        {
+            if (panels.Contains(handle))
+            {
+                return;
+            }
+            for (var grew = true; grew;)
+            {
+                grew = false;
+                foreach (var (child, parent) in parents)
+                {
+                    if (gone.Contains(parent) && gone.Add(child))
+                    {
+                        grew = true;
+                    }
+                }
+            }
+            foreach (var other in gone)
+            {
+                parents.Remove(other);
+            }
+        }
+        Forget(entry => gone.Contains(entry.Sender));
+    }
 
     [UnmanagedCallersOnly]
     static void RunSlot(IntPtr user, SignalData* signal)
     {
+        Action<SignalData>? slot;
+        lock (gate)
+        {
+            slot = connected.TryGetValue((long)user, out var entry) ? entry.Slot : null;
+        }
+        if (slot is null)
+        {
+            return;
+        }
         try
         {
-            ((Action<SignalData>)GCHandle.FromIntPtr(user).Target!)(*signal);
+            slot(*signal);
         }
         catch (Exception failure)
         {
@@ -382,6 +496,7 @@ public unsafe class UiObject(ulong handle)
     public void Destroy()
     {
         Table->Destroy(Context, Handle);
+        Editor.Destroyed(Handle);
         Handle = 0;
     }
 
@@ -389,7 +504,26 @@ public unsafe class UiObject(ulong handle)
 
     protected static IntPtr Context => Editor.Table->Context;
 
-    protected static ulong Make(Kind kind, ulong parent = 0) => Table->Create(Context, (uint)kind, parent);
+    protected static ulong Make(Kind kind, ulong parent = 0)
+    {
+        var handle = Table->Create(Context, (uint)kind, parent);
+        if (handle != 0 && parent != 0)
+        {
+            Editor.Placed(parent, handle, false);
+        }
+        return handle;
+    }
+
+    /// <summary>Places a widget or layout in this layout, or sets the one layout of this
+    /// container.</summary>
+    protected void Hold(UiObject child, bool alone, uint row = 0, uint column = 0, uint rowSpan = 1,
+                        uint columnSpan = 1)
+    {
+        if (Table->AddTo(Context, Handle, child.Handle, row, column, rowSpan, columnSpan) == 0)
+        {
+            Editor.Placed(Handle, child.Handle, alone);
+        }
+    }
 
     protected void WriteText(Property property, string text)
     {
@@ -571,7 +705,7 @@ public class Separator() : Widget(Make(Kind.Separator));
 
 public unsafe class Layout(ulong handle) : UiObject(handle)
 {
-    public void AddWidget(UiObject widget) => Table->AddTo(Context, Handle, widget.Handle, 0, 0, 1, 1);
+    public void AddWidget(UiObject widget) => Hold(widget, false);
     public void AddLayout(Layout layout) => AddWidget(layout);
 }
 
@@ -588,7 +722,7 @@ public unsafe class GridLayout() : Layout(Make(Kind.GridLayout))
         {
             throw new ArgumentOutOfRangeException(nameof(row), "a grid cell has a row and a column from 0 and spans from 1");
         }
-        Table->AddTo(Context, Handle, widget.Handle, (uint)row, (uint)column, (uint)rowSpan, (uint)columnSpan);
+        Hold(widget, false, (uint)row, (uint)column, (uint)rowSpan, (uint)columnSpan);
     }
 }
 
@@ -597,7 +731,7 @@ public unsafe class GroupBox : Widget
     public GroupBox(string title = "") : base(Make(Kind.GroupBox)) => SetTitle(title);
 
     public void SetTitle(string title) => WriteText(Property.Title, title);
-    public void SetLayout(Layout layout) => Table->AddTo(Context, Handle, layout.Handle, 0, 0, 1, 1);
+    public void SetLayout(Layout layout) => Hold(layout, true);
 }
 
 /// <summary>Curves edited by hand, drawn by the module curves: SetCurves and Curves take the JSON
@@ -630,7 +764,7 @@ public unsafe class Dialog : UiObject
     public Signal Rejected { get; }
 
     public void SetTitle(string title) => WriteText(Property.Title, title);
-    public void SetLayout(Layout layout) => Table->AddTo(Context, Handle, layout.Handle, 0, 0, 1, 1);
+    public void SetLayout(Layout layout) => Hold(layout, true);
     public void Show() => WriteNumbers(Property.Visible, 1.0);
     public void Hide() => WriteNumbers(Property.Visible, 0.0);
 }
@@ -638,12 +772,14 @@ public unsafe class Dialog : UiObject
 /// <summary>A dock panel the module declared with Editor.Describe.</summary>
 public unsafe class Panel(string id) : UiObject(Find(id))
 {
-    public void SetLayout(Layout layout) => Table->AddTo(Context, Handle, layout.Handle, 0, 0, 1, 1);
+    public void SetLayout(Layout layout) => Hold(layout, true);
 
     static ulong Find(string id)
     {
         using var copy = new Utf8(id);
-        return Table->Panel(Context, copy.Pointer);
+        var handle = Table->Panel(Context, copy.Pointer);
+        Editor.AddPanel(handle);
+        return handle;
     }
 }
 
