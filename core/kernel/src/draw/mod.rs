@@ -36,6 +36,8 @@ pub struct PanelView {
     rows: HashMap<Handle, HashMap<String, RowProperty>>,
     /// The id each dopesheet view was drawn under, for the dopesheet to forget it once it is gone.
     sheet_ids: HashMap<Handle, egui::Id>,
+    /// The frame `rows` were read for: once a frame, whatever the panels and dialogs drawn.
+    prepared: Option<u64>,
     /// The time axis of each curve view and dopesheet view.
     time_axes: HashMap<Handle, TimeAxis>,
     /// The change of its sequence each view has under way.
@@ -44,11 +46,13 @@ pub struct PanelView {
     failures: Vec<(&'static str, String)>,
 }
 
-/// A change of a view's sequence under way, shown at once: the tracks before it began, and the
-/// version of the sequence once the view last changed it.
+/// A change of a view's sequence under way, shown at once: the sequence, the tracks before the
+/// change began, and those the view set.
 struct Editing {
+    sequence: Handle,
     before: Vec<Track>,
-    generation: u64,
+    /// The tracks the view set last: others mean that the tracks changed elsewhere.
+    set: Vec<Track>,
 }
 
 /// The curves of a sequence as a curve view shows them, one per number of each track but a
@@ -178,7 +182,12 @@ impl PanelView {
 
     /// Reads, before the objects are locked, the labels and values of the properties the sequences
     /// shown animate: reading a property runs its module's code, which may lock objects.
-    fn prepare(&mut self, shared: &SharedUi) {
+    fn prepare(&mut self, shared: &SharedUi, ctx: &egui::Context) {
+        let pass = ctx.cumulative_pass_nr();
+        if self.prepared == Some(pass) {
+            return;
+        }
+        self.prepared = Some(pass);
         let shown = lock(shared).shown_sequences();
         self.rows.clear();
         if shown.is_empty() {
@@ -224,13 +233,21 @@ impl PanelView {
     }
 
     /// Forgets what it kept of the objects that are gone; a view's texture goes with it.
-    fn forget_gone(&mut self, store: &Ui) {
+    fn forget_gone(&mut self, store: &mut Ui) {
+        let gone: Vec<Handle> = self
+            .editing
+            .keys()
+            .filter(|view| store.object(**view).is_none())
+            .copied()
+            .collect();
+        for view in gone {
+            self.drop_editing(store, view);
+        }
         let alive = |handle: &Handle| store.object(*handle).is_some();
         self.scenes.retain(|handle, _| alive(handle));
         self.painted.retain(|handle, _| alive(handle));
         self.sizes.retain(|handle, _| alive(handle));
         self.time_axes.retain(|handle, _| alive(handle));
-        self.editing.retain(|handle, _| alive(handle));
         let sheet = self.dopesheet.clone();
         self.sheet_ids.retain(|handle, id| {
             let kept = alive(handle);
@@ -243,10 +260,10 @@ impl PanelView {
 
     /// Draws the panel `panel` of a module.
     pub fn show(&mut self, shared: &SharedUi, panel: &str, ui: &mut egui::Ui, gpu: Option<&egui_wgpu::RenderState>) {
-        self.prepare(shared);
+        self.prepare(shared, ui.ctx());
         let mut store = lock(shared);
         store.set_wake(ui.ctx());
-        self.forget_gone(&store);
+        self.forget_gone(&mut store);
         let layout = store
             .find_panel(panel)
             .and_then(|handle| store.object(handle))
@@ -271,10 +288,10 @@ impl PanelView {
         ctx: &egui::Context,
         gpu: Option<&egui_wgpu::RenderState>,
     ) -> Vec<egui::LayerId> {
-        self.prepare(shared);
+        self.prepare(shared, ctx);
         let mut store = lock(shared);
         store.set_wake(ctx);
-        self.forget_gone(&store);
+        self.forget_gone(&mut store);
         let mut events = Vec::new();
         let mut layers = Vec::new();
         for handle in store.dialogs() {
@@ -544,6 +561,7 @@ impl PanelView {
                     ui.available_height().max(object.minimum_height as f32),
                 );
                 let Some(editor) = self.curve_editor.clone() else {
+                    self.drop_editing(store, handle);
                     return Some(
                         ui.allocate_ui(size, |ui| ui.weak("No curve editor: the module curves is not running."))
                             .response,
@@ -557,6 +575,7 @@ impl PanelView {
                         self.sequence_curve_view(store, handle, object, sequence, &data, editor, size, ui, events);
                     return Some(response);
                 }
+                self.drop_editing(store, handle);
                 let mut curves = object.curves.clone();
                 let time = self.time_axes.entry(handle).or_default();
                 let inner = ui.allocate_ui(size, |ui| {
@@ -591,6 +610,7 @@ impl PanelView {
                     ui.available_height().max(object.minimum_height as f32),
                 );
                 let Some(sheet) = self.dopesheet.clone() else {
+                    self.drop_editing(store, handle);
                     return Some(
                         ui.allocate_ui(size, |ui| ui.weak("No dopesheet: the module dopesheet is not running."))
                             .response,
@@ -600,6 +620,7 @@ impl PanelView {
                     .plays
                     .and_then(|sequence| Some((sequence, store.sequence(sequence).ok()?)))
                 else {
+                    self.drop_editing(store, handle);
                     return Some(ui.allocate_ui(size, |ui| ui.weak("No sequence shown.")).response);
                 };
                 let playhead = playhead(store, object);
@@ -621,6 +642,7 @@ impl PanelView {
                     Err(panic) => {
                         let message = format!("the dopesheet panicked: {}", panic_text(&*panic));
                         self.failures.push((dopesheet::SERVICE.id(), message));
+                        self.drop_editing(store, handle);
                         return Some(inner.response);
                     }
                 };
@@ -698,11 +720,15 @@ impl PanelView {
         let shown = catch_unwind(AssertUnwindSafe(|| {
             editor.show(&mut child, id.with("curves"), &mut curves, time, &options)
         }));
-        let change = shown.unwrap_or_else(|panic| {
-            let message = format!("the curve editor panicked: {}", panic_text(&*panic));
-            self.failures.push((curve::SERVICE.id(), message));
-            CurveChange::None
-        });
+        let change = match shown {
+            Ok(change) => change,
+            Err(panic) => {
+                let message = format!("the curve editor panicked: {}", panic_text(&*panic));
+                self.failures.push((curve::SERVICE.id(), message));
+                self.drop_editing(store, view);
+                return response;
+            }
+        };
         let keys = match (left_keys, change) {
             (KeysChange::None, CurveChange::None) => KeysChange::None,
             (KeysChange::None, CurveChange::Changing) => KeysChange::Changing(tracks_of(data, &curves, &origin)),
@@ -720,6 +746,18 @@ impl PanelView {
         response
     }
 
+    /// Puts back the sequence a view was changing, when the view can no longer end the change: gone,
+    /// or drawn without its service. Not when the tracks changed elsewhere meanwhile.
+    fn drop_editing(&mut self, store: &mut Ui, view: Handle) {
+        if let Some(editing) = self.editing.remove(&view)
+            && store
+                .sequence(editing.sequence)
+                .is_ok_and(|data| data.tracks == editing.set)
+        {
+            let _ = store.set_tracks_under_way(editing.sequence, editing.before);
+        }
+    }
+
     /// Makes what a view did to its sequence's keys: a change under way at once, recording
     /// nothing; a change done as one undo entry from the tracks before it began; a change dropped,
     /// nothing being done by the user any more, undone.
@@ -732,13 +770,12 @@ impl PanelView {
         idle: bool,
         events: &mut Vec<SignalData>,
     ) {
-        let generation = store.object(sequence).map(|object| object.generation);
-        // Changed elsewhere since the view changed it: what the change began from no longer stands.
-        if self
-            .editing
-            .get(&view)
-            .is_some_and(|editing| Some(editing.generation) != generation)
-        {
+        // Changed elsewhere since the view changed them: what the change began from no longer
+        // stands. A change of the frame rate or the length leaves the tracks.
+        let stale = self.editing.get(&view).is_some_and(|editing| {
+            editing.sequence != sequence || store.sequence(sequence).map_or(true, |data| data.tracks != editing.set)
+        });
+        if stale {
             self.editing.remove(&view);
         }
         match keys {
@@ -762,9 +799,13 @@ impl PanelView {
                 let text = store
                     .has_slots(view, Signal::KeysChanged)
                     .then(|| tracks_to_json(&tracks).to_string());
-                if store.set_tracks_under_way(sequence, tracks).is_ok() {
-                    let generation = store.object(sequence).map_or(0, |object| object.generation);
-                    self.editing.insert(view, Editing { before, generation });
+                if store.set_tracks_under_way(sequence, tracks.clone()).is_ok() {
+                    let editing = Editing {
+                        sequence,
+                        before,
+                        set: tracks,
+                    };
+                    self.editing.insert(view, editing);
                     if let Some(text) = text {
                         events.push(SignalData {
                             sender: view,
@@ -1187,6 +1228,7 @@ mod tests {
     /// `cube/opacity`, played by a player at frame 5; what the module would record, and the
     /// signals the view sends.
     struct Fixture {
+        ctx: egui::Context,
         shared: SharedUi,
         jobs: Jobs,
         sequence: Handle,
@@ -1248,6 +1290,7 @@ mod tests {
             (sequence, player, view)
         };
         Fixture {
+            ctx: egui::Context::default(),
             shared,
             jobs,
             sequence,
@@ -1262,9 +1305,24 @@ mod tests {
     impl Fixture {
         /// Draws the panel once, then runs the slots.
         fn frame(&self, panels: &mut PanelView) {
-            let ctx = egui::Context::default();
-            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| panels.show(&self.shared, "p", ui, None));
+            let mut output = self
+                .ctx
+                .run_ui(egui::RawInput::default(), |ui| panels.show(&self.shared, "p", ui, None));
             output.textures_delta.clear();
+            self.run_slots();
+        }
+
+        /// A frame drawing the panel and the dialogs, as the kernel does.
+        fn frame_with_dialogs(&self, panels: &mut PanelView) {
+            let mut output = self.ctx.run_ui(egui::RawInput::default(), |ui| {
+                panels.show(&self.shared, "p", ui, None);
+                panels.dialogs(&self.shared, ui.ctx(), None);
+            });
+            output.textures_delta.clear();
+            self.run_slots();
+        }
+
+        fn run_slots(&self) {
             let jobs = std::mem::take(&mut *self.jobs.lock().unwrap());
             for job in jobs {
                 job();
@@ -1543,5 +1601,63 @@ mod tests {
         };
         fixture.frame(&mut panels);
         assert_eq!(*seeing.0.lock().unwrap(), vec![false]);
+    }
+
+    #[test]
+    fn a_change_under_way_is_put_back_when_its_view_goes_or_is_drawn_without_its_service() {
+        for gone in [true, false] {
+            let fixture = fixture(Kind::DopesheetView);
+            let mut panels = PanelView {
+                dopesheet: giving(KeysChange::Changing(moved_to(3.0))),
+                ..PanelView::default()
+            };
+            fixture.frame(&mut panels);
+            assert_eq!(fixture.tracks(), moved_to(3.0));
+            if gone {
+                lock(&fixture.shared).destroy(fixture.view).unwrap();
+            } else {
+                panels.dopesheet = None;
+            }
+            fixture.frame(&mut panels);
+            assert_eq!(fixture.tracks(), moved_to(0.0), "view gone: {gone}");
+            assert!(fixture.recorded.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_change_of_length_during_a_drag_leaves_where_the_drag_began() {
+        let fixture = fixture(Kind::DopesheetView);
+        let mut panels = PanelView {
+            dopesheet: giving(KeysChange::Changing(moved_to(3.0))),
+            ..PanelView::default()
+        };
+        fixture.frame(&mut panels);
+        lock(&fixture.shared)
+            .set_numbers(fixture.sequence, Property::Length, &[200.0])
+            .unwrap();
+        panels.dopesheet = giving(KeysChange::Finished {
+            label: "move keys".to_owned(),
+            tracks: moved_to(4.0),
+        });
+        fixture.frame(&mut panels);
+        fixture.changes.lock().unwrap().pop().unwrap().undo();
+        assert_eq!(fixture.tracks(), moved_to(0.0), "undone to where the drag began");
+    }
+
+    #[test]
+    fn the_properties_are_read_once_a_frame_whatever_is_drawn() {
+        let fixture = fixture(Kind::DopesheetView);
+        let catalogue = Arc::new(Catalogue {
+            objects: fixture.shared.clone(),
+            free: Mutex::default(),
+        });
+        let mut panels = PanelView {
+            dopesheet: Some(Arc::new(Forgetting::default())),
+            editor: Some(Editor::new(catalogue.clone(), "test")),
+            ..PanelView::default()
+        };
+        fixture.frame_with_dialogs(&mut panels);
+        fixture.frame_with_dialogs(&mut panels);
+        assert_eq!(catalogue.free.lock().unwrap().len(), 2, "once in each frame");
     }
 }

@@ -1424,6 +1424,10 @@ As built, first part (8.6a), the views doing what the Timeline does by hand:
   before it began (`Ui::finish_tracks`). A change dropped, nothing being done by the user any more,
   is undone; one the tracks changed under, elsewhere, starts again from them. Step 8.5 showed a
   change under way in the view alone.
+- After the review: a change under way is put back when its view goes or is drawn without its
+  service; the tracks the view set, not the version of the sequence, tell a change made elsewhere,
+  so that a change of the length during a drag leaves where it began; the properties the views
+  show are read once a frame for a module, whatever panels and dialogs are drawn.
 
 **Step 8.7, data widgets**, as in Qt:
 
