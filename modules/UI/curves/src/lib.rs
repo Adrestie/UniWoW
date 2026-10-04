@@ -203,7 +203,7 @@ fn drag_handle(shown: &mut ShownCurve, k: usize, side: Side, target: (f64, f64))
     if !outward {
         return;
     }
-    let slope = (target.1 - key.value) / reach;
+    let slope = ((target.1 - key.value) / reach).clamp(-curve::LIMIT, curve::LIMIT);
     if matches!(
         key.mode,
         TangentMode::ClampedAuto | TangentMode::Auto | TangentMode::Flat
@@ -360,17 +360,40 @@ enum MenuAction {
 }
 
 /// A step of the grid, at least `pixels` apart: 1, 2 or 5 times a power of ten, or a multiple of
-/// `snap` when there is one.
-fn grid_step(pixels_per_unit: f32, pixels: f32, snap: Option<f64>) -> f64 {
+/// `snap` when there is one. None for a zoom that is not a positive number.
+fn grid_step(pixels_per_unit: f32, pixels: f32, snap: Option<f64>) -> Option<f64> {
     let wanted = f64::from(pixels / pixels_per_unit);
-    let mut power = 10f64.powf(wanted.log10().floor());
-    let step = loop {
-        if let Some(step) = [1.0, 2.0, 5.0].iter().map(|m| m * power).find(|step| *step >= wanted) {
-            break step;
+    if !(wanted.is_finite() && wanted > 0.0) {
+        return None;
+    }
+    let power = 10f64.powf(wanted.log10().floor());
+    let step = [1.0, 2.0, 5.0, 10.0]
+        .iter()
+        .map(|m| m * power)
+        .find(|step| *step >= wanted)?;
+    let step = snap.map_or(step, |snap| (step / snap).ceil().max(1.0) * snap);
+    (step.is_finite() && step > 0.0).then_some(step)
+}
+
+/// The most lines a grid draws.
+const MAX_LINES: usize = 1000;
+
+/// The multiples of `step` from `first` to `last`, counted rather than summed, so that a step lost
+/// in the size of the numbers cannot loop for ever.
+fn grid_lines(first: f64, last: f64, step: f64) -> Vec<f64> {
+    let start = (first / step).floor();
+    if !(start.is_finite() && last.is_finite()) {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    for index in 0..MAX_LINES {
+        let line = (start + index as f64) * step;
+        if line > last {
+            break;
         }
-        power *= 10.0;
-    };
-    snap.map_or(step, |snap| (step / snap).ceil().max(1.0) * snap)
+        lines.push(line);
+    }
+    lines
 }
 
 fn number_label(value: f64, step: f64) -> String {
@@ -406,9 +429,11 @@ impl CurveEditor for Editor {
                 .get(*c)
                 .is_some_and(|shown| shown.visible && *k < shown.curve.keys.len())
         });
-        if graph.pixels_per_value <= 0.0 || graph.time.pixels_per_unit <= 0.0 {
+        let usable = |zoom: f32, at: f64| zoom.is_finite() && zoom > 0.0 && at.is_finite();
+        let time_usable = usable(graph.time.pixels_per_unit, graph.time.first);
+        if !time_usable || !usable(graph.pixels_per_value, graph.bottom) {
             let points = key_points(curves, &BTreeSet::new());
-            graph.frame(&points, options.span, graph.time.pixels_per_unit <= 0.0);
+            graph.frame(&points, options.span, !time_usable);
         }
         let mut change = CurveChange::None;
         let command = ui.input(|i| i.modifiers.command);
@@ -517,7 +542,7 @@ impl CurveEditor for Editor {
                             .map_or(f64::MAX, |n| n.time - gap);
                         let key = &mut curves[c].curve.keys[k];
                         key.time = snapped(time + dt, options).clamp(low, high);
-                        key.value = value + dv;
+                        key.value = (value + dv).clamp(-curve::LIMIT, curve::LIMIT);
                     }
                     for shown in curves.iter_mut() {
                         shown.curve.update_tangents();
@@ -649,9 +674,8 @@ fn draw(ui: &egui::Ui, curves: &[ShownCurve], state: &State, graph: &Graph, opti
     // The grid, its times along the bottom and its values along the left.
     let line = visuals.widgets.noninteractive.bg_stroke.color.gamma_multiply(0.6);
     let label = visuals.weak_text_color();
-    let step = grid_step(graph.time.pixels_per_unit, 60.0, options.snap);
-    let mut time = (graph.time(rect.left()) / step).floor() * step;
-    while time <= graph.time(rect.right()) {
+    let step = grid_step(graph.time.pixels_per_unit, 60.0, options.snap).unwrap_or(f64::NAN);
+    for time in grid_lines(graph.time(rect.left()), graph.time(rect.right()), step) {
         let x = graph.x(time);
         painter.line_segment(
             [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
@@ -664,11 +688,9 @@ fn draw(ui: &egui::Ui, curves: &[ShownCurve], state: &State, graph: &Graph, opti
             FontId::proportional(10.0),
             label,
         );
-        time += step;
     }
-    let step = grid_step(graph.pixels_per_value, 28.0, None);
-    let mut value = (graph.value(rect.bottom()) / step).floor() * step;
-    while value <= graph.value(rect.top()) {
+    let step = grid_step(graph.pixels_per_value, 28.0, None).unwrap_or(f64::NAN);
+    for value in grid_lines(graph.value(rect.bottom()), graph.value(rect.top()), step) {
         let y = graph.y(value);
         let width = if value.abs() < step / 2.0 { 1.5 } else { 1.0 };
         painter.line_segment(
@@ -682,7 +704,6 @@ fn draw(ui: &egui::Ui, curves: &[ShownCurve], state: &State, graph: &Graph, opti
             FontId::proportional(10.0),
             label,
         );
-        value += step;
     }
 
     // The curves, sampled every two pixels, then their keys and the handles of the selected ones.
@@ -756,7 +777,7 @@ uniwow_api::export_module!(CurvesModule);
 mod tests {
     use uniwow_api::curve::{Curve, ShownCurve, SideMode, TangentMode};
 
-    use super::{Choice, Side, apply_choice, drag_handle, grid_step};
+    use super::{Choice, MAX_LINES, Side, apply_choice, drag_handle, grid_lines, grid_step};
 
     fn shown(points: &[(f64, f64)]) -> ShownCurve {
         let mut curve = Curve::default();
@@ -808,9 +829,19 @@ mod tests {
 
     #[test]
     fn grid_steps_are_round_and_follow_the_snap() {
-        assert_eq!(grid_step(10.0, 60.0, None), 10.0);
-        assert_eq!(grid_step(100.0, 60.0, None), 1.0);
-        assert_eq!(grid_step(100.0, 28.0, None), 0.5);
-        assert_eq!(grid_step(300.0, 60.0, Some(1.0)), 1.0, "never below a frame");
+        assert_eq!(grid_step(10.0, 60.0, None), Some(10.0));
+        assert_eq!(grid_step(100.0, 60.0, None), Some(1.0));
+        assert_eq!(grid_step(100.0, 28.0, None), Some(0.5));
+        assert_eq!(grid_step(300.0, 60.0, Some(1.0)), Some(1.0), "never below a frame");
+        assert_eq!(grid_step(f32::NAN, 60.0, None), None);
+        assert_eq!(grid_step(0.0, 60.0, None), None);
+    }
+
+    #[test]
+    fn a_grid_ends_even_when_its_step_is_lost_in_the_size_of_the_numbers() {
+        assert_eq!(grid_lines(0.0, 2.0, 0.5), vec![0.0, 0.5, 1.0, 1.5, 2.0]);
+        assert!(grid_lines(1e16, 1e16 + 1e6, 1.0).len() <= MAX_LINES);
+        assert!(grid_lines(0.0, 1.0, f64::NAN).is_empty());
+        assert!(grid_lines(f64::NAN, 1.0, 1.0).is_empty());
     }
 }

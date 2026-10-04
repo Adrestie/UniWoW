@@ -91,7 +91,8 @@ enum {
     UNIWOW_PROPERTY_VIEW_CENTER = 29,    /* graphics view: x, y of the scene at its centre */
     UNIWOW_PROPERTY_COUNT = 30,          /* read only: entries of a combo box, children otherwise */
     UNIWOW_PROPERTY_CURVES = 31          /* curve view, text: JSON [{label, colour: [r, g, b], visible, keys: [{time,
-                                            value, mode, left, right}]}] */
+                                            value, mode, left, right}]}]; keys in time order, each at a time of its
+                                            own, numbers within 1e9 */
 };
 
 /* Signals, named as in Qt. Each tells what the user did, never a change the module made. */

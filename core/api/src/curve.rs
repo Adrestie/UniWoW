@@ -46,6 +46,9 @@ pub struct Side {
 /// The length of a handle that is not weighted.
 pub const DEFAULT_WEIGHT: f64 = 1.0 / 3.0;
 
+/// The times, values and slopes of a curve stay within this, either way.
+pub const LIMIT: f64 = 1e9;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CurveKey {
     pub time: f64,
@@ -181,9 +184,27 @@ impl Curve {
                 .map(key_from_json)
                 .collect::<Result<_, _>>()?,
         };
-        curve.sort();
+        curve.check()?;
         curve.update_tangents();
         Ok(curve)
+    }
+
+    /// Refuses a curve whose numbers are not within `LIMIT`, or whose keys are not in time order,
+    /// each at a time of its own.
+    pub fn check(&self) -> Result<(), String> {
+        let within = |number: f64| number.is_finite() && number.abs() <= LIMIT;
+        for key in &self.keys {
+            let numbers = [key.time, key.value, key.left.slope, key.right.slope];
+            if !numbers.into_iter().all(within) {
+                return Err(format!(
+                    "a key's time, value and slopes must be numbers within {LIMIT:e}"
+                ));
+            }
+        }
+        if self.keys.windows(2).any(|pair| pair[0].time >= pair[1].time) {
+            return Err("the keys of a curve must be in time order, each at a time of its own".to_owned());
+        }
+        Ok(())
     }
 }
 
@@ -498,6 +519,16 @@ mod tests {
             "Clamped Auto is the default"
         );
         assert!(Curve::from_json(&serde_json::json!({ "keys": [{ "time": 0 }] })).is_err());
+        let refused = |keys: serde_json::Value| Curve::from_json(&serde_json::json!({ "keys": keys })).is_err();
+        assert!(refused(serde_json::json!([{ "time": 0, "value": 1e16 }])), "too large");
+        assert!(
+            refused(serde_json::json!([{ "time": 5, "value": 0 }, { "time": 1, "value": 0 }])),
+            "unsorted"
+        );
+        assert!(
+            refused(serde_json::json!([{ "time": 1, "value": 0 }, { "time": 1, "value": 2 }])),
+            "twice"
+        );
         let shown = vec![ShownCurve {
             label: "x".to_owned(),
             colour: [220, 70, 60],

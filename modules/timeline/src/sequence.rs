@@ -242,6 +242,9 @@ impl Sequence {
                         .map_err(|error| format!("'{property}' at frame {frame}: {error}"))?;
                     read.set_key(frame, value);
                 }
+                for curve in &read.curves {
+                    curve.check().map_err(|error| format!("'{property}': {error}"))?;
+                }
             }
             if sequence.track(property).is_some() {
                 return Err(format!("'{property}' has two tracks"));
