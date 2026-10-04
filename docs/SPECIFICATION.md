@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 7 built and validated; milestones 8 to 11 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 proposed; milestones 10 to 14 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -154,7 +154,7 @@ The panels of compiled, Lua and Python modules, written once for every language.
 typed functions of `uniwow.h`, which numbers the objects, properties and signals below; C++ has the
 classes of `sdk/uniwow.hpp` (`uniwow::PushButton`, `button.clicked.connect(...)`), C# those of
 `sdk/UniWoW.cs` with the names of C# (`button.Clicked.Connect(...)`, `UiObject` for `QObject`); Lua
-and Python receive theirs in milestones 9 and 10.
+and Python receive theirs in milestones 10 and 11.
 
 | Object | As in Qt | Properties | Signals |
 |---|---|---|---|
@@ -246,22 +246,25 @@ fills it, or *not planned* when no milestone does yet.
 
 | Capability | Built-in (Rust) modules | Unified API (`uniwow.h`) | C++ and C# | Lua and Python |
 |---|---|---|---|---|
-| Named commands: offer, list, call | `Registrar::command`, `command_on_caller`; `Context::call`, `Editor::call` | `uniwow_module_info.commands`; `commands`, `call` | `uniwow::call`; `Editor.Call`, `Command` | Scripts: `uniwow.commands`, `uniwow.call`; modules: milestones 9 and 10 |
+| Named commands: offer, list, call | `Registrar::command`, `command_on_caller`; `Context::call`, `Editor::call` | `uniwow_module_info.commands`; `commands`, `call` | `uniwow::call`; `Editor.Call`, `Command` | Scripts: `uniwow.commands`, `uniwow.call`; modules: milestones 10 and 11 |
 | Events | `Registrar::subscribe`, `Module::on_event`, `Context::publish_as`; `Editor::subscribe`, `next_event` | `publish`, `subscribe`, `next_event`, `unsubscribe` | The table (`uniwow::api()`, `Editor.Table`) | Scripts: `uniwow.publish`, `subscribe`, `next_event`, `unsubscribe` |
 | Settings | `Context::setting`, `set_setting` | `setting`, `set_setting` | The table | Scripts: `uniwow.setting`, `set_setting` |
 | Log | The `log` crate | `log` | `uniwow::log`; `Editor.Log` | Scripts: `uniwow.log`, `print` |
-| Undo of the module's own data | `Command`, `Context::execute` | `record_change`, with `uniwow_module_info.apply_change` | `uniwow::recordChange`; `Editor.RecordChange` | Milestones 9 and 10 |
+| Undo of the module's own data | `Command`, `Context::execute` | `record_change`, with `uniwow_module_info.apply_change` | `uniwow::recordChange`; `Editor.RecordChange` | Milestones 10 and 11 |
 | Undo groups | The commands of one call | `begin_group`, `end_group` | The table; `Editor.BeginGroup`, `EndGroup` | Scripts: `uniwow.begin_group`, `end_group` |
-| Panels | `Registrar::panel`, `Module::panel_ui` (egui) | `uniwow_module_info.panels`, `panel`, the objects | `uniwow::Panel`; `Panel` | Milestones 9 and 10 |
-| Widgets, layouts, a scene, painting | egui | The objects of this section | The classes named as in Qt | Milestones 9 and 10 |
+| Panels | `Registrar::panel`, `Module::panel_ui` (egui) | `uniwow_module_info.panels`, `panel`, the objects | `uniwow::Panel`; `Panel` | Milestones 10 and 11 |
+| Widgets, layouts, a scene, painting | egui | The objects of this section | The classes named as in Qt | Milestones 10 and 11 |
 | Modal windows | The command `ui.dialog`; the object `Dialog` | `ui.dialog` through `call`; `Dialog` | `uniwow::Dialog`; `Dialog` | Scripts: `ui.dialog` through `uniwow.call` |
-| The curve editor | The service `curve-editor` | `CurveView` | `uniwow::CurveView`; `CurveView` | Milestones 9 and 10 |
-| Animatable properties: declare, list, read, write | `Registrar::animatable`; `Editor::properties`, `read_property`, `write_property` | `uniwow_module_info.properties` (`uniwow_property`); `properties`, `read_property`, `write_property`, `set_property` | `uniwow::Property`, `describeProperties`, `properties`, `readProperty`, `writeProperty`; `Editor.DeclareProperty`, `Properties`, `ReadProperty`, `WriteProperty`, `SetProperty` | — milestones 9 and 10 |
-| The viewport's camera | Inside the module `viewport` (*View*, *Reset camera*) | The properties `viewport/camera_position`, `camera_target`, `camera_fov`; the commands `viewport.camera`, `viewport.look_at`, `viewport.frame` | The functions of properties; `call` | Scripts: the commands through `uniwow.call`; the properties: milestones 9 and 10 |
-| Sequences and their playback | `uniwow_api::sequence`; the objects `Sequence` and `Player` handed to the kernel with `Context::adopt_objects`, as the Timeline does | `Sequence`, `Player` | `uniwow::Sequence`, `uniwow::Player`; `Sequence`, `Player` | — milestones 9 and 10 |
-| The dopesheet | The service `dopesheet`; the objects `DopesheetView` and `CurveView`, as the Timeline does | `DopesheetView`; `CurveView` showing a `Sequence` | `uniwow::DopesheetView`; `DopesheetView` | — milestones 9 and 10 |
-| Tree, table, property grid | egui; the service `property-grid` | `TreeView`, `TableView`, with `set_cell`, `insert_rows`, `remove_rows`; `PropertyGrid` | `uniwow::TreeView`, `uniwow::TableView`, `uniwow::PropertyGrid`; `TreeView`, `TableView`, `PropertyGrid` | — milestones 9 and 10 |
+| The curve editor | The service `curve-editor` | `CurveView` | `uniwow::CurveView`; `CurveView` | Milestones 10 and 11 |
+| Animatable properties: declare, list, read, write | `Registrar::animatable`; `Editor::properties`, `read_property`, `write_property` | `uniwow_module_info.properties` (`uniwow_property`); `properties`, `read_property`, `write_property`, `set_property` | `uniwow::Property`, `describeProperties`, `properties`, `readProperty`, `writeProperty`; `Editor.DeclareProperty`, `Properties`, `ReadProperty`, `WriteProperty`, `SetProperty` | — milestones 10 and 11 |
+| The viewport's camera | Inside the module `viewport` (*View*, *Reset camera*) | The properties `viewport/camera_position`, `camera_target`, `camera_fov`; the commands `viewport.camera`, `viewport.look_at`, `viewport.frame` | The functions of properties; `call` | Scripts: the commands through `uniwow.call`; the properties: milestones 10 and 11 |
+| Sequences and their playback | `uniwow_api::sequence`; the objects `Sequence` and `Player` handed to the kernel with `Context::adopt_objects`, as the Timeline does | `Sequence`, `Player` | `uniwow::Sequence`, `uniwow::Player`; `Sequence`, `Player` | — milestones 10 and 11 |
+| The dopesheet | The service `dopesheet`; the objects `DopesheetView` and `CurveView`, as the Timeline does | `DopesheetView`; `CurveView` showing a `Sequence` | `uniwow::DopesheetView`; `DopesheetView` | — milestones 10 and 11 |
+| Tree, table, property grid | egui; the service `property-grid` | `TreeView`, `TableView`, with `set_cell`, `insert_rows`, `remove_rows`; `PropertyGrid` | `uniwow::TreeView`, `uniwow::TableView`, `uniwow::PropertyGrid`; `TreeView`, `TableView`, `PropertyGrid` | — milestones 10 and 11 |
 | Drawing in the 3D view | The service `viewport` and its layers | — not planned (an other 3D access of step 8.3) | — | — |
+| The live world: entities of the server around a point, their moves | Inside the module `live-world` | — step 9.3 (commands and events) | — step 9.3 | — milestones 10 and 11 |
+| Picking in the 3D view, the selection shown in 3D | — designed in milestone 9, not built | — | — | — |
+| Editing the world: terrain, painting, objects and creatures placed | — designed in milestone 9, not built | — | — | — |
 | Unsaved changes, asked about when the editor closes | `Module::unsaved`, `save_unsaved` | — not planned | — | — |
 | Menu items | `Registrar::menu_item`, `Module::on_menu` | — not planned | — | — |
 | Jobs of the kernel's pool, with progress and *Cancel* in the Jobs panel | `Context::spawn`, `spawn_thread` | — not planned; compiled modules run threads of their own (T7) | — | Scripts run on threads of their own (T6) |
@@ -472,12 +475,12 @@ milestone 9 takes up those that concern it.
 
 | Library | Role |
 |---|---|
-| formats | Read and write MPQ, DBC, ADT, WDT, WDL, WMO, M2, BLP. Based on warcraft-rs (MIT/Apache) where its writing is verified, own code otherwise |
-| defs | DBC layouts for build 12340 (WoWDBDefs) |
-| vfs | Client archive chain in the 3.3.5a load order, plus the project's own files on top |
+| formats | Read and write MPQ, DBC, ADT, WDT, WDL, WMO, M2, BLP. Based on warcraft-rs (MIT/Apache) where its writing is verified, own code otherwise. Milestone 9 proposes to keep it out of the runtime, inside the module `assets`, behind services (see milestone 9) |
+| defs | DBC layouts for build 12340 (WoWDBDefs). Milestone 9 proposes it inside the module `assets` too |
+| vfs | Client archive chain in the 3.3.5a load order, plus the project's own files on top. Milestone 9 proposes it inside the module `assets` too |
 | gpu | Generic GPU helpers on wgpu (device, shaders, buffers, camera math). Drawing of each kind of object belongs to the module that owns it |
 | db | MySQL access to the AzerothCore databases |
-| server-link | SOAP client, server process control |
+| server-link | SOAP client, server process control, client of the observer `mod-uniwow-observer` (milestone 9) |
 | client-link | Protocol with the WXL client module |
 | ids | Id range allocation per module |
 
@@ -500,6 +503,7 @@ added through section 4 without touching the core.
 | environment | Lighting and sky (Light tables, skyboxes), zone music and ambience |
 | spawns | Server creatures and game objects placed in the viewport, waypoints, formations |
 | server-map-data | Regenerate .map, vmaps and mmaps for changed tiles (AzerothCore extractors), in the background |
+| live-world | The world as it runs on the server, in the viewport: creatures, NPCs, game objects and players where they are, in real time, from the observer `mod-uniwow-observer` (milestone 9) |
 
 ### Data
 
@@ -519,9 +523,9 @@ added through section 4 without touching the core.
 
 | Id | Module |
 |---|---|
-| assets | Browse the virtual file system (archives and project), search, preview |
+| assets | Browse the virtual file system (archives and project), search, preview. Holds the reading of the formats and archives of WoW and offers it through the services `vfs` and `formats` (milestone 9) |
 | textures | BLP view, PNG to BLP and back, format and size checks |
-| models | M2 and WMO viewer (animations, textures, attachments), import of new models |
+| models | M2 and WMO viewer (animations, textures, attachments), import of new models. Provides the `models` service: M2 and WMO loaded in jobs, kept on the GPU, and instances drawn for the modules giving them (milestone 9) |
 | retail-import | Fetch modern assets through the wow.export bridge |
 
 ### Interface and scripts
@@ -596,6 +600,7 @@ E:\WoW-editor
   sdk/tests/            tests of the C++ and C# classes, run by `cargo xtask test-sdk`
   scripts/<language>-<version>/<tool>/  sample scripts, copied beside the executable
   client-bridge/        C++ (WXL SDK), own build
+  server/mod-uniwow-observer/  C++ module of AzerothCore, built with the AzerothCore source tree
   xtask/
   docs/
   .github/workflows/    CI on Windows with .NET 10: fmt, bindings --check, clippy -D warnings, cargo test,
@@ -1208,7 +1213,7 @@ As built:
 Whatever a built-in module can do, a module in any language can do (R9). This milestone completes
 the unified API where it falls short, and splits the Timeline into an engine, widgets and a window
 using them, so that a module of another language builds a timeline of its own on its own
-properties. Lua and Python reach all of it in milestones 9 and 10, through the same API.
+properties. Lua and Python reach all of it in milestones 10 and 11, through the same API.
 
 What the unified API lacks today:
 
@@ -1486,7 +1491,7 @@ As built, second part (8.6b), the Timeline a client:
   that 100,000 rows scroll smoothly. Besides the rows given at once, functions change one cell,
   insert rows and remove rows, without giving the whole table again. The kernel sorts, keeping the
   id of each row, which the signals and these functions use, whatever the order shown. The SQL
-  tool of milestone 11 relies on it.
+  tool of milestone 12 relies on it.
 - `PropertyGrid`, drawn by a new module of the interface, `modules/UI/properties/`, through a
   service: the properties of the catalogue whose paths it is given, each with its label and an
   editor for its kind (numbers dragged or typed, a colour, a box); a change by hand writes the
@@ -1613,21 +1618,301 @@ Acceptance, automated where possible (the shell run without a window, the tests 
 | 8.7 | The cube's colour changed in the property grid | The cube changes; one undo entry |
 | All | Tests, `cargo xtask check`, the tests of the SDK, CI | Green |
 
-### Milestone 9: Lua modules (outline)
+### Milestone 9: live view of the world (proposed)
+
+*Written by the external review from the user's request, brought up to date with milestone 8 as
+built; to be completed and corrected by the instance and validated by the user before anything is
+built.*
+
+The world of WoW as it runs now on the AzerothCore server, shown in the editor: a map with its
+terrain, buildings, doodads and water, and the creatures, NPCs, game objects and players where they
+are, in real time. The editor is not a game client: there is **no action of the game**, and no
+character connected. In this milestone the only thing the user does is move the camera.
+
+The editor will later edit this world: sculpt the terrain, select objects and creatures, add,
+remove and move them, paint vertex colours, areas, holes and textures. This milestone builds none of
+it, but its design must not stand in the way: *Preparing the editing to come*, below, records the
+choices made here for that.
+
+Decisions of the user:
+
+- **The live state comes from an observer module of the server**, `mod-uniwow-observer`, written in
+  C++ for AzerothCore. Not a ghost client speaking the protocol of the game, not the real client
+  shown in the editor: both would need a connected character.
+- **The first delivery is the whole scene**: terrain, animated models, buildings, doodads and water.
+  It is built in small steps, each reviewed before the next one.
+- **It comes after milestone 8**; the outlined milestones that followed move one number on.
+- **The server runs on the same machine as the editor**: the observer listens on 127.0.0.1 only,
+  and asks for a token.
+
+Rules:
+
+| Id | Rule |
+|---|---|
+| L1 | No action of the game, ever: the editor never plays, and never connects as a player. |
+| L2 | Nothing is changed in this milestone: the observer offers no write; the database and the files of the client are not touched; the live view records no undo entry. The only interaction is the camera. The observer does have one effect on the running server, which is no change of its data: it keeps the zone looked at alive (below), which costs the server some work and lets its creatures move where no player is. |
+| L3 | The work is spread over the threads of the editor as *Threads* below sets out: reading, decoding, building meshes and uploading them run on every core, the network and the animation on threads of their own; the interface thread only hands over what is ready and draws it (R7, T1 to T5). |
+| L4 | The live entities are offered to every language (R9): commands that read, such as *the entities around a point*, run on the calling thread from a snapshot shared between threads and answer at once (T4); events are batched, one per update of the server listing what appeared, left or moved, never one per entity. The table of capabilities is kept up to date. |
+| L5 | The core names none of these modules (R1). |
+
+#### Components
+
+**The formats and archives of WoW, behind the module `assets`** (decision of the user): their code
+will change often for a long time, and in the runtime each fix would change its fingerprint and
+make every Rust module be rebuilt, while making the runtime export more. So they live in a module:
+
+- `assets` reads the chain of archives of 3.3.5a in the order of the patches (MPQ), the DBC with the
+  layouts of build 12340 (from WoWDBDefs, its licence to check), and WDT, ADT, WMO, M2 and BLP, read
+  only in this milestone. What can also be **written** correctly is recorded format by format: the
+  terrain and the placement will need it.
+- It offers the services `vfs` (the bytes of a file, whether it exists, the files under a folder)
+  and `formats` (a tile, a model, a texture, the rows of a DBC, parsed), shared between threads
+  (T3). Their interfaces, and the plain data they return (heights, layers and alpha maps of a chunk,
+  vertices, bones and keyframes of a model, the levels of a texture), are declared in `core/api`:
+  they change far less often than the code reading the files.
+- The rule of section 2 stays as the user chose it: a module depends on `uniwow-api` and `libs/*`
+  only. `assets` therefore holds its own copy of the parts of warcraft-rs it uses, with their
+  licence (MIT/Apache). The other way, to decide in review: let a module depend on crates outside
+  the runtime when no crate of their tree is in the runtime's tree, which `cargo xtask check` can
+  verify on the resolved graph, so that no option merged by Cargo can rebuild the runtime.
+- `libs/server-link` (in the runtime) holds the client of the observer: its protocol is small and
+  changes with its version only.
+
+**Installations** (part of the open question of section 10): the folder of the client, and the
+observer's port and token, in the settings; a clear message when one is missing or wrong.
+
+**The observer, `server/mod-uniwow-observer/`** (C++, AzerothCore, outside the Cargo workspace,
+built with the AzerothCore source tree; how to build it is documented):
+
+- **Handshake**: a version of the protocol, the token, and a list of capabilities. This milestone
+  offers reading only; the list lets a protected capability of editing be added later without
+  breaking the protocol.
+- **Subscription**: a map, the id of its instance for a dungeon or a battleground, and a zone (a
+  centre and a radius), moved with the camera.
+- **Snapshot, then changes** 10 to 20 times a second. For each object:
+  - its GUID at run time and its type: creature, game object, player;
+  - its entry, and **the id of its spawn in the database** (the guid of the tables `creature` and
+    `gameobject`), with whether it is permanent or temporary (summoned, spawned by a script), and
+    the pool or the game event the spawn belongs to, if any;
+  - its phase mask: two objects may stand at the same place in different phases;
+  - its display id, position, orientation and scale;
+  - its movement: standing, walking, running, flying, following a path (the spline when there is
+    one);
+  - its name.
+- **The zone looked at stays alive without a player**: AzerothCore updates a grid only near a
+  player. The observer places at the camera's position an **active invisible object, not a
+  character**, which follows the subscription and keeps the grids around it loaded and updated. It
+  cannot be selected, is invisible to every player, game masters included, has no AI, takes no part
+  in the game, and is never saved. It is removed when the editor unsubscribes or disconnects, and
+  when nothing comes from the editor for 10 seconds (a heartbeat), so that an editor that crashed
+  leaves no zone alive behind it.
+- **Supported AzerothCore**: the module is built against a given commit of AzerothCore, written in
+  its documentation and in the handshake; moving to a newer one is a change of the module, reviewed
+  as such. The CI cannot build AzerothCore: the protocol is tested against a fake server.
+- **Bounded load**: a maximum radius, a maximum number of objects, changes only.
+
+**Modules of the editor:**
+
+- `viewport`: a free camera beside the orbit of step 8.3 (fly with the keyboard, look with the
+  right or middle button, the wheel for speed). Its position, target and angle stay the
+  properties and commands of step 8.3 (`viewport/camera_position`, `viewport.look_at`, ...), so
+  that the Timeline animates a flight over a map; their reach, 100,000 units from the origin,
+  covers a map, 64 × 64 tiles of 533.33 yards centred on the origin. The axes and units of WoW
+  are matched to those of the view. The view draws in reverse Z with no far plane since step 8.3
+  (`Target::depth_compare`): the terrain, the models and the buildings take it, so that a whole
+  map is seen with its depth precise near the eye.
+- `terrain`: WDT and ADT, heights, textures and their layers, loaded and unloaded around the camera.
+- `models` and its service `models`: M2 (model, skin, textures, the animations *Stand*, *Walk*,
+  *Run* chosen by the movement received) and WMO, loaded in jobs, kept on the GPU, and the instances
+  other modules give drawn in the viewport, each with its transform, its animation and its id.
+- `placement`: the doodads and buildings of the tiles, given to `models` as instances; `liquids`:
+  the water of the tiles.
+- `live-world`: the connection to the observer, the entities given to `models` as instances, their
+  moves interpolated between two updates, reconnection, and a visible state *server stopped* or
+  *observer missing*.
+
+#### Threads
+
+The live view is mostly reading and decoding, which spread over every core, and a little drawing,
+which stays on the interface thread.
+
+| Work | Thread | How |
+|---|---|---|
+| Reading the archives (MPQ) | Any thread | The `vfs` service of `assets` is `Send + Sync` and reads with positional reads, without a global lock, so that every job reads at once; a small cache of decompressed blocks is shared between threads |
+| A terrain tile: the ADT parsed, the meshes and alpha maps of its chunks built, its textures decoded, its GPU buffers and textures created and filled | A job of the pool (`Context::spawn`) per tile; its 256 chunks split with `parallel_for` (below) | Created and uploaded in the job (T5), which submits its own uploads: wgpu starts a transfer only at the next `submit`, and the viewport submits only when it draws, so uploads left to it would pile up in memory while the view is hidden and all leave with one frame, making it late. The GPU resources, ready to draw, come back through `on_job` |
+| An M2 or a WMO: parsed, its skins built, its textures decoded, uploaded; the groups of a WMO in parallel | Jobs of the pool | The `models` service loads a file once even when many ask for it at once: a load in flight is shared |
+| BLP textures | Inside the jobs that need them | A texture cache shared between threads (`libs/gpu`), by path, a load in flight shared |
+| The order of loading | The module, on the interface thread | What is wanted is queued by distance to the camera and size on screen; at most *cores − 1* loading jobs run at once; a job whose tile left the zone is cancelled (`is_cancelled`). Loading pauses while the view is not drawn (no frame signal: minimised, or its tab hidden) and goes on when it is |
+| Handing ready resources to the drawing | The interface thread | A bounded amount per frame, within a time budget (2 ms to start with), so that a burst of loads never makes a frame late |
+| The connection to the observer: reading, decoding a binary protocol, keeping the state of every entity | A thread of its own (`Context::spawn_thread`: work that waits) | Writes a new snapshot of the entities, shared between threads (an `Arc` swapped under a brief lock); its readers never wait for the network |
+| Interpolating the moves of the live entities between two updates | A thread of `live-world`, woken at each frame by the viewport's frame signal (below) | Reads the snapshot and gives `models` the transform and movement of each entity for frame N+1 while frame N is drawn |
+| Choosing the animations and computing the bones of every animated instance: creatures, and the doodads that move (torches, trees) | A thread of the `models` service, woken at each frame | The bones of hundreds of instances split with `parallel_for`; the instance and bone buffers written to the GPU from that thread (T5), two of each in turn, so that a frame never draws data half written |
+| Culling and recording the draws | The interface thread | Culling by tile and by group of instances, not by object: the bundle of a layer is recorded again only when the set of tiles or groups in sight, or what is loaded, changes, which flying does far less often than once per frame. Instanced draws, one per model and material, so that a frame's work follows the number of models in sight, not of objects; the camera and the animated instances change through buffers, not through the draws |
+| Commands that read the live world | The calling thread (T4) | Read the shared snapshot and answer at once, from any thread |
+| Events of the live world | Published by the connection thread, delivered on the interface thread | Batched, as L4 says |
+| Rebuilding one terrain chunk (the editing to come) | A job | Its new GPU resources take the place of the old ones at the next frame |
+
+Additions to the core this milestone needs, specified and reviewed with step 9.2:
+
+- **Fork-join on the pool, `parallel_for`**: a job, or a thread of its own, splits a slice of work
+  over the threads of the pool and waits for them, working on its own slices while it waits, never on
+  other jobs. The pool stays the only set of worker threads: a second pool, inside a library, would
+  fight it for the cores. The slices are short (under a millisecond as a goal), and the pool runs an
+  ordinary job, or the kernel's own work (the sorts of large tables of step 8.7, `Pool::background`),
+  before any slice, so that a job of another module waits at most for one slice: that is
+  what keeps a thread for the others, more than the limit of *cores − 1* loading jobs, whose slices
+  use every thread. Offered to every module; T2 says that waiting in `parallel_for` is not waiting
+  without a limit.
+- **Bundles kept in the viewport**: a layer may keep its recorded render bundle from one frame to
+  the next and record it again only when what it draws changes; the viewport validates a bundle
+  once, when it is recorded, as today. A layer gains a step run at each frame before the drawing,
+  `prepare`, with the view of that frame, which writes its buffers (the camera, the instances) without
+  recording anything: today `draw` receives the view only while it records.
+- **A frame signal in the viewport service**: threads of modules wait on it to prepare the next
+  frame while the current one is drawn, with the time of the frame to come; shared between threads
+  (T3).
+- The table *Who runs what* of section 5 gains the slices of `parallel_for` on the workers of the
+  pool, and the threads of modules waiting for the frame signal.
+
+Of the points to revisit of section 5, this milestone takes up the 3D view: bundles kept from one
+frame to the next, and GPU resources created and uploaded by the jobs rather than on the interface
+thread (steps 9.2a and 9.2). The loading of the modules and the files of the Timeline are not its
+concern.
+
+When a module fails or the editor closes:
+
+- Its threads of their own end: the connection reads the network with a short time limit (100 ms)
+  and checks its cancellation between reads; a thread waiting for the frame signal wakes on its
+  cancellation too. None keeps writing after its module failed.
+- The `models` service removes the instances of a module that failed, as the viewport removes its
+  layers, and the loads only it had asked for are cancelled.
+
+GPU memory:
+
+- A budget, set in the settings, for the textures, models and tiles kept on the GPU; beyond it,
+  what has not been seen for the longest time and is farthest from the camera is released, and
+  loaded again when it comes back in sight.
+- A device lost (driver reset, memory exhausted) stops the drawing of the view with a message; the
+  rest of the editor goes on, and the view loads again what it shows once a device is back.
+
+On the server, in `mod-uniwow-observer` (AzerothCore updates its maps on several threads):
+
+- The objects of a map are read only during that map's update, by a hook of the map's scripts, on
+  its thread, and copied into the outgoing state of each subscription. The network runs on a thread
+  of its own and never touches an object of the game.
+- A subscription the network moves is applied at the next update of its map, through a queue; the
+  active invisible object is created, moved and removed there, never from the network thread.
+
+#### Preparing the editing to come (designed here, not built)
+
+1. **A terrain model that can be edited, not only drawn.** The ADT are loaded into a model in
+   memory that keeps, chunk by chunk, everything that will be edited: heights, normals, vertex
+   colours (MCCV), the area of each chunk (`AreaTable`), holes, texture layers and alpha maps,
+   liquids, the references of doodads and buildings. Drawing is built from this model **chunk by
+   chunk**, one mesh and its alpha maps per chunk, so that a changed chunk will be rebuilt alone, in
+   a job, without reloading its tile. Each chunk and tile can be marked changed; nothing is written yet.
+2. **Stable ids for whatever will be selectable**: a terrain chunk by its tile and chunk; a doodad
+   or a building of a tile by its `uniqueId`; a live entity by its GUID at run time **and** the id of
+   its spawn in the database, so that a later selection finds the row to edit.
+3. **Picking**: each model (bounds of the M2 and WMO) and each terrain chunk keeps a bounding
+   volume. The viewport's interface plans, without building it, *what is under this point* (a ray
+   against the terrain, the objects and the entities), the picking of step 8.3; the drawing plans
+   how a selection is highlighted, and `models` already takes a highlight flag per instance.
+4. **Controls**: the left button is kept for the tools to come (selection, handles, brushes); the
+   camera uses the right or middle button, the wheel and the flying keys. In this milestone, a left
+   click does nothing.
+5. **Overlays**: the drawing of the terrain can lay information over it, off in this milestone:
+   vertex colours, areas in colours, holes, the grid of chunks. The brushes will need these views.
+6. **Two sources of entities**: the editor will show the spawns as they are in the database (what is
+   edited) and the live entities (what runs). The model of entities tells the two apart from now
+   on, even though this milestone shows the live ones only, and keeps for each its map, instance,
+   phase mask, and the pool or game event of its spawn: editing a spawn will depend on them.
+7. **The way of writing to come**, described, not built; every change will go through the
+   kernel's undoable commands (F2, S4):
+   - terrain: the ADT written by `libs/formats`, then the server's data rebuilt (`.map`, vmaps,
+     mmaps, the module `server-map-data`);
+   - spawns: written in the database (`libs/db`), and the server updated while it runs, through a
+     protected capability of editing of the observer or another way chosen later (SOAP, GM
+     commands).
+   Nothing in this milestone's design may stand in the way of either.
+8. **Parity from the design**: selection, picking, and later the editing of the terrain and of the
+   spawns, are offered to every language through the unified API, as the other capabilities (R9).
+
+#### Steps
+
+Each step is reviewed before the next one; the milestone is delivered once all are done.
+
+| Step | Content |
+|---|---|
+| 9.1 | Installations; the module `assets` and its services `vfs` and `formats`, with their interfaces in `core/api`, read from any thread at once: MPQ, the list of files, the DBC `Map`, `AreaTable`, `CreatureDisplayInfo`, `CreatureModelData`, and those the next steps need |
+| 9.2a | The additions to the core: `parallel_for`, bundles kept in the viewport with `prepare`, its frame signal |
+| 9.2 | The terrain model that can be edited (point 1 above), loaded in jobs in the order of *Threads*, its uploads submitted by the jobs, the GPU memory budget, drawn chunk by chunk; the free camera |
+| 9.3 | The observer and its threads, on both sides; the entities as markers (a coloured shape and the name) moving in real time; the commands and events of L4 |
+| 9.4 | Still M2 models: from the display id to the model, its skin, its textures and its scale |
+| 9.5 | M2 animations: *Stand*, *Walk*, *Run* chosen by the movement received, on the animation thread |
+| 9.6 | Buildings (WMO), doodads and water |
+| 9.7 | Optional, proposed apart: light and sky (`Light.dbc`), the server's time of day |
+
+#### Risks verified first
+
+| Risk | Result |
+|---|---|
+| Does the active invisible object keep the zone looked at alive without any player: creatures moving, paths followed, respawns? | To verify |
+| The volume of data in a crowded city at the rate chosen | To verify |
+| The work of the M2 animations (bones, interpolation) | To estimate |
+| Speed of the terrain and the models in a city (the goal to fix), and the cost of rebuilding one terrain chunk alone, for the editing to come | To measure |
+| Reading the archives from many threads at once: does it scale with the cores, or does the disk or a lock limit it? | To measure |
+| The time the interface thread spends per frame while flying fast over a city: handing over, culling, recording | To measure |
+| What warcraft-rs reads and writes correctly in 3.3.5a, format by format; what `assets` copies of it | To verify |
+| Does the active invisible object stay out of the game (no aggro, no AI, not seen by game masters), and is it always removed (unsubscription, disconnection, heartbeat lost)? | To verify |
+
+#### Tests
+
+The protocol of the observer against a fake server; the interpolation; the loading of tiles around
+the camera, its order and the cancelling of what left the zone; rebuilding one terrain chunk from
+the model; reading the formats on small sample files that the tests write themselves (never files
+taken from the client: they are Blizzard's and the repository is public); `parallel_for`, and a job
+of another module started while every thread runs slices; the
+archives read from many threads at once; the snapshot of the entities read from many threads while
+the connection thread replaces it; a bundle kept while unchanged and recorded again once changed;
+uploads while the view is hidden; the threads of a module ending when it fails; releasing beyond the
+GPU budget and loading again. The tests on the real files of the client run when their folder is given by
+an environment variable, and are skipped with a message otherwise: the CI does not have the client.
+
+#### Acceptance
+
+On the user's machine, with the client and the server on it:
+
+| Check | Expected result |
+|---|---|
+| A map chosen, then flown over | Terrain, buildings, doodads and water right |
+| Creatures and NPCs | At their place, animated, moving as on the server |
+| A player connected meanwhile with the real client | Seen moving |
+| The server stopped, then started again | The view says so, then reconnects |
+| Anything changed? | Nothing: no undo entry, no write in the database or the files |
+| A left click in the view | Does nothing: it is kept for the tools to come |
+| The interface during all of it | Fluid: flying fast over a city, no frame of the interface thread over 33 ms |
+| The loading of a city (Task Manager, Jobs panel) | Every core works; the jobs of other modules still start |
+| The editor minimised, or the 3D tab hidden, for a minute while tiles were loading | Memory stays flat; the view picks up where it was |
+| The editor killed while it watched a zone | On the server, the invisible object is gone within 10 seconds |
+| A dungeon, and a zone with phases | Its instance's entities only; entities of other phases told apart |
+| Tests, `cargo xtask check`, CI | Green |
+
+### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
 hosts them through a contract of the core open to the module of any language: their own Lua state
 kept while the editor runs, commands, events, settings, the interface objects with Lua classes
 (those of milestone 8 included), animatable properties, sequences and players, undo. Specified in
-detail when milestone 8 is done.
+detail when milestone 9 is done.
 
-### Milestone 10: Python (outline)
+### Milestone 11: Python (outline)
 
 Python scripts, console and modules, with the behaviour of Lua: the host built apart and reaching
 the editor through `uniwow.h`, the embeddable distribution in `interpreters\python-3.14\`, scripts
 by tool in `scripts\python-3.14\` (the tool folder is a package), Stop even when a script catches
 exceptions, the editor starting without Python, the interface objects with Python classes.
-Specified in detail when milestone 9 is done.
+Specified in detail when milestone 10 is done.
 
 Risks verified first:
 
@@ -1641,7 +1926,7 @@ Risks verified first:
 Decisions: Python is embedded by a host built apart; Python 3.14, with its GIL; the .NET 10 SDK
 builds the C# module.
 
-### Milestone 11: acceptance of the extensibility (outline)
+### Milestone 12: acceptance of the extensibility (outline)
 
 Three tools written only with the unified API, without touching the core:
 
@@ -1655,13 +1940,13 @@ Three tools written only with the unified API, without touching the core:
 
 Specifying it needs the project model of section 10 decided first.
 
-### Milestone 12: the Timeline in Montage mode (outline)
+### Milestone 13: the Timeline in Montage mode (outline)
 
 Sequences of tracks holding clips; a clip moved along its track or to another one, trimmed at
 either end, cut in two at the playhead; edges snapping to the playhead, to the other clips and to
 the frames; each change one undo entry. Built on the engine and widgets of milestone 8.
 
-### Milestone 13: recording and copied keys in the Timeline (outline)
+### Milestone 14: recording and copied keys in the Timeline (outline)
 
 - **Recording**: while recording, changing a property by hand sets a key at the playhead.
 - **Keys copied and pasted** in the dopesheet and in the Curves view.
@@ -1671,5 +1956,6 @@ the frames; each change one undo entry. Built on the engine and widgets of miles
 ## 10. Open questions
 
 - Project model: what a project contains, where it is stored, how it maps to a WoW-mods module.
-- Installations targeted: client with WXL, server, database connection.
+- Installations targeted: client with WXL, server, database connection. Milestone 9 settles part of it:
+  the client's folder, and the observer on the same machine (address, port, token).
 - Order of the features after milestone 1.
