@@ -8,7 +8,8 @@ pub mod data;
 mod painter;
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::panic::AssertUnwindSafe;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
 pub use painter::{MAX_TEXT, PaintCommand};
 
@@ -16,7 +17,7 @@ use crate::AppliedChange;
 use crate::curve::ShownCurve;
 use crate::egui;
 use crate::sequence::{self, MAX_FRAME_RATE, MAX_LENGTH, Sequence, Track};
-use data::{Row, Table, TreeItem};
+use data::{Row, Rows, SortJob, Table, TreeItem};
 
 /// Identifies an object of one module.
 pub type Handle = u64;
@@ -67,6 +68,31 @@ pub type Recorder = Arc<dyn Fn(&str, Box<dyn AppliedChange>) -> Result<(), Strin
 
 /// Runs a job on the module's own thread.
 pub type Post = Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync>;
+
+/// Runs long work off the interface's thread and the modules' threads.
+pub type Background = Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync>;
+
+static BACKGROUND: OnceLock<Background> = OnceLock::new();
+
+/// Where the objects make their long work, such as the sort of a large table: the kernel's pool,
+/// which the kernel sets when it starts. Before, each runs on a thread of its own.
+pub fn set_background(run: Background) {
+    let _ = BACKGROUND.set(run);
+}
+
+fn in_background(work: Box<dyn FnOnce() + Send>) {
+    match BACKGROUND.get() {
+        Some(run) => run(work),
+        None => {
+            if let Err(error) = std::thread::Builder::new()
+                .name("uniwow-objects".to_owned())
+                .spawn(work)
+            {
+                log::error!("no thread for the work of the objects: {error}");
+            }
+        }
+    }
+}
 
 /// A function connected to a signal; it runs on the module's own thread.
 pub type Slot = Arc<dyn Fn(&SignalData) + Send + Sync>;
@@ -189,6 +215,8 @@ pub struct Object {
     pub player: Option<Handle>,
     /// A tree view's items, shared with the kernel drawing them.
     pub tree: Option<Arc<Vec<TreeItem>>>,
+    /// Changed when a tree view's items, or which are unfolded, change.
+    pub tree_version: u64,
     /// A table view's columns and rows, shared with the kernel drawing them.
     pub table: Option<Arc<Table>>,
     /// The id of a tree view's current item or a table view's current row, 0 for none.
@@ -264,6 +292,7 @@ impl Object {
             plays: None,
             player: None,
             tree: (kind == Kind::TreeView).then(Arc::default),
+            tree_version: 0,
             table: (kind == Kind::TableView).then(Arc::default),
             current_item: 0,
             current_column: 0,
@@ -633,8 +662,8 @@ impl Ui {
         }
         match property {
             Property::Tracks => return self.set_tracks(handle, read_tracks(text)?),
-            Property::Items => return self.set_items(handle, read_items(text)?),
-            Property::Rows => return self.set_rows(handle, read_rows(text)?),
+            Property::Items => return self.set_items(handle, read_items(text)?).map(drop),
+            Property::Rows => return self.set_rows(handle, Rows::new(read_rows(text)?)?).map(drop),
             Property::Columns => return self.set_columns(handle, read_columns(text)?),
             _ => {}
         }
@@ -681,7 +710,8 @@ impl Ui {
             .ok_or_else(|| format!("a {:?} is not a table view", object.kind))
     }
 
-    pub fn set_items(&mut self, handle: Handle, items: Vec<TreeItem>) -> Result<(), String> {
+    /// The items of a tree view; gives back those replaced, to be freed after the lock.
+    pub fn set_items(&mut self, handle: Handle, items: Vec<TreeItem>) -> Result<Arc<Vec<TreeItem>>, String> {
         let object = self.get_mut(handle)?;
         let kind = object.kind;
         let tree = object
@@ -692,9 +722,27 @@ impl Ui {
         if !data::has_item(&items, object.current_item) {
             object.current_item = 0;
         }
-        *tree = Arc::new(items);
+        let replaced = std::mem::replace(tree, Arc::new(items));
+        object.tree_version += 1;
         self.changed(handle);
-        Ok(())
+        Ok(replaced)
+    }
+
+    /// An item of a tree view folded or unfolded; returns whether the tree holds it.
+    pub fn set_item_expanded(&mut self, handle: Handle, item: u64, expanded: bool) -> Result<bool, String> {
+        let object = self.get_mut(handle)?;
+        let kind = object.kind;
+        let tree = object
+            .tree
+            .as_mut()
+            .ok_or_else(|| format!("a {kind:?} is not a tree view"))?;
+        let Some(found) = data::find_item(Arc::make_mut(tree).as_mut_slice(), item) else {
+            return Ok(false);
+        };
+        found.expanded = expanded;
+        object.tree_version += 1;
+        self.changed(handle);
+        Ok(true)
     }
 
     /// Changes the table of a table view.
@@ -725,9 +773,56 @@ impl Ui {
         })
     }
 
-    /// The rows of a table view, in the module's order.
-    pub fn set_rows(&mut self, handle: Handle, rows: Vec<Row>) -> Result<(), String> {
-        self.change_table(handle, |table| table.set_rows(rows))
+    /// The rows of a table view, in the module's order, made beforehand off the lock; gives back
+    /// those replaced, to be freed after it.
+    pub fn set_rows(&mut self, handle: Handle, rows: Rows) -> Result<Rows, String> {
+        self.change_table(handle, |table| Ok(table.set_rows(rows)))
+    }
+
+    /// The sort of a table view: a column and whether from the highest, or the module's order.
+    pub fn set_sort(&mut self, handle: Handle, sort: Option<(usize, bool)>) -> Result<(), String> {
+        self.change_table(handle, |table| {
+            table.set_sort(sort);
+            Ok(())
+        })
+    }
+
+    /// Makes off the lock and off the interface's thread the sort a large table view asks for, when
+    /// it is neither made nor being made. The kernel calls it as it draws the view, so that the
+    /// changes of the sort between two frames make one.
+    pub fn start_sort(&mut self, handle: Handle) {
+        let Some(table) = self.objects.get_mut(&handle).and_then(|object| object.table.as_mut()) else {
+            return;
+        };
+        let Some(job) = Arc::make_mut(table).sort_job() else {
+            return;
+        };
+        let this = self.this.clone();
+        in_background(Box::new(move || {
+            let order = std::panic::catch_unwind(AssertUnwindSafe(|| job.run())).ok();
+            if let Some(shared) = this.upgrade() {
+                lock(&shared).sorted(handle, &job, order);
+            }
+        }));
+    }
+
+    /// The order a sort made off the lock, or none when it failed: shown if its sort is still the
+    /// one asked for and the rows have not changed, otherwise made again when next drawn.
+    fn sorted(&mut self, handle: Handle, job: &SortJob, order: Option<Vec<usize>>) {
+        let Some(table) = self.objects.get_mut(&handle).and_then(|object| object.table.as_mut()) else {
+            return;
+        };
+        let table = Arc::make_mut(table);
+        match order {
+            Some(order) => {
+                table.finish_sort(job, order);
+            }
+            None => {
+                log::error!("the sort of a table failed; its order stays");
+                table.abandon_sort();
+            }
+        }
+        self.changed(handle);
     }
 
     /// One cell of a table view, of the row `row`.
@@ -1005,19 +1100,9 @@ impl Ui {
             }
             Property::SortColumn => {
                 let descending = sort.is_some_and(|(_, descending)| descending);
-                let sort = (value >= 0.0).then_some((value as usize, descending));
-                self.change_table(handle, |table| {
-                    table.set_sort(sort);
-                    Ok(())
-                })
+                self.set_sort(handle, (value >= 0.0).then_some((value as usize, descending)))
             }
-            _ => {
-                let sort = sort.map(|(column, _)| (column, value != 0.0));
-                self.change_table(handle, |table| {
-                    table.set_sort(sort);
-                    Ok(())
-                })
-            }
+            _ => self.set_sort(handle, sort.map(|(column, _)| (column, value != 0.0))),
         }
     }
 
@@ -2086,6 +2171,67 @@ mod tests {
             ui.set_numbers(tree, Property::SortColumn, &[0.0]).is_err(),
             "a tree is not sorted"
         );
+    }
+
+    #[test]
+    fn a_large_table_view_is_sorted_off_the_lock_once_drawn() {
+        let shared = ui();
+        let count = super::data::BACKGROUND_SORT_ROWS as u64;
+        let table = {
+            let mut ui = lock(&shared);
+            let table = ui.create(Kind::TableView, None).unwrap();
+            ui.set_text(table, Property::Columns, r#"["value"]"#).unwrap();
+            let many = (1..=count)
+                .map(|id| super::Row {
+                    id,
+                    cells: vec![(count - id).to_string()],
+                })
+                .collect();
+            ui.set_rows(table, super::Rows::new(many).unwrap()).unwrap();
+            ui.set_numbers(table, Property::SortColumn, &[0.0]).unwrap();
+            assert_eq!(
+                ui.numbers(table, Property::SortColumn).unwrap(),
+                vec![0.0],
+                "the sort asked"
+            );
+            assert!(ui.table(table).unwrap().is_sorting());
+            ui.start_sort(table);
+            table
+        };
+        let started = std::time::Instant::now();
+        while lock(&shared).table(table).unwrap().is_sorting() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(10), "never sorted");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let ui = lock(&shared);
+        let sorted = ui.table(table).unwrap();
+        assert_eq!(sorted.shown_sort(), Some((0, false)));
+        assert_eq!(sorted.shown(0).unwrap().id, count, "the lowest first");
+    }
+
+    #[test]
+    fn a_tree_view_s_version_changes_with_its_items_and_their_folding() {
+        let shared = ui();
+        let mut ui = lock(&shared);
+        let tree = ui.create(Kind::TreeView, None).unwrap();
+        let version = |ui: &Ui| ui.object(tree).unwrap().tree_version;
+        ui.set_text(
+            tree,
+            Property::Items,
+            r#"[{"id":1,"text":"a","children":[{"id":2,"text":"b"}]}]"#,
+        )
+        .unwrap();
+        let set = version(&ui);
+        assert_eq!(ui.set_item_expanded(tree, 1, true), Ok(true));
+        assert!(ui.items(tree).unwrap()[0].expanded);
+        assert!(version(&ui) > set);
+        let unfolded = version(&ui);
+        assert_eq!(
+            ui.set_item_expanded(tree, 9, true),
+            Ok(false),
+            "an item it does not hold"
+        );
+        assert_eq!(version(&ui), unfolded);
     }
 
     #[test]

@@ -88,6 +88,17 @@ impl Pool {
         self.threads
     }
 
+    /// Runs work on the workers outside the jobs of the modules: the long work of the objects of
+    /// the core, such as the sort of a large table.
+    pub fn background(&self) -> uniwow_api::ui::Background {
+        let sender = self.sender.clone();
+        Arc::new(move |task| {
+            if sender.send(task).is_err() {
+                uniwow_api::log::error!("the work of the objects could not be queued: no worker thread");
+            }
+        })
+    }
+
     pub fn running(&self) -> &[Running] {
         &self.running
     }

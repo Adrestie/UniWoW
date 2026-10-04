@@ -109,6 +109,7 @@ impl Shell {
         let (bridge, requests) = Bridge::new(Some(cc.egui_ctx.clone()));
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
         let pool = Pool::new(threads, Some(cc.egui_ctx.clone()), Some(bridge.clone()));
+        uniwow_api::ui::set_background(pool.background());
         let host = KernelHost::new(cc.wgpu_render_state.clone(), Settings::load(), pool, bridge);
         // wgpu panics on errors nobody captured; log them instead, the editor must keep running.
         if let Some(gpu) = &host.gpu {

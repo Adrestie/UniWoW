@@ -13,7 +13,7 @@ use scene::{SceneView, modifiers};
 use uniwow_api::curve::{self, CurveChange, CurveEditor, CurveOptions, CurveOutput, ShownCurve, TimeAxis};
 use uniwow_api::dopesheet::{self, Dopesheet, DopesheetInput, KeysChange, RowProperty};
 use uniwow_api::sequence::{Sequence, Track, number_colour, number_names, tracks_to_json};
-use uniwow_api::ui::data::{TreeItem, find_item};
+use uniwow_api::ui::data::TreeItem;
 use uniwow_api::ui::{Handle, Kind, Object, Property, SharedUi, Signal, SignalData, Ui, lock};
 use uniwow_api::{Editor, PropertyInfo, PropertyKind, egui, egui_wgpu, log};
 
@@ -50,7 +50,30 @@ pub struct PanelView {
     /// What the user did in tree and table views, applied once the copy of the object drawn is
     /// dropped, so that their data is changed in place rather than copied.
     data_actions: Vec<(Handle, DataAction)>,
+    /// The rows each tree view shows, made again only when its items or their folding change.
+    flat_trees: HashMap<Handle, FlatTree>,
+    /// How many times a tree's rows were made.
+    #[cfg(test)]
+    flattened: usize,
 }
+
+/// The rows a tree view shows, for the version of its items they were made from.
+#[derive(Default)]
+struct FlatTree {
+    version: Option<u64>,
+    rows: Vec<FlatRow>,
+}
+
+/// A row of a tree view: its depth, the row of its parent (`NO_PARENT` at the top), and its place
+/// among its parent's children.
+#[derive(Clone, Copy)]
+struct FlatRow {
+    depth: u32,
+    parent: u32,
+    child: u32,
+}
+
+const NO_PARENT: u32 = u32::MAX;
 
 /// What the user did in a tree view or a table view during a frame.
 enum DataAction {
@@ -312,6 +335,7 @@ impl PanelView {
         self.painted.retain(|handle, _| alive(handle));
         self.sizes.retain(|handle, _| alive(handle));
         self.cell_edits.retain(|handle, _| alive(handle));
+        self.flat_trees.retain(|handle, _| alive(handle));
         self.time_axes.retain(|key, _| match key {
             AxisKey::Played { player, sequence } => alive(player) && alive(sequence),
             AxisKey::View(view) => alive(view),
@@ -417,6 +441,7 @@ impl PanelView {
         if !object.visible {
             return;
         }
+        let kind = object.kind;
         ui.push_id(handle, |ui| {
             ui.add_enabled_ui(object.enabled, |ui| {
                 let response = self.widget(store, shared, handle, &object, ui, gpu, events);
@@ -437,6 +462,10 @@ impl PanelView {
                     }
                 }
             }
+        }
+        // Once a frame at most, whatever the module changed since.
+        if kind == Kind::TableView {
+            store.start_sort(handle);
         }
     }
 
@@ -755,16 +784,28 @@ impl PanelView {
             ui.available_height().max(object.minimum_height as f32),
         );
         let items = object.tree.clone().unwrap_or_default();
-        let shown = shown_items(&items);
+        let flat = self.flat_trees.entry(handle).or_default();
+        if flat.version != Some(object.tree_version) {
+            flat.rows = flatten(&items);
+            flat.version = Some(object.tree_version);
+            #[cfg(test)]
+            {
+                self.flattened += 1;
+            }
+        }
+        let rows = &self.flat_trees[&handle].rows;
         let (mut clicked, mut toggled) = (None, None);
         let inner = ui.allocate_ui(size, |ui| {
             let height = ui.spacing().interact_size.y;
             egui::ScrollArea::vertical()
                 .id_salt(("uniwow-tree", handle))
                 .auto_shrink([false, false])
-                .show_rows(ui, height, shown.len(), |ui, positions| {
-                    for &(depth, item) in &shown[positions] {
-                        tree_row(ui, depth, item, object.current_item, height, &mut clicked, &mut toggled);
+                .show_rows(ui, height, rows.len(), |ui, positions| {
+                    for position in positions {
+                        if let Some(item) = flat_item(&items, rows, position) {
+                            let depth = rows[position].depth as usize;
+                            tree_row(ui, depth, item, object.current_item, height, &mut clicked, &mut toggled);
+                        }
                     }
                 });
         });
@@ -794,11 +835,20 @@ impl PanelView {
             let width = ((ui.available_width() - 16.0) / columns as f32).max(60.0);
             let height = ui.spacing().interact_size.y;
             ui.horizontal(|ui| {
+                let sorting = table
+                    .is_sorting()
+                    .then(|| table.sort().map(|(column, _)| column))
+                    .flatten();
                 for (column, header) in table.columns().iter().enumerate() {
-                    let sorted = table
-                        .sort()
-                        .and_then(|(sorted, descending)| (sorted == column).then_some(descending));
-                    if column_header(ui, header, sorted, [width, height]).clicked() {
+                    let state = if sorting == Some(column) {
+                        Header::Sorting
+                    } else {
+                        match table.shown_sort() {
+                            Some((sorted, descending)) if sorted == column => Header::Sorted { descending },
+                            _ => Header::Plain,
+                        }
+                    };
+                    if column_header(ui, header, state, [width, height]).clicked() {
                         actions.sorted = Some(column);
                     }
                 }
@@ -1148,9 +1198,6 @@ fn apply_tree(
     toggled: Option<(u64, bool)>,
     events: &mut Vec<SignalData>,
 ) {
-    let Some(target) = store.object_mut(handle) else {
-        return;
-    };
     let signal = |signal: Signal, item: u64| SignalData {
         sender: handle,
         signal: signal as u32,
@@ -1158,15 +1205,16 @@ fn apply_tree(
         ..Default::default()
     };
     if let Some((item, expanded)) = toggled
-        && let Some(tree) = target.tree.as_mut()
-        && let Some(found) = find_item(Arc::make_mut(tree).as_mut_slice(), item)
+        && store.set_item_expanded(handle, item, expanded) == Ok(true)
     {
-        found.expanded = expanded;
         events.push(SignalData {
             boolean: expanded,
             ..signal(Signal::ItemExpanded, item)
         });
     }
+    let Some(target) = store.object_mut(handle) else {
+        return;
+    };
     if let Some(item) = clicked {
         events.push(signal(Signal::ItemClicked, item));
         if item != target.current_item {
@@ -1205,11 +1253,7 @@ fn apply_table(
     };
     if let Some(column) = actions.sorted {
         let descending = sort == Some((column, false));
-        if store
-            .set_numbers(handle, Property::SortColumn, &[column as f64])
-            .and_then(|()| store.set_numbers(handle, Property::SortDescending, &[f64::from(u8::from(descending))]))
-            .is_ok()
-        {
+        if store.set_sort(handle, Some((column, descending))).is_ok() {
             events.push(SignalData {
                 boolean: descending,
                 ..signal(Signal::SortChanged, 0, column)
@@ -1235,21 +1279,52 @@ fn apply_table(
     edit
 }
 
-/// The items of a tree shown, each with its depth: the children of an unfolded item under it.
-fn shown_items(items: &[TreeItem]) -> Vec<(usize, &TreeItem)> {
-    let mut shown = Vec::new();
-    let mut levels = vec![items.iter()];
-    while let Some(level) = levels.last_mut() {
-        let Some(item) = level.next() else {
+/// The rows of a tree: each item, and under it the children of one unfolded.
+fn flatten(items: &[TreeItem]) -> Vec<FlatRow> {
+    let mut rows = Vec::new();
+    // Each level down: the row of its parent, its items, and the next one.
+    let mut levels: Vec<(u32, &[TreeItem], usize)> = vec![(NO_PARENT, items, 0)];
+    while let Some(&(parent, children, next)) = levels.last() {
+        let depth = levels.len() - 1;
+        let Some(item) = children.get(next) else {
             levels.pop();
             continue;
         };
-        shown.push((levels.len() - 1, item));
-        if item.expanded {
-            levels.push(item.children.iter());
+        levels[depth].2 += 1;
+        rows.push(FlatRow {
+            depth: depth as u32,
+            parent,
+            child: next as u32,
+        });
+        if item.expanded && !item.children.is_empty() {
+            levels.push(((rows.len() - 1) as u32, &item.children, 0));
         }
     }
-    shown
+    rows
+}
+
+/// The item of the row at `position`, found from the top by the places of its parents.
+fn flat_item<'a>(items: &'a [TreeItem], rows: &[FlatRow], position: usize) -> Option<&'a TreeItem> {
+    let mut places = [0u32; uniwow_api::ui::data::MAX_DEPTH];
+    let mut depth = 0;
+    let mut at = position;
+    loop {
+        let row = rows.get(at)?;
+        *places.get_mut(depth)? = row.child;
+        depth += 1;
+        if row.parent == NO_PARENT {
+            break;
+        }
+        at = row.parent as usize;
+    }
+    let mut level = items;
+    let mut found = None;
+    for &place in places[..depth].iter().rev() {
+        let item = level.get(place as usize)?;
+        level = &item.children;
+        found = Some(item);
+    }
+    found
 }
 
 /// The row of an item of a tree view at `depth`.
@@ -1277,9 +1352,21 @@ fn tree_row(
     });
 }
 
-/// The header of a column of a table view: its text, and when the rows are sorted by it a triangle
-/// pointing up, or down from the highest, the fonts having no arrow.
-fn column_header(ui: &mut egui::Ui, header: &str, sorted: Option<bool>, size: [f32; 2]) -> egui::Response {
+/// What the header of a column shows besides its text.
+#[derive(Clone, Copy)]
+enum Header {
+    Plain,
+    /// The rows are shown sorted by the column: a triangle pointing up, or down from the highest,
+    /// the fonts having no arrow.
+    Sorted {
+        descending: bool,
+    },
+    /// The rows are being sorted by the column, off the interface's thread.
+    Sorting,
+}
+
+/// The header of a column of a table view.
+fn column_header(ui: &mut egui::Ui, header: &str, state: Header, size: [f32; 2]) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size[0], size[1]), egui::Sense::click());
     let visuals = ui.style().interact(&response);
     if response.hovered() {
@@ -1292,18 +1379,30 @@ fn column_header(ui: &mut egui::Ui, header: &str, sorted: Option<bool>, size: [f
     let at = rect.left_center() + egui::vec2(4.0, -galley.size().y / 2.0);
     let end = at.x + galley.size().x;
     ui.painter_at(rect).galley(at, galley, colour);
-    if let Some(descending) = sorted {
-        let centre = egui::pos2(end + 9.0, rect.center().y);
-        let (tip, base) = if descending { (4.0, -3.0) } else { (-4.0, 3.0) };
-        ui.painter_at(rect).add(egui::Shape::convex_polygon(
-            vec![
-                centre + egui::vec2(0.0, tip),
-                centre + egui::vec2(4.0, base),
-                centre + egui::vec2(-4.0, base),
-            ],
-            colour,
-            egui::Stroke::NONE,
-        ));
+    match state {
+        Header::Plain => {}
+        Header::Sorted { descending } => {
+            let centre = egui::pos2(end + 9.0, rect.center().y);
+            let (tip, base) = if descending { (4.0, -3.0) } else { (-4.0, 3.0) };
+            ui.painter_at(rect).add(egui::Shape::convex_polygon(
+                vec![
+                    centre + egui::vec2(0.0, tip),
+                    centre + egui::vec2(4.0, base),
+                    centre + egui::vec2(-4.0, base),
+                ],
+                colour,
+                egui::Stroke::NONE,
+            ));
+        }
+        Header::Sorting => {
+            ui.painter_at(rect).text(
+                egui::pos2(end + 6.0, rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                "sorting…",
+                egui::TextStyle::Small.resolve(ui.style()),
+                ui.visuals().weak_text_color(),
+            );
+        }
     }
     response
 }
@@ -1433,7 +1532,8 @@ mod tests {
         AppliedChange, CommandInfo, Editor, EditorBackend, Event, PropertyInfo, PropertyKind, PropertyValue, egui,
     };
 
-    use super::{PanelView, TableActions, apply_table, apply_tree};
+    use super::{PanelView, TableActions, apply_table, apply_tree, flat_item, flatten};
+    use uniwow_api::ui::data::{Row, Rows, TreeItem};
 
     type Jobs = Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
     /// The changes the module would record.
@@ -2217,6 +2317,165 @@ mod tests {
         assert!(
             std::ptr::eq(Arc::as_ptr(&sorted), address),
             "the table is changed in place, not copied"
+        );
+    }
+
+    /// Draws `shared`'s panel with a screen of 800 by 600 and `events`; returns how long it took.
+    fn timed_frame(
+        ctx: &egui::Context,
+        panels: &mut PanelView,
+        shared: &SharedUi,
+        events: Vec<egui::Event>,
+    ) -> std::time::Duration {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+            events,
+            ..egui::RawInput::default()
+        };
+        let started = std::time::Instant::now();
+        let mut output = ctx.run_ui(input, |ui| panels.show(shared, "p", ui, None));
+        output.textures_delta.clear();
+        started.elapsed()
+    }
+
+    #[test]
+    fn a_header_clicked_in_a_million_rows_leaves_every_frame_short_while_they_sort() {
+        let (shared, table) = data_view(Kind::TableView);
+        let count = 1_000_000u64;
+        {
+            // Values in no order, for the sort to take long.
+            let many: Vec<Row> = (1..=count)
+                .map(|id| Row {
+                    id,
+                    cells: vec![(id * 2_654_435_761 % 1_000_000_007).to_string()],
+                })
+                .collect();
+            let mut store = lock(&shared);
+            store.set_text(table, Property::Columns, r#"["Value"]"#).unwrap();
+            store.set_rows(table, Rows::new(many).unwrap()).unwrap();
+        }
+        let mut panels = PanelView::default();
+        let ctx = egui::Context::default();
+        let header = egui::pos2(20.0, 8.0);
+        let button = |pressed| egui::Event::PointerButton {
+            pos: header,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        timed_frame(&ctx, &mut panels, &shared, vec![egui::Event::PointerMoved(header)]);
+        let mut frames = vec![
+            timed_frame(&ctx, &mut panels, &shared, vec![button(true)]),
+            timed_frame(&ctx, &mut panels, &shared, vec![button(false)]),
+        ];
+        assert_eq!(
+            lock(&shared).table(table).unwrap().sort(),
+            Some((0, false)),
+            "the header was clicked"
+        );
+        let started = std::time::Instant::now();
+        while lock(&shared).table(table).unwrap().is_sorting() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(30), "never sorted");
+            frames.push(timed_frame(&ctx, &mut panels, &shared, Vec::new()));
+        }
+        frames.push(timed_frame(&ctx, &mut panels, &shared, Vec::new()));
+        let longest = frames.iter().max().unwrap();
+        assert!(
+            *longest <= std::time::Duration::from_millis(33),
+            "a frame took {longest:?} of {} frames",
+            frames.len()
+        );
+        let sorted = lock(&shared).table(table).unwrap();
+        let first: Vec<u64> = (0..1000)
+            .map(|position| sorted.shown(position).unwrap().cells[0].parse().unwrap())
+            .collect();
+        assert!(sorted.shown_sort() == Some((0, false)) && first.is_sorted(), "sorted");
+    }
+
+    #[test]
+    fn the_header_of_the_column_being_sorted_says_so() {
+        let (shared, table) = data_view(Kind::TableView);
+        {
+            let many: Vec<Row> = (1..=uniwow_api::ui::data::BACKGROUND_SORT_ROWS as u64)
+                .map(|id| Row {
+                    id,
+                    cells: vec![id.to_string()],
+                })
+                .collect();
+            let mut store = lock(&shared);
+            store.set_text(table, Property::Columns, r#"["Value"]"#).unwrap();
+            store.set_rows(table, Rows::new(many).unwrap()).unwrap();
+            store.set_sort(table, Some((0, true))).unwrap();
+        }
+        let ctx = egui::Context::default();
+        let mut panels = PanelView::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| panels.show(&shared, "p", ui, None));
+        output.textures_delta.clear();
+        let texts: Vec<&str> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some(text.galley.text()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.contains(&"sorting…"), "{texts:?}");
+    }
+
+    /// A tree of `count` items at the top, each unfolded with `children` children.
+    fn wide_tree(count: u64, children: u64) -> Vec<TreeItem> {
+        (0..count)
+            .map(|top| TreeItem {
+                id: top * (children + 1) + 1,
+                text: format!("top {top}"),
+                expanded: true,
+                children: (0..children)
+                    .map(|child| TreeItem {
+                        id: top * (children + 1) + child + 2,
+                        text: format!("child {child}"),
+                        expanded: false,
+                        children: Vec::new(),
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_rows_of_a_tree_are_made_again_only_when_its_items_or_their_folding_change() {
+        let (shared, tree) = data_view(Kind::TreeView);
+        lock(&shared).set_items(tree, wide_tree(1000, 299)).unwrap();
+        let mut panels = PanelView::default();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            timed_frame(&ctx, &mut panels, &shared, Vec::new());
+        }
+        assert_eq!(panels.flattened, 1, "300,000 rows made once for three frames");
+        assert_eq!(panels.flat_trees[&tree].rows.len(), 300_000);
+        lock(&shared).set_item_expanded(tree, 1, false).unwrap();
+        timed_frame(&ctx, &mut panels, &shared, Vec::new());
+        timed_frame(&ctx, &mut panels, &shared, Vec::new());
+        assert_eq!(panels.flattened, 2, "made again once folded");
+        assert_eq!(panels.flat_trees[&tree].rows.len(), 300_000 - 299);
+    }
+
+    #[test]
+    fn each_row_of_a_tree_finds_its_item_and_depth() {
+        let items: Vec<TreeItem> = uniwow_api::ui::read_items(
+            r#"[{"id":1,"text":"a","expanded":true,"children":[
+                {"id":2,"text":"b","expanded":true,"children":[{"id":3,"text":"c"}]},
+                {"id":4,"text":"d","children":[{"id":5,"text":"hidden"}]}]},
+               {"id":6,"text":"e"}]"#,
+        )
+        .unwrap();
+        let rows = flatten(&items);
+        let shown: Vec<(u64, u32)> = (0..rows.len())
+            .map(|position| (flat_item(&items, &rows, position).unwrap().id, rows[position].depth))
+            .collect();
+        assert_eq!(
+            shown,
+            vec![(1, 0), (2, 1), (3, 2), (4, 1), (6, 0)],
+            "the folded child hidden"
         );
     }
 

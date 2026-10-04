@@ -416,7 +416,7 @@ Who runs what, and how the threads reach each other:
 | Thread | Owns | Runs |
 |---|---|---|
 | Interface | Every module's state, the history and the open groups, the views of the interface objects, the kernel's state | The `Module` methods of every module, the undoable commands, Undo and Redo, the requests of the queue, the drawing |
-| Worker of the pool | Nothing | Jobs of `Context::spawn` (T2) |
+| Worker of the pool | Nothing | Jobs of `Context::spawn` (T2); the sorts of large tables of the interface objects |
 | Thread of its own | Nothing | Scripts and jobs that wait (`Context::spawn_thread`) |
 | Thread of a compiled module | The module's data, by its own rules | Its slots, paintings and `apply_change`, and its commands called from the interface thread |
 | Any thread | — | Commands running on the caller (T4), the reading and writing of animatable properties, the C functions (T7) |
@@ -1509,6 +1509,33 @@ As built, first part (8.7a), trees and tables:
   and text. The C# sample has a panel *Data*: a table of 100,000 rows (Id, Name, Value), a button
   inserting a row at the top and one removing the current row, a tree, and the last signal received
   above them.
+- After the review, each change of rows made where it falls: the rows keep their places, the index
+  of the ids is kept up to date rather than made again, a row inserted or a cell changed in the
+  column sorted by goes to its place in the order shown by binary search (many rows inserted at
+  once are sorted and merged in one pass), and rows are removed in one pass; no change of rows
+  sorts every row. Rows of equal cells keep the module's order through ranks with room between
+  them, ranked again only when no room is left.
+- A table of 50,000 rows or more is sorted whole off the lock and off the interface's thread, on
+  the kernel's pool: its former order stays shown, the header saying *sorting…*, until the sort is
+  made. A sort whose rows changed meanwhile, or which another sort replaced, is dropped and made
+  again. The kernel starts it as it draws the table, so that the changes of the sort between two
+  frames make one sort. Limit: a module changing such a table more often than a sort takes keeps
+  it in its former order.
+- A tree view's rows are made again only when its items, or which are unfolded, change.
+
+Where the work of trees and tables is done:
+
+| Work | Thread | Under the lock of the module's objects |
+|---|---|---|
+| `ITEMS` and `ROWS` read from JSON, rows made ready (places, ranks, index) | The module's, in `set_text` | No |
+| Items or rows set; those replaced freed | The module's, in `set_text` | Set: yes, by exchange; freed: no |
+| `set_cell`, `insert_rows`, `remove_rows` | The module's | Yes: a binary search and one move per row, one pass to remove |
+| `ROWS` read | The module's, in `text` | Only to take the rows, shared, not copied; the JSON is made after |
+| What the user did: a sort asked, a cell kept, an item folded | Interface | Yes, once the kernel let go of its copy of the object |
+| A sort of fewer than 50,000 rows | The thread asking for it | Yes |
+| A sort of 50,000 rows or more | A worker of the pool | No: the rows are shared with it under the lock, its order taken under it |
+| The rows of a tree view made again | Interface, when they change | Yes |
+| Drawing | Interface | Yes; only the rows in sight |
 
 Choices confirmed by the review:
 

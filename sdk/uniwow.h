@@ -127,7 +127,8 @@ enum {
                                             id the view does not hold is refused, and an item or row removed is no
                                             longer current */
     UNIWOW_PROPERTY_SORT_COLUMN = 45,    /* table view: the column the rows are shown sorted by, -1 for the module's
-                                            order */
+                                            order; a table of 50000 rows or more is sorted off the interface's
+                                            thread, its former order shown meanwhile */
     UNIWOW_PROPERTY_SORT_DESCENDING = 46 /* table view: sorted from the highest */
 };
 /* </generated property> */

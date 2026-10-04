@@ -226,7 +226,8 @@ public enum Property : uint
                          // from 1, each of its own; 1000000 rows at most
     CurrentItem = 44,    // tree view, table view: the id of the current item or row, 0 for none; an id the view does
                          // not hold is refused, and an item or row removed is no longer current
-    SortColumn = 45,     // table view: the column the rows are shown sorted by, -1 for the module's order
+    SortColumn = 45,     // table view: the column the rows are shown sorted by, -1 for the module's order; a table of
+                         // 50000 rows or more is sorted off the interface's thread, its former order shown meanwhile
     SortDescending = 46, // table view: sorted from the highest
 }
 // </generated property>

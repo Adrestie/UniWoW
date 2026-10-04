@@ -8,7 +8,7 @@ use std::sync::Arc;
 use super::{Reply, UserPointer, c_text, guarded, module, read, reply_with};
 use uniwow_api::curve::ShownCurve;
 use uniwow_api::sequence::{self, Sequence, Track};
-use uniwow_api::ui::data::{self, Row, Table as TableData, TreeItem};
+use uniwow_api::ui::data::{self, Rows, RowsInOrder, TreeItem};
 use uniwow_api::ui::{self, Kind, PaintCommand, Property, Signal, SignalData, Ui};
 
 /// What a slot receives; the fields its signal does not use are zero.
@@ -149,30 +149,41 @@ enum Read {
     Curves(Result<Vec<ShownCurve>, String>),
     Tracks(Result<Vec<Track>, String>),
     Items(Result<Vec<TreeItem>, String>),
-    Rows(Result<Vec<Row>, String>),
+    Rows(Result<Rows, String>),
     Columns(Result<Vec<String>, String>),
 }
 
 extern "C" fn set_text(context: *mut c_void, object: u64, which: u32, text: *const c_char) -> i32 {
     let which = property(which);
     let text = read(text);
-    // JSON is read before taking the lock: a long text would hold the interface waiting.
+    // JSON is read, and rows made ready, before taking the lock: a long text would hold the
+    // interface waiting.
     let parsed = match (&which, &text) {
         (Ok(Property::Curves), Ok(text)) => Some(Read::Curves(ui::read_curves(text))),
         (Ok(Property::Tracks), Ok(text)) => Some(Read::Tracks(ui::read_tracks(text))),
         (Ok(Property::Items), Ok(text)) => Some(Read::Items(ui::read_items(text))),
-        (Ok(Property::Rows), Ok(text)) => Some(Read::Rows(ui::read_rows(text))),
+        (Ok(Property::Rows), Ok(text)) => Some(Read::Rows(ui::read_rows(text).and_then(Rows::new))),
         (Ok(Property::Columns), Ok(text)) => Some(Read::Columns(ui::read_columns(text))),
         _ => None,
     };
-    with_ui(context, "set_text", 1, |ui| match parsed {
+    // Items or rows replaced, freed once the lock is released.
+    let mut replaced: Option<Box<dyn std::any::Any>> = None;
+    let code = with_ui(context, "set_text", 1, |ui| match parsed {
         Some(Read::Curves(curves)) => status(ui.set_curves(object, curves?)),
         Some(Read::Tracks(tracks)) => status(ui.set_tracks(object, tracks?)),
-        Some(Read::Items(items)) => status(ui.set_items(object, items?)),
-        Some(Read::Rows(rows)) => status(ui.set_rows(object, rows?)),
+        Some(Read::Items(items)) => {
+            replaced = Some(Box::new(ui.set_items(object, items?)?));
+            Ok(0)
+        }
+        Some(Read::Rows(rows)) => {
+            replaced = Some(Box::new(ui.set_rows(object, rows?)?));
+            Ok(0)
+        }
         Some(Read::Columns(columns)) => status(ui.set_columns(object, columns?)),
         None => status(ui.set_text(object, which?, &text?)),
-    })
+    });
+    drop(replaced);
+    code
 }
 
 extern "C" fn set_numbers(context: *mut c_void, object: u64, which: u32, values: *const f64, count: u32) -> i32 {
@@ -192,7 +203,7 @@ enum Copied {
     Curves(Vec<ShownCurve>),
     Sequence(std::sync::Arc<Sequence>),
     Items(std::sync::Arc<Vec<TreeItem>>),
-    Table(std::sync::Arc<TableData>),
+    Rows(RowsInOrder),
 }
 
 extern "C" fn text(
@@ -210,7 +221,7 @@ extern "C" fn text(
                 Property::Curves => ui.curves(object).map(Copied::Curves),
                 Property::Tracks => ui.sequence(object).map(Copied::Sequence),
                 Property::Items => ui.items(object).map(Copied::Items),
-                Property::Rows => ui.table(object).map(Copied::Table),
+                Property::Rows => ui.table(object).map(|table| Copied::Rows(table.rows_in_order())),
                 _ => ui.text(object, which).map(Copied::Text),
             }
         });
@@ -226,7 +237,7 @@ extern "C" fn text(
                 &sequence::tracks_to_json(&data.tracks).to_string(),
             ),
             Ok(Copied::Items(items)) => reply_with(reply, reply_context, &data::items_to_json(&items).to_string()),
-            Ok(Copied::Table(table)) => reply_with(reply, reply_context, &data::rows_to_json(table.rows()).to_string()),
+            Ok(Copied::Rows(rows)) => reply_with(reply, reply_context, &data::rows_to_json(rows.iter()).to_string()),
             Err(error) => {
                 module.refuse("text", &error);
                 return 1;
