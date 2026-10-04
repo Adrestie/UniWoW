@@ -18,7 +18,7 @@ use uniwow_api::egui_dock::tab_viewer::OnCloseResponse;
 use uniwow_api::egui_dock::{DockArea, DockState, Style, TabViewer};
 use uniwow_api::{
     CallId, CommandHandler, CommandInfo, Context, DIALOG_ANSWERED_TOPIC, DIALOG_COMMAND, DockArea as Area, Event, Host,
-    MODULE_FAILED_TOPIC, Module, PropertyInfo, Registrar, RunsOn, eframe, egui, log, serde_json,
+    MODULE_FAILED_TOPIC, Module, PropertyInfo, Registrar, RunsOn, eframe, egui, log, range_error, serde_json,
 };
 
 use crate::capi;
@@ -184,6 +184,11 @@ impl Shell {
             let mut properties = self.host.bridge.properties.write().unwrap_or_else(|e| e.into_inner());
             for spec in reg.properties {
                 let path = format!("{}/{}", slot.id, spec.name);
+                // Its module's mistake, refused here: clamping by it would fail in whoever writes.
+                if let Some(reason) = range_error(spec.range) {
+                    log::warn!("property '{path}' refused: {reason}");
+                    continue;
+                }
                 let info = PropertyInfo {
                     path: path.clone(),
                     owner: slot.id.clone(),

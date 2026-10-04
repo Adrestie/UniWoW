@@ -312,7 +312,7 @@ the same runtime.
 | Events | Publish and subscribe, typed by serialisation: the topic is a string and the payload JSON, written with `Context::publish_as` and read with `Event::decode` into a type each module declares on its own side. No Rust type is shared between modules. Events may be published from any thread; they are delivered on the interface thread |
 | Services | Registry of interface implementations provided by modules |
 | Selection | Current selection, any type |
-| Animatable properties | Registry of the properties modules let be animated: path, type, range, reading and writing; written without history during playback (milestone 6) |
+| Animatable properties | Registry of the properties modules let be animated: path, type, range, reading and writing; written without history during playback (milestone 6). A property whose range is not two numbers, the lowest first, is refused with the reason |
 | Project | Open, save; content defined in a later step |
 | Settings | Global, per project, per module. Written atomically (temporary file, then rename), at most once per second and at exit |
 | Jobs | Pool of worker threads, one per processor core: background jobs with progress and cancel (T2) |

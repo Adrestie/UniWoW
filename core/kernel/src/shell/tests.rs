@@ -450,6 +450,48 @@ fn a_modal_window_a_rust_module_draws_with_egui_takes_the_keyboard_too() {
     assert_eq!(*lock(&value), 1, "no shortcut under the module's modal window");
 }
 
+/// Declares properties whose ranges are wrong, and a right one.
+struct Ranges;
+
+impl Module for Ranges {
+    fn register(&mut self, reg: &mut Registrar) {
+        let number = || uniwow_api::PropertyValue::Number(0.0);
+        reg.animatable(
+            "upside_down",
+            "Upside down",
+            uniwow_api::PropertyKind::Number,
+            [1.0, 0.0],
+            number,
+            |_| {},
+        );
+        reg.animatable(
+            "nan",
+            "NaN",
+            uniwow_api::PropertyKind::Number,
+            [f64::NAN, 1.0],
+            number,
+            |_| {},
+        );
+        reg.animatable(
+            "right",
+            "Right",
+            uniwow_api::PropertyKind::Number,
+            [0.0, 1.0],
+            number,
+            |_| {},
+        );
+    }
+}
+
+#[test]
+fn a_property_with_a_wrong_range_is_refused_and_its_module_goes_on() {
+    let harness = Harness::new(vec![("ranges", Box::new(Ranges))]);
+    let properties = harness.shell.host.bridge.properties.read().unwrap();
+    let paths: Vec<&String> = properties.keys().collect();
+    assert_eq!(paths, vec!["ranges/right"]);
+    assert!(harness.shell.slots[0].state.is_running());
+}
+
 #[test]
 fn a_compiled_module_command_called_from_the_interface_runs_on_its_thread() {
     let native = CompiledModule::started(capi::testing::native("native"));

@@ -38,7 +38,7 @@ pub use editor::{Editor, EditorBackend};
 pub use event::Event;
 pub use job::{JobContext, JobFn, JobId, JobOutcome};
 pub use module::{CREATE_SYMBOL, CreateFn, Module, PACKAGE_SYMBOL, PackageFn};
-pub use property::{PropertyInfo, PropertyKind, PropertySpec, PropertyValue, ReadProperty, WriteProperty};
+pub use property::{PropertyInfo, PropertyKind, PropertySpec, PropertyValue, ReadProperty, WriteProperty, range_error};
 pub use registrar::{DockArea, MenuItemSpec, PanelSpec, Registrar};
 pub use service::ServiceKey;
 

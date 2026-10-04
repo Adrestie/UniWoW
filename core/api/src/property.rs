@@ -89,7 +89,8 @@ impl PropertyValue {
                 let numbers: Vec<f64> = self
                     .components()
                     .into_iter()
-                    .map(|n| if n.is_nan() { 0.0 } else { n }.clamp(range[0], range[1]))
+                    // max and min, unlike clamp, never panic, whatever the range.
+                    .map(|n| if n.is_nan() { 0.0 } else { n }.max(range[0]).min(range[1]))
                     .collect();
                 Self::from_components(self.kind(), &numbers)
             }
@@ -142,6 +143,17 @@ pub struct PropertySpec {
     pub write: WriteProperty,
 }
 
+/// Why a range cannot be a property's: none for two numbers, the lowest first.
+pub fn range_error(range: [f64; 2]) -> Option<String> {
+    if range[0].is_nan() || range[1].is_nan() {
+        Some("its range holds a value that is not a number".to_owned())
+    } else if range[0] > range[1] {
+        Some(format!("its range goes from {} down to {}", range[0], range[1]))
+    } else {
+        None
+    }
+}
+
 /// A property of the catalogue.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PropertyInfo {
@@ -159,6 +171,17 @@ mod tests {
     use serde_json::json;
 
     use super::{PropertyKind, PropertyValue};
+
+    #[test]
+    fn a_range_upside_down_or_not_a_number_is_refused_and_never_panics() {
+        assert!(super::range_error([0.0, 1.0]).is_none());
+        assert!(super::range_error([f64::NEG_INFINITY, f64::INFINITY]).is_none());
+        assert!(super::range_error([1.0, 0.0]).is_some());
+        assert!(super::range_error([f64::NAN, 1.0]).is_some());
+        let value = PropertyValue::Number(5.0);
+        assert_eq!(value.clamped([1.0, 0.0]), PropertyValue::Number(0.0));
+        assert_eq!(value.clamped([f64::NAN, 2.0]), PropertyValue::Number(2.0));
+    }
 
     #[test]
     fn values_cross_as_json_and_keep_within_their_range() {

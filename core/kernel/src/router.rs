@@ -320,8 +320,7 @@ impl EditorBackend for Bridge {
                 value.kind().name()
             ));
         }
-        let value = value.clamped(entry.info.range);
-        self.run_property(&entry, || (entry.write)(value))
+        self.run_property(&entry, || (entry.write)(value.clamped(entry.info.range)))
     }
 
     fn commands(&self) -> Vec<CommandInfo> {
