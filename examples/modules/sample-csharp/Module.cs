@@ -2,7 +2,7 @@
 // and a spin box, each change one undo entry, with its history painted as bars; a curve edited in
 // the curve editor of the module curves, each change one undo entry; the counter's value as an
 // animatable property, with a sequence of its own shown in a dopesheet, whose changes the editor
-// records; a table of 100,000 rows and a tree; and two commands.
+// records; a table of 100,000 rows, a tree and a property grid of the cube; and two commands.
 
 using System.Runtime.InteropServices;
 using System.Text;
@@ -204,7 +204,8 @@ static unsafe class Module
     }
 
     // The panel Data: a table of 100,000 rows, edited in place and sorted by a column, rows
-    // inserted and removed without giving the others; and a tree. The last signal is shown above.
+    // inserted and removed without giving the others; a tree; and the cube's properties, each value
+    // changed by hand an undo entry the editor records. The last signal is shown above.
     static void BuildData()
     {
         dataEvent = new Label("Double-click a cell to edit it; click a header to sort by its column.");
@@ -249,11 +250,16 @@ static unsafe class Module
         tree.ItemExpanded.Connect(change =>
             dataEvent.SetText(Invariant($"Item {change.Item} {(change.Expanded ? "unfolded" : "folded")}")));
 
+        var cube = new PropertyGrid();
+        cube.SetMinimumHeight(110);
+        cube.SetPaths("""["sample-cube/position","sample-cube/rotation","sample-cube/scale","sample-cube/colour"]""");
+
         var layout = new VBoxLayout();
         layout.AddWidget(dataEvent);
         layout.AddWidget(table);
         layout.AddLayout(buttons);
         layout.AddWidget(tree);
+        layout.AddWidget(cube);
         new Panel("data").SetLayout(layout);
     }
 

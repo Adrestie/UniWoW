@@ -1,0 +1,22 @@
+[package]
+name = "uniwow-module-properties"
+description = "The property grid, as the Inspector of Unity: animatable properties with a field for each, changed by hand"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Only uniwow-api and the crates of libs/ are allowed, here and in dev or build dependencies
+# (cargo xtask check). Any other crate, even one the runtime already contains, can make Cargo
+# rebuild the runtime and so make every module incompatible. Ask for it to be added to the runtime.
+uniwow-api.workspace = true
+
+[package.metadata.uniwow]
+id = "properties"
+name = "Property grid"
+category = "Interface"
+# Services the module cannot work without, and services it uses when present.
+requires = []
+uses = []

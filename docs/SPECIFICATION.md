@@ -181,6 +181,7 @@ and Python receive theirs in milestones 9 and 10.
 | `DopesheetView` | a `QWidget` drawn by the module `dopesheet` | sequence, player, title, minimum height | `keysChanged` (tracks, finished), `playheadMoved` (frame) |
 | `TreeView` | `QTreeWidget` | items (JSON), current item, minimum height | `itemClicked`, `currentItemChanged` (item), `itemExpanded` (item, unfolded) |
 | `TableView` | `QTableWidget` | columns, rows (JSON), current row, sort column and direction, minimum height | `cellChanged` (row, column, text), `currentCellChanged` (row, column), `sortChanged` (column, from the highest) |
+| `PropertyGrid` | a `QWidget` drawn by the module `properties`, as the Inspector of Unity | paths of the properties shown (JSON), minimum height | |
 | `Sequence` | the data a `QTimeLine` plays; not drawn | tracks (JSON), frame rate, length | |
 | `Player` | `QTimeLine`; not drawn | sequence, time, playing, loop, speed | `timeChanged` (time), `finished` |
 
@@ -259,7 +260,7 @@ fills it, or *not planned* when no milestone does yet.
 | The viewport's camera | Inside the module `viewport` (*View*, *Reset camera*) | The properties `viewport/camera_position`, `camera_target`, `camera_fov`; the commands `viewport.camera`, `viewport.look_at`, `viewport.frame` | The functions of properties; `call` | Scripts: the commands through `uniwow.call`; the properties: milestones 9 and 10 |
 | Sequences and their playback | `uniwow_api::sequence`; the objects `Sequence` and `Player` handed to the kernel with `Context::adopt_objects`, as the Timeline does | `Sequence`, `Player` | `uniwow::Sequence`, `uniwow::Player`; `Sequence`, `Player` | — milestones 9 and 10 |
 | The dopesheet | The service `dopesheet`; the objects `DopesheetView` and `CurveView`, as the Timeline does | `DopesheetView`; `CurveView` showing a `Sequence` | `uniwow::DopesheetView`; `DopesheetView` | — milestones 9 and 10 |
-| Tree, table, property grid | egui | `TreeView`, `TableView`, with `set_cell`, `insert_rows`, `remove_rows`; the property grid: — step 8.7 | `uniwow::TreeView`, `uniwow::TableView`; `TreeView`, `TableView`; the property grid: — step 8.7 | — milestones 9 and 10 |
+| Tree, table, property grid | egui; the service `property-grid` | `TreeView`, `TableView`, with `set_cell`, `insert_rows`, `remove_rows`; `PropertyGrid` | `uniwow::TreeView`, `uniwow::TableView`, `uniwow::PropertyGrid`; `TreeView`, `TableView`, `PropertyGrid` | — milestones 9 and 10 |
 | Drawing in the 3D view | The service `viewport` and its layers | — not planned (an other 3D access of step 8.3) | — | — |
 | Unsaved changes, asked about when the editor closes | `Module::unsaved`, `save_unsaved` | — not planned | — | — |
 | Menu items | `Registrar::menu_item`, `Module::on_menu` | — not planned | — | — |
@@ -1548,6 +1549,38 @@ Where the work of trees and tables is done:
 | A sort of 50,000 rows or more | A worker of the pool | No: the rows are shared with it under the lock, its order taken under it |
 | The rows of a tree view made again | Interface, when they change | Yes |
 | Drawing | Interface | Yes; only the rows in sight |
+
+As built, second part (8.7b), the property grid:
+
+- `PropertyGrid` (kind 29) shows the properties whose paths `PATHS` gives (property 47, a JSON
+  list of 100,000 paths at most), one row each: its label, then a field for its kind, numbers
+  dragged or typed, a colour picked, a box ticked; a property no running module declares is
+  greyed. `uniwow.h` stays at version 5: no function is added.
+- It is drawn by a new module of the interface, `modules/UI/properties/`, through the service
+  `property-grid` (`uniwow_api::property_grid`), as the dopesheet is: without the module, the grid
+  says that it is not running; a panic of the service is its provider's failure (F5).
+- A value being changed, such as a number dragged, is written at once and shown by the grid until
+  the change is done; done, it is written and recorded by the kernel as one undo entry, *Set
+  <label>*, of the property's module, from the value before the change began; a value left as it
+  was records nothing. A change under way is put back when its grid goes, is drawn without its
+  service, or when the user does nothing any more without the grid saying it is done; the grid
+  says it is done once the user does nothing any more, even when its row left the sight. A change
+  of another value ends the one under way. A value that is not of the property's kind, or not
+  finite, is not written. The colour picker gives a colour back a little changed even when only
+  looked at: only a number it changes by more than 1e-4 counts, the others kept whole.
+- The module records nothing, and the grid sends no signal: the property's module receives the
+  value in its `write`.
+- The SDK has `PropertyGrid` in C++ and C#. The C# sample's panel *Data* shows the cube's position,
+  rotation, scale and colour in a grid.
+
+Where the work of the property grid is done:
+
+| Work | Thread | Under the lock of the module's objects |
+|---|---|---|
+| `PATHS` read from JSON | The module's, in `set_text` | No |
+| The rows made and their values read: those in sight and 32 around, the first 64 of a grid not drawn yet | Interface, before drawing | No: reading a property runs its module's code, which may lock objects |
+| Drawing, and what the user did turned into a change | Interface | Yes; only the rows in sight |
+| The values changed written, a change done recorded | Interface, once the drawing is done | No: writing runs the module's code, or hands the value to the module's thread |
 
 Choices confirmed by the review:
 

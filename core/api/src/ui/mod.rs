@@ -48,6 +48,24 @@ pub fn read_columns(text: &str) -> Result<Vec<String>, String> {
     data::columns_from_json(&json(text, "columns")?)
 }
 
+/// The most properties a property grid shows.
+pub const MAX_PATHS: usize = 100_000;
+
+/// Reads the paths of the properties a property grid shows: `["<module>/<name>", ...]`.
+pub fn read_paths(text: &str) -> Result<Vec<String>, String> {
+    let value = json(text, "paths")?;
+    let list = value.as_array().ok_or("paths come as a list")?;
+    if list.len() > MAX_PATHS {
+        return Err(format!("a property grid shows {MAX_PATHS} properties at most"));
+    }
+    list.iter()
+        .map(|path| match path.as_str() {
+            Some(path) if !path.is_empty() => Ok(path.to_owned()),
+            _ => Err("a path is a text, not empty".to_owned()),
+        })
+        .collect()
+}
+
 /// Reads the tracks of a sequence from their JSON text (`sequence::tracks_from_json`).
 pub fn read_tracks(text: &str) -> Result<Vec<Track>, String> {
     let value = serde_json::from_str(text).map_err(|error| format!("the tracks are not JSON: {error}"))?;
@@ -219,6 +237,8 @@ pub struct Object {
     pub tree_version: u64,
     /// A table view's columns and rows, shared with the kernel drawing them.
     pub table: Option<Arc<Table>>,
+    /// The paths of the properties a property grid shows.
+    pub paths: Option<Arc<Vec<String>>>,
     /// The id of a tree view's current item or a table view's current row, 0 for none.
     pub current_item: u64,
     /// The column of a table view's current cell.
@@ -276,6 +296,7 @@ impl Object {
                     | Kind::DopesheetView
                     | Kind::TreeView
                     | Kind::TableView
+                    | Kind::PropertyGrid
             ) {
                 200.0
             } else {
@@ -294,6 +315,7 @@ impl Object {
             tree: (kind == Kind::TreeView).then(Arc::default),
             tree_version: 0,
             table: (kind == Kind::TableView).then(Arc::default),
+            paths: (kind == Kind::PropertyGrid).then(Arc::default),
             current_item: 0,
             current_column: 0,
             time: 0.0,
@@ -388,6 +410,8 @@ pub struct Ui {
     players: BTreeSet<Handle>,
     /// The dopesheet views and curve views, which may show a sequence.
     sequence_views: BTreeSet<Handle>,
+    /// The property grids, whose properties the kernel reads before drawing them.
+    grids: BTreeSet<Handle>,
     /// Changed at each change of a scene's set of items or their order, by scene.
     structure: HashMap<Handle, u64>,
     post: Post,
@@ -460,6 +484,7 @@ impl Ui {
                 times: HashMap::new(),
                 players: BTreeSet::new(),
                 sequence_views: BTreeSet::new(),
+                grids: BTreeSet::new(),
                 structure: HashMap::new(),
                 post,
                 uncounted: None,
@@ -551,6 +576,9 @@ impl Ui {
         if matches!(kind, Kind::DopesheetView | Kind::CurveView) {
             self.sequence_views.insert(handle);
         }
+        if kind == Kind::PropertyGrid {
+            self.grids.insert(handle);
+        }
         if let Some(parent) = parent {
             self.get_mut(parent)?.children.push(handle);
             self.changed_structure(parent);
@@ -580,6 +608,7 @@ impl Ui {
             self.times.remove(&next);
             self.players.remove(&next);
             self.sequence_views.remove(&next);
+            self.grids.remove(&next);
         }
         // Views showing a destroyed scene show nothing; players of a destroyed sequence play
         // nothing.
@@ -665,6 +694,7 @@ impl Ui {
             Property::Items => return self.set_items(handle, read_items(text)?).map(drop),
             Property::Rows => return self.set_rows(handle, Rows::new(read_rows(text)?)?).map(drop),
             Property::Columns => return self.set_columns(handle, read_columns(text)?),
+            Property::Paths => return self.set_paths(handle, read_paths(text)?),
             _ => {}
         }
         let object = self.get_mut(handle)?;
@@ -699,6 +729,36 @@ impl Ui {
             .tree
             .clone()
             .ok_or_else(|| format!("a {:?} is not a tree view", object.kind))
+    }
+
+    /// The paths of the properties a property grid shows.
+    pub fn paths(&self, handle: Handle) -> Result<Arc<Vec<String>>, String> {
+        let object = self.get(handle)?;
+        object
+            .paths
+            .clone()
+            .ok_or_else(|| format!("a {:?} is not a property grid", object.kind))
+    }
+
+    pub fn set_paths(&mut self, handle: Handle, paths: Vec<String>) -> Result<(), String> {
+        let object = self.get_mut(handle)?;
+        let kind = object.kind;
+        let shown = object
+            .paths
+            .as_mut()
+            .ok_or_else(|| format!("a {kind:?} is not a property grid"))?;
+        *shown = Arc::new(paths);
+        self.changed(handle);
+        Ok(())
+    }
+
+    /// The property grids and the paths each shows, for the kernel to read their properties before
+    /// it draws them.
+    pub fn property_grids(&self) -> Vec<(Handle, Arc<Vec<String>>)> {
+        self.grids
+            .iter()
+            .filter_map(|handle| Some((*handle, self.objects.get(handle)?.paths.clone()?)))
+            .collect()
     }
 
     /// The columns and rows of a table view.
@@ -939,6 +999,7 @@ impl Ui {
             Property::Items => data::items_to_json(&self.items(handle)?).to_string(),
             Property::Rows => data::rows_to_json(self.table(handle)?.rows()).to_string(),
             Property::Columns => serde_json::json!(self.table(handle)?.columns()).to_string(),
+            Property::Paths => serde_json::json!(*self.paths(handle)?).to_string(),
             other => return Err(format!("{other:?} is not a text")),
         })
     }
@@ -2171,6 +2232,36 @@ mod tests {
             ui.set_numbers(tree, Property::SortColumn, &[0.0]).is_err(),
             "a tree is not sorted"
         );
+    }
+
+    #[test]
+    fn a_property_grid_is_given_the_paths_of_its_properties() {
+        let shared = ui();
+        let mut ui = lock(&shared);
+        let grid = ui.create(Kind::PropertyGrid, None).unwrap();
+        ui.set_text(grid, Property::Paths, r#"["cube/colour","cube/scale"]"#)
+            .unwrap();
+        assert_eq!(
+            ui.text(grid, Property::Paths).unwrap(),
+            r#"["cube/colour","cube/scale"]"#
+        );
+        let paths = Arc::new(vec!["cube/colour".to_owned(), "cube/scale".to_owned()]);
+        assert_eq!(ui.property_grids(), vec![(grid, paths)]);
+        assert!(
+            ui.set_text(grid, Property::Paths, r#"["", "a/b"]"#).is_err(),
+            "an empty path"
+        );
+        assert!(ui.set_text(grid, Property::Paths, "[1]").is_err(), "a number");
+        assert!(ui.set_text(grid, Property::Paths, "{}").is_err(), "not a list");
+        let many = serde_json::json!(vec!["a/b"; super::MAX_PATHS + 1]).to_string();
+        assert!(ui.set_text(grid, Property::Paths, &many).is_err(), "too many");
+        let label = ui.create(Kind::Label, None).unwrap();
+        assert!(
+            ui.set_text(label, Property::Paths, "[]").is_err(),
+            "a label shows no properties"
+        );
+        ui.destroy(grid).unwrap();
+        assert!(ui.property_grids().is_empty());
     }
 
     #[test]

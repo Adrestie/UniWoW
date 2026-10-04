@@ -18,7 +18,15 @@ static unsafe class Fake
     public static int AddTo(IntPtr context, ulong container, ulong child, uint row, uint column, uint rowSpan,
                             uint columnSpan) => 0;
 
-    [UnmanagedCallersOnly] public static int SetText(IntPtr context, ulong handle, uint property, byte* text) => 0;
+    /// <summary>The last text set: on which object, which property, and the text.</summary>
+    public static (ulong Handle, uint Property, string Text) Text = (0, 0, "");
+
+    [UnmanagedCallersOnly]
+    public static int SetText(IntPtr context, ulong handle, uint property, byte* text)
+    {
+        Text = (handle, property, Utf8.Read(text));
+        return 0;
+    }
 
     [UnmanagedCallersOnly]
     public static ulong Connect(IntPtr context, ulong sender, uint signal,
@@ -253,6 +261,11 @@ static unsafe class Program
         var sorting = table.SortChanged.Connect(given => sort = given);
         Fake.CallWith(Fake.Connections[sorting], new SignalData { Integer = 3, Boolean = 1 });
         Expect(sort == (3, true), "SortChanged gives the column and whether from the highest");
+
+        var grid = new PropertyGrid();
+        grid.SetPaths("""["cube/colour"]""");
+        Expect(Fake.Text == (grid.Handle, (uint)Property.Paths, """["cube/colour"]"""),
+               "a property grid is given the paths of its properties");
 
         Console.WriteLine($"{failures} failure(s)");
         return failures == 0 ? 0 : 1;

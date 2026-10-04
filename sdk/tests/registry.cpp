@@ -19,7 +19,16 @@ uniwow_handle fake_panel(void *, const char *) { return 1000; }
 uniwow_handle fake_create(void *, uint32_t, uniwow_handle) { return next_handle++; }
 void fake_destroy(void *, uniwow_handle) {}
 int32_t fake_add_to(void *, uniwow_handle, uniwow_handle, uint32_t, uint32_t, uint32_t, uint32_t) { return 0; }
-int32_t fake_set_text(void *, uniwow_handle, uint32_t, const char *) { return 0; }
+// The last text set: on which object, which property, and the text.
+uniwow_handle text_object = 0;
+uint32_t text_property = 0;
+std::string text_set;
+int32_t fake_set_text(void *, uniwow_handle object, uint32_t property, const char *text) {
+    text_object = object;
+    text_property = property;
+    text_set = text;
+    return 0;
+}
 uint64_t fake_connect(void *, uniwow_handle, uint32_t, uniwow_slot slot, void *user) {
     fake_connections[next_connection] = {slot, user};
     return next_connection++;
@@ -228,6 +237,11 @@ int main() {
     sorted.boolean = 1;
     fake_connections[sorting].slot(fake_connections[sorting].user, &sorted);
     expect(sorted_column == 3 && from_highest, "sortChanged gives the column and whether from the highest");
+
+    uniwow::PropertyGrid grid;
+    grid.setPaths(R"(["cube/colour"])");
+    expect(text_object == grid.handle() && text_property == UNIWOW_PROPERTY_PATHS && text_set == R"(["cube/colour"])",
+           "a property grid is given the paths of its properties");
 
     std::printf("%d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

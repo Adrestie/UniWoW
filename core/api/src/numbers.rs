@@ -42,6 +42,9 @@ numbered!(
         /// rows of cells under headers, edited in place and sorted by a column, as QTableWidget;
         /// only the rows in sight are drawn
         TableView = 28,
+        /// animatable properties of the catalogue with a field for each, drawn by the module
+        /// properties; a value changed by hand is one undo entry the editor records
+        PropertyGrid = 29,
     }
 );
 
@@ -137,6 +140,9 @@ numbered!(
         SortColumn = 45,
         /// table view: sorted from the highest
         SortDescending = 46,
+        /// property grid, text: JSON [path, ...], the paths of the properties shown,
+        /// `<module>/<name>`; 100000 at most
+        Paths = 47,
     }
 );
 

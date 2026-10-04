@@ -40,6 +40,7 @@ entries = [
     [26, "DopesheetView", "DOPESHEET_VIEW", "the keys of a sequence edited by hand, and the playhead of a player, drawn by the module dopesheet"],
     [27, "TreeView", "TREE_VIEW", "items with a text and children, folded or unfolded, one current, as QTreeWidget"],
     [28, "TableView", "TABLE_VIEW", "rows of cells under headers, edited in place and sorted by a column, as QTableWidget; only the rows in sight are drawn"],
+    [29, "PropertyGrid", "PROPERTY_GRID", "animatable properties of the catalogue with a field for each, drawn by the module properties; a value changed by hand is one undo entry the editor records"],
 ]
 
 [property]
@@ -94,6 +95,7 @@ entries = [
     [44, "CurrentItem", "CURRENT_ITEM", "tree view, table view: the id of the current item or row, 0 for none; an id the view does not hold is refused, and an item or row removed is no longer current"],
     [45, "SortColumn", "SORT_COLUMN", "table view: the column the rows are shown sorted by, -1 for the module's order; a table of 50000 rows or more is sorted off the interface's thread, its former order shown meanwhile"],
     [46, "SortDescending", "SORT_DESCENDING", "table view: sorted from the highest"],
+    [47, "Paths", "PATHS", "property grid, text: JSON [path, ...], the paths of the properties shown, `<module>/<name>`; 100000 at most"],
 ]
 
 [value_kind]

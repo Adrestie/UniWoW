@@ -144,13 +144,14 @@ extern "C" fn add_to(
     })
 }
 
-/// Curves, tracks, items, rows or columns read from their JSON.
+/// Curves, tracks, items, rows, columns or paths read from their JSON.
 enum Read {
     Curves(Result<Vec<ShownCurve>, String>),
     Tracks(Result<Vec<Track>, String>),
     Items(Result<Vec<TreeItem>, String>),
     Rows(Result<Rows, String>),
     Columns(Result<Vec<String>, String>),
+    Paths(Result<Vec<String>, String>),
 }
 
 extern "C" fn set_text(context: *mut c_void, object: u64, which: u32, text: *const c_char) -> i32 {
@@ -164,6 +165,7 @@ extern "C" fn set_text(context: *mut c_void, object: u64, which: u32, text: *con
         (Ok(Property::Items), Ok(text)) => Some(Read::Items(ui::read_items(text))),
         (Ok(Property::Rows), Ok(text)) => Some(Read::Rows(ui::read_rows(text).and_then(Rows::new))),
         (Ok(Property::Columns), Ok(text)) => Some(Read::Columns(ui::read_columns(text))),
+        (Ok(Property::Paths), Ok(text)) => Some(Read::Paths(ui::read_paths(text))),
         _ => None,
     };
     // Items or rows replaced, freed once the lock is released.
@@ -180,6 +182,7 @@ extern "C" fn set_text(context: *mut c_void, object: u64, which: u32, text: *con
             Ok(0)
         }
         Some(Read::Columns(columns)) => status(ui.set_columns(object, columns?)),
+        Some(Read::Paths(paths)) => status(ui.set_paths(object, paths?)),
         None => status(ui.set_text(object, which?, &text?)),
     });
     drop(replaced);

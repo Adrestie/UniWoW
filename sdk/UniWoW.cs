@@ -166,6 +166,8 @@ public enum Kind : uint
     TreeView = 27,      // items with a text and children, folded or unfolded, one current, as QTreeWidget
     TableView = 28,     // rows of cells under headers, edited in place and sorted by a column, as QTableWidget; only
                         // the rows in sight are drawn
+    PropertyGrid = 29,  // animatable properties of the catalogue with a field for each, drawn by the module properties;
+                        // a value changed by hand is one undo entry the editor records
 }
 // </generated kind>
 
@@ -229,6 +231,8 @@ public enum Property : uint
     SortColumn = 45,     // table view: the column the rows are shown sorted by, -1 for the module's order; a table of
                          // 50000 rows or more is sorted off the interface's thread, its former order shown meanwhile
     SortDescending = 46, // table view: sorted from the highest
+    Paths = 47,          // property grid, text: JSON [path, ...], the paths of the properties shown, `<module>/<name>`;
+                         // 100000 at most
 }
 // </generated property>
 
@@ -1142,6 +1146,18 @@ public unsafe class TableView : Widget
 
     Signal<CellEvent> CellSignal(SignalId id) =>
         new(Handle, id, s => new CellEvent(s.Item, (int)s.Integer, s.Text));
+}
+
+/// <summary>Animatable properties of the catalogue, one row each with its label and a field for its
+/// kind, as the Inspector of Unity, drawn by the module properties: SetPaths takes the JSON of the
+/// property PATHS of uniwow.h, the paths <c>module/name</c>. A value changed by hand is written to
+/// its property and is one undo entry the editor records for the property's module: the module
+/// records nothing.</summary>
+public class PropertyGrid() : Widget(Make(Kind.PropertyGrid))
+{
+    public void SetPaths(string json) => WriteText(Property.Paths, json);
+    public string Paths() => ReadText(Property.Paths);
+    public void SetMinimumHeight(double height) => WriteNumbers(Property.MinimumHeight, height);
 }
 
 /// <summary>Tracks of keys on animatable properties, with a frame rate and a length, as in the

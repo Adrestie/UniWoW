@@ -4,6 +4,7 @@ use std::sync::{Arc, Weak};
 
 use uniwow_api::curve::{self, CurveEditor};
 use uniwow_api::dopesheet::{self, Dopesheet};
+use uniwow_api::property_grid::{self, PropertyGrid};
 use uniwow_api::ui::{self, SharedUi};
 use uniwow_api::{CallId, Command, Editor, Event, Host, JobFn, JobId, egui, egui_wgpu, serde_json};
 
@@ -77,11 +78,21 @@ impl KernelHost {
             .cloned()
     }
 
+    /// The property grid of the module `properties`, which draws the property grids, when it runs.
+    fn property_grid(&self) -> Option<Arc<dyn PropertyGrid>> {
+        self.services
+            .get(property_grid::SERVICE.id())?
+            .value
+            .downcast_ref::<Arc<dyn PropertyGrid>>()
+            .cloned()
+    }
+
     /// The view of `owner`'s objects, with the services and the editor it draws with.
     fn view(&mut self, owner: &str, objects: &SharedUi) -> &mut PanelView {
-        let (curve_editor, sheet, editor) = (self.curve_editor(), self.dopesheet(), self.editor(owner));
+        let (curve_editor, sheet, grid) = (self.curve_editor(), self.dopesheet(), self.property_grid());
+        let (editor, backend) = (self.editor(owner), self.bridge.clone());
         let view = self.views.entry(view_key(owner, objects)).or_default();
-        view.set_services(curve_editor, sheet, editor);
+        view.set_services(curve_editor, sheet, grid, editor, backend);
         view
     }
 

@@ -662,6 +662,19 @@ class TableView : public Widget {
     Signal<int, bool> sortChanged{handle_, UNIWOW_SIGNAL_SORT_CHANGED};
 };
 
+// Animatable properties of the catalogue, one row each with its label and a field for its kind, as
+// the Inspector of Unity, drawn by the module properties: setPaths takes the JSON of
+// UNIWOW_PROPERTY_PATHS, the paths `<module>/<name>`. A value changed by hand is written to its
+// property and is one undo entry the editor records for the property's module: the module records
+// nothing.
+class PropertyGrid : public Widget {
+  public:
+    PropertyGrid() : Widget(make(UNIWOW_PROPERTY_GRID)) {}
+    void setPaths(const std::string &json) const { setString(UNIWOW_PROPERTY_PATHS, json); }
+    std::string paths() const { return string(UNIWOW_PROPERTY_PATHS); }
+    void setMinimumHeight(double height) const { setNumbers(UNIWOW_PROPERTY_MINIMUM_HEIGHT, {height}); }
+};
+
 // A modal window, as QDialog: while it is shown, the rest of the editor cannot be used. It is
 // created hidden; the user closing it, with Escape or its close button, hides it and sends rejected.
 class Dialog : public Object {

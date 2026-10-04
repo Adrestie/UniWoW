@@ -61,8 +61,10 @@ enum {
     UNIWOW_DOPESHEET_VIEW = 26, /* the keys of a sequence edited by hand, and the playhead of a player, drawn by the
                                    module dopesheet */
     UNIWOW_TREE_VIEW = 27,      /* items with a text and children, folded or unfolded, one current, as QTreeWidget */
-    UNIWOW_TABLE_VIEW = 28      /* rows of cells under headers, edited in place and sorted by a column, as
+    UNIWOW_TABLE_VIEW = 28,     /* rows of cells under headers, edited in place and sorted by a column, as
                                    QTableWidget; only the rows in sight are drawn */
+    UNIWOW_PROPERTY_GRID = 29   /* animatable properties of the catalogue with a field for each, drawn by the module
+                                   properties; a value changed by hand is one undo entry the editor records */
 };
 /* </generated kind> */
 
@@ -75,61 +77,63 @@ enum {
     UNIWOW_PROPERTY_ENABLED = 3,
     UNIWOW_PROPERTY_VISIBLE = 4,
     UNIWOW_PROPERTY_CHECKED = 5,
-    UNIWOW_PROPERTY_VALUE = 6,           /* slider, spin box; kept within the range */
+    UNIWOW_PROPERTY_VALUE = 6,            /* slider, spin box; kept within the range */
     UNIWOW_PROPERTY_MINIMUM = 7,
     UNIWOW_PROPERTY_MAXIMUM = 8,
     UNIWOW_PROPERTY_STEP = 9,
     UNIWOW_PROPERTY_DECIMALS = 10,
-    UNIWOW_PROPERTY_PLACEHOLDER = 11,    /* line edit, text */
-    UNIWOW_PROPERTY_CURRENT_INDEX = 12,  /* combo box */
-    UNIWOW_PROPERTY_TITLE = 13,          /* group box, text */
-    UNIWOW_PROPERTY_POS = 14,            /* item: x, y in its parent */
-    UNIWOW_PROPERTY_RECT = 15,           /* rectangle or ellipse item: x, y, width, height */
-    UNIWOW_PROPERTY_LINE = 16,           /* line item: x1, y1, x2, y2 */
+    UNIWOW_PROPERTY_PLACEHOLDER = 11,     /* line edit, text */
+    UNIWOW_PROPERTY_CURRENT_INDEX = 12,   /* combo box */
+    UNIWOW_PROPERTY_TITLE = 13,           /* group box, text */
+    UNIWOW_PROPERTY_POS = 14,             /* item: x, y in its parent */
+    UNIWOW_PROPERTY_RECT = 15,            /* rectangle or ellipse item: x, y, width, height */
+    UNIWOW_PROPERTY_LINE = 16,            /* line item: x1, y1, x2, y2 */
     UNIWOW_PROPERTY_PEN_COLOR = 17,
     UNIWOW_PROPERTY_PEN_WIDTH = 18,
     UNIWOW_PROPERTY_BRUSH_COLOR = 19,
-    UNIWOW_PROPERTY_RADIUS = 20,         /* rectangle item: corner radius */
-    UNIWOW_PROPERTY_Z_VALUE = 21,        /* item: stacking order among its siblings */
-    UNIWOW_PROPERTY_MOVABLE = 22,        /* item: 0 no, 1 along x, 2 along y, 3 both */
+    UNIWOW_PROPERTY_RADIUS = 20,          /* rectangle item: corner radius */
+    UNIWOW_PROPERTY_Z_VALUE = 21,         /* item: stacking order among its siblings */
+    UNIWOW_PROPERTY_MOVABLE = 22,         /* item: 0 no, 1 along x, 2 along y, 3 both */
     UNIWOW_PROPERTY_SELECTABLE = 23,
     UNIWOW_PROPERTY_SELECTED = 24,
-    UNIWOW_PROPERTY_MOVE_BOUNDS = 25,    /* movable item: x, y, width, height its position stays in */
-    UNIWOW_PROPERTY_FONT_SIZE = 26,      /* text item, 1 to 512, finite */
-    UNIWOW_PROPERTY_MINIMUM_HEIGHT = 27, /* graphics view, paint area */
-    UNIWOW_PROPERTY_VIEW_SCALE = 28,     /* graphics view: zoom */
-    UNIWOW_PROPERTY_VIEW_CENTER = 29,    /* graphics view: x, y of the scene at its centre */
-    UNIWOW_PROPERTY_COUNT = 30,          /* read only: entries of a combo box, children otherwise */
-    UNIWOW_PROPERTY_CURVES = 31,         /* curve view, text: JSON [{label, colour: [r, g, b], visible, keys: [{time,
-                                            value, mode, left, right}]}]; keys in time order, each at a time of its
-                                            own, numbers within 1e9 */
-    UNIWOW_PROPERTY_TRACKS = 32,         /* sequence, text: JSON [{property, kind, curves: [{keys: [{time, value,
-                                            mode, left, right}]}]}], one curve per number of the property; keys at
-                                            whole frames from 0, numbers within 1e9; each change is an undo entry the
-                                            kernel records */
-    UNIWOW_PROPERTY_FRAME_RATE = 33,     /* sequence: frames per second, a whole number from 1 to 240 */
-    UNIWOW_PROPERTY_LENGTH = 34,         /* sequence: in frames, a whole number from 1 to 1000000 */
-    UNIWOW_PROPERTY_SEQUENCE = 35,       /* player, dopesheet view, curve view: the handle of the sequence it plays
-                                            or shows, 0 for none; a view changes it directly, each change done an
-                                            undo entry the kernel records */
-    UNIWOW_PROPERTY_TIME = 36,           /* player: in frames, fractional, from 0 to the length of its sequence */
-    UNIWOW_PROPERTY_PLAYING = 37,        /* player: 1 plays from the time, or from 0 when at the end; 0 pauses */
-    UNIWOW_PROPERTY_LOOP = 38,           /* player: at the end, starts again from 0 */
-    UNIWOW_PROPERTY_SPEED = 39,          /* player: times the frame rate, from 0 to 100 */
-    UNIWOW_PROPERTY_PLAYER = 40,         /* dopesheet view, curve view: the handle of the player whose time it shows
-                                            as the playhead, 0 for none */
-    UNIWOW_PROPERTY_ITEMS = 41,          /* tree view, text: JSON [{id, text, expanded, children: [...]}]; ids whole
-                                            numbers from 1, each of its own; 64 levels and 1000000 items at most */
-    UNIWOW_PROPERTY_COLUMNS = 42,        /* table view, text: JSON [header, ...], 1000 columns at most */
-    UNIWOW_PROPERTY_ROWS = 43,           /* table view, text: JSON [{id, cells: [text, ...]}] in the module's order;
-                                            ids whole numbers from 1, each of its own; 1000000 rows at most */
-    UNIWOW_PROPERTY_CURRENT_ITEM = 44,   /* tree view, table view: the id of the current item or row, 0 for none; an
-                                            id the view does not hold is refused, and an item or row removed is no
-                                            longer current */
-    UNIWOW_PROPERTY_SORT_COLUMN = 45,    /* table view: the column the rows are shown sorted by, -1 for the module's
-                                            order; a table of 50000 rows or more is sorted off the interface's
-                                            thread, its former order shown meanwhile */
-    UNIWOW_PROPERTY_SORT_DESCENDING = 46 /* table view: sorted from the highest */
+    UNIWOW_PROPERTY_MOVE_BOUNDS = 25,     /* movable item: x, y, width, height its position stays in */
+    UNIWOW_PROPERTY_FONT_SIZE = 26,       /* text item, 1 to 512, finite */
+    UNIWOW_PROPERTY_MINIMUM_HEIGHT = 27,  /* graphics view, paint area */
+    UNIWOW_PROPERTY_VIEW_SCALE = 28,      /* graphics view: zoom */
+    UNIWOW_PROPERTY_VIEW_CENTER = 29,     /* graphics view: x, y of the scene at its centre */
+    UNIWOW_PROPERTY_COUNT = 30,           /* read only: entries of a combo box, children otherwise */
+    UNIWOW_PROPERTY_CURVES = 31,          /* curve view, text: JSON [{label, colour: [r, g, b], visible, keys:
+                                             [{time, value, mode, left, right}]}]; keys in time order, each at a time
+                                             of its own, numbers within 1e9 */
+    UNIWOW_PROPERTY_TRACKS = 32,          /* sequence, text: JSON [{property, kind, curves: [{keys: [{time, value,
+                                             mode, left, right}]}]}], one curve per number of the property; keys at
+                                             whole frames from 0, numbers within 1e9; each change is an undo entry
+                                             the kernel records */
+    UNIWOW_PROPERTY_FRAME_RATE = 33,      /* sequence: frames per second, a whole number from 1 to 240 */
+    UNIWOW_PROPERTY_LENGTH = 34,          /* sequence: in frames, a whole number from 1 to 1000000 */
+    UNIWOW_PROPERTY_SEQUENCE = 35,        /* player, dopesheet view, curve view: the handle of the sequence it plays
+                                             or shows, 0 for none; a view changes it directly, each change done an
+                                             undo entry the kernel records */
+    UNIWOW_PROPERTY_TIME = 36,            /* player: in frames, fractional, from 0 to the length of its sequence */
+    UNIWOW_PROPERTY_PLAYING = 37,         /* player: 1 plays from the time, or from 0 when at the end; 0 pauses */
+    UNIWOW_PROPERTY_LOOP = 38,            /* player: at the end, starts again from 0 */
+    UNIWOW_PROPERTY_SPEED = 39,           /* player: times the frame rate, from 0 to 100 */
+    UNIWOW_PROPERTY_PLAYER = 40,          /* dopesheet view, curve view: the handle of the player whose time it shows
+                                             as the playhead, 0 for none */
+    UNIWOW_PROPERTY_ITEMS = 41,           /* tree view, text: JSON [{id, text, expanded, children: [...]}]; ids whole
+                                             numbers from 1, each of its own; 64 levels and 1000000 items at most */
+    UNIWOW_PROPERTY_COLUMNS = 42,         /* table view, text: JSON [header, ...], 1000 columns at most */
+    UNIWOW_PROPERTY_ROWS = 43,            /* table view, text: JSON [{id, cells: [text, ...]}] in the module's order;
+                                             ids whole numbers from 1, each of its own; 1000000 rows at most */
+    UNIWOW_PROPERTY_CURRENT_ITEM = 44,    /* tree view, table view: the id of the current item or row, 0 for none; an
+                                             id the view does not hold is refused, and an item or row removed is no
+                                             longer current */
+    UNIWOW_PROPERTY_SORT_COLUMN = 45,     /* table view: the column the rows are shown sorted by, -1 for the module's
+                                             order; a table of 50000 rows or more is sorted off the interface's
+                                             thread, its former order shown meanwhile */
+    UNIWOW_PROPERTY_SORT_DESCENDING = 46, /* table view: sorted from the highest */
+    UNIWOW_PROPERTY_PATHS = 47            /* property grid, text: JSON [path, ...], the paths of the properties
+                                             shown, `<module>/<name>`; 100000 at most */
 };
 /* </generated property> */
 

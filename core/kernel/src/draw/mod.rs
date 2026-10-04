@@ -5,6 +5,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
+mod grid;
 mod painter;
 mod scene;
 
@@ -12,10 +13,11 @@ use painter::replay;
 use scene::{SceneView, modifiers};
 use uniwow_api::curve::{self, CurveChange, CurveEditor, CurveOptions, CurveOutput, ShownCurve, TimeAxis};
 use uniwow_api::dopesheet::{self, Dopesheet, DopesheetInput, KeysChange, RowProperty};
+use uniwow_api::property_grid::PropertyGrid;
 use uniwow_api::sequence::{Sequence, Track, number_colour, number_names, tracks_to_json};
 use uniwow_api::ui::data::TreeItem;
 use uniwow_api::ui::{Handle, Kind, Object, Property, SharedUi, Signal, SignalData, Ui, lock};
-use uniwow_api::{Editor, PropertyInfo, PropertyKind, egui, egui_wgpu, log};
+use uniwow_api::{Editor, EditorBackend, PropertyInfo, PropertyKind, egui, egui_wgpu, log};
 
 /// What the interface thread keeps of a module's panels between frames.
 #[derive(Default)]
@@ -29,8 +31,15 @@ pub struct PanelView {
     curve_editor: Option<Arc<dyn CurveEditor>>,
     /// The dopesheet of the module `dopesheet`, which draws the dopesheet views, when it runs.
     dopesheet: Option<Arc<dyn Dopesheet>>,
-    /// The module's editor: the labels and values of the properties its sequences animate.
+    /// The property grid of the module `properties`, which draws the property grids, when it runs.
+    property_grid: Option<Arc<dyn PropertyGrid>>,
+    /// The module's editor: the labels and values of the properties its sequences animate and its
+    /// grids show.
     editor: Option<Editor>,
+    /// The kernel's side of the editors, to record a value changed in a grid as an undo entry of
+    /// the property's module.
+    backend: Option<Arc<dyn EditorBackend>>,
+    grids: grid::Grids,
     /// The animatable properties, by path, read before the objects are locked.
     infos: HashMap<String, PropertyInfo>,
     /// The properties of the tracks each view shows, read before the objects are locked.
@@ -226,7 +235,8 @@ fn expands(store: &Ui, handle: Handle) -> bool {
                 | Kind::CurveView
                 | Kind::DopesheetView
                 | Kind::TreeView
-                | Kind::TableView => true,
+                | Kind::TableView
+                | Kind::PropertyGrid => true,
                 Kind::VBoxLayout | Kind::HBoxLayout | Kind::GridLayout | Kind::GroupBox => {
                     object.children.iter().any(|child| expands(store, *child))
                 }
@@ -236,17 +246,22 @@ fn expands(store: &Ui, handle: Handle) -> bool {
 }
 
 impl PanelView {
-    /// The services the views are drawn with, from the modules `curves` and `dopesheet`, and the
-    /// editor of the module whose objects are drawn.
+    /// The services the views are drawn with, from the modules `curves`, `dopesheet` and
+    /// `properties`; the editor of the module whose objects are drawn, and the kernel's side of the
+    /// editors.
     pub fn set_services(
         &mut self,
         curve_editor: Option<Arc<dyn CurveEditor>>,
         dopesheet: Option<Arc<dyn Dopesheet>>,
+        property_grid: Option<Arc<dyn PropertyGrid>>,
         editor: Editor,
+        backend: Arc<dyn EditorBackend>,
     ) {
         self.curve_editor = curve_editor;
         self.dopesheet = dopesheet;
+        self.property_grid = property_grid;
         self.editor = Some(editor);
+        self.backend = Some(backend);
     }
 
     /// Why services panicked, once, with the id of each service: its provider is the culprit (F5).
@@ -255,14 +270,18 @@ impl PanelView {
     }
 
     /// Reads, before the objects are locked, the labels and values of the properties the sequences
-    /// shown animate: reading a property runs its module's code, which may lock objects.
+    /// shown animate and the grids show: reading a property runs its module's code, which may lock
+    /// objects.
     fn prepare(&mut self, shared: &SharedUi, ctx: &egui::Context) {
         let pass = ctx.cumulative_pass_nr();
         if self.prepared == Some(pass) {
             return;
         }
         self.prepared = Some(pass);
-        let shown = lock(shared).shown_sequences();
+        let (shown, grids) = {
+            let store = lock(shared);
+            (store.shown_sequences(), store.property_grids())
+        };
         self.rows.clear();
         // The axis of a sequence no view shows with its player any more is forgotten: shown again,
         // it fits again.
@@ -277,7 +296,8 @@ impl PanelView {
             .collect();
         self.time_axes
             .retain(|key, _| matches!(key, AxisKey::View(_)) || played.contains(key));
-        if shown.is_empty() {
+        if shown.is_empty() && grids.is_empty() {
+            self.grids.read(&[], &self.infos, None);
             return;
         }
         self.infos = self
@@ -292,6 +312,7 @@ impl PanelView {
             let rows = self.row_properties(&shown.data, shown.time);
             self.rows.insert(shown.view, rows);
         }
+        self.grids.read(&grids, &self.infos, self.editor.as_ref());
     }
 
     /// The property of each track of `data`, with its value at `playhead`.
@@ -340,6 +361,7 @@ impl PanelView {
             AxisKey::Played { player, sequence } => alive(player) && alive(sequence),
             AxisKey::View(view) => alive(view),
         });
+        self.grids.forget_gone(alive, self.property_grid.as_ref());
         let sheet = self.dopesheet.clone();
         self.sheet_ids.retain(|handle, id| {
             let kept = alive(handle);
@@ -362,6 +384,8 @@ impl PanelView {
             .and_then(|object| object.children.first().copied());
         let Some(layout) = layout else {
             ui.weak("Waiting for its module to fill this panel.");
+            drop(store);
+            self.grids.write(self.editor.as_ref(), self.backend.as_ref());
             return;
         };
         let mut events = Vec::new();
@@ -369,6 +393,8 @@ impl PanelView {
         for event in events {
             store.emit(event);
         }
+        drop(store);
+        self.grids.write(self.editor.as_ref(), self.backend.as_ref());
     }
 
     /// Draws the dialogs of a module that are shown, each in a modal window over the editor, and
@@ -423,6 +449,8 @@ impl PanelView {
         for event in events {
             store.emit(event);
         }
+        drop(store);
+        self.grids.write(self.editor.as_ref(), self.backend.as_ref());
         layers
     }
 
@@ -773,6 +801,10 @@ impl PanelView {
             | Kind::Player => None,
             Kind::TreeView => Some(self.tree_view(handle, object, ui)),
             Kind::TableView => Some(self.table_view(handle, object, ui)),
+            Kind::PropertyGrid => {
+                let service = self.property_grid.clone();
+                Some(self.grids.show(service, handle, object, ui, &mut self.failures))
+            }
         }
     }
 

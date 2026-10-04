@@ -47,6 +47,7 @@ mod job;
 mod module;
 mod numbers;
 mod property;
+pub mod property_grid;
 mod registrar;
 pub mod sequence;
 mod service;
