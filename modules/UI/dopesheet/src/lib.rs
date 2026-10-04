@@ -211,6 +211,10 @@ impl Dopesheet for Sheet {
         };
         output
     }
+
+    fn forget(&self, id: egui::Id) {
+        lock(&self.states).remove(&id);
+    }
 }
 
 /// The ruler, with the frame at the playhead on its left; pressing on it moves the playhead, which
@@ -821,6 +825,15 @@ mod tests {
         let hover = vec![egui::Event::PointerMoved(egui::pos2(404.0, 11.0))];
         let (output, _) = frames(State::default(), &sequence, vec![hover, vec![press]]);
         assert_eq!(output.playhead, Some(10.0));
+    }
+
+    #[test]
+    fn a_dopesheet_forgotten_keeps_nothing() {
+        let sheet = Sheet::default();
+        let id = egui::Id::new("gone");
+        lock(&sheet.states).insert(id, State::default());
+        sheet.forget(id);
+        assert!(lock(&sheet.states).is_empty());
     }
 
     #[test]

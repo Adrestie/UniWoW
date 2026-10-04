@@ -224,7 +224,9 @@ within bounds), selectable and selected or not. Colours are `0xRRGGBBAA`, sizes 
   moved in a `DopesheetView` or a `CurveView` showing a `Sequence`, a value changed in a
   `PropertyGrid`, the `TRACKS` of a `Sequence` set by its module, the value of a property of a
   module of another language changed by hand. The entry belongs to the module owning the object or
-  the property, and joins its open group (S4). The author of a tool in any language has nothing to
+  the property. A change the module makes, such as its `TRACKS`, joins the group the module has
+  open on the thread making it (S4); a change made by hand in a view is recorded from the interface
+  thread, where the module has no group open, and is an entry of its own, as the user's gesture. The author of a tool in any language has nothing to
   write for these; `record_change` stays for the module's own data. Rust modules using these
   objects hand them to the kernel with `Context::adopt_objects` and get the same.
 
@@ -1389,6 +1391,9 @@ table up to date, and its review checks it.
     of the ruler are bounded.
   - The C# *Counter* shows a dopesheet of a sequence of its own on its value, with a player whose
     playhead, moved on the ruler, sets the counter; it records nothing for its keys.
+  - After the review: the labels and values of the properties a view shows are read before the
+    objects are locked, reading a property running its module's code; the tracks of `keysChanged`
+    are made only for a slot connected; the dopesheet forgets a view once it is gone.
   - Left for step 8.6, which the Timeline has today and its views do not: the values on the left
     edited by hand to set keys, a key added at the playhead, a track added or removed, the curves of
     the Curves view hidden one by one.

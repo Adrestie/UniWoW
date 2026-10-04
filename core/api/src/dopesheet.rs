@@ -59,6 +59,9 @@ pub trait Dopesheet: Send + Sync {
     /// sequence. `id` tells the dopesheets of a module apart: each keeps its selection, its
     /// unfolded rows and the gesture under way, which ends when the tracks change outside it.
     fn show(&self, ui: &mut egui::Ui, id: egui::Id, input: &DopesheetInput, time: &mut TimeAxis) -> DopesheetOutput;
+
+    /// Forgets what it keeps of the dopesheet `id`, whose view is gone.
+    fn forget(&self, id: egui::Id);
 }
 
 /// The service of the dopesheet.

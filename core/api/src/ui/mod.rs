@@ -302,6 +302,8 @@ pub struct Ui {
     times: HashMap<Handle, Waiting>,
     /// The players, which the kernel moves on at each frame.
     players: BTreeSet<Handle>,
+    /// The dopesheet views and curve views, which may show a sequence.
+    sequence_views: BTreeSet<Handle>,
     /// Changed at each change of a scene's set of items or their order, by scene.
     structure: HashMap<Handle, u64>,
     post: Post,
@@ -373,6 +375,7 @@ impl Ui {
                 waiting: None,
                 times: HashMap::new(),
                 players: BTreeSet::new(),
+                sequence_views: BTreeSet::new(),
                 structure: HashMap::new(),
                 post,
                 uncounted: None,
@@ -461,6 +464,9 @@ impl Ui {
         if kind == Kind::Player {
             self.players.insert(handle);
         }
+        if matches!(kind, Kind::DopesheetView | Kind::CurveView) {
+            self.sequence_views.insert(handle);
+        }
         if let Some(parent) = parent {
             self.get_mut(parent)?.children.push(handle);
             self.changed_structure(parent);
@@ -489,6 +495,7 @@ impl Ui {
             self.structure.remove(&next);
             self.times.remove(&next);
             self.players.remove(&next);
+            self.sequence_views.remove(&next);
         }
         // Views showing a destroyed scene show nothing; players of a destroyed sequence play
         // nothing.
@@ -1047,6 +1054,31 @@ impl Ui {
             .ok_or_else(|| format!("no painter {painter}: paint only inside a Paint slot"))?;
         commands.push(command);
         Ok(())
+    }
+
+    /// Whether a slot is connected to `signal` of `sender`: what it would carry need not be made
+    /// otherwise.
+    pub fn has_slots(&self, sender: Handle, signal: Signal) -> bool {
+        self.connections
+            .iter()
+            .any(|c| c.sender == sender && c.signal == signal)
+    }
+
+    /// The views showing a sequence, with that sequence and the time of the player they show.
+    pub fn shown_sequences(&self) -> Vec<(Handle, Arc<Sequence>, Option<f64>)> {
+        self.sequence_views
+            .iter()
+            .filter_map(|handle| {
+                let view = self.objects.get(handle)?;
+                let data = self.objects.get(&view.plays?)?.sequence.clone()?;
+                let time = view
+                    .player
+                    .and_then(|player| self.objects.get(&player))
+                    .filter(|player| player.kind == Kind::Player)
+                    .map(|player| player.time);
+                Some((*handle, data, time))
+            })
+            .collect()
     }
 
     /// The slots connected to a signal of `sender`, with their connections.

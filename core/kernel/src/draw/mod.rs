@@ -29,6 +29,12 @@ pub struct PanelView {
     dopesheet: Option<Arc<dyn Dopesheet>>,
     /// The module's editor: the labels and values of the properties its sequences animate.
     editor: Option<Editor>,
+    /// The labels of the animatable properties, read before the objects are locked.
+    labels: HashMap<String, String>,
+    /// The properties of the tracks each view shows, read before the objects are locked.
+    rows: HashMap<Handle, HashMap<String, RowProperty>>,
+    /// The id each dopesheet view was drawn under, for the dopesheet to forget it once it is gone.
+    sheet_ids: HashMap<Handle, egui::Id>,
     /// The time axis of each curve view and dopesheet view.
     time_axes: HashMap<Handle, TimeAxis>,
     /// The curves of a curve view showing a sequence while a change of them goes on, with the
@@ -127,24 +133,34 @@ impl PanelView {
         std::mem::take(&mut self.failures)
     }
 
-    /// The labels of the animatable properties of running modules, by path.
-    fn labels(&self) -> HashMap<String, String> {
-        self.editor
+    /// Reads, before the objects are locked, the labels and values of the properties the sequences
+    /// shown animate: reading a property runs its module's code, which may lock objects.
+    fn prepare(&mut self, shared: &SharedUi) {
+        let shown = lock(shared).shown_sequences();
+        self.rows.clear();
+        if shown.is_empty() {
+            return;
+        }
+        self.labels = self
+            .editor
             .as_ref()
             .map(Editor::properties)
             .unwrap_or_default()
             .into_iter()
             .map(|info| (info.path, info.label))
-            .collect()
+            .collect();
+        for (view, data, playhead) in shown {
+            let rows = self.row_properties(&data, playhead);
+            self.rows.insert(view, rows);
+        }
     }
 
     /// The property of each track of `data`, with its value at `playhead`.
     fn row_properties(&self, data: &Sequence, playhead: Option<f64>) -> HashMap<String, RowProperty> {
-        let labels = self.labels();
         data.tracks
             .iter()
             .map(|track| {
-                let label = labels.get(&track.property);
+                let label = self.labels.get(&track.property);
                 let current = label
                     .and(self.editor.as_ref())
                     .and_then(|editor| editor.read_property(&track.property).ok());
@@ -169,10 +185,19 @@ impl PanelView {
         self.sizes.retain(|handle, _| alive(handle));
         self.time_axes.retain(|handle, _| alive(handle));
         self.working.retain(|handle, _| alive(handle));
+        let sheet = self.dopesheet.clone();
+        self.sheet_ids.retain(|handle, id| {
+            let kept = alive(handle);
+            if !kept && let Some(sheet) = &sheet {
+                sheet.forget(*id);
+            }
+            kept
+        });
     }
 
     /// Draws the panel `panel` of a module.
     pub fn show(&mut self, shared: &SharedUi, panel: &str, ui: &mut egui::Ui, gpu: Option<&egui_wgpu::RenderState>) {
+        self.prepare(shared);
         let mut store = lock(shared);
         store.set_wake(ui.ctx());
         self.forget_gone(&store);
@@ -200,6 +225,7 @@ impl PanelView {
         ctx: &egui::Context,
         gpu: Option<&egui_wgpu::RenderState>,
     ) -> Vec<egui::LayerId> {
+        self.prepare(shared);
         let mut store = lock(shared);
         store.set_wake(ctx);
         self.forget_gone(&store);
@@ -486,7 +512,7 @@ impl PanelView {
                     Some((_, data, generation)) => {
                         let curves = match self.working.get(&handle) {
                             Some((started, working)) if started == generation => working.clone(),
-                            _ => sequence_curves(data, &self.labels()),
+                            _ => sequence_curves(data, &self.labels),
                         };
                         let options = CurveOptions {
                             snap: Some(1.0),
@@ -551,10 +577,11 @@ impl PanelView {
                     return Some(ui.allocate_ui(size, |ui| ui.weak("No sequence shown.")).response);
                 };
                 let playhead = playhead(store, object);
-                let properties = self.row_properties(&data, playhead);
+                let properties = self.rows.remove(&handle).unwrap_or_default();
+                let id = ui.id().with(("uniwow-dopesheet", handle));
+                self.sheet_ids.insert(handle, id);
                 let time = self.time_axes.entry(handle).or_default();
                 let inner = ui.allocate_ui(size, |ui| {
-                    let id = ui.id().with(("uniwow-dopesheet", handle));
                     let input = DopesheetInput {
                         sequence: &data,
                         properties: &properties,
@@ -584,10 +611,13 @@ impl PanelView {
                 }
                 match output.keys {
                     KeysChange::None => {}
-                    KeysChange::Changing(tracks) => events.push(SignalData {
-                        text: tracks_to_json(&tracks).to_string(),
-                        ..signal(Signal::KeysChanged)
-                    }),
+                    KeysChange::Changing(tracks) if store.has_slots(handle, Signal::KeysChanged) => {
+                        events.push(SignalData {
+                            text: tracks_to_json(&tracks).to_string(),
+                            ..signal(Signal::KeysChanged)
+                        });
+                    }
+                    KeysChange::Changing(_) => {}
                     KeysChange::Finished { label, tracks } => {
                         if let Some(event) = change_keys(store, handle, sequence, tracks, &label) {
                             events.push(event);
@@ -631,12 +661,14 @@ impl PanelView {
             }
             CurveChange::None => {}
             CurveChange::Changing => {
-                events.push(SignalData {
-                    sender: view,
-                    signal: Signal::KeysChanged as u32,
-                    text: tracks_to_json(&tracks_of(data, &curves)).to_string(),
-                    ..Default::default()
-                });
+                if store.has_slots(view, Signal::KeysChanged) {
+                    events.push(SignalData {
+                        sender: view,
+                        signal: Signal::KeysChanged as u32,
+                        text: tracks_to_json(&tracks_of(data, &curves)).to_string(),
+                        ..Default::default()
+                    });
+                }
                 self.working.insert(view, (generation, curves));
             }
             CurveChange::Finished => {
@@ -786,10 +818,12 @@ fn close_button(ui: &mut egui::Ui) -> bool {
 }
 
 /// Makes a change of keys done in a view to its sequence, as one undo entry named `label`, and
-/// returns the signal telling it; nothing for tracks that break the rules of a file, or a change
-/// the kernel refuses to record.
+/// returns the signal telling it, when a slot receives it; nothing for tracks that break the rules
+/// of a file, or a change the kernel refuses to record.
 fn change_keys(store: &mut Ui, view: Handle, sequence: Handle, tracks: Vec<Track>, label: &str) -> Option<SignalData> {
-    let text = tracks_to_json(&tracks).to_string();
+    let text = store
+        .has_slots(view, Signal::KeysChanged)
+        .then(|| tracks_to_json(&tracks).to_string());
     let checked = Sequence {
         tracks,
         ..Sequence::default()
@@ -798,7 +832,7 @@ fn change_keys(store: &mut Ui, view: Handle, sequence: Handle, tracks: Vec<Track
         .check()
         .and_then(|()| store.change_tracks(sequence, checked.tracks, label));
     match made {
-        Ok(()) => Some(SignalData {
+        Ok(()) => text.map(|text| SignalData {
             sender: view,
             signal: Signal::KeysChanged as u32,
             text,
@@ -818,9 +852,12 @@ mod tests {
 
     use uniwow_api::curve::{CurveChange, CurveEditor, CurveOptions, ShownCurve, TimeAxis};
     use uniwow_api::dopesheet::{Dopesheet, DopesheetInput, DopesheetOutput, KeysChange};
-    use uniwow_api::egui;
     use uniwow_api::sequence::Track;
+    use uniwow_api::serde_json::Value;
     use uniwow_api::ui::{Handle, Kind, Property, SharedUi, Signal, SignalData, Ui, lock};
+    use uniwow_api::{
+        AppliedChange, CommandInfo, Editor, EditorBackend, Event, PropertyInfo, PropertyKind, PropertyValue, egui,
+    };
 
     use super::PanelView;
 
@@ -841,6 +878,102 @@ mod tests {
         ) -> DopesheetOutput {
             self.0.clone()
         }
+
+        fn forget(&self, _id: egui::Id) {}
+    }
+
+    /// A dopesheet changing nothing, which notes the dopesheets it is told to forget.
+    #[derive(Default)]
+    struct Forgetting(Mutex<Vec<egui::Id>>);
+
+    impl Dopesheet for Forgetting {
+        fn show(
+            &self,
+            _ui: &mut egui::Ui,
+            _id: egui::Id,
+            _input: &DopesheetInput,
+            _time: &mut TimeAxis,
+        ) -> DopesheetOutput {
+            DopesheetOutput {
+                keys: KeysChange::None,
+                playhead: None,
+            }
+        }
+
+        fn forget(&self, id: egui::Id) {
+            self.0.lock().unwrap().push(id);
+        }
+    }
+
+    /// An editor whose one property, `cube/opacity`, notes whether the objects were free when it
+    /// was read.
+    struct Catalogue {
+        objects: SharedUi,
+        free: Mutex<Vec<bool>>,
+    }
+
+    impl EditorBackend for Catalogue {
+        fn commands(&self) -> Vec<CommandInfo> {
+            Vec::new()
+        }
+
+        fn call(&self, _caller: &str, _name: &str, _arguments: Value) -> Result<Value, String> {
+            Err("no command".to_owned())
+        }
+
+        fn publish(&self, _source: &str, _topic: &str, _payload: Value) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn subscribe(&self, _caller: &str, _topic: &str) -> Result<u64, String> {
+            Err("no event".to_owned())
+        }
+
+        fn next_event(
+            &self,
+            _caller: &str,
+            _subscription: u64,
+            _timeout: std::time::Duration,
+        ) -> Result<Option<Event>, String> {
+            Ok(None)
+        }
+
+        fn unsubscribe(&self, _subscription: u64) {}
+
+        fn setting(&self, _caller: &str, _space: &str, _key: &str) -> Result<Option<Value>, String> {
+            Ok(None)
+        }
+
+        fn set_setting(&self, _caller: &str, _space: &str, _key: &str, _value: Value) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn begin_group(&self, _caller: &str, _label: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn end_group(&self, _caller: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn record_change(&self, _caller: &str, _label: &str, _change: Box<dyn AppliedChange>) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn properties(&self) -> Vec<PropertyInfo> {
+            vec![PropertyInfo {
+                path: "cube/opacity".to_owned(),
+                owner: "cube".to_owned(),
+                label: "Opacity".to_owned(),
+                kind: PropertyKind::Number,
+                range: [0.0, 1.0],
+            }]
+        }
+
+        fn read_property(&self, _caller: &str, _path: &str) -> Result<PropertyValue, String> {
+            self.free.lock().unwrap().push(self.objects.try_lock().is_ok());
+            Ok(PropertyValue::Number(0.25))
+        }
     }
 
     struct BrokenSheet;
@@ -855,6 +988,8 @@ mod tests {
         ) -> DopesheetOutput {
             panic!("broken dopesheet")
         }
+
+        fn forget(&self, _id: egui::Id) {}
     }
 
     /// A curve editor setting the first key of the first curve to 0.75, which says `change`.
@@ -1145,5 +1280,41 @@ mod tests {
         lock(&shared).destroy(layout).unwrap();
         frame(&mut panels);
         assert!(panels.scenes.is_empty() && panels.sizes.is_empty() && !panels.painted.contains_key(&area));
+    }
+
+    #[test]
+    fn the_properties_of_a_sequence_shown_are_read_while_the_objects_are_free() {
+        let fixture = fixture(Kind::DopesheetView);
+        let catalogue = Arc::new(Catalogue {
+            objects: fixture.shared.clone(),
+            free: Mutex::default(),
+        });
+        let mut panels = PanelView {
+            dopesheet: Some(Arc::new(Forgetting::default())),
+            editor: Some(Editor::new(catalogue.clone(), "test")),
+            ..PanelView::default()
+        };
+        fixture.frame(&mut panels);
+        assert_eq!(
+            *catalogue.free.lock().unwrap(),
+            vec![true],
+            "read once, the objects unlocked"
+        );
+    }
+
+    #[test]
+    fn the_dopesheet_forgets_a_view_that_is_gone() {
+        let fixture = fixture(Kind::DopesheetView);
+        let sheet = Arc::new(Forgetting::default());
+        let mut panels = PanelView {
+            dopesheet: Some(sheet.clone()),
+            ..PanelView::default()
+        };
+        fixture.frame(&mut panels);
+        assert!(sheet.0.lock().unwrap().is_empty());
+        lock(&fixture.shared).destroy(fixture.view).unwrap();
+        fixture.frame(&mut panels);
+        assert_eq!(sheet.0.lock().unwrap().len(), 1);
+        assert!(panels.sheet_ids.is_empty());
     }
 }
