@@ -461,7 +461,8 @@ impl Ui {
         }
         let first = values[0];
         let object = self.get_mut(handle)?;
-        let structural = property == Property::ZValue;
+        // Which items a scene draws, and in which order.
+        let structural = matches!(property, Property::ZValue | Property::Visible);
         match property {
             Property::Enabled => object.enabled = first != 0.0,
             Property::Visible => object.visible = first != 0.0,
@@ -833,5 +834,17 @@ mod tests {
             ui.structure(scene) > structure,
             "a new item changes the scene's structure"
         );
+    }
+
+    #[test]
+    fn hiding_a_group_changes_what_its_scene_draws() {
+        let shared = ui();
+        let mut ui = lock(&shared);
+        let scene = ui.create(Kind::GraphicsScene, None).unwrap();
+        let group = ui.create(Kind::ItemGroup, Some(scene)).unwrap();
+        ui.create(Kind::RectItem, Some(group)).unwrap();
+        let structure = ui.structure(scene);
+        ui.set_numbers(group, Property::Visible, &[0.0]).unwrap();
+        assert!(ui.structure(scene) > structure);
     }
 }
