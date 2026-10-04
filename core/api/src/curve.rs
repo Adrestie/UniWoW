@@ -1,7 +1,11 @@
 //! Curves of keys with tangents, as the animation curves of Unity, shared by the module that edits
-//! them and by the modules that evaluate them.
+//! them and by the modules that evaluate them, and the contract of the curve editor.
+
+use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
+
+use crate::{ServiceKey, egui};
 
 /// How the tangents of a key are set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -235,6 +239,101 @@ fn bezier(points: [f64; 4], u: f64) -> f64 {
     v * v * v * points[0] + 3.0 * v * v * u * points[1] + 3.0 * v * u * u * points[2] + u * u * u * points[3]
 }
 
+/// A curve as the curve editor shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShownCurve {
+    pub label: String,
+    pub colour: [u8; 3],
+    pub curve: Curve,
+    /// A hidden curve is neither drawn nor edited.
+    pub visible: bool,
+}
+
+impl ShownCurve {
+    /// Curves as JSON: `[{ "label", "colour": [r, g, b], "visible", "keys": [...] }]`.
+    pub fn list_to_json(curves: &[ShownCurve]) -> Value {
+        Value::Array(
+            curves
+                .iter()
+                .map(|shown| {
+                    let mut object = shown.curve.to_json();
+                    object["label"] = json!(shown.label);
+                    object["colour"] = json!(shown.colour);
+                    object["visible"] = json!(shown.visible);
+                    object
+                })
+                .collect(),
+        )
+    }
+
+    pub fn list_from_json(value: &Value) -> Result<Vec<ShownCurve>, String> {
+        value
+            .as_array()
+            .ok_or("curves come as a list")?
+            .iter()
+            .map(|item| {
+                let colour = item["colour"].as_array().map_or(Ok([200, 200, 200]), |c| {
+                    let channel = |i: usize| c.get(i).and_then(Value::as_u64).map_or(200, |n| n.min(255) as u8);
+                    Ok::<_, String>([channel(0), channel(1), channel(2)])
+                })?;
+                Ok(ShownCurve {
+                    label: item["label"].as_str().unwrap_or_default().to_owned(),
+                    colour,
+                    curve: Curve::from_json(item)?,
+                    visible: item["visible"].as_bool().unwrap_or(true),
+                })
+            })
+            .collect()
+    }
+}
+
+/// The time axis of a curve editor: the time at its left edge, and how many pixels a unit of time
+/// takes. Its caller keeps it, so that the editor's time can follow a ruler of the caller's. With
+/// no pixels per unit yet, the editor fits it to the curves.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TimeAxis {
+    pub first: f64,
+    pub pixels_per_unit: f32,
+}
+
+/// How a curve editor shows and edits its curves.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CurveOptions {
+    /// Moved keys and added keys land on multiples of this time, such as a frame.
+    pub snap: Option<f64>,
+    pub playhead: Option<f64>,
+    /// The times outside this span are shaded, such as before the first frame and after the last.
+    pub span: Option<[f64; 2]>,
+}
+
+/// What the user did to the curves during one frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CurveChange {
+    None,
+    /// A change going on, such as a key being dragged.
+    Changing,
+    /// A change done, to record as one undo entry.
+    Finished,
+}
+
+/// The curve editor, offered by the module `curves`.
+pub trait CurveEditor: Send + Sync {
+    /// Draws `curves` in the room left in `ui` and lets the user edit them; `time` is read and
+    /// changed by zooming and scrolling. `id` tells the editors of a module apart: each keeps its
+    /// value axis, its selection and the gesture under way.
+    fn show(
+        &self,
+        ui: &mut egui::Ui,
+        id: egui::Id,
+        curves: &mut [ShownCurve],
+        time: &mut TimeAxis,
+        options: &CurveOptions,
+    ) -> CurveChange;
+}
+
+/// The service of the curve editor.
+pub const SERVICE: ServiceKey<Arc<dyn CurveEditor>> = ServiceKey::new("curve-editor");
+
 const MODES: [(TangentMode, &str); 5] = [
     (TangentMode::ClampedAuto, "clamped_auto"),
     (TangentMode::Auto, "auto"),
@@ -320,7 +419,7 @@ fn key_from_json(value: &Value) -> Result<CurveKey, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Curve, CurveKey, SideMode, TangentMode};
+    use super::{Curve, CurveKey, ShownCurve, SideMode, TangentMode};
 
     fn curve(points: &[(f64, f64)]) -> Curve {
         let mut curve = Curve::default();
@@ -399,5 +498,12 @@ mod tests {
             "Clamped Auto is the default"
         );
         assert!(Curve::from_json(&serde_json::json!({ "keys": [{ "time": 0 }] })).is_err());
+        let shown = vec![ShownCurve {
+            label: "x".to_owned(),
+            colour: [220, 70, 60],
+            curve: keys,
+            visible: false,
+        }];
+        assert_eq!(ShownCurve::list_from_json(&ShownCurve::list_to_json(&shown)), Ok(shown));
     }
 }
