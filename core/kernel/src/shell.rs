@@ -742,6 +742,7 @@ impl Shell {
             Closing::Confirmed => return,
             Closing::Asking(_) => {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                show_window(ctx);
                 return;
             }
             Closing::Open => {}
@@ -770,6 +771,7 @@ impl Shell {
         {
             Ok(Some(dialog)) => {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                show_window(ctx);
                 self.closing = Closing::Asking(dialog);
             }
             Ok(None) => log::warn!(
@@ -1032,6 +1034,14 @@ impl eframe::App for Shell {
                 ctx.request_repaint_after(SETTINGS_SAVE_INTERVAL - since);
             }
         }
+        // Here rather than in `ui`: eframe calls only `logic` while the window is minimised, then
+        // closes it unless told otherwise.
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.close_requested(ctx);
+        }
+        if matches!(self.closing, Closing::Confirmed) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 
     /// Draws the window and handles what the user did in it; the rest waits for `logic`.
@@ -1107,13 +1117,6 @@ impl eframe::App for Shell {
                 self.fail(index, format!("windows: {message}"));
             }
         }
-        if ctx.input(|i| i.viewport().close_requested()) {
-            self.close_requested(&ctx);
-        }
-        if matches!(self.closing, Closing::Confirmed) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        }
-
         // A modal window takes the keyboard from the editor.
         let modal = ctx.memory(|memory| memory.top_modal_layer().is_some());
         // Nor while something is dragged: undoing under a drag would change what it moves.
@@ -1342,6 +1345,14 @@ fn history_button(ui: &mut egui::Ui, verb: &str, shortcut: &str, label: Option<S
 }
 
 /// Calls the module of `slot` with a context, catching panics.
+/// Brings the window back from the taskbar, so that its question is seen.
+fn show_window(ctx: &egui::Context) {
+    if ctx.input(|i| i.viewport().minimized.unwrap_or(false)) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+    }
+    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+}
+
 fn call_module<R>(
     slot: &mut Slot,
     host: &mut KernelHost,
