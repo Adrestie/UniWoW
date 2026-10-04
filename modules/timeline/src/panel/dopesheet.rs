@@ -331,6 +331,7 @@ pub(super) fn properties_row(
             .on_hover_text("Add a key at the playhead with the current value")
             .clicked()
             && let Some(value) = current
+            && admissible_value(timeline, &shown_name, &value)
         {
             let frame = f64::from(timeline.playhead.round() as u32);
             let mut after = sequence.clone();
@@ -583,6 +584,30 @@ pub(super) fn diamond(painter: &egui::Painter, centre: Pos2, fill: Color32, outl
     painter.add(egui::Shape::convex_polygon(points, fill, Stroke::new(1.0, outline)));
 }
 
+/// Whether a property's value may go into a sequence; else the panel says why.
+fn admissible_value(timeline: &mut TimelineModule, name: &str, value: &PropertyValue) -> bool {
+    let fits = value
+        .components()
+        .iter()
+        .all(|number| crate::sequence::admissible(*number));
+    if !fits {
+        timeline
+            .panel
+            .say(&format!("no key for {name}: its value is not a number within 1e9"));
+    }
+    fits
+}
+
+/// A number typed in a field: none for the text it showed (see `number_field`), nor for what is no
+/// finite number.
+fn typed(text: &str, shown: &str) -> Option<f64> {
+    let text = text.trim();
+    if text == shown {
+        return None;
+    }
+    text.parse().ok().filter(|number: &f64| number.is_finite())
+}
+
 /// A number as its field shows it: at most three decimals.
 fn field_text(value: f64) -> String {
     let text = format!("{value:.3}");
@@ -592,8 +617,14 @@ fn field_text(value: f64) -> String {
 
 /// The field of a number at the playhead. Its text, typed or not, is kept once the field loses the
 /// keyboard; the text it showed when it took it is no value typed, even rounded or out of range.
+/// What a field lets through: its property's range, within the limit of the curves.
+fn field_range(range: [f64; 2]) -> [f64; 2] {
+    [range[0].max(-curve::LIMIT), range[1].min(curve::LIMIT)]
+}
+
 pub(super) fn number_field(ui: &mut egui::Ui, value: &mut f64, range: [f64; 2], speed: f64) -> egui::Response {
     let shown = field_text(*value);
+    let range = field_range(range);
     ui.add_sized(
         [62.0, ROW - 4.0],
         egui::DragValue::new(value)
@@ -601,10 +632,7 @@ pub(super) fn number_field(ui: &mut egui::Ui, value: &mut f64, range: [f64; 2], 
             .range(range[0]..=range[1])
             .clamp_existing_to_range(false)
             .custom_formatter(|number, _| field_text(number))
-            .custom_parser(move |text| {
-                let text = text.trim();
-                if text == shown { None } else { text.parse().ok() }
-            })
+            .custom_parser(move |text| typed(text, &shown))
             .update_while_editing(false),
     )
 }
@@ -613,7 +641,7 @@ pub(super) fn number_field(ui: &mut egui::Ui, value: &mut f64, range: [f64; 2], 
 mod tests {
     use uniwow_api::egui;
 
-    use super::{field_text, number_field};
+    use super::{field_range, field_text, number_field, typed};
 
     /// A frame drawing a field of `value`, with `events`; returns whether it changed and its place.
     fn frame(ctx: &egui::Context, value: &mut f64, events: Vec<egui::Event>) -> (bool, egui::Rect) {
@@ -658,6 +686,15 @@ mod tests {
         frame(&ctx, &mut value, Vec::new());
         assert!(!changed);
         assert_eq!(value, 1.0487, "neither rounded nor brought back within the range");
+    }
+
+    #[test]
+    fn a_field_lets_through_only_finite_numbers_within_the_limit_of_the_curves() {
+        assert_eq!(typed("nan", "1"), None);
+        assert_eq!(typed("inf", "1"), None);
+        assert_eq!(typed(" 2.5 ", "1"), Some(2.5));
+        assert_eq!(field_range([f64::MIN, 1e12]), [-1e9, 1e9]);
+        assert_eq!(field_range([0.0, 1.0]), [0.0, 1.0]);
     }
 
     #[test]

@@ -221,6 +221,11 @@ impl TimelineModule {
     fn save(&mut self, name: &str) -> Result<(), String> {
         let path = self.path(name);
         let document = self.documents.get_mut(name).ok_or("nothing to save")?;
+        // A file the Timeline could not read back is never written.
+        document
+            .sequence
+            .check()
+            .map_err(|error| format!("'{name}' is not saved: {error}"))?;
         let temporary = path.with_extension("json.tmp");
         std::fs::write(&temporary, document.sequence.to_text())
             .and_then(|()| std::fs::rename(&temporary, &path))
@@ -318,15 +323,23 @@ impl TimelineModule {
     }
 
     /// Replaces the shown sequence by `after`, as one undo entry.
-    fn edit(&mut self, ctx: &mut Context, label: &str, after: Sequence) {
-        if let Some(name) = self.current.clone() {
-            ctx.execute(SequenceEdit {
-                name,
-                label: label.to_owned(),
-                after,
-                before: None,
-            });
+    /// Records the change as one undo entry; refused, with a message, when the sequence could not
+    /// be saved afterwards.
+    fn edit(&mut self, ctx: &mut Context, label: &str, after: Sequence) -> bool {
+        if let Err(error) = after.check() {
+            self.panel_message(&format!("not changed: {error}"));
+            return false;
         }
+        let Some(name) = self.current.clone() else {
+            return false;
+        };
+        ctx.execute(SequenceEdit {
+            name,
+            label: label.to_owned(),
+            after,
+            before: None,
+        });
+        true
     }
 }
 
@@ -449,6 +462,34 @@ mod tests {
         assert_eq!(host.forgotten, vec!["intro".to_owned()]);
         assert!(!timeline.documents.contains_key("intro"));
         assert_eq!(timeline.current.as_deref(), Some("outro"));
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn a_sequence_its_loader_would_refuse_is_neither_saved_nor_recorded() {
+        let folder = std::env::temp_dir().join(format!("uniwow-timeline-check-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut broken = Sequence::default();
+        let mut track = Track::new("cube/scale", PropertyKind::Vector);
+        track.curves[0].set_key(0.0, f64::NAN);
+        broken.tracks.push(track);
+        let mut timeline = TimelineModule {
+            folder: folder.clone(),
+            current: Some("intro".to_owned()),
+            ..TimelineModule::default()
+        };
+        timeline.documents.insert(
+            "intro".to_owned(),
+            Document {
+                sequence: broken.clone(),
+                dirty: true,
+            },
+        );
+        assert!(timeline.save("intro").is_err());
+        assert!(!folder.join("intro.json").exists(), "no file it could not read back");
+        let mut host = FakeHost::default();
+        assert!(!timeline.edit(&mut host.context(), "break it", broken));
+        assert!(host.executed.is_empty());
         std::fs::remove_dir_all(&folder).unwrap();
     }
 

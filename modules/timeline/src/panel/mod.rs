@@ -239,8 +239,13 @@ fn finish_editing(timeline: &mut TimelineModule, ctx: &mut Context) {
     let after = std::mem::replace(&mut document.sequence, before);
     if after == document.sequence {
         document.dirty = dirty;
-    } else {
-        timeline.edit(ctx, &label, after);
+    } else if !timeline.edit(ctx, &label, after)
+        && let Some(document) = timeline
+            .current
+            .as_ref()
+            .and_then(|name| timeline.documents.get_mut(name))
+    {
+        document.dirty = dirty;
     }
 }
 

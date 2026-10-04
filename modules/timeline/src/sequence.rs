@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use uniwow_api::curve::{Curve, CurveKey};
+use uniwow_api::curve::{Curve, CurveKey, LIMIT};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::{PropertyKind, PropertyValue};
 
@@ -105,7 +105,24 @@ impl Track {
     }
 }
 
+/// Whether a value may go into a sequence: the rules of `Curve::check`.
+pub fn admissible(value: f64) -> bool {
+    value.is_finite() && value.abs() <= LIMIT
+}
+
 impl Sequence {
+    /// Whether its file would be read back: every curve follows the rules of `Curve::check`.
+    pub fn check(&self) -> Result<(), String> {
+        for track in &self.tracks {
+            for curve in &track.curves {
+                curve
+                    .check()
+                    .map_err(|error| format!("'{}': {error}", track.property))?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn track(&self, property: &str) -> Option<&Track> {
         self.tracks.iter().find(|track| track.property == property)
     }
