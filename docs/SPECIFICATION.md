@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 4 built and validated; milestone 5 built, awaiting validation; milestones 6 to 9 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 5 built and validated; milestones 6 to 9 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -679,7 +679,7 @@ As built:
   folder as a group that opens and closes; `require` looks in the script's tool folder first, then
   in the language folder.
 
-### Milestone 5: panels and undo for compiled modules (built, awaiting validation)
+### Milestone 5: panels and undo for compiled modules (done)
 
 An interface API modelled on Qt, defined once in the core for every module that is not written in
 Rust, offered here to compiled modules with classes for C++ and C#; Lua and Python modules receive
