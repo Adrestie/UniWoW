@@ -214,6 +214,26 @@ fn with_keys(tracks: &[Track], property: &str, frame: f64, values: &[(usize, f64
     tracks
 }
 
+/// The tracks with values set by hand on numbers of `property`, each a key at `frame`. A number
+/// without a key yet, set away from frame 0, keeps there as a key the value it had `before`.
+fn with_values(tracks: &[Track], property: &str, frame: f64, values: &[(usize, f64)], before: &[f64]) -> Vec<Track> {
+    let mut tracks = tracks.to_vec();
+    if let Some(track) = tracks.iter_mut().find(|track| track.property == property) {
+        for (number, value) in values {
+            if let Some(curve) = track.curves.get_mut(*number) {
+                if curve.keys.is_empty()
+                    && frame > 0.0
+                    && let Some(old) = before.get(*number)
+                {
+                    curve.set_key(0.0, *old);
+                }
+                curve.set_key(frame, *value);
+            }
+        }
+    }
+    tracks
+}
+
 /// The tracks without that of `property`.
 fn without_track(tracks: &[Track], property: &str) -> Vec<Track> {
     tracks
@@ -551,6 +571,7 @@ fn values(
         .or(current)
         .unwrap_or_else(|| PropertyValue::from_components(track.kind, &[]));
     let mut numbers = shown.components();
+    let before = numbers.clone();
     // Only what the user did sets keys: a field that brings a value back within its range on its
     // own must not.
     let mut changed: Vec<usize> = Vec::new();
@@ -627,7 +648,7 @@ fn values(
     }
     if !changed.is_empty() {
         let keys: Vec<(usize, f64)> = changed.into_iter().map(|number| (number, numbers[number])).collect();
-        let tracks = with_keys(&input.sequence.tracks, &track.property, frame, &keys);
+        let tracks = with_values(&input.sequence.tracks, &track.property, frame, &keys, &before);
         let label = format!("set a key of {shown_name}");
         let keys = if finished {
             state.field = None;
@@ -1041,7 +1062,7 @@ mod tests {
 
     use super::{
         Gesture, Row, Sheet, State, field_range, field_text, keyable, lock, number_field, row_keys, rows, tick_step,
-        typed, with_keys, without_track,
+        typed, with_keys, with_values, without_track,
     };
 
     /// `cube/position` with keys at frames 10 and 20 on x, and `cube/opacity` with one at 10.
@@ -1206,6 +1227,26 @@ mod tests {
         let left = without_track(&sequence.tracks, "cube/position");
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].property, "cube/opacity");
+    }
+
+    #[test]
+    fn a_number_set_for_the_first_time_away_from_the_start_keeps_its_value_there() {
+        let mut colour = Track::new("cube/colour", PropertyKind::Colour);
+        colour.curves[1].set_key(10.0, 0.5);
+        let tracks = vec![colour];
+        let before = [1.0, 0.5, 1.0];
+        // Red has no key: set at frame 30, it keeps 1 at frame 0.
+        let set = with_values(&tracks, "cube/colour", 30.0, &[(0, 0.2)], &before);
+        let red: Vec<(f64, f64)> = set[0].curves[0].keys.iter().map(|key| (key.time, key.value)).collect();
+        assert_eq!(red, vec![(0.0, 1.0), (30.0, 0.2)]);
+        // Green has a key: only the one set.
+        let set = with_values(&tracks, "cube/colour", 30.0, &[(1, 0.8)], &before);
+        assert_eq!(set[0].curves[1].keys.len(), 2);
+        assert!(set[0].curves[1].keys.iter().all(|key| key.time != 0.0));
+        // At frame 0, the value set is the key there.
+        let set = with_values(&tracks, "cube/colour", 0.0, &[(2, 0.4)], &before);
+        let blue: Vec<(f64, f64)> = set[0].curves[2].keys.iter().map(|key| (key.time, key.value)).collect();
+        assert_eq!(blue, vec![(0.0, 0.4)]);
     }
 
     #[test]

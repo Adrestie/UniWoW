@@ -1457,6 +1457,9 @@ As built, second part (8.6b), the Timeline a client:
   kernel, fitted again for a sequence shown again; the button adding a key is greyed, with *a value beyond 1e9 cannot be
   keyed*, when the property's value is beyond the limit of the curves, as is a field showing such a
   value, and a value typed beyond is brought back to the limit.
+- At the user's request, as in Unity: a number whose curve has no key, given a value by hand away
+  from frame 0, also gets a key at frame 0 holding the value it had before; a number that has a
+  key already behaves as before.
 
 **Step 8.7, data widgets**, as in Qt:
 
