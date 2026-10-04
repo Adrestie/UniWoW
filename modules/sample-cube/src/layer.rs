@@ -11,6 +11,8 @@ const SHADER: &str = r#"
 struct Globals {
     view_proj: mat4x4<f32>,
     model: mat4x4<f32>,
+    // The inverse transpose of `model`, which keeps normals right under any scale.
+    normal: mat4x4<f32>,
     color: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -24,7 +26,7 @@ struct VertexOut {
 fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>) -> VertexOut {
     var out: VertexOut;
     out.position = globals.view_proj * globals.model * vec4<f32>(position, 1.0);
-    out.normal = (globals.model * vec4<f32>(normal, 0.0)).xyz;
+    out.normal = (globals.normal * vec4<f32>(normal, 0.0)).xyz;
     return out;
 }
 
@@ -35,6 +37,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     return vec4<f32>(globals.color.rgb * (0.25 + 0.75 * diffuse), 1.0);
 }
 "#;
+
+/// Floats of the shader's `Globals`.
+const GLOBALS: usize = 52;
 
 /// Pipeline and buffers of the cube, built in a job (rule T5) then handed to the layer.
 pub struct Gpu {
@@ -76,17 +81,22 @@ impl Layer for CubeLayer {
         let Some(resources) = self.gpu.as_ref() else {
             return;
         };
-        let (color, speed) = {
+        let (model, color) = {
             let params = lock(&self.params);
-            (params.color, params.speed)
+            let [x, y, z] = params.rotation.map(f32::to_radians);
+            let model = Mat4::from_translation(Vec3::from(params.position))
+                * Mat4::from_rotation_z(z)
+                * Mat4::from_rotation_y(y)
+                * Mat4::from_rotation_x(x)
+                * Mat4::from_scale(Vec3::from(params.scale));
+            (model, params.color)
         };
-        let angle = view.time * speed * std::f32::consts::TAU / 10.0;
-        let model = Mat4::from_translation(Vec3::new(0.0, 0.0, 1.0)) * Mat4::from_rotation_z(angle);
-        let mut globals = [0f32; 36];
+        let mut globals = [0f32; GLOBALS];
         globals[0..16].copy_from_slice(&view.view_proj.to_cols_array());
         globals[16..32].copy_from_slice(&model.to_cols_array());
-        globals[32..35].copy_from_slice(&color);
-        globals[35] = 1.0;
+        globals[32..48].copy_from_slice(&model.inverse().transpose().to_cols_array());
+        globals[48..51].copy_from_slice(&color);
+        globals[51] = 1.0;
         gpu.queue
             .write_buffer(&resources.globals, 0, bytemuck::cast_slice(&globals));
 
@@ -134,7 +144,7 @@ pub fn create(device: &wgpu::Device, target: &Target) -> Gpu {
     });
     let globals = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("cube globals"),
-        size: 36 * 4,
+        size: (GLOBALS * 4) as u64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });

@@ -1,9 +1,9 @@
 //! Sample module: a cube drawn through the viewport service.
 //!
-//! Its colour and speed change through undoable commands, from its own panel, when another
-//! module publishes `sample.paint`, or through the named command `cube.paint`. It never names
-//! the modules that ask. `cube.color` answers on the calling thread, and the cube's GPU
-//! resources are built in a job.
+//! Its colour changes through undoable commands, from its own panel, when another module
+//! publishes `sample.paint`, or through the named command `cube.paint`. It never names the
+//! modules that ask. `cube.color` answers on the calling thread, and the cube's GPU resources are
+//! built in a job. Its position, rotation, scale and colour are animatable properties.
 
 mod layer;
 
@@ -14,16 +14,19 @@ use uniwow_api::serde::{Deserialize, Serialize};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::viewport;
 use uniwow_api::{
-    Command, Context, DockArea, Event, JobId, JobOutcome, MODULE_FAILED_TOPIC, Module, Registrar, decode_arguments,
-    egui, log,
+    Command, Context, DockArea, Event, JobId, JobOutcome, MODULE_FAILED_TOPIC, Module, PropertyKind, PropertyValue,
+    Registrar, decode_arguments, egui, log,
 };
 
 use layer::{CubeLayer, Gpu};
 
 pub struct Params {
     pub color: [f32; 3],
-    /// Turns per ten seconds.
-    pub speed: f32,
+    /// Centre of the cube.
+    pub position: [f32; 3],
+    /// Euler angles in degrees, applied around x, then y, then z.
+    pub rotation: [f32; 3],
+    pub scale: [f32; 3],
 }
 
 /// Locks shared state even if a panic poisoned it: the values stay usable.
@@ -44,8 +47,6 @@ struct CubeModule {
     gpu: Arc<Mutex<Option<Gpu>>>,
     gpu_job: Option<JobId>,
     drawn: bool,
-    /// Speed before the slider started changing it, until the change is recorded.
-    speed_before_edit: Option<f32>,
 }
 
 impl Default for CubeModule {
@@ -53,12 +54,13 @@ impl Default for CubeModule {
         Self {
             params: Arc::new(Mutex::new(Params {
                 color: PRESETS[2].1,
-                speed: 1.0,
+                position: [0.0, 0.0, 1.0],
+                rotation: [0.0; 3],
+                scale: [1.0; 3],
             })),
             gpu: Arc::default(),
             gpu_job: None,
             drawn: false,
-            speed_before_edit: None,
         }
     }
 }
@@ -77,14 +79,34 @@ impl Module for CubeModule {
             )
             .command_on_caller(
                 "cube.color",
-                "The colour and speed of the cube, read on the calling thread.",
+                "The colour of the cube, read on the calling thread.",
                 json!({ "type": "object" }),
-                json!({ "type": "object", "properties": { "color": {}, "speed": { "type": "number" } } }),
-                Arc::new(move |_| {
-                    let params = lock(&params);
-                    Ok(json!({ "color": params.color, "speed": params.speed }))
-                }),
+                json!({ "type": "object", "properties": { "color": {} } }),
+                Arc::new(move |_| Ok(json!({ "color": lock(&params).color }))),
             );
+        let vector = |reg: &mut Registrar, name: &str, label: &str, range: [f64; 2], field: Field| {
+            let kind = if name == "colour" {
+                PropertyKind::Colour
+            } else {
+                PropertyKind::Vector
+            };
+            let (read, write) = (self.params.clone(), self.params.clone());
+            reg.animatable(
+                name,
+                label,
+                kind,
+                range,
+                move || PropertyValue::from_components(kind, &field(&mut lock(&read)).map(widen)),
+                move |value| {
+                    let numbers = value.components();
+                    *field(&mut lock(&write)) = [numbers[0] as f32, numbers[1] as f32, numbers[2] as f32];
+                },
+            );
+        };
+        vector(reg, "position", "Position", [-100.0, 100.0], |p| &mut p.position);
+        vector(reg, "rotation", "Rotation", [-3600.0, 3600.0], |p| &mut p.rotation);
+        vector(reg, "scale", "Scale", [0.01, 100.0], |p| &mut p.scale);
+        vector(reg, "colour", "Colour", [0.0, 1.0], |p| &mut p.color);
     }
 
     fn init(&mut self, ctx: &mut Context) {
@@ -137,32 +159,6 @@ impl Module for CubeModule {
                 }
             }
         });
-        ui.separator();
-
-        let before = lock(&self.params).speed;
-        let mut speed = before;
-        // A typed value is taken on Enter or when the box loses focus, not at every character.
-        let slider = egui::Slider::new(&mut speed, 0.0..=4.0)
-            .text("Rotation speed")
-            .update_while_editing(false);
-        let response = ui.add(slider);
-        if response.changed() {
-            // The value before the first change, whatever changed it: mouse, keyboard or typing.
-            self.speed_before_edit.get_or_insert(before);
-            // Shown live; recorded as one command once the slider is no longer being dragged.
-            lock(&self.params).speed = speed;
-        }
-        if !response.dragged()
-            && let Some(old) = self.speed_before_edit.take()
-        {
-            let mut params = lock(&self.params);
-            let new = params.speed;
-            if new != old {
-                // The command reads the value it replaces when applied: the one before the edit.
-                params.speed = old;
-                ctx.execute(SetSpeed::new(new));
-            }
-        }
         ui.separator();
         ui.weak("Ctrl+Z / Ctrl+Y undo and redo these changes.");
     }
@@ -222,6 +218,14 @@ struct Painted {
     reason: String,
 }
 
+/// One of the vectors of `Params`.
+type Field = fn(&mut Params) -> &mut [f32; 3];
+
+/// The number an `f32` was written as: 0.15, not 0.15000000596046448.
+fn widen(value: f32) -> f64 {
+    value.to_string().parse().unwrap_or(f64::from(value))
+}
+
 fn to_color32(c: [f32; 3]) -> egui::Color32 {
     egui::Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8)
 }
@@ -262,41 +266,11 @@ impl Command for SetColor {
     }
 }
 
-/// Sets the rotation speed. The speed it replaces is read when applied (see `Command`).
-struct SetSpeed {
-    new: f32,
-    old: Option<f32>,
-}
-
-impl SetSpeed {
-    fn new(speed: f32) -> Self {
-        Self { new: speed, old: None }
-    }
-}
-
-impl Command for SetSpeed {
-    fn label(&self) -> String {
-        "cube speed".to_owned()
-    }
-
-    fn apply(&mut self, module: &mut dyn Any) {
-        let mut params = lock(&cube(module).params);
-        self.old = Some(params.speed);
-        params.speed = self.new;
-    }
-
-    fn revert(&mut self, module: &mut dyn Any) {
-        if let Some(old) = self.old {
-            lock(&cube(module).params).speed = old;
-        }
-    }
-}
-
 uniwow_api::export_module!(CubeModule::default());
 
 #[cfg(test)]
 mod tests {
-    use uniwow_api::Command;
+    use uniwow_api::{Command, Module, PropertyKind, PropertyValue, Registrar};
 
     use super::{CubeModule, PRESETS, SetColor, lock};
 
@@ -314,5 +288,21 @@ mod tests {
         assert_eq!(lock(&cube.params).color, red, "one undo gives the first paint back");
         first.revert(&mut cube);
         assert_eq!(lock(&cube.params).color, start, "two undos give the starting colour");
+    }
+
+    #[test]
+    fn its_position_rotation_scale_and_colour_are_animatable() {
+        let mut cube = CubeModule::default();
+        let mut reg = Registrar::default();
+        cube.register(&mut reg);
+        let names: Vec<&str> = reg.properties.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["position", "rotation", "scale", "colour"]);
+        let scale = &reg.properties[2];
+        (scale.write)(PropertyValue::Vector([2.0, 1.0, 0.5]));
+        assert_eq!(lock(&cube.params).scale, [2.0, 1.0, 0.5]);
+        assert_eq!((scale.read)(), PropertyValue::Vector([2.0, 1.0, 0.5]));
+        assert_eq!(reg.properties[3].kind, PropertyKind::Colour);
+        (reg.properties[3].write)(PropertyValue::Colour([0.15, 0.3, 0.85]));
+        assert_eq!((reg.properties[3].read)(), PropertyValue::Colour([0.15, 0.3, 0.85]));
     }
 }
