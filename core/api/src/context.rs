@@ -1,6 +1,6 @@
 use std::any::Any;
 
-use crate::{CallId, Command, Editor, JobContext, JobFn, JobId, ServiceKey, egui_wgpu};
+use crate::{CallId, Command, Editor, JobContext, JobFn, JobId, PropertyInfo, PropertyValue, ServiceKey, egui_wgpu};
 
 /// What the kernel offers to modules. Implemented by the kernel only.
 pub trait Host {
@@ -118,5 +118,19 @@ impl<'a> Context<'a> {
     /// A handle to the editor for other threads, acting for this module.
     pub fn editor(&self) -> Editor {
         self.host.editor(self.module)
+    }
+
+    /// Every animatable property of running modules.
+    pub fn properties(&self) -> Vec<PropertyInfo> {
+        self.editor().properties()
+    }
+
+    pub fn read_property(&self, path: &str) -> Result<PropertyValue, String> {
+        self.editor().read_property(path)
+    }
+
+    /// Writes an animatable property, without the history.
+    pub fn write_property(&self, path: &str, value: PropertyValue) -> Result<(), String> {
+        self.editor().write_property(path, value)
     }
 }

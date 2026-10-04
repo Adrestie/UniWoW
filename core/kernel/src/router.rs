@@ -8,7 +8,10 @@ use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
 use uniwow_api::serde_json::Value;
-use uniwow_api::{AppliedChange, CallId, CommandHandler, CommandInfo, CommandSpec, EditorBackend, Event, egui, log};
+use uniwow_api::{
+    AppliedChange, CallId, CommandHandler, CommandInfo, CommandSpec, EditorBackend, Event, PropertyInfo, PropertyValue,
+    ReadProperty, WriteProperty, egui, log,
+};
 
 use crate::guard::guarded_as;
 use crate::host::Reported;
@@ -18,6 +21,14 @@ pub struct Entry {
     pub info: CommandInfo,
     /// Set for a command running on the calling thread.
     pub handler: Option<CommandHandler>,
+}
+
+/// An animatable property of the catalogue.
+#[derive(Clone)]
+pub struct PropertyEntry {
+    pub info: PropertyInfo,
+    pub read: ReadProperty,
+    pub write: WriteProperty,
 }
 
 /// Where the answer of a call goes.
@@ -105,6 +116,8 @@ struct Subscription {
 /// State shared between the interface thread and every `Editor` handle.
 pub struct Bridge {
     pub catalogue: RwLock<BTreeMap<String, Entry>>,
+    /// Animatable properties by path; only those of running modules are reached.
+    pub properties: RwLock<BTreeMap<String, PropertyEntry>>,
     /// Ids of the running modules; only their commands can be called.
     pub running: RwLock<HashSet<String>>,
     /// Events published from other threads, delivered at the next frame.
@@ -129,6 +142,7 @@ impl Bridge {
         let (requests, receiver) = mpsc::channel();
         let bridge = Self {
             catalogue: RwLock::default(),
+            properties: RwLock::default(),
             running: RwLock::default(),
             events: Mutex::default(),
             failures: Mutex::default(),
@@ -224,6 +238,43 @@ impl Bridge {
         })
     }
 
+    /// The property, if it exists and its module is running.
+    fn property(&self, path: &str) -> Result<PropertyEntry, String> {
+        let entry = self
+            .properties
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(path)
+            .cloned()
+            .ok_or_else(|| format!("unknown property '{path}'"))?;
+        if !self
+            .running
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&entry.info.owner)
+        {
+            return Err(format!(
+                "'{path}' belongs to '{}', which is not running",
+                entry.info.owner
+            ));
+        }
+        Ok(entry)
+    }
+
+    /// Runs a property's function; a panic there makes its module fail, at the next frame.
+    fn run_property<R>(&self, entry: &PropertyEntry, f: impl FnOnce() -> R) -> Result<R, String> {
+        let owner = &entry.info.owner;
+        guarded_as(owner, f).map_err(|panic| {
+            self.failures.lock().unwrap_or_else(|e| e.into_inner()).push(Reported {
+                reporter: "kernel".to_owned(),
+                culprit: owner.clone(),
+                message: format!("property '{}' panicked: {panic}", entry.info.path),
+            });
+            self.wake();
+            format!("'{}' failed: {panic}", entry.info.path)
+        })
+    }
+
     fn wake(&self) {
         if let Some(wake) = &self.wake {
             wake.request_repaint();
@@ -232,6 +283,37 @@ impl Bridge {
 }
 
 impl EditorBackend for Bridge {
+    fn properties(&self) -> Vec<PropertyInfo> {
+        let running = self.running.read().unwrap_or_else(|e| e.into_inner());
+        self.properties
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter(|entry| running.contains(&entry.info.owner))
+            .map(|entry| entry.info.clone())
+            .collect()
+    }
+
+    fn read_property(&self, caller: &str, path: &str) -> Result<PropertyValue, String> {
+        self.active(caller)?;
+        let entry = self.property(path)?;
+        self.run_property(&entry, || (entry.read)())
+    }
+
+    fn write_property(&self, caller: &str, path: &str, value: PropertyValue) -> Result<(), String> {
+        self.active(caller)?;
+        let entry = self.property(path)?;
+        if value.kind() != entry.info.kind {
+            return Err(format!(
+                "'{path}' takes a {}, not a {}",
+                entry.info.kind.name(),
+                value.kind().name()
+            ));
+        }
+        let value = value.clamped(entry.info.range);
+        self.run_property(&entry, || (entry.write)(value))
+    }
+
     fn commands(&self) -> Vec<CommandInfo> {
         let running = self.running.read().unwrap_or_else(|e| e.into_inner());
         self.catalogue
@@ -420,15 +502,15 @@ pub fn serve(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use uniwow_api::serde_json::{Value, json};
-    use uniwow_api::{CommandInfo, EditorBackend};
+    use uniwow_api::{CommandInfo, EditorBackend, PropertyInfo, PropertyKind, PropertyValue};
 
     use uniwow_api::{CommandSpec, RunsOn};
 
-    use super::{Bridge, Entry, ReplyTo, Request, choose_commands, serve};
+    use super::{Bridge, Entry, PropertyEntry, ReplyTo, Request, choose_commands, serve};
 
     fn declared(owner: &str, name: &str, delegated: bool) -> (String, CommandSpec) {
         let spec = CommandSpec {
@@ -717,5 +799,72 @@ mod tests {
         assert_eq!(bridge.commands().len(), 2);
         bridge.running.write().unwrap().clear();
         assert!(bridge.commands().is_empty());
+    }
+
+    /// A bridge with the property `cube/scale`, a vector from 0.01 to 100, whose writes go to
+    /// the returned value; writing `[13, 13, 13]` panics.
+    fn bridge_with_scale() -> (Arc<Bridge>, Arc<Mutex<PropertyValue>>) {
+        let (bridge, _receiver) = bridge();
+        let scale = Arc::new(Mutex::new(PropertyValue::Vector([1.0; 3])));
+        let (read, write) = (scale.clone(), scale.clone());
+        bridge.properties.write().unwrap().insert(
+            "cube/scale".to_owned(),
+            PropertyEntry {
+                info: PropertyInfo {
+                    path: "cube/scale".to_owned(),
+                    owner: "cube".to_owned(),
+                    label: "Scale".to_owned(),
+                    kind: PropertyKind::Vector,
+                    range: [0.01, 100.0],
+                },
+                read: Arc::new(move || *read.lock().unwrap()),
+                write: Arc::new(move |value| {
+                    assert_ne!(value, PropertyValue::Vector([13.0; 3]), "unlucky");
+                    *write.lock().unwrap() = value;
+                }),
+            },
+        );
+        (bridge, scale)
+    }
+
+    #[test]
+    fn properties_are_written_within_their_range_and_type() {
+        let (bridge, scale) = bridge_with_scale();
+        assert_eq!(bridge.properties().len(), 1);
+        let caller = "timeline";
+        bridge.running.write().unwrap().insert(caller.to_owned());
+        bridge
+            .write_property(caller, "cube/scale", PropertyValue::Vector([2.0, 0.0, 500.0]))
+            .unwrap();
+        assert_eq!(*scale.lock().unwrap(), PropertyValue::Vector([2.0, 0.01, 100.0]));
+        assert_eq!(
+            bridge.read_property(caller, "cube/scale"),
+            Ok(PropertyValue::Vector([2.0, 0.01, 100.0]))
+        );
+        assert!(
+            bridge
+                .write_property(caller, "cube/scale", PropertyValue::Number(1.0))
+                .is_err()
+        );
+        assert!(bridge.read_property(caller, "cube/size").is_err());
+    }
+
+    #[test]
+    fn a_property_of_a_stopped_module_is_out_of_reach_and_a_panic_is_reported() {
+        let (bridge, _scale) = bridge_with_scale();
+        let caller = "timeline";
+        bridge.running.write().unwrap().insert(caller.to_owned());
+        assert!(
+            bridge
+                .write_property(caller, "cube/scale", PropertyValue::Vector([13.0; 3]))
+                .is_err()
+        );
+        let reported = bridge.failures.lock().unwrap();
+        assert_eq!(reported.len(), 1);
+        assert_eq!(reported[0].culprit, "cube");
+        drop(reported);
+        bridge.running.write().unwrap().remove("cube");
+        assert!(bridge.properties().is_empty());
+        assert!(bridge.read_property(caller, "cube/scale").is_err());
     }
 }

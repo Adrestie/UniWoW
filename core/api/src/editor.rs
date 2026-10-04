@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::{AppliedChange, CommandInfo, Event};
+use crate::{AppliedChange, CommandInfo, Event, PropertyInfo, PropertyValue};
 
 /// What the kernel offers behind an `Editor` handle. Implemented by the kernel only. Every request
 /// of a caller whose module no longer runs is refused with an error.
@@ -37,6 +37,20 @@ pub trait EditorBackend: Send + Sync {
     /// Whether the caller's module still runs.
     fn is_active(&self, _caller: &str) -> bool {
         true
+    }
+
+    /// Every animatable property of running modules.
+    fn properties(&self) -> Vec<PropertyInfo> {
+        Vec::new()
+    }
+
+    fn read_property(&self, _caller: &str, path: &str) -> Result<PropertyValue, String> {
+        Err(format!("no property '{path}' here"))
+    }
+
+    /// Writes a property without the history.
+    fn write_property(&self, _caller: &str, path: &str, _value: PropertyValue) -> Result<(), String> {
+        Err(format!("no property '{path}' here"))
     }
 }
 
@@ -168,5 +182,20 @@ impl Editor {
     /// Whether the module still runs: once it failed, its threads should stop.
     pub fn is_active(&self) -> bool {
         self.backend.is_active(&self.caller)
+    }
+
+    /// Every animatable property of running modules.
+    pub fn properties(&self) -> Vec<PropertyInfo> {
+        self.backend.properties()
+    }
+
+    /// The current value of an animatable property.
+    pub fn read_property(&self, path: &str) -> Result<PropertyValue, String> {
+        self.backend.read_property(&self.caller, path)
+    }
+
+    /// Writes an animatable property, without the history; each number is kept within its range.
+    pub fn write_property(&self, path: &str, value: PropertyValue) -> Result<(), String> {
+        self.backend.write_property(&self.caller, path, value)
     }
 }

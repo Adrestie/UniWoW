@@ -1,6 +1,7 @@
 use std::any::Any;
+use std::sync::Arc;
 
-use crate::{CommandHandler, CommandSpec, RunsOn, ServiceKey};
+use crate::{CommandHandler, CommandSpec, PropertyKind, PropertySpec, PropertyValue, RunsOn, ServiceKey};
 
 /// Where a panel goes the first time it is shown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +41,8 @@ pub struct Registrar {
     pub commands: Vec<CommandSpec>,
     /// Event topics; `*` receives every event.
     pub subscriptions: Vec<String>,
+    /// Animatable properties.
+    pub properties: Vec<PropertySpec>,
 }
 
 impl Registrar {
@@ -122,6 +125,29 @@ impl Registrar {
             result,
             runs_on,
             delegated,
+        });
+        self
+    }
+
+    /// Declares an animatable property, `<module>/<name>`: `read` gives its current value and
+    /// `write` sets it, without the history, from any thread. Each number written is kept within
+    /// `range`.
+    pub fn animatable(
+        &mut self,
+        name: &str,
+        label: &str,
+        kind: PropertyKind,
+        range: [f64; 2],
+        read: impl Fn() -> PropertyValue + Send + Sync + 'static,
+        write: impl Fn(PropertyValue) + Send + Sync + 'static,
+    ) -> &mut Self {
+        self.properties.push(PropertySpec {
+            name: name.to_owned(),
+            label: label.to_owned(),
+            kind,
+            range,
+            read: Arc::new(read),
+            write: Arc::new(write),
         });
         self
     }

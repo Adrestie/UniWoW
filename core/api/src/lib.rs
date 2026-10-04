@@ -25,6 +25,7 @@ mod editor;
 mod event;
 mod job;
 mod module;
+mod property;
 mod registrar;
 mod service;
 pub mod ui;
@@ -37,6 +38,7 @@ pub use editor::{Editor, EditorBackend};
 pub use event::Event;
 pub use job::{JobContext, JobFn, JobId, JobOutcome};
 pub use module::{CREATE_SYMBOL, CreateFn, Module, PACKAGE_SYMBOL, PackageFn};
+pub use property::{PropertyInfo, PropertyKind, PropertySpec, PropertyValue, ReadProperty, WriteProperty};
 pub use registrar::{DockArea, MenuItemSpec, PanelSpec, Registrar};
 pub use service::ServiceKey;
 

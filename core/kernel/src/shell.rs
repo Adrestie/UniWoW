@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use uniwow_api::egui_dock::tab_viewer::OnCloseResponse;
 use uniwow_api::egui_dock::{DockArea, DockState, Style, TabViewer};
 use uniwow_api::{
-    CallId, CommandInfo, Context, DockArea as Area, Host, MODULE_FAILED_TOPIC, Module, Registrar, RunsOn, eframe, egui,
-    log, serde_json,
+    CallId, CommandInfo, Context, DockArea as Area, Host, MODULE_FAILED_TOPIC, Module, PropertyInfo, Registrar, RunsOn,
+    eframe, egui, log, serde_json,
 };
 
 use crate::groups::{Closed, Ended, Groups};
@@ -22,7 +22,7 @@ use crate::logger;
 use crate::order;
 use crate::panels::{self, CommandsPanel};
 use crate::requirements::{self, Need};
-use crate::router::{self, Bridge, Entry, ReplyTo, Request};
+use crate::router::{self, Bridge, Entry, PropertyEntry, ReplyTo, Request};
 use crate::settings::Settings;
 
 const KERNEL: &str = "kernel";
@@ -130,6 +130,26 @@ impl Shell {
             slot.menu_items = reg.menu_items;
             slot.subscriptions = reg.subscriptions;
             declared.extend(reg.commands.into_iter().map(|spec| (slot.id.clone(), spec)));
+            let mut properties = self.host.bridge.properties.write().unwrap_or_else(|e| e.into_inner());
+            for spec in reg.properties {
+                let path = format!("{}/{}", slot.id, spec.name);
+                let info = PropertyInfo {
+                    path: path.clone(),
+                    owner: slot.id.clone(),
+                    label: spec.label,
+                    kind: spec.kind,
+                    range: spec.range,
+                };
+                let entry = PropertyEntry {
+                    info,
+                    read: spec.read,
+                    write: spec.write,
+                };
+                if properties.insert(path.clone(), entry).is_some() {
+                    log::warn!("property '{path}' declared twice: the last one is kept");
+                }
+            }
+            drop(properties);
             for (id, value) in reg.services {
                 if let Some(existing) = self.host.services.get(&id) {
                     log::warn!(
