@@ -40,6 +40,10 @@ impl Module for CompiledModule {
     fn panel_ui(&mut self, panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
         self.view.show(&self.started.context.ui, panel, ui, ctx.gpu());
     }
+
+    fn windows_ui(&mut self, egui: &egui::Context, ctx: &mut Context) {
+        self.view.dialogs(&self.started.context.ui, egui, ctx.gpu());
+    }
 }
 
 /// Loads the DLL of a compiled module where it is, so that the DLLs it needs are found in its

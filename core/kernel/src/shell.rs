@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use uniwow_api::egui_dock::tab_viewer::OnCloseResponse;
 use uniwow_api::egui_dock::{DockArea, DockState, Style, TabViewer};
 use uniwow_api::{
-    CallId, CommandInfo, Context, DockArea as Area, Host, MODULE_FAILED_TOPIC, Module, PropertyInfo, Registrar, RunsOn,
-    eframe, egui, log, serde_json,
+    CallId, CommandInfo, Context, DIALOG_ANSWERED_TOPIC, DIALOG_COMMAND, DockArea as Area, Event, Host,
+    MODULE_FAILED_TOPIC, Module, PropertyInfo, Registrar, RunsOn, eframe, egui, log, serde_json,
 };
 
 use crate::groups::{Closed, Ended, Groups};
@@ -55,6 +55,16 @@ pub struct Shell {
     /// Undo groups open per caller and thread (S4): their commands become one entry when the
     /// group ends.
     groups: Groups,
+    closing: Closing,
+}
+
+/// Where the closing of the editor stands while modules have unsaved changes.
+enum Closing {
+    Open,
+    /// The user is asked, in the dialog window of this number.
+    Asking(u64),
+    /// The user said to close.
+    Confirmed,
 }
 
 /// Whether the dock could be drawn this session.
@@ -97,6 +107,7 @@ impl Shell {
             replies: Vec::new(),
             commands_panel: CommandsPanel::default(),
             groups: Groups::default(),
+            closing: Closing::Open,
         };
         shell.register_all();
         shell.resolve_requirements();
@@ -673,6 +684,9 @@ impl Shell {
     /// Delivers the events published this frame. Events published meanwhile wait for the next one.
     fn dispatch_events(&mut self) {
         for event in std::mem::take(&mut self.host.events) {
+            if event.topic == DIALOG_ANSWERED_TOPIC {
+                self.closing_answered(&event);
+            }
             self.host.bridge.deliver(&event);
             for index in 0..self.slots.len() {
                 let slot = &self.slots[index];
@@ -688,6 +702,122 @@ impl Shell {
             }
         }
         self.apply_pending();
+    }
+
+    /// The unsaved documents of the running modules, with the module's name.
+    fn unsaved(&mut self) -> Vec<(usize, String, String)> {
+        let mut found = Vec::new();
+        for index in 0..self.slots.len() {
+            if !self.slots[index].state.is_running() {
+                continue;
+            }
+            let slot = &self.slots[index];
+            let name = slot
+                .manifest
+                .as_ref()
+                .map_or_else(|| slot.id.clone(), |m| m.name.clone());
+            match call_module(&mut self.slots[index], &mut self.host, |f, _| f.unsaved()) {
+                Ok(documents) => found.extend(documents.into_iter().map(|d| (index, name.clone(), d))),
+                Err(message) => self.fail(index, format!("unsaved changes: {message}")),
+            }
+        }
+        found
+    }
+
+    /// Keeps the editor open while modules have unsaved changes, and asks the user in a dialog
+    /// window when a module offers them; without one, the changes are lost.
+    fn close_requested(&mut self, ctx: &egui::Context) {
+        match self.closing {
+            Closing::Confirmed => return,
+            Closing::Asking(_) => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                return;
+            }
+            Closing::Open => {}
+        }
+        let unsaved = self.unsaved();
+        if unsaved.is_empty() {
+            return;
+        }
+        let list: Vec<String> = unsaved
+            .iter()
+            .map(|(_, module, document)| format!("- {module}: {document}"))
+            .collect();
+        let arguments = serde_json::json!({
+            "title": "Unsaved changes",
+            "text": format!("These changes are not saved:\n{}", list.join("\n")),
+            "buttons": [
+                { "id": "save", "label": "Save" },
+                { "id": "discard", "label": "Don't save" },
+                { "id": "cancel", "label": "Cancel" },
+            ],
+            "escape": "cancel",
+        });
+        match self
+            .run_command("kernel", std::thread::current().id(), DIALOG_COMMAND, arguments)
+            .map(|answer| answer["dialog"].as_u64())
+        {
+            Ok(Some(dialog)) => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.closing = Closing::Asking(dialog);
+            }
+            Ok(None) => log::warn!(
+                "unsaved changes lost, '{DIALOG_COMMAND}' giving no window number:\n{}",
+                list.join("\n")
+            ),
+            Err(error) => log::warn!("unsaved changes lost, {error}:\n{}", list.join("\n")),
+        }
+    }
+
+    /// The user's answer about the unsaved changes, when the editor is closed.
+    fn closing_answered(&mut self, event: &Event) {
+        let Closing::Asking(dialog) = self.closing else {
+            return;
+        };
+        if event.payload["dialog"].as_u64() != Some(dialog) {
+            return;
+        }
+        self.closing = Closing::Open;
+        match event.payload["button"].as_str() {
+            Some("save") => {
+                let mut failures = Vec::new();
+                let mut saved: Vec<usize> = Vec::new();
+                for (index, module, _) in self.unsaved() {
+                    if saved.contains(&index) {
+                        continue;
+                    }
+                    saved.push(index);
+                    match call_module(&mut self.slots[index], &mut self.host, |f, ctx| f.save_unsaved(ctx)) {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => failures.push(format!("- {module}: {error}")),
+                        Err(message) => {
+                            failures.push(format!("- {module}: {message}"));
+                            self.fail(index, format!("saving: {message}"));
+                        }
+                    }
+                }
+                if failures.is_empty() {
+                    self.closing = Closing::Confirmed;
+                    return;
+                }
+                let text = format!(
+                    "The editor stays open: these changes could not be saved.\n{}",
+                    failures.join("\n")
+                );
+                log::error!("{text}");
+                let arguments = serde_json::json!({
+                    "title": "Unsaved changes",
+                    "text": text,
+                    "buttons": [{ "id": "ok", "label": "OK" }],
+                    "escape": "ok",
+                });
+                if let Err(error) = self.run_command("kernel", std::thread::current().id(), DIALOG_COMMAND, arguments) {
+                    log::error!("{error}");
+                }
+            }
+            Some("discard") => self.closing = Closing::Confirmed,
+            _ => {}
+        }
     }
 
     fn running_index(&self, id: &str) -> Option<usize> {
@@ -933,6 +1063,7 @@ impl eframe::App for Shell {
             });
         });
         let Viewer { failures, closed, .. } = viewer;
+        let ctx = ui.ctx().clone();
         // A layout egui_dock cannot draw would otherwise stop the editor at every start. The reset is
         // tried once; a panel that panics at every frame then leaves a fixed message instead.
         if let Err(message) = shown {
@@ -957,8 +1088,24 @@ impl eframe::App for Shell {
             self.host.settings_changed = true;
         }
 
-        let ctx = ui.ctx().clone();
-        if !ctx.egui_wants_keyboard_input() {
+        // The modules' floating windows, over the panels.
+        for index in 0..self.slots.len() {
+            if self.slots[index].state.is_running()
+                && let Err(message) = call_module(&mut self.slots[index], &mut self.host, |f, c| f.windows_ui(&ctx, c))
+            {
+                self.fail(index, format!("windows: {message}"));
+            }
+        }
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.close_requested(&ctx);
+        }
+        if matches!(self.closing, Closing::Confirmed) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
+        // A modal window takes the keyboard from the editor.
+        let modal = ctx.memory(|memory| memory.top_modal_layer().is_some());
+        if !ctx.egui_wants_keyboard_input() && !modal {
             if ctx
                 .input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Z)))
             {

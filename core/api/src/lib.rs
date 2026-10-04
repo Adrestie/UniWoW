@@ -45,5 +45,14 @@ pub use service::ServiceKey;
 /// Topic published by the kernel when a module fails while running. Payload: `{ "id": <module id> }`.
 pub const MODULE_FAILED_TOPIC: &str = "kernel.module_failed";
 
+/// Command opening a modal window, offered by the module `dialogs` when it runs. Arguments:
+/// `{ "title", "text", "buttons": [{ "id", "label" }], "escape": <id of a button> }`; result:
+/// `{ "dialog": <number> }`.
+pub const DIALOG_COMMAND: &str = "ui.dialog";
+
+/// Topic of the answer to a window opened with `DIALOG_COMMAND`. Payload:
+/// `{ "dialog": <number>, "button": <id> }`.
+pub const DIALOG_ANSWERED_TOPIC: &str = "ui.dialog_answered";
+
 /// Name of the runtime DLL, next to the executable.
 pub const RUNTIME_DLL: &str = "uniwow_api.dll";

@@ -16,6 +16,21 @@ pub trait Module: Any {
     /// Draws one of the panels declared in `register`, identified by `panel`.
     fn panel_ui(&mut self, _panel: &str, _ui: &mut egui::Ui, _ctx: &mut Context) {}
 
+    /// Draws the module's floating windows, such as its dialogs, at every frame, whatever panel is
+    /// shown. `egui` is the editor's window.
+    fn windows_ui(&mut self, _egui: &egui::Context, _ctx: &mut Context) {}
+
+    /// The documents of the module whose changes are not saved, named as the user knows them,
+    /// such as "Sequence 'intro'".
+    fn unsaved(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Saves every unsaved change; an error tells what could not be saved.
+    fn save_unsaved(&mut self, _ctx: &mut Context) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Receives an event whose topic the module subscribed to.
     fn on_event(&mut self, _event: &Event, _ctx: &mut Context) {}
 
