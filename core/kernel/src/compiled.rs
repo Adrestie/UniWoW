@@ -51,6 +51,11 @@ impl Module for CompiledModule {
 }
 
 impl CompiledModule {
+    /// What waits for or runs on its thread.
+    pub fn activity(&self) -> Arc<capi::Activity> {
+        self.started.context.activity.clone()
+    }
+
     /// A panic of the curve editor in a curve view is its provider's fault, not this module's (F5).
     fn report_editor_failure(&mut self, ctx: &mut Context) {
         if let Some(message) = self.view.take_editor_failure()

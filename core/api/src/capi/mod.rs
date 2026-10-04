@@ -5,8 +5,9 @@ mod objects;
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{OnceLock, mpsc};
-use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -101,6 +102,8 @@ pub struct ModuleContext {
     pub editor: OnceLock<Editor>,
     /// Its interface objects; jobs for the module's own thread are posted through them.
     pub ui: SharedUi,
+    /// What waits for or runs on the module's thread.
+    pub activity: Arc<Activity>,
     apply: OnceLock<(ApplyFn, UserPointer)>,
 }
 
@@ -161,34 +164,71 @@ pub struct Started {
     pub panels: Vec<PanelSpec>,
 }
 
+/// The work waiting for or running on a compiled module's thread: Undo and Redo wait for it,
+/// and the Modules panel tells a module that no longer answers.
+#[derive(Default)]
+pub struct Activity {
+    /// Jobs posted and not finished, the running one included.
+    pending: AtomicUsize,
+    /// When the running job started.
+    since: Mutex<Option<Instant>>,
+}
+
+impl Activity {
+    /// How many jobs wait or run.
+    pub fn pending(&self) -> usize {
+        self.pending.load(Ordering::Acquire)
+    }
+
+    /// How long the running job has been running.
+    pub fn running_for(&self) -> Option<Duration> {
+        self.since
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .map(|since| since.elapsed())
+    }
+}
+
 /// The thread a module's signals, paintings and undo values run on, in order.
-fn module_thread(id: &str) -> Post {
+fn module_thread(id: &str) -> (Post, Arc<Activity>) {
     let (sender, receiver) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
     let name = id.to_owned();
+    let activity = Arc::new(Activity::default());
+    let worker = activity.clone();
     let spawned = std::thread::Builder::new()
         .name(format!("uniwow module {id}"))
         .spawn(move || {
             for job in receiver {
+                *worker.since.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
                 if catch_unwind(AssertUnwindSafe(job)).is_err() {
                     log::error!("module '{name}': a call on its thread panicked in the editor");
                 }
+                *worker.since.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                worker.pending.fetch_sub(1, Ordering::Release);
             }
         });
     if let Err(error) = spawned {
         log::error!("module '{id}': its thread could not start: {error}");
     }
-    std::sync::Arc::new(move |job| {
-        let _ = sender.send(job);
-    })
+    let counter = activity.clone();
+    let post: Post = Arc::new(move |job| {
+        counter.pending.fetch_add(1, Ordering::AcqRel);
+        if sender.send(job).is_err() {
+            counter.pending.fetch_sub(1, Ordering::Release);
+        }
+    });
+    (post, activity)
 }
 
 /// Calls the entry point of the compiled module `id` with the table of the C interface, and reads
 /// what it offers. The table and the context live until the process ends, as the module does.
 pub fn start(init: InitFn, id: &str) -> Result<Started, String> {
+    let (post, activity) = module_thread(id);
     let context: &'static ModuleContext = Box::leak(Box::new(ModuleContext {
         id: id.to_owned(),
         editor: OnceLock::new(),
-        ui: Ui::new(module_thread(id)),
+        ui: Ui::new(post),
+        activity,
         apply: OnceLock::new(),
     }));
     let api: &'static Api = Box::leak(Box::new(Api {
@@ -641,6 +681,35 @@ mod tests {
     ) -> i32 {
         error(context, c"no licence file".as_ptr());
         1
+    }
+
+    #[test]
+    fn the_work_of_a_module_thread_is_counted_until_it_ends() {
+        let started = start(good, "test").expect("starts");
+        let activity = &started.context.activity;
+        assert_eq!(activity.pending(), 0);
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let mut ui = crate::ui::lock(&started.context.ui);
+        ui.post_job(Box::new(move || {
+            let _ = wait.recv();
+        }));
+        ui.post_job(Box::new(|| {}));
+        drop(ui);
+        assert_eq!(activity.pending(), 2);
+        let started_at = Instant::now();
+        while activity.running_for().is_none() {
+            assert!(
+                started_at.elapsed() < Duration::from_secs(5),
+                "the first job never started"
+            );
+            std::thread::yield_now();
+        }
+        release.send(()).unwrap();
+        while activity.pending() > 0 {
+            assert!(started_at.elapsed() < Duration::from_secs(5), "the jobs never ended");
+            std::thread::yield_now();
+        }
+        assert!(activity.running_for().is_none());
     }
 
     #[test]

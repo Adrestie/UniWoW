@@ -200,6 +200,9 @@ within bounds), selectable and selected or not. Colours are `0xRRGGBBAA`, sizes 
 - **Undo**: a module records a change it has made with a label and two JSON values, one undoing it
   and one redoing it. Undo and Redo hand the matching value to the function the module declared,
   on its thread; when that function fails, the module fails and its changes leave the history.
+  While a compiled module's thread still has signals, changes or commands to handle, Undo and
+  Redo are refused with the reason; one job running for more than 3 seconds shows the module as
+  not responding in the Modules panel.
 
 ---
 

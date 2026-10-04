@@ -36,6 +36,9 @@ const CALL_BUDGET: Duration = Duration::from_millis(4);
 const MINIMISED_CALL_BUDGET: Duration = Duration::from_millis(80);
 /// After a call, how long to wait for the next one of a thread calling in a loop.
 const CALL_IDLE: Duration = Duration::from_micros(500);
+/// How long a compiled module's thread may run one job before the Modules panel shows it as not
+/// responding.
+const NOT_RESPONDING: Duration = Duration::from_secs(3);
 
 pub struct Shell {
     host: KernelHost,
@@ -441,12 +444,31 @@ impl Shell {
         }
     }
 
+    /// Why Undo and Redo cannot run now: an open group holds a change, or a compiled module still
+    /// has signals, changes or commands to handle on its thread, which may record changes the
+    /// history must have first. Once its work ends, `undo` and `redo` serve the calls waiting, its
+    /// changes among them, before going on.
+    fn blocking_undo(&self) -> Option<String> {
+        self.groups.blocking_undo().or_else(|| {
+            self.slots
+                .iter()
+                .find(|slot| {
+                    slot.state.is_running() && slot.activity.as_ref().is_some_and(|activity| activity.pending() > 0)
+                })
+                .map(|slot| format!("'{}' is still working on its thread", slot.id))
+        })
+    }
+
     /// Reverts the last entry, its commands in reverse order. A command whose revert fails makes
     /// its module fail; the other commands of the entry are reverted all the same. Refused while
     /// an undo group is open.
     fn undo(&mut self) {
-        if let Some(reason) = self.groups.blocking_undo() {
+        if let Some(reason) = self.blocking_undo() {
             log::warn!("Undo ignored: {reason}");
+            return;
+        }
+        if self.serve_calls(CALL_BUDGET) {
+            log::warn!("Undo ignored: calls are still waiting");
             return;
         }
         let running = self.running_ids();
@@ -464,8 +486,12 @@ impl Shell {
     }
 
     fn redo(&mut self) {
-        if let Some(reason) = self.groups.blocking_undo() {
+        if let Some(reason) = self.blocking_undo() {
             log::warn!("Redo ignored: {reason}");
+            return;
+        }
+        if self.serve_calls(CALL_BUDGET) {
+            log::warn!("Redo ignored: calls are still waiting");
             return;
         }
         let running = self.running_ids();
@@ -895,7 +921,7 @@ impl Shell {
                 self.module_items(ui, "File", &mut actions);
             });
             ui.menu_button("Edit", |ui| {
-                let blocked = self.groups.blocking_undo();
+                let blocked = self.blocking_undo();
                 if history_button(ui, "Undo", "Ctrl+Z", self.history.undo_label(), blocked.as_deref()) {
                     actions.push(MenuAction::Undo);
                 }
@@ -1035,6 +1061,14 @@ impl eframe::App for Shell {
         if !self.host.pool.running().is_empty() {
             // Keeps the progress of the jobs moving in the Jobs panel.
             ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        let busy = self
+            .slots
+            .iter()
+            .any(|slot| slot.activity.as_ref().is_some_and(|activity| activity.pending() > 0));
+        if busy {
+            // Undo comes back, and the Modules panel tells a module not responding, without input.
+            ctx.request_repaint_after(Duration::from_millis(250));
         }
         if self
             .host
@@ -1304,13 +1338,28 @@ impl Viewer<'_> {
                     ui.label(slot.manifest.as_ref().map_or("", |m| m.category.as_str()));
                     ui.label(&slot.id);
                     ui.label(slot.manifest.as_ref().map_or("", |m| m.version.as_str()));
-                    let color = match slot.state {
-                        State::Running => egui::Color32::from_rgb(90, 170, 90),
-                        State::Disabled => ui.visuals().weak_text_color(),
-                        State::Ignored(_) => ui.visuals().warn_fg_color,
-                        _ => ui.visuals().error_fg_color,
-                    };
-                    ui.colored_label(color, state_text(&slot.state));
+                    let stuck = slot
+                        .activity
+                        .as_ref()
+                        .and_then(|activity| activity.running_for())
+                        .filter(|running| *running >= NOT_RESPONDING);
+                    match stuck {
+                        Some(running) if slot.state.is_running() => {
+                            ui.colored_label(
+                                ui.visuals().warn_fg_color,
+                                format!("not responding: busy for {} s", running.as_secs()),
+                            );
+                        }
+                        _ => {
+                            let color = match slot.state {
+                                State::Running => egui::Color32::from_rgb(90, 170, 90),
+                                State::Disabled => ui.visuals().weak_text_color(),
+                                State::Ignored(_) => ui.visuals().warn_fg_color,
+                                _ => ui.visuals().error_fg_color,
+                            };
+                            ui.colored_label(color, state_text(&slot.state));
+                        }
+                    }
                     let error = ui.visuals().error_fg_color;
                     ui.horizontal_wrapped(|ui| {
                         for (command, refused) in &slot.commands {
@@ -1369,7 +1418,6 @@ fn history_button(ui: &mut egui::Ui, verb: &str, shortcut: &str, label: Option<S
     .clicked()
 }
 
-/// Calls the module of `slot` with a context, catching panics.
 /// Brings the window back from the taskbar, so that its question is seen.
 fn show_window(ctx: &egui::Context) {
     if ctx.input(|i| i.viewport().minimized.unwrap_or(false)) {
@@ -1378,6 +1426,7 @@ fn show_window(ctx: &egui::Context) {
     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
 }
 
+/// Calls the module of `slot` with a context, catching panics.
 fn call_module<R>(
     slot: &mut Slot,
     host: &mut KernelHost,
