@@ -34,6 +34,9 @@ numbered!(
         Sequence = 24,
         /// plays a sequence, as QTimeLine; moved on by the kernel; not drawn
         Player = 25,
+        /// the keys of a sequence edited by hand, and the playhead of a player, drawn by the module
+        /// dopesheet
+        DopesheetView = 26,
     }
 );
 
@@ -98,7 +101,8 @@ numbered!(
         FrameRate = 33,
         /// sequence: in frames, a whole number from 1 to 1000000
         Length = 34,
-        /// player: the handle of the sequence it plays, 0 for none
+        /// player, dopesheet view, curve view: the handle of the sequence it plays or shows, 0 for
+        /// none; a view changes it directly, each change done an undo entry the kernel records
         Sequence = 35,
         /// player: in frames, fractional, from 0 to the length of its sequence
         Time = 36,
@@ -108,6 +112,9 @@ numbered!(
         Loop = 38,
         /// player: times the frame rate, from 0 to 100
         Speed = 39,
+        /// dopesheet view, curve view: the handle of the player whose time it shows as the
+        /// playhead, 0 for none
+        Player = 40,
     }
 );
 
@@ -157,6 +164,12 @@ numbered!(
         TimeChanged = 20,
         /// player: it reached the end without LOOP and stopped
         Finished = 21,
+        /// dopesheet view, curve view showing a sequence: text, the tracks; boolean, whether the
+        /// change is done, then made to the sequence
+        KeysChanged = 22,
+        /// dopesheet view: number, the frame the user moved the playhead to, its player paused
+        /// there
+        PlayheadMoved = 23,
     }
 );
 

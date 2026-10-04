@@ -9,9 +9,11 @@ mod scene;
 
 use painter::replay;
 use scene::{SceneView, modifiers};
-use uniwow_api::curve::{CurveChange, CurveEditor, CurveOptions, ShownCurve, TimeAxis};
-use uniwow_api::ui::{Handle, Kind, Object, SharedUi, Signal, SignalData, Ui, lock};
-use uniwow_api::{egui, egui_wgpu};
+use uniwow_api::curve::{self, Curve, CurveChange, CurveEditor, CurveOptions, ShownCurve, TimeAxis};
+use uniwow_api::dopesheet::{self, Dopesheet, DopesheetInput, KeysChange, RowProperty};
+use uniwow_api::sequence::{Sequence, Track, number_colour, number_names, tracks_to_json};
+use uniwow_api::ui::{Handle, Kind, Object, Property, SharedUi, Signal, SignalData, Ui, lock};
+use uniwow_api::{Editor, egui, egui_wgpu, log};
 
 /// What the interface thread keeps of a module's panels between frames.
 #[derive(Default)]
@@ -23,10 +25,63 @@ pub struct PanelView {
     sizes: HashMap<Handle, f32>,
     /// The curve editor of the module `curves`, which draws the curve views, when it runs.
     curve_editor: Option<Arc<dyn CurveEditor>>,
-    /// The time axis of each curve view.
+    /// The dopesheet of the module `dopesheet`, which draws the dopesheet views, when it runs.
+    dopesheet: Option<Arc<dyn Dopesheet>>,
+    /// The module's editor: the labels and values of the properties its sequences animate.
+    editor: Option<Editor>,
+    /// The time axis of each curve view and dopesheet view.
     time_axes: HashMap<Handle, TimeAxis>,
-    /// Why the curve editor failed while drawing a curve view, for its provider to be reported.
-    editor_failure: Option<String>,
+    /// The curves of a curve view showing a sequence while a change of them goes on, with the
+    /// version of the sequence they started from.
+    working: HashMap<Handle, (u64, Vec<ShownCurve>)>,
+    /// Why a service failed while drawing, by service, for its provider to be reported.
+    failures: Vec<(&'static str, String)>,
+}
+
+/// The curves of a sequence as a curve view shows them: one per number of each track.
+fn sequence_curves(data: &Sequence, labels: &HashMap<String, String>) -> Vec<ShownCurve> {
+    let mut curves = Vec::new();
+    for track in &data.tracks {
+        let label = labels.get(&track.property).unwrap_or(&track.property);
+        let names = number_names(track.kind);
+        for (number, curve) in track.curves.iter().enumerate() {
+            curves.push(ShownCurve {
+                label: if track.curves.len() > 1 {
+                    format!("{label}.{}", names[number])
+                } else {
+                    label.clone()
+                },
+                colour: number_colour(track.kind, number),
+                curve: curve.clone(),
+                visible: true,
+            });
+        }
+    }
+    curves
+}
+
+/// The tracks of `data` with the curves a curve view changed, in the order `sequence_curves` gave.
+fn tracks_of(data: &Sequence, curves: &[ShownCurve]) -> Vec<Track> {
+    let mut changed = curves.iter();
+    data.tracks
+        .iter()
+        .map(|track| Track {
+            curves: track
+                .curves
+                .iter()
+                .map(|_| changed.next().map_or_else(Curve::default, |shown| shown.curve.clone()))
+                .collect(),
+            ..track.clone()
+        })
+        .collect()
+}
+
+/// The time of the player a view shows as its playhead.
+fn playhead(store: &Ui, view: &Object) -> Option<f64> {
+    view.player
+        .and_then(|player| store.object(player))
+        .filter(|player| player.kind == Kind::Player)
+        .map(|player| player.time)
 }
 
 /// The text of a panic.
@@ -44,7 +99,7 @@ fn expands(store: &Ui, handle: Handle) -> bool {
     store.object(handle).is_some_and(|object| {
         object.visible
             && match object.kind {
-                Kind::GraphicsView | Kind::PaintArea | Kind::CurveView => true,
+                Kind::GraphicsView | Kind::PaintArea | Kind::CurveView | Kind::DopesheetView => true,
                 Kind::VBoxLayout | Kind::HBoxLayout | Kind::GridLayout | Kind::GroupBox => {
                     object.children.iter().any(|child| expands(store, *child))
                 }
@@ -54,14 +109,56 @@ fn expands(store: &Ui, handle: Handle) -> bool {
 }
 
 impl PanelView {
-    /// The curve editor to draw the curve views with, from the service of the module `curves`.
-    pub fn set_curve_editor(&mut self, editor: Option<Arc<dyn CurveEditor>>) {
-        self.curve_editor = editor;
+    /// The services the views are drawn with, from the modules `curves` and `dopesheet`, and the
+    /// editor of the module whose objects are drawn.
+    pub fn set_services(
+        &mut self,
+        curve_editor: Option<Arc<dyn CurveEditor>>,
+        dopesheet: Option<Arc<dyn Dopesheet>>,
+        editor: Editor,
+    ) {
+        self.curve_editor = curve_editor;
+        self.dopesheet = dopesheet;
+        self.editor = Some(editor);
     }
 
-    /// Why the curve editor panicked, once: its provider is the culprit (F5).
-    pub fn take_editor_failure(&mut self) -> Option<String> {
-        self.editor_failure.take()
+    /// Why services panicked, once, with the id of each service: its provider is the culprit (F5).
+    pub fn take_failures(&mut self) -> Vec<(&'static str, String)> {
+        std::mem::take(&mut self.failures)
+    }
+
+    /// The labels of the animatable properties of running modules, by path.
+    fn labels(&self) -> HashMap<String, String> {
+        self.editor
+            .as_ref()
+            .map(Editor::properties)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|info| (info.path, info.label))
+            .collect()
+    }
+
+    /// The property of each track of `data`, with its value at `playhead`.
+    fn row_properties(&self, data: &Sequence, playhead: Option<f64>) -> HashMap<String, RowProperty> {
+        let labels = self.labels();
+        data.tracks
+            .iter()
+            .map(|track| {
+                let label = labels.get(&track.property);
+                let current = label
+                    .and(self.editor.as_ref())
+                    .and_then(|editor| editor.read_property(&track.property).ok());
+                let value = playhead.and_then(|frame| track.evaluate(frame, current)).or(current);
+                let property = RowProperty {
+                    label: label
+                        .cloned()
+                        .unwrap_or_else(|| track.property.rsplit('/').next().unwrap_or(&track.property).to_owned()),
+                    declared: label.is_some(),
+                    value,
+                };
+                (track.property.clone(), property)
+            })
+            .collect()
     }
 
     /// Forgets what it kept of the objects that are gone; a view's texture goes with it.
@@ -71,6 +168,7 @@ impl PanelView {
         self.painted.retain(|handle, _| alive(handle));
         self.sizes.retain(|handle, _| alive(handle));
         self.time_axes.retain(|handle, _| alive(handle));
+        self.working.retain(|handle, _| alive(handle));
     }
 
     /// Draws the panel `panel` of a module.
@@ -379,29 +477,121 @@ impl PanelView {
                             .response,
                     );
                 };
-                let mut curves = object.curves.clone();
+                // A sequence shown: its curves, or those of the change going on.
+                let shown = object.plays.and_then(|sequence| {
+                    let generation = store.object(sequence)?.generation;
+                    Some((sequence, store.sequence(sequence).ok()?, generation))
+                });
+                let (mut curves, options) = match &shown {
+                    Some((_, data, generation)) => {
+                        let curves = match self.working.get(&handle) {
+                            Some((started, working)) if started == generation => working.clone(),
+                            _ => sequence_curves(data, &self.labels()),
+                        };
+                        let options = CurveOptions {
+                            snap: Some(1.0),
+                            playhead: playhead(store, object),
+                            span: Some([0.0, f64::from(data.length)]),
+                        };
+                        (curves, options)
+                    }
+                    None => (object.curves.clone(), CurveOptions::default()),
+                };
                 let time = self.time_axes.entry(handle).or_default();
                 let inner = ui.allocate_ui(size, |ui| {
                     let id = ui.id().with(("uniwow-curves", handle));
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        editor.show(ui, id, &mut curves, time, &CurveOptions::default())
+                        editor.show(ui, id, &mut curves, time, &options)
                     }))
                 });
                 let change = match inner.inner {
                     Ok(change) => change,
                     Err(panic) => {
-                        self.editor_failure = Some(format!("the curve editor panicked: {}", panic_text(&*panic)));
+                        let message = format!("the curve editor panicked: {}", panic_text(&*panic));
+                        self.failures.push((curve::SERVICE.id(), message));
                         CurveChange::None
                     }
                 };
-                if change != CurveChange::None {
-                    events.push(SignalData {
-                        text: ShownCurve::list_to_json(&curves).to_string(),
-                        boolean: change == CurveChange::Finished,
-                        ..signal(Signal::CurvesChanged)
-                    });
-                    if let Some(target) = store.object_mut(handle) {
-                        target.curves = curves;
+                match shown {
+                    Some((sequence, data, generation)) => {
+                        let idle = !ui.input(|i| i.pointer.any_down());
+                        self.sequence_curves_changed(
+                            store, handle, sequence, &data, generation, curves, change, idle, events,
+                        );
+                    }
+                    None if change != CurveChange::None => {
+                        events.push(SignalData {
+                            text: ShownCurve::list_to_json(&curves).to_string(),
+                            boolean: change == CurveChange::Finished,
+                            ..signal(Signal::CurvesChanged)
+                        });
+                        if let Some(target) = store.object_mut(handle) {
+                            target.curves = curves;
+                        }
+                    }
+                    None => {}
+                }
+                Some(inner.response)
+            }
+            Kind::DopesheetView => {
+                let size = egui::vec2(
+                    ui.available_width(),
+                    ui.available_height().max(object.minimum_height as f32),
+                );
+                let Some(sheet) = self.dopesheet.clone() else {
+                    return Some(
+                        ui.allocate_ui(size, |ui| ui.weak("No dopesheet: the module dopesheet is not running."))
+                            .response,
+                    );
+                };
+                let Some((sequence, data)) = object
+                    .plays
+                    .and_then(|sequence| Some((sequence, store.sequence(sequence).ok()?)))
+                else {
+                    return Some(ui.allocate_ui(size, |ui| ui.weak("No sequence shown.")).response);
+                };
+                let playhead = playhead(store, object);
+                let properties = self.row_properties(&data, playhead);
+                let time = self.time_axes.entry(handle).or_default();
+                let inner = ui.allocate_ui(size, |ui| {
+                    let id = ui.id().with(("uniwow-dopesheet", handle));
+                    let input = DopesheetInput {
+                        sequence: &data,
+                        properties: &properties,
+                        playhead,
+                        title: &object.title,
+                    };
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sheet.show(ui, id, &input, time)))
+                });
+                let output = match inner.inner {
+                    Ok(output) => output,
+                    Err(panic) => {
+                        let message = format!("the dopesheet panicked: {}", panic_text(&*panic));
+                        self.failures.push((dopesheet::SERVICE.id(), message));
+                        return Some(inner.response);
+                    }
+                };
+                if let (Some(frame), Some(player)) = (output.playhead, object.player) {
+                    let moved = store
+                        .set_numbers(player, Property::Playing, &[0.0])
+                        .and_then(|()| store.set_numbers(player, Property::Time, &[frame]));
+                    if moved.is_ok() {
+                        events.push(SignalData {
+                            number: frame,
+                            ..signal(Signal::PlayheadMoved)
+                        });
+                    }
+                }
+                match output.keys {
+                    KeysChange::None => {}
+                    KeysChange::Changing(tracks) => events.push(SignalData {
+                        text: tracks_to_json(&tracks).to_string(),
+                        ..signal(Signal::KeysChanged)
+                    }),
+                    KeysChange::Finished { label, tracks } => {
+                        if let Some(event) = change_keys(store, handle, sequence, tracks, &label) {
+                            events.push(event);
+                        }
                     }
                 }
                 Some(inner.response)
@@ -416,6 +606,45 @@ impl PanelView {
             | Kind::ItemGroup
             | Kind::Sequence
             | Kind::Player => None,
+        }
+    }
+
+    /// What a curve view showing a sequence did: a change going on is kept and drawn until it is
+    /// done, then made to the sequence as one undo entry; one dropped is forgotten once the pointer
+    /// is up.
+    #[allow(clippy::too_many_arguments)]
+    fn sequence_curves_changed(
+        &mut self,
+        store: &mut Ui,
+        view: Handle,
+        sequence: Handle,
+        data: &Sequence,
+        generation: u64,
+        curves: Vec<ShownCurve>,
+        change: CurveChange,
+        idle: bool,
+        events: &mut Vec<SignalData>,
+    ) {
+        match change {
+            CurveChange::None if idle => {
+                self.working.remove(&view);
+            }
+            CurveChange::None => {}
+            CurveChange::Changing => {
+                events.push(SignalData {
+                    sender: view,
+                    signal: Signal::KeysChanged as u32,
+                    text: tracks_to_json(&tracks_of(data, &curves)).to_string(),
+                    ..Default::default()
+                });
+                self.working.insert(view, (generation, curves));
+            }
+            CurveChange::Finished => {
+                self.working.remove(&view);
+                if let Some(event) = change_keys(store, view, sequence, tracks_of(data, &curves), "edit curves") {
+                    events.push(event);
+                }
+            }
         }
     }
 
@@ -556,15 +785,297 @@ fn close_button(ui: &mut egui::Ui) -> bool {
     response.on_hover_text("Close").clicked()
 }
 
+/// Makes a change of keys done in a view to its sequence, as one undo entry named `label`, and
+/// returns the signal telling it; nothing for tracks that break the rules of a file, or a change
+/// the kernel refuses to record.
+fn change_keys(store: &mut Ui, view: Handle, sequence: Handle, tracks: Vec<Track>, label: &str) -> Option<SignalData> {
+    let text = tracks_to_json(&tracks).to_string();
+    let checked = Sequence {
+        tracks,
+        ..Sequence::default()
+    };
+    let made = checked
+        .check()
+        .and_then(|()| store.change_tracks(sequence, checked.tracks, label));
+    match made {
+        Ok(()) => Some(SignalData {
+            sender: view,
+            signal: Signal::KeysChanged as u32,
+            text,
+            boolean: true,
+            ..Default::default()
+        }),
+        Err(error) => {
+            log::warn!("the keys changed in a view were not kept: {error}");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use uniwow_api::curve::{CurveChange, CurveEditor, CurveOptions, ShownCurve, TimeAxis};
+    use uniwow_api::dopesheet::{Dopesheet, DopesheetInput, DopesheetOutput, KeysChange};
     use uniwow_api::egui;
-    use uniwow_api::ui::{Kind, Property, Ui, lock};
+    use uniwow_api::sequence::Track;
+    use uniwow_api::ui::{Handle, Kind, Property, SharedUi, Signal, SignalData, Ui, lock};
 
     use super::PanelView;
+
+    type Jobs = Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
+    /// The signals a view sent: which, its text, its boolean and its number.
+    type Sent = Arc<Mutex<Vec<(Signal, String, bool, f64)>>>;
+
+    /// A dopesheet giving the same at every frame.
+    struct Giving(DopesheetOutput);
+
+    impl Dopesheet for Giving {
+        fn show(
+            &self,
+            _ui: &mut egui::Ui,
+            _id: egui::Id,
+            _input: &DopesheetInput,
+            _time: &mut TimeAxis,
+        ) -> DopesheetOutput {
+            self.0.clone()
+        }
+    }
+
+    struct BrokenSheet;
+
+    impl Dopesheet for BrokenSheet {
+        fn show(
+            &self,
+            _ui: &mut egui::Ui,
+            _id: egui::Id,
+            _input: &DopesheetInput,
+            _time: &mut TimeAxis,
+        ) -> DopesheetOutput {
+            panic!("broken dopesheet")
+        }
+    }
+
+    /// A curve editor setting the first key of the first curve to 0.75, which says `change`.
+    struct Editing(CurveChange);
+
+    impl CurveEditor for Editing {
+        fn show(
+            &self,
+            _ui: &mut egui::Ui,
+            _id: egui::Id,
+            curves: &mut [ShownCurve],
+            _time: &mut TimeAxis,
+            _options: &CurveOptions,
+        ) -> CurveChange {
+            curves[0].curve.keys[0].value = 0.75;
+            self.0
+        }
+    }
+
+    /// A panel holding a view of `kind` on a sequence with a key of 0.5 at frame 0 on
+    /// `cube/opacity`, played by a player at frame 5; what the module would record, and the
+    /// signals the view sends.
+    struct Fixture {
+        shared: SharedUi,
+        jobs: Jobs,
+        sequence: Handle,
+        player: Handle,
+        view: Handle,
+        recorded: Arc<Mutex<Vec<String>>>,
+        signals: Sent,
+    }
+
+    const TRACKS: &str =
+        r#"[{"property":"cube/opacity","kind":"number","curves":[{"keys":[{"time":0,"value":0.5}]}]}]"#;
+
+    fn fixture(kind: Kind) -> Fixture {
+        let jobs: Jobs = Arc::default();
+        let queue = jobs.clone();
+        let shared = Ui::new(Arc::new(move |job| queue.lock().unwrap().push(job)));
+        let recorded: Arc<Mutex<Vec<String>>> = Arc::default();
+        let signals: Sent = Arc::default();
+        let (sequence, player, view) = {
+            let mut store = lock(&shared);
+            let panel = store.panel("p");
+            let layout = store.create(Kind::VBoxLayout, None).unwrap();
+            store.add_to(panel, layout, [0, 0, 1, 1]).unwrap();
+            let sequence = store.create(Kind::Sequence, None).unwrap();
+            store.set_text(sequence, Property::Tracks, TRACKS).unwrap();
+            let player = store.create(Kind::Player, None).unwrap();
+            store
+                .set_numbers(player, Property::Sequence, &[sequence as f64])
+                .unwrap();
+            store.set_numbers(player, Property::Time, &[5.0]).unwrap();
+            store.set_numbers(player, Property::Playing, &[1.0]).unwrap();
+            let view = store.create(kind, None).unwrap();
+            store.set_numbers(view, Property::Sequence, &[sequence as f64]).unwrap();
+            store.set_numbers(view, Property::Player, &[player as f64]).unwrap();
+            store.add_to(layout, view, [0, 0, 1, 1]).unwrap();
+            for signal in [Signal::KeysChanged, Signal::PlayheadMoved, Signal::CurvesChanged] {
+                let seen = signals.clone();
+                store
+                    .connect(
+                        view,
+                        signal,
+                        Arc::new(move |data: &SignalData| {
+                            let signal = Signal::from_u32(data.signal).unwrap();
+                            seen.lock()
+                                .unwrap()
+                                .push((signal, data.text.clone(), data.boolean, data.number));
+                        }),
+                    )
+                    .unwrap();
+            }
+            let labels = recorded.clone();
+            store.set_recorder(Arc::new(move |label, _change| {
+                labels.lock().unwrap().push(label.to_owned());
+                Ok(())
+            }));
+            (sequence, player, view)
+        };
+        Fixture {
+            shared,
+            jobs,
+            sequence,
+            player,
+            view,
+            recorded,
+            signals,
+        }
+    }
+
+    impl Fixture {
+        /// Draws the panel once, then runs the slots.
+        fn frame(&self, panels: &mut PanelView) {
+            let ctx = egui::Context::default();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| panels.show(&self.shared, "p", ui, None));
+            output.textures_delta.clear();
+            let jobs = std::mem::take(&mut *self.jobs.lock().unwrap());
+            for job in jobs {
+                job();
+            }
+        }
+
+        fn value(&self) -> f64 {
+            lock(&self.shared).sequence(self.sequence).unwrap().tracks[0].curves[0].keys[0].value
+        }
+    }
+
+    /// The tracks of the fixture with the key at `frame`.
+    fn moved_to(frame: f64) -> Vec<Track> {
+        let mut tracks = uniwow_api::ui::read_tracks(TRACKS).unwrap();
+        tracks[0].curves[0].keys[0].time = frame;
+        tracks
+    }
+
+    #[test]
+    fn a_change_of_keys_done_in_a_dopesheet_view_is_made_and_recorded_and_the_playhead_moves() {
+        let fixture = fixture(Kind::DopesheetView);
+        let mut panels = PanelView {
+            dopesheet: Some(Arc::new(Giving(DopesheetOutput {
+                keys: KeysChange::Finished {
+                    label: "move keys".to_owned(),
+                    tracks: moved_to(3.0),
+                },
+                playhead: Some(12.0),
+            }))),
+            ..PanelView::default()
+        };
+        fixture.frame(&mut panels);
+        let store = lock(&fixture.shared);
+        assert_eq!(store.sequence(fixture.sequence).unwrap().tracks, moved_to(3.0));
+        assert_eq!(store.numbers(fixture.player, Property::Time).unwrap(), vec![12.0]);
+        assert_eq!(
+            store.numbers(fixture.player, Property::Playing).unwrap(),
+            vec![0.0],
+            "paused there"
+        );
+        drop(store);
+        assert_eq!(*fixture.recorded.lock().unwrap(), vec!["move keys".to_owned()]);
+        let signals = fixture.signals.lock().unwrap();
+        assert!(signals.contains(&(Signal::PlayheadMoved, String::new(), false, 12.0)));
+        assert!(
+            signals
+                .iter()
+                .any(|(signal, text, done, _)| *signal == Signal::KeysChanged && *done && text.contains("3.0"))
+        );
+    }
+
+    #[test]
+    fn a_change_of_keys_under_way_or_breaking_the_rules_leaves_the_sequence() {
+        for (keys, sent) in [
+            (KeysChange::Changing(moved_to(3.0)), true),
+            (
+                KeysChange::Finished {
+                    label: "move keys".to_owned(),
+                    tracks: moved_to(2.5),
+                },
+                false,
+            ),
+        ] {
+            let fixture = fixture(Kind::DopesheetView);
+            let mut panels = PanelView {
+                dopesheet: Some(Arc::new(Giving(DopesheetOutput { keys, playhead: None }))),
+                ..PanelView::default()
+            };
+            fixture.frame(&mut panels);
+            assert_eq!(
+                lock(&fixture.shared).sequence(fixture.sequence).unwrap().tracks,
+                moved_to(0.0)
+            );
+            assert!(fixture.recorded.lock().unwrap().is_empty());
+            let signals = fixture.signals.lock().unwrap();
+            assert_eq!(
+                signals
+                    .iter()
+                    .any(|(signal, _, done, _)| *signal == Signal::KeysChanged && !done),
+                sent
+            );
+        }
+    }
+
+    #[test]
+    fn a_panic_of_the_dopesheet_is_kept_for_its_provider_to_be_reported() {
+        let fixture = fixture(Kind::DopesheetView);
+        let mut panels = PanelView {
+            dopesheet: Some(Arc::new(BrokenSheet)),
+            ..PanelView::default()
+        };
+        fixture.frame(&mut panels);
+        let failures = panels.take_failures();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].0, "dopesheet");
+        assert!(failures[0].1.contains("broken dopesheet"));
+    }
+
+    #[test]
+    fn a_curve_view_showing_a_sequence_changes_it_once_the_change_is_done() {
+        let fixture = fixture(Kind::CurveView);
+        let mut panels = PanelView {
+            curve_editor: Some(Arc::new(Editing(CurveChange::Changing))),
+            ..PanelView::default()
+        };
+        fixture.frame(&mut panels);
+        assert_eq!(fixture.value(), 0.5, "not while it goes on");
+        assert!(panels.working.contains_key(&fixture.view), "kept and drawn until done");
+        panels.curve_editor = Some(Arc::new(Editing(CurveChange::Finished)));
+        fixture.frame(&mut panels);
+        assert_eq!(fixture.value(), 0.75);
+        assert!(panels.working.is_empty());
+        assert_eq!(*fixture.recorded.lock().unwrap(), vec!["edit curves".to_owned()]);
+        let signals = fixture.signals.lock().unwrap();
+        assert!(
+            signals
+                .iter()
+                .any(|(signal, _, done, _)| *signal == Signal::KeysChanged && *done)
+        );
+        assert!(
+            signals.iter().all(|(signal, ..)| *signal != Signal::CurvesChanged),
+            "its own curves are not what it shows"
+        );
+    }
 
     struct Broken;
 
@@ -592,16 +1103,17 @@ mod tests {
             let view = store.create(Kind::CurveView, None).unwrap();
             store.add_to(layout, view, [0, 0, 1, 1]).unwrap();
         }
-        let mut panels = PanelView::default();
-        panels.set_curve_editor(Some(Arc::new(Broken)));
+        let mut panels = PanelView {
+            curve_editor: Some(Arc::new(Broken)),
+            ..PanelView::default()
+        };
         let ctx = egui::Context::default();
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| panels.show(&shared, "p", ui, None));
         output.textures_delta.clear();
-        assert!(
-            panels
-                .take_editor_failure()
-                .is_some_and(|m| m.contains("broken editor"))
-        );
+        let failures = panels.take_failures();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].0, "curve-editor");
+        assert!(failures[0].1.contains("broken editor"));
     }
 
     #[test]

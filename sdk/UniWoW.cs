@@ -157,6 +157,8 @@ public enum Kind : uint
     CurveView = 23,     // curves edited by hand, drawn by the module curves
     Sequence = 24,      // tracks of keys on animatable properties, with a frame rate and a length; not drawn
     Player = 25,        // plays a sequence, as QTimeLine; moved on by the kernel; not drawn
+    DopesheetView = 26, // the keys of a sequence edited by hand, and the playhead of a player, drawn by the module
+                        // dopesheet
 }
 // </generated kind>
 
@@ -202,11 +204,14 @@ public enum Property : uint
                         // within 1e9; each change is an undo entry the kernel records
     FrameRate = 33,     // sequence: frames per second, a whole number from 1 to 240
     Length = 34,        // sequence: in frames, a whole number from 1 to 1000000
-    Sequence = 35,      // player: the handle of the sequence it plays, 0 for none
+    Sequence = 35,      // player, dopesheet view, curve view: the handle of the sequence it plays or shows, 0 for none;
+                        // a view changes it directly, each change done an undo entry the kernel records
     Time = 36,          // player: in frames, fractional, from 0 to the length of its sequence
     Playing = 37,       // player: 1 plays from the time, or from 0 when at the end; 0 pauses
     Loop = 38,          // player: at the end, starts again from 0
     Speed = 39,         // player: times the frame rate, from 0 to 100
+    Player = 40,        // dopesheet view, curve view: the handle of the player whose time it shows as the playhead, 0
+                        // for none
 }
 // </generated property>
 
@@ -236,6 +241,10 @@ public enum SignalId : uint
     TimeChanged = 20,        // player, as it plays: number, the time in frames; its slot records nothing and Undo does
                              // not wait for it
     Finished = 21,           // player: it reached the end without LOOP and stopped
+    KeysChanged = 22,        // dopesheet view, curve view showing a sequence: text, the tracks; boolean, whether the
+                             // change is done, then made to the sequence
+    PlayheadMoved = 23,      // dopesheet view: number, the frame the user moved the playhead to, its player paused
+                             // there
 }
 // </generated signal>
 
@@ -958,17 +967,51 @@ public unsafe class GroupBox : Widget
 
 /// <summary>Curves edited by hand, drawn by the module curves: SetCurves and Curves take the JSON
 /// of the property CURVES of uniwow.h; CurvesChanged gives the curves and whether the change is
-/// done.</summary>
+/// done. Shown with a sequence, it shows the curves of its tracks instead and changes them
+/// directly, each change done an undo entry the editor records; KeysChanged then gives the tracks
+/// and whether the change is done.</summary>
 public class CurveView : Widget
 {
-    public CurveView() : base(Make(Kind.CurveView)) =>
+    public CurveView() : base(Make(Kind.CurveView))
+    {
         CurvesChanged = new Signal<(string Json, bool Finished)>(Handle, SignalId.CurvesChanged,
                                                                    s => (s.Text, s.Boolean != 0));
+        KeysChanged = new Signal<(string Json, bool Finished)>(Handle, SignalId.KeysChanged,
+                                                                 s => (s.Text, s.Boolean != 0));
+    }
 
     public Signal<(string Json, bool Finished)> CurvesChanged { get; }
+    public Signal<(string Json, bool Finished)> KeysChanged { get; }
 
     public void SetCurves(string json) => WriteText(Property.Curves, json);
     public string Curves() => ReadText(Property.Curves);
+    public void SetSequence(Sequence sequence) => WriteNumbers(Property.Sequence, sequence.Handle);
+    /// <summary>The player whose time is shown as the playhead.</summary>
+    public void SetPlayer(Player player) => WriteNumbers(Property.Player, player.Handle);
+    public void SetMinimumHeight(double height) => WriteNumbers(Property.MinimumHeight, height);
+}
+
+/// <summary>The keys of a sequence, drawn by the module dopesheet: a row per track, unfolding into
+/// one per number, the keys selected, moved and deleted by hand, each change done an undo entry the
+/// editor records; and the playhead of a player, moved by hand on the ruler. KeysChanged gives the
+/// tracks and whether the change is done, PlayheadMoved the frame the player was paused
+/// at.</summary>
+public class DopesheetView : Widget
+{
+    public DopesheetView() : base(Make(Kind.DopesheetView))
+    {
+        KeysChanged = new Signal<(string Json, bool Finished)>(Handle, SignalId.KeysChanged,
+                                                                 s => (s.Text, s.Boolean != 0));
+        PlayheadMoved = NumberSignal(Handle, SignalId.PlayheadMoved);
+    }
+
+    public Signal<(string Json, bool Finished)> KeysChanged { get; }
+    public Signal<double> PlayheadMoved { get; }
+
+    public void SetSequence(Sequence sequence) => WriteNumbers(Property.Sequence, sequence.Handle);
+    public void SetPlayer(Player player) => WriteNumbers(Property.Player, player.Handle);
+    /// <summary>The name of the row of every key.</summary>
+    public void SetTitle(string title) => WriteText(Property.Title, title);
     public void SetMinimumHeight(double height) => WriteNumbers(Property.MinimumHeight, height);
 }
 

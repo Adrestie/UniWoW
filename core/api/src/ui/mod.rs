@@ -161,8 +161,10 @@ pub struct Object {
     pub curves: Vec<ShownCurve>,
     /// A sequence's frame rate, length and tracks, shared with the kernel playing it.
     pub sequence: Option<Arc<Sequence>>,
-    /// The sequence a player plays.
+    /// The sequence a player plays, or a view shows.
     pub plays: Option<Handle>,
+    /// The player whose time a view shows as the playhead.
+    pub player: Option<Handle>,
     /// A player's time, in frames.
     pub time: f64,
     pub playing: bool,
@@ -208,7 +210,10 @@ impl Object {
             selected: false,
             bounds: None,
             font_size: 13.0,
-            minimum_height: if matches!(kind, Kind::GraphicsView | Kind::PaintArea | Kind::CurveView) {
+            minimum_height: if matches!(
+                kind,
+                Kind::GraphicsView | Kind::PaintArea | Kind::CurveView | Kind::DopesheetView
+            ) {
                 200.0
             } else {
                 0.0
@@ -222,6 +227,7 @@ impl Object {
             curves: Vec::new(),
             sequence: (kind == Kind::Sequence).then(|| Arc::new(Sequence::default())),
             plays: None,
+            player: None,
             time: 0.0,
             playing: false,
             looping: false,
@@ -494,6 +500,9 @@ impl Ui {
             if object.plays.is_some_and(|sequence| !alive.contains(&sequence)) {
                 object.plays = None;
             }
+            if object.player.is_some_and(|player| !alive.contains(&player)) {
+                object.player = None;
+            }
         }
         Ok(())
     }
@@ -600,6 +609,11 @@ impl Ui {
     /// Sets the tracks of a sequence. A change is one undo entry, which the kernel records once it
     /// has adopted the objects; a change it refuses is not made.
     pub fn set_tracks(&mut self, handle: Handle, tracks: Vec<Track>) -> Result<(), String> {
+        self.change_tracks(handle, tracks, "edit a sequence")
+    }
+
+    /// `set_tracks`, the undo entry named `label`.
+    pub fn change_tracks(&mut self, handle: Handle, tracks: Vec<Track>, label: &str) -> Result<(), String> {
         let before = self.sequence(handle)?.tracks.clone();
         if before == tracks {
             return Ok(());
@@ -611,7 +625,7 @@ impl Ui {
                 before,
                 after: tracks.clone(),
             };
-            record("edit a sequence", Box::new(change))?;
+            record(label, Box::new(change))?;
         }
         self.replace_tracks(handle, tracks)
     }
@@ -760,21 +774,37 @@ impl Ui {
                 | Property::Playing
                 | Property::Loop
                 | Property::Speed
+                | Property::Player
         )
     }
 
-    /// The object `handle` if it is a sequence, for the frame rate and the length, or a player.
+    /// The object `handle` if it has `property`: a sequence its frame rate and length, a player
+    /// its sequence and playback, a dopesheet view or a curve view its sequence and player.
     fn playback_object(&self, handle: Handle, property: Property) -> Result<&Object, String> {
         let object = self.get(handle)?;
-        let kind = if matches!(property, Property::FrameRate | Property::Length) {
-            Kind::Sequence
-        } else {
-            Kind::Player
+        let view = matches!(object.kind, Kind::DopesheetView | Kind::CurveView);
+        let has = match property {
+            Property::FrameRate | Property::Length => object.kind == Kind::Sequence,
+            Property::Sequence => object.kind == Kind::Player || view,
+            Property::Player => view,
+            _ => object.kind == Kind::Player,
         };
-        if object.kind != kind {
+        if !has {
             return Err(format!("a {:?} has no {property:?}", object.kind));
         }
         Ok(object)
+    }
+
+    /// The object `value` names, of `kind`, among this module's: none for 0.
+    fn handle_of(&self, value: f64, kind: Kind) -> Result<Option<Handle>, String> {
+        if value == 0.0 {
+            return Ok(None);
+        }
+        let handle = value as Handle;
+        if value.fract() != 0.0 || value < 0.0 || self.objects.get(&handle).is_none_or(|o| o.kind != kind) {
+            return Err(format!("no {kind:?} {value} among the module's objects"));
+        }
+        Ok(Some(handle))
     }
 
     /// The length of the sequence a player plays, if it plays one.
@@ -808,14 +838,12 @@ impl Ui {
                 }
             }
             Property::Sequence => {
-                let plays = (value != 0.0).then_some(value as Handle);
-                let valid = plays.is_none_or(|sequence| {
-                    value.fract() == 0.0 && self.objects.get(&sequence).is_some_and(|o| o.kind == Kind::Sequence)
-                });
-                if !valid {
-                    return Err(format!("no sequence {value} among the module's objects"));
-                }
+                let plays = self.handle_of(value, Kind::Sequence)?;
                 self.get_mut(handle)?.plays = plays;
+            }
+            Property::Player => {
+                let player = self.handle_of(value, Kind::Player)?;
+                self.get_mut(handle)?.player = player;
             }
             Property::Time => {
                 self.get_mut(handle)?.time = value.clamp(0.0, length.unwrap_or(f64::MAX));
@@ -843,6 +871,7 @@ impl Ui {
             Property::FrameRate => f64::from(object.sequence.as_ref().map_or(0, |s| s.frame_rate)),
             Property::Length => f64::from(object.sequence.as_ref().map_or(0, |s| s.length)),
             Property::Sequence => object.plays.map_or(0.0, |sequence| sequence as f64),
+            Property::Player => object.player.map_or(0.0, |player| player as f64),
             Property::Time => object.time,
             Property::Playing => flag(object.playing),
             Property::Loop => flag(object.looping),
@@ -1050,10 +1079,14 @@ impl Ui {
     }
 
     /// Sends a signal to the slots connected to it, on the module's thread. A mouse move, or a
-    /// curves change still under way, replaces the same one of the same object still waiting.
+    /// change of curves or keys still under way, replaces the same one of the same object still
+    /// waiting.
     pub fn emit(&mut self, data: SignalData) {
-        let mergeable =
-            data.signal == Signal::MouseMove as u32 || (data.signal == Signal::CurvesChanged as u32 && !data.boolean);
+        let under_way = matches!(
+            Signal::from_u32(data.signal),
+            Some(Signal::CurvesChanged | Signal::KeysChanged)
+        );
+        let mergeable = data.signal == Signal::MouseMove as u32 || (under_way && !data.boolean);
         let (sender, signal) = (data.sender, data.signal);
         if mergeable
             && let Some((waiting_sender, waiting_signal, waiting)) = &self.waiting
@@ -1646,5 +1679,75 @@ mod tests {
                 .is_err()
         );
         assert_eq!(value(), 2.0, "a change that cannot be recorded is not made");
+    }
+
+    #[test]
+    fn a_view_shows_a_sequence_and_a_player_of_its_module() {
+        let shared = ui();
+        let mut ui = lock(&shared);
+        let sequence = ui.create(Kind::Sequence, None).unwrap();
+        let player = ui.create(Kind::Player, None).unwrap();
+        for kind in [Kind::DopesheetView, Kind::CurveView] {
+            let view = ui.create(kind, None).unwrap();
+            assert!(
+                ui.set_numbers(view, Property::Sequence, &[player as f64]).is_err(),
+                "not a sequence"
+            );
+            assert!(
+                ui.set_numbers(view, Property::Player, &[sequence as f64]).is_err(),
+                "not a player"
+            );
+            ui.set_numbers(view, Property::Sequence, &[sequence as f64]).unwrap();
+            ui.set_numbers(view, Property::Player, &[player as f64]).unwrap();
+            assert_eq!(ui.numbers(view, Property::Player).unwrap(), vec![player as f64]);
+        }
+        let label = ui.create(Kind::Label, None).unwrap();
+        assert!(
+            ui.set_numbers(label, Property::Sequence, &[sequence as f64]).is_err(),
+            "a label shows none"
+        );
+        assert!(ui.set_numbers(player, Property::Player, &[player as f64]).is_err());
+        let layout = ui.create(Kind::VBoxLayout, None).unwrap();
+        let view = ui.create(Kind::DopesheetView, None).unwrap();
+        ui.add_to(layout, view, [0, 0, 1, 1]).unwrap();
+        ui.set_numbers(view, Property::Player, &[player as f64]).unwrap();
+        ui.destroy(player).unwrap();
+        assert_eq!(
+            ui.numbers(view, Property::Player).unwrap(),
+            vec![0.0],
+            "its player gone"
+        );
+    }
+
+    #[test]
+    fn a_change_of_keys_under_way_still_waiting_takes_the_next_one() {
+        let (shared, jobs) = queued();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut store = lock(&shared);
+        let view = store.create(Kind::DopesheetView, None).unwrap();
+        let kept = seen.clone();
+        store
+            .connect(
+                view,
+                Signal::KeysChanged,
+                Arc::new(move |data: &SignalData| kept.lock().unwrap().push((data.text.clone(), data.boolean))),
+            )
+            .unwrap();
+        let change = |text: &str, done| SignalData {
+            sender: view,
+            signal: Signal::KeysChanged as u32,
+            text: text.to_owned(),
+            boolean: done,
+            ..Default::default()
+        };
+        store.emit(change("a", false));
+        store.emit(change("b", false));
+        store.emit(change("c", true));
+        drop(store);
+        run(&jobs);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![("b".to_owned(), false), ("c".to_owned(), true)]
+        );
     }
 }

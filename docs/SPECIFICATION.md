@@ -177,7 +177,8 @@ and Python receive theirs in milestones 9 and 10.
 | `ItemGroup` | `QGraphicsItemGroup` | items | |
 | `PaintArea` | a `QWidget` and its `paintEvent` | minimum height | `paint` (painter, width, height), `mousePress`, `mouseMove`, `mouseRelease`, `wheel` (x, y, dx, dy, button, keys) |
 | `Dialog` | `QDialog` | title, the one layout it holds, shown or hidden | `rejected` |
-| `CurveView` | a `QWidget` drawn by the module `curves` | curves (JSON), minimum height | `curvesChanged` (curves, finished) |
+| `CurveView` | a `QWidget` drawn by the module `curves` | curves (JSON), minimum height; or a sequence and a player | `curvesChanged` (curves, finished); `keysChanged` (tracks, finished) when it shows a sequence |
+| `DopesheetView` | a `QWidget` drawn by the module `dopesheet` | sequence, player, title, minimum height | `keysChanged` (tracks, finished), `playheadMoved` (frame) |
 | `Sequence` | the data a `QTimeLine` plays; not drawn | tracks (JSON), frame rate, length | |
 | `Player` | `QTimeLine`; not drawn | sequence, time, playing, loop, speed | `timeChanged` (time), `finished` |
 
@@ -248,7 +249,7 @@ fills it, or *not planned* when no milestone does yet.
 | Animatable properties: declare, list, read, write | `Registrar::animatable`; `Editor::properties`, `read_property`, `write_property` | `uniwow_module_info.properties` (`uniwow_property`); `properties`, `read_property`, `write_property`, `set_property` | `uniwow::Property`, `describeProperties`, `properties`, `readProperty`, `writeProperty`; `Editor.DeclareProperty`, `Properties`, `ReadProperty`, `WriteProperty`, `SetProperty` | — milestones 9 and 10 |
 | The viewport's camera | Inside the module `viewport` (*View*, *Reset camera*) | The properties `viewport/camera_position`, `camera_target`, `camera_fov`; the commands `viewport.camera`, `viewport.look_at`, `viewport.frame` | The functions of properties; `call` | Scripts: the commands through `uniwow.call`; the properties: milestones 9 and 10 |
 | Sequences and their playback | Inside the Timeline; `uniwow_api::sequence`, the objects `Sequence` and `Player` handed to the kernel with `Context::adopt_objects` | `Sequence`, `Player` | `uniwow::Sequence`, `uniwow::Player`; `Sequence`, `Player` | — milestones 9 and 10 |
-| The dopesheet | Inside the Timeline's panel | — step 8.5 | — step 8.5 | — milestones 9 and 10 |
+| The dopesheet | Inside the Timeline's panel; the service `dopesheet` | `DopesheetView`; `CurveView` showing a `Sequence` | `uniwow::DopesheetView`; `DopesheetView` | — milestones 9 and 10 |
 | Tree, table, property grid | egui | — step 8.7 | — step 8.7 | — milestones 9 and 10 |
 | Drawing in the 3D view | The service `viewport` and its layers | — not planned (an other 3D access of step 8.3) | — | — |
 | Unsaved changes, asked about when the editor closes | `Module::unsaved`, `save_unsaved` | — not planned | — | — |
@@ -1359,6 +1360,38 @@ table up to date, and its review checks it.
   as the culprit (F5), and a gesture ended when its data change outside it.
 - Sample: the C# *Counter* shows a dopesheet of its own sequence on its value; each change of keys
   is one undo entry, without the module recording anything.
+
+  As built:
+
+  - Kind 26 (`DOPESHEET_VIEW`), property 40 (`PLAYER`, the player whose time a view shows as its
+    playhead) and signals 22 and 23 (`KEYS_CHANGED`, `PLAYHEAD_MOVED`); `SEQUENCE` also names the
+    sequence a dopesheet view or a curve view shows, and `TITLE` the row of every key.
+  - The module `modules/UI/dopesheet` offers the service `dopesheet` (`uniwow_api::dopesheet`),
+    taken from the Timeline's dopesheet: a row of every key, one per module, one per track unfolding
+    into one per number; on the left, each track's label and its values at the playhead, read only;
+    keys selected by a click, Ctrl+click or a box, moved by dragging, deleted with Delete; the wheel
+    zooms the time, the middle button scrolls it; a press on the ruler moves the playhead to a whole
+    frame. Rust modules may use the service as they use the curve editor's.
+  - The kernel draws a `DopesheetView` with the service, the sequence and the player's time it is
+    shown with, and the labels and values of the catalogue. A drag shows the keys moved while it
+    goes on (`keysChanged`, not done) and changes the sequence when it ends; Delete at once. The
+    kernel makes each change done to the sequence as one undo entry, *move keys* or *delete keys*,
+    owned by the sequence's module, which records nothing; tracks that break the rules of a file are
+    refused. The playhead moved pauses the player at that frame, whose values the kernel then
+    writes; it is no change of the history.
+  - A `CurveView` shown with a sequence shows one curve per number of its tracks, keys at whole
+    frames within the sequence, the player's time as its playhead. A change under way is drawn from
+    a copy; the sequence changes, as one undo entry *edit curves*, when it is done. Its own `CURVES`
+    are then not shown, and it sends `keysChanged` instead of `curvesChanged`.
+  - A gesture of the dopesheet ends when the tracks change outside it, without changing a key: a
+    key removed by the module during a drag ends the drag, and the module's change stands. A panic
+    of the dopesheet or of the curve editor while drawing makes its provider fail (F5); the labels
+    of the ruler are bounded.
+  - The C# *Counter* shows a dopesheet of a sequence of its own on its value, with a player whose
+    playhead, moved on the ruler, sets the counter; it records nothing for its keys.
+  - Left for step 8.6, which the Timeline has today and its views do not: the values on the left
+    edited by hand to set keys, a key added at the playhead, a track added or removed, the curves of
+    the Curves view hidden one by one.
 
 **Step 8.6, the Timeline, a client:** the Timeline module keeps its egui window (sequence and
 playback bars, *Add property*), but its sequences are `Sequence` objects, its playback a `Player`,

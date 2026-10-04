@@ -57,7 +57,9 @@ enum {
     UNIWOW_DIALOG = 22,         /* a modal window; created hidden, shown and hidden through VISIBLE */
     UNIWOW_CURVE_VIEW = 23,     /* curves edited by hand, drawn by the module curves */
     UNIWOW_SEQUENCE = 24,       /* tracks of keys on animatable properties, with a frame rate and a length; not drawn */
-    UNIWOW_PLAYER = 25          /* plays a sequence, as QTimeLine; moved on by the kernel; not drawn */
+    UNIWOW_PLAYER = 25,         /* plays a sequence, as QTimeLine; moved on by the kernel; not drawn */
+    UNIWOW_DOPESHEET_VIEW = 26  /* the keys of a sequence edited by hand, and the playhead of a player, drawn by the
+                                   module dopesheet */
 };
 /* </generated kind> */
 
@@ -104,11 +106,15 @@ enum {
                                             kernel records */
     UNIWOW_PROPERTY_FRAME_RATE = 33,     /* sequence: frames per second, a whole number from 1 to 240 */
     UNIWOW_PROPERTY_LENGTH = 34,         /* sequence: in frames, a whole number from 1 to 1000000 */
-    UNIWOW_PROPERTY_SEQUENCE = 35,       /* player: the handle of the sequence it plays, 0 for none */
+    UNIWOW_PROPERTY_SEQUENCE = 35,       /* player, dopesheet view, curve view: the handle of the sequence it plays
+                                            or shows, 0 for none; a view changes it directly, each change done an
+                                            undo entry the kernel records */
     UNIWOW_PROPERTY_TIME = 36,           /* player: in frames, fractional, from 0 to the length of its sequence */
     UNIWOW_PROPERTY_PLAYING = 37,        /* player: 1 plays from the time, or from 0 when at the end; 0 pauses */
     UNIWOW_PROPERTY_LOOP = 38,           /* player: at the end, starts again from 0 */
-    UNIWOW_PROPERTY_SPEED = 39           /* player: times the frame rate, from 0 to 100 */
+    UNIWOW_PROPERTY_SPEED = 39,          /* player: times the frame rate, from 0 to 100 */
+    UNIWOW_PROPERTY_PLAYER = 40          /* dopesheet view, curve view: the handle of the player whose time it shows
+                                            as the playhead, 0 for none */
 };
 /* </generated property> */
 
@@ -136,7 +142,11 @@ enum {
     UNIWOW_SIGNAL_CURVES_CHANGED = 19,       /* curve view: text, the curves; boolean, whether the change is done */
     UNIWOW_SIGNAL_TIME_CHANGED = 20,         /* player, as it plays: number, the time in frames; its slot records
                                                 nothing and Undo does not wait for it */
-    UNIWOW_SIGNAL_FINISHED = 21              /* player: it reached the end without LOOP and stopped */
+    UNIWOW_SIGNAL_FINISHED = 21,             /* player: it reached the end without LOOP and stopped */
+    UNIWOW_SIGNAL_KEYS_CHANGED = 22,         /* dopesheet view, curve view showing a sequence: text, the tracks;
+                                                boolean, whether the change is done, then made to the sequence */
+    UNIWOW_SIGNAL_PLAYHEAD_MOVED = 23        /* dopesheet view: number, the frame the user moved the playhead to, its
+                                                player paused there */
 };
 /* </generated signal> */
 

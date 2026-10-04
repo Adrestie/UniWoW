@@ -40,6 +40,7 @@ mod command;
 mod commands;
 mod context;
 pub mod curve;
+pub mod dopesheet;
 mod editor;
 mod event;
 mod job;

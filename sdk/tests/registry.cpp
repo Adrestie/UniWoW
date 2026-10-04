@@ -154,6 +154,23 @@ int main() {
     fake_connections[timed].slot(fake_connections[timed].user, &moved);
     expect(time == 12.5, "timeChanged gives the time in frames");
 
+    uniwow::DopesheetView keys;
+    keys.setPlayer(player);
+    expect(numbers_object == keys.handle() && numbers_property == UNIWOW_PROPERTY_PLAYER &&
+               numbers_value == double(player.handle()),
+           "a dopesheet view is given its player by its handle");
+    std::string tracks;
+    bool done = false;
+    const uint64_t edited = keys.keysChanged.connect([&](const std::string &json, bool finished) {
+        tracks = json;
+        done = finished;
+    });
+    uniwow_signal changed{};
+    changed.text = "[]";
+    changed.boolean = 1;
+    fake_connections[edited].slot(fake_connections[edited].user, &changed);
+    expect(tracks == "[]" && done, "keysChanged gives the tracks and whether the change is done");
+
     std::printf("%d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

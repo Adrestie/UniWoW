@@ -65,6 +65,14 @@ static unsafe class Fake
         var data = new SignalData { Number = number };
         ((delegate* unmanaged<IntPtr, SignalData*, void>)kept.Slot)(kept.User, &data);
     }
+
+    /// <summary>Calls a slot with a text and a boolean, as for a change of keys.</summary>
+    public static void CallWithText((IntPtr Slot, IntPtr User) kept, string text, bool boolean)
+    {
+        using var copy = new Utf8(text);
+        var data = new SignalData { TextPointer = copy.Pointer, Boolean = boolean ? 1 : 0 };
+        ((delegate* unmanaged<IntPtr, SignalData*, void>)kept.Slot)(kept.User, &data);
+    }
 }
 
 static unsafe class Program
@@ -188,6 +196,15 @@ static unsafe class Program
         var timed = player.TimeChanged.Connect(frames => time = frames);
         Fake.Call(Fake.Connections[timed], 12.5);
         Expect(time == 12.5, "TimeChanged gives the time in frames");
+
+        var keys = new DopesheetView();
+        keys.SetPlayer(player);
+        Expect(Fake.Numbers == (keys.Handle, (uint)Property.Player, (double)player.Handle),
+               "a dopesheet view is given its player by its handle");
+        (string Json, bool Finished) change = ("", false);
+        var edited = keys.KeysChanged.Connect(given => change = given);
+        Fake.CallWithText(Fake.Connections[edited], "[]", true);
+        Expect(change == ("[]", true), "KeysChanged gives the tracks and whether the change is done");
 
         Console.WriteLine($"{failures} failure(s)");
         return failures == 0 ? 0 : 1;

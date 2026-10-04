@@ -1,7 +1,8 @@
 // Sample compiled module in C#, published with NativeAOT: a counter changed by buttons, a slider
 // and a spin box, each change one undo entry, with its history painted as bars; a curve edited in
 // the curve editor of the module curves, each change one undo entry; the counter's value as an
-// animatable property; and two commands.
+// animatable property, with a sequence of its own shown in a dopesheet, whose changes the editor
+// records; and two commands.
 
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -39,6 +40,10 @@ static unsafe class Module
 
     const string StartCurve =
         """[{"label":"easing","colour":[230,160,40],"keys":[{"time":0,"value":0},{"time":1,"value":1}]}]""";
+
+    // The keys of the counter's own sequence, over 2 seconds at 30 frames per second.
+    const string ValueTrack =
+        """[{"property":"sample-csharp/value","kind":"number","curves":[{"keys":[{"time":0,"value":0},{"time":30,"value":100},{"time":60,"value":50}]}]}]""";
 
     static readonly Command[] Commands =
     [
@@ -140,6 +145,19 @@ static unsafe class Module
             committedCurve = change.Json;
         });
 
+        // A dopesheet of the counter's sequence: the editor records each change of its keys, and
+        // moving its playhead writes the value at that frame. The module records nothing.
+        var sequence = new Sequence();
+        sequence.SetLength(60);
+        sequence.SetTracks(ValueTrack);
+        var player = new Player();
+        player.SetSequence(sequence);
+        var keys = new DopesheetView();
+        keys.SetSequence(sequence);
+        keys.SetPlayer(player);
+        keys.SetTitle("Counter");
+        keys.SetMinimumHeight(110);
+
         var fail = new CheckBox("Fail to apply undo and redo");
         fail.SetToolTip("The module then fails at the next undo or redo of its changes.");
         fail.Toggled.Connect(on => failToApply = on);
@@ -165,6 +183,7 @@ static unsafe class Module
         layout.AddLayout(values);
         layout.AddWidget(bars);
         layout.AddWidget(curve);
+        layout.AddWidget(keys);
         layout.AddWidget(new Separator());
         layout.AddLayout(trials);
         new Panel("counter").SetLayout(layout);

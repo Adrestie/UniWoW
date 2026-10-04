@@ -106,6 +106,26 @@ impl Track {
     }
 }
 
+/// The names of the numbers of a property of `kind`.
+pub fn number_names(kind: PropertyKind) -> &'static [&'static str] {
+    match kind {
+        PropertyKind::Vector => &["x", "y", "z"],
+        PropertyKind::Colour => &["red", "green", "blue"],
+        PropertyKind::Number | PropertyKind::Boolean => &["value"],
+    }
+}
+
+/// The colour the keys and the curve of a number are drawn in: red, green and blue for the
+/// numbers of a vector or a colour, orange for a lone number.
+pub fn number_colour(kind: PropertyKind, number: usize) -> [u8; 3] {
+    match (kind.components(), number) {
+        (3, 0) => [220, 70, 60],
+        (3, 1) => [80, 170, 60],
+        (3, _) => [60, 120, 230],
+        _ => [230, 160, 40],
+    }
+}
+
 /// Whether a value may go into a sequence: the rules of `Curve::check`.
 pub fn admissible(value: f64) -> bool {
     value.is_finite() && value.abs() <= LIMIT

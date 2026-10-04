@@ -509,17 +509,6 @@ class GroupBox : public Widget {
     void setLayout(const Layout &layout) const { hold(layout, true); }
 };
 
-// Curves edited by hand, drawn by the module curves: setCurves and curves take the JSON of
-// UNIWOW_PROPERTY_CURVES; curvesChanged gives the curves and whether the change is done.
-class CurveView : public Widget {
-  public:
-    CurveView() : Widget(make(UNIWOW_CURVE_VIEW)) {}
-    void setCurves(const std::string &json) const { setString(UNIWOW_PROPERTY_CURVES, json); }
-    std::string curves() const { return string(UNIWOW_PROPERTY_CURVES); }
-    void setMinimumHeight(double height) const { setNumbers(UNIWOW_PROPERTY_MINIMUM_HEIGHT, {height}); }
-    Signal<std::string, bool> curvesChanged{handle_, UNIWOW_SIGNAL_CURVES_CHANGED};
-};
-
 // Tracks of keys on animatable properties, with a frame rate and a length, as in the files of the
 // Timeline: setTracks and tracks take the JSON of UNIWOW_PROPERTY_TRACKS. Each change of the
 // tracks is an undo entry the editor records: the module records nothing.
@@ -560,6 +549,44 @@ class Player : public Object {
     double speed() const { return number(UNIWOW_PROPERTY_SPEED); }
     Signal<double> timeChanged{handle_, UNIWOW_SIGNAL_TIME_CHANGED};
     Signal<> finished{handle_, UNIWOW_SIGNAL_FINISHED};
+};
+
+// Curves edited by hand, drawn by the module curves: setCurves and curves take the JSON of
+// UNIWOW_PROPERTY_CURVES; curvesChanged gives the curves and whether the change is done. Shown
+// with a sequence, it shows the curves of its tracks instead and changes them directly, each change
+// done an undo entry the editor records; keysChanged then gives the tracks and whether the change
+// is done.
+class CurveView : public Widget {
+  public:
+    CurveView() : Widget(make(UNIWOW_CURVE_VIEW)) {}
+    void setCurves(const std::string &json) const { setString(UNIWOW_PROPERTY_CURVES, json); }
+    std::string curves() const { return string(UNIWOW_PROPERTY_CURVES); }
+    void setSequence(const Sequence &sequence) const {
+        setNumbers(UNIWOW_PROPERTY_SEQUENCE, {double(sequence.handle())});
+    }
+    // The player whose time is shown as the playhead.
+    void setPlayer(const Player &player) const { setNumbers(UNIWOW_PROPERTY_PLAYER, {double(player.handle())}); }
+    void setMinimumHeight(double height) const { setNumbers(UNIWOW_PROPERTY_MINIMUM_HEIGHT, {height}); }
+    Signal<std::string, bool> curvesChanged{handle_, UNIWOW_SIGNAL_CURVES_CHANGED};
+    Signal<std::string, bool> keysChanged{handle_, UNIWOW_SIGNAL_KEYS_CHANGED};
+};
+
+// The keys of a sequence, drawn by the module dopesheet: a row per track, unfolding into one per
+// number, the keys selected, moved and deleted by hand, each change done an undo entry the editor
+// records; and the playhead of a player, moved by hand on the ruler. keysChanged gives the tracks
+// and whether the change is done, playheadMoved the frame the player was paused at.
+class DopesheetView : public Widget {
+  public:
+    DopesheetView() : Widget(make(UNIWOW_DOPESHEET_VIEW)) {}
+    void setSequence(const Sequence &sequence) const {
+        setNumbers(UNIWOW_PROPERTY_SEQUENCE, {double(sequence.handle())});
+    }
+    void setPlayer(const Player &player) const { setNumbers(UNIWOW_PROPERTY_PLAYER, {double(player.handle())}); }
+    // The name of the row of every key.
+    void setTitle(const std::string &title) const { setString(UNIWOW_PROPERTY_TITLE, title); }
+    void setMinimumHeight(double height) const { setNumbers(UNIWOW_PROPERTY_MINIMUM_HEIGHT, {height}); }
+    Signal<std::string, bool> keysChanged{handle_, UNIWOW_SIGNAL_KEYS_CHANGED};
+    Signal<double> playheadMoved{handle_, UNIWOW_SIGNAL_PLAYHEAD_MOVED};
 };
 
 // A modal window, as QDialog: while it is shown, the rest of the editor cannot be used. It is

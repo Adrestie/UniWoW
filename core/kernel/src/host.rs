@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Weak};
 
 use uniwow_api::curve::{self, CurveEditor};
+use uniwow_api::dopesheet::{self, Dopesheet};
 use uniwow_api::ui::{self, SharedUi};
 use uniwow_api::{CallId, Command, Editor, Event, Host, JobFn, JobId, egui, egui_wgpu, serde_json};
 
@@ -67,16 +68,35 @@ impl KernelHost {
             .cloned()
     }
 
-    /// A panic of the curve editor while drawing is its provider's fault, not the fault of the
-    /// module drawing (F5).
-    fn report_editor_failure(&mut self, owner: &str, objects: &SharedUi) {
-        let failure = self
+    /// The dopesheet of the module `dopesheet`, which draws the dopesheet views, when it runs.
+    fn dopesheet(&self) -> Option<Arc<dyn Dopesheet>> {
+        self.services
+            .get(dopesheet::SERVICE.id())?
+            .value
+            .downcast_ref::<Arc<dyn Dopesheet>>()
+            .cloned()
+    }
+
+    /// The view of `owner`'s objects, with the services and the editor it draws with.
+    fn view(&mut self, owner: &str, objects: &SharedUi) -> &mut PanelView {
+        let (curve_editor, sheet, editor) = (self.curve_editor(), self.dopesheet(), self.editor(owner));
+        let view = self.views.entry(view_key(owner, objects)).or_default();
+        view.set_services(curve_editor, sheet, editor);
+        view
+    }
+
+    /// A panic of a service while drawing is its provider's fault, not the fault of the module
+    /// drawing (F5).
+    fn report_service_failures(&mut self, owner: &str, objects: &SharedUi) {
+        let failures = self
             .views
             .get_mut(&view_key(owner, objects))
-            .and_then(PanelView::take_editor_failure);
-        let provider = self.services.get(curve::SERVICE.id()).map(|s| s.provider.clone());
-        if let (Some(message), Some(provider)) = (failure, provider) {
-            self.report_failure(owner, &provider, &message);
+            .map(PanelView::take_failures)
+            .unwrap_or_default();
+        for (service, message) in failures {
+            if let Some(provider) = self.services.get(service).map(|s| s.provider.clone()) {
+                self.report_failure(owner, &provider, &message);
+            }
         }
     }
 
@@ -139,21 +159,17 @@ impl Host for KernelHost {
     }
 
     fn draw_panel(&mut self, owner: &str, objects: &SharedUi, panel: &str, ui: &mut egui::Ui) {
-        let editor = self.curve_editor();
-        let view = self.views.entry(view_key(owner, objects)).or_default();
-        view.set_curve_editor(editor);
-        view.show(objects, panel, ui, self.gpu.as_ref());
-        self.report_editor_failure(owner, objects);
+        let gpu = self.gpu.clone();
+        self.view(owner, objects).show(objects, panel, ui, gpu.as_ref());
+        self.report_service_failures(owner, objects);
     }
 
     fn draw_dialogs(&mut self, owner: &str, objects: &SharedUi, egui: &egui::Context) {
-        let editor = self.curve_editor();
-        let view = self.views.entry(view_key(owner, objects)).or_default();
-        view.set_curve_editor(editor);
-        let layers = view.dialogs(objects, egui, self.gpu.as_ref());
+        let gpu = self.gpu.clone();
+        let layers = self.view(owner, objects).dialogs(objects, egui, gpu.as_ref());
         self.modal_shown |= !layers.is_empty();
         self.kernel_modals.extend(layers);
-        self.report_editor_failure(owner, objects);
+        self.report_service_failures(owner, objects);
     }
 
     fn adopt_objects(&mut self, owner: &str, objects: &SharedUi) {

@@ -37,6 +37,7 @@ entries = [
     [23, "CurveView", "CURVE_VIEW", "curves edited by hand, drawn by the module curves"],
     [24, "Sequence", "SEQUENCE", "tracks of keys on animatable properties, with a frame rate and a length; not drawn"],
     [25, "Player", "PLAYER", "plays a sequence, as QTimeLine; moved on by the kernel; not drawn"],
+    [26, "DopesheetView", "DOPESHEET_VIEW", "the keys of a sequence edited by hand, and the playhead of a player, drawn by the module dopesheet"],
 ]
 
 [property]
@@ -79,11 +80,12 @@ entries = [
     [32, "Tracks", "TRACKS", "sequence, text: JSON [{property, kind, curves: [{keys: [{time, value, mode, left, right}]}]}], one curve per number of the property; keys at whole frames from 0, numbers within 1e9; each change is an undo entry the kernel records"],
     [33, "FrameRate", "FRAME_RATE", "sequence: frames per second, a whole number from 1 to 240"],
     [34, "Length", "LENGTH", "sequence: in frames, a whole number from 1 to 1000000"],
-    [35, "Sequence", "SEQUENCE", "player: the handle of the sequence it plays, 0 for none"],
+    [35, "Sequence", "SEQUENCE", "player, dopesheet view, curve view: the handle of the sequence it plays or shows, 0 for none; a view changes it directly, each change done an undo entry the kernel records"],
     [36, "Time", "TIME", "player: in frames, fractional, from 0 to the length of its sequence"],
     [37, "Playing", "PLAYING", "player: 1 plays from the time, or from 0 when at the end; 0 pauses"],
     [38, "Loop", "LOOP", "player: at the end, starts again from 0"],
     [39, "Speed", "SPEED", "player: times the frame rate, from 0 to 100"],
+    [40, "Player", "PLAYER", "dopesheet view, curve view: the handle of the player whose time it shows as the playhead, 0 for none"],
 ]
 
 [value_kind]
@@ -125,4 +127,6 @@ entries = [
     [19, "CurvesChanged", "CURVES_CHANGED", "curve view: text, the curves; boolean, whether the change is done"],
     [20, "TimeChanged", "TIME_CHANGED", "player, as it plays: number, the time in frames; its slot records nothing and Undo does not wait for it"],
     [21, "Finished", "FINISHED", "player: it reached the end without LOOP and stopped"],
+    [22, "KeysChanged", "KEYS_CHANGED", "dopesheet view, curve view showing a sequence: text, the tracks; boolean, whether the change is done, then made to the sequence"],
+    [23, "PlayheadMoved", "PLAYHEAD_MOVED", "dopesheet view: number, the frame the user moved the playhead to, its player paused there"],
 ]
