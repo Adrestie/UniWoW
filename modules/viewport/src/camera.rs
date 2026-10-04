@@ -18,6 +18,8 @@ pub struct OrbitCamera {
     distance: f32,
     /// Vertical angle of view, in degrees.
     fov: f32,
+    /// Width over height of the view last drawn.
+    aspect: f32,
 }
 
 impl Default for OrbitCamera {
@@ -28,6 +30,7 @@ impl Default for OrbitCamera {
             pitch: 0.45,
             distance: 14.0,
             fov: 45.0,
+            aspect: 16.0 / 9.0,
         }
     }
 }
@@ -61,6 +64,13 @@ impl OrbitCamera {
         self.fov = degrees.clamp(FOV[0], FOV[1]);
     }
 
+    /// The width over the height of the view drawn, which `frame` fits a box in.
+    pub fn set_aspect(&mut self, aspect: f32) {
+        if aspect.is_finite() && aspect > 0.0 {
+            self.aspect = aspect;
+        }
+    }
+
     /// The eye at `position`, looking at `target`, within the limits of the orbit: its angle above
     /// the ground and its distance. An eye on the target keeps the direction it had.
     pub fn look_at(&mut self, position: Vec3, target: Vec3) {
@@ -74,16 +84,21 @@ impl OrbitCamera {
         self.distance = distance.clamp(DISTANCE[0], DISTANCE[1]);
     }
 
-    /// Fits the box from `min` to `max` in the view, seen from the same direction.
+    /// Fits the box from `min` to `max` in the view, seen from the same direction: within the
+    /// narrower of its angles, the vertical one or the horizontal one.
     pub fn frame(&mut self, min: Vec3, max: Vec3) {
         let radius = ((max - min).length() / 2.0).max(DISTANCE[0]);
+        let vertical = self.fov.to_radians() / 2.0;
+        let horizontal = (vertical.tan() * self.aspect).atan();
         self.target = (min + max) / 2.0;
-        self.distance = (radius / (self.fov.to_radians() / 2.0).sin()).clamp(DISTANCE[0], DISTANCE[1]);
+        self.distance = (radius / vertical.min(horizontal).sin()).clamp(DISTANCE[0], DISTANCE[1]);
     }
 
+    /// Reverse Z with no far plane: the depth is 1 at the near plane and falls towards 0 at
+    /// infinity, so that the whole of a map is seen, with its precision where it is needed.
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
         let view = Mat4::look_at_rh(self.eye(), self.target, Vec3::Z);
-        let proj = Mat4::perspective_rh(self.fov.to_radians(), aspect, 0.1, 5000.0);
+        let proj = Mat4::perspective_infinite_reverse_rh(self.fov.to_radians(), aspect, 0.1);
         proj * view
     }
 
@@ -143,6 +158,40 @@ mod tests {
         assert!(camera.eye().z < 10.0, "not straight above: the orbit stops before");
         camera.set_fov(500.0);
         assert_eq!(camera.fov(), 170.0);
+    }
+
+    /// The clip coordinates of `point`: x, y and the depth, divided by w.
+    fn clip(camera: &OrbitCamera, aspect: f32, point: Vec3) -> Vec3 {
+        let clip = camera.view_proj(aspect) * point.extend(1.0);
+        clip.truncate() / clip.w
+    }
+
+    #[test]
+    fn far_points_are_seen_and_nearer_is_deeper_in_reverse_z() {
+        let camera = OrbitCamera::default();
+        let forward = (camera.target() - camera.eye()).normalize();
+        let far = clip(&camera, 1.5, camera.eye() + forward * 50_000.0);
+        let near = clip(&camera, 1.5, camera.eye() + forward * 10.0);
+        assert!(far.z > 0.0 && far.z <= 1.0, "{far}");
+        assert!(near.z > far.z, "nearer is greater");
+    }
+
+    #[test]
+    fn a_large_box_framed_is_all_in_view_even_in_a_tall_view() {
+        let mut camera = OrbitCamera::default();
+        camera.set_aspect(0.5);
+        let (min, max) = (
+            Vec3::new(-10_000.0, -10_000.0, 0.0),
+            Vec3::new(10_000.0, 10_000.0, 500.0),
+        );
+        camera.frame(min, max);
+        for corner in 0..8 {
+            let pick = |bit: usize, low: f32, high: f32| if corner & bit == 0 { low } else { high };
+            let point = Vec3::new(pick(1, min.x, max.x), pick(2, min.y, max.y), pick(4, min.z, max.z));
+            let seen = clip(&camera, 0.5, point);
+            assert!(seen.z > 0.0 && seen.z <= 1.0, "corner {corner}: {seen}");
+            assert!(seen.x.abs() <= 1.0 && seen.y.abs() <= 1.0, "corner {corner}: {seen}");
+        }
     }
 
     #[test]

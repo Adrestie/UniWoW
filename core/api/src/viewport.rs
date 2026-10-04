@@ -27,6 +27,9 @@ pub struct Target {
     pub color_format: wgpu::TextureFormat,
     pub depth_format: wgpu::TextureFormat,
     pub sample_count: u32,
+    /// How a layer's pipeline compares depths. Reverse Z: the depth is 1 at the near plane and
+    /// falls towards 0 at infinity, where it is cleared; nearer is greater.
+    pub depth_compare: wgpu::CompareFunction,
 }
 
 /// The camera and frame being drawn. World axes: X and Y on the ground, Z up.

@@ -133,7 +133,7 @@ Extension points a module may contribute to:
 | Asset handlers, per file type | open or preview `.blp`, `.m2` |
 | Settings page | brush defaults |
 | Services implementing an interface defined in core/api, under a typed `ServiceKey<T>` declared beside the interface, used both to provide and to ask, so that a type mismatch does not compile | "viewport", "creature lookup" |
-| Viewport layers, through the viewport service | terrain, cube; each layer records into its own render bundle |
+| Viewport layers, through the viewport service | terrain, cube; each layer records into its own render bundle, with pipelines matching the view's `Target`: its colour and depth formats, its sample count and its depth comparison (reverse Z: nearer is greater) |
 | Event subscriptions | "project saved", "tile changed" |
 | Project data section owned by the module | spawn edits not yet deployed |
 
@@ -1262,11 +1262,17 @@ table up to date, and its review checks it.
   - The camera is the orbit of the 3D view, shared by its panel, its properties and its commands,
     which may come from any thread. A position or a target given keeps the other one; the camera
     then stays within its orbit: at most 1.5 radians above or below the ground, from 0.5 to 100,000
-    units from its target. The angle of view goes from 1 to 170 degrees (45 at start), its points
-    within 100,000 of the origin.
+    units from its target. The angle of view goes from 1 to 170 degrees (45 at start). The target
+    stays within 100,000 of the origin on each axis and the eye within 200,000, as far again as its
+    distance to the target: a position read can always be written back.
   - The commands run on the calling thread and give the camera as `{ "position", "target", "fov" }`;
     `viewport.look_at` and `viewport.frame` refuse what is not three finite numbers within reach, and
-    a box upside down.
+    a box upside down. `viewport.frame` fits the box within the narrower of the two angles of view,
+    the vertical one or the horizontal one, from the width over height of the view last drawn.
+  - Reverse Z with no far plane: the depth is 1 at the near plane (0.1) and falls towards 0 at
+    infinity, where the view clears it; the layers compare depths with `Target::depth_compare`
+    (`Greater`). A point 50,000 units away is drawn, and the precision stays near the eye. The
+    review of this step found the former far plane, at 5,000 units, cutting what the camera frames.
   - The recette found the 3D view locking its camera twice in one frame, which froze the editor: it
     is locked once, and a test keeps it so.
 

@@ -198,7 +198,7 @@ pub fn create(device: &wgpu::Device, target: &Target) -> Gpu {
         depth_stencil: Some(wgpu::DepthStencilState {
             format: target.depth_format,
             depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::Less),
+            depth_compare: Some(target.depth_compare),
             stencil: Default::default(),
             bias: Default::default(),
         }),

@@ -27,6 +27,7 @@ const TARGET: Target = Target {
     color_format: wgpu::TextureFormat::Rgba8UnormSrgb,
     depth_format: wgpu::TextureFormat::Depth32Float,
     sample_count: 4,
+    depth_compare: wgpu::CompareFunction::Greater,
 };
 
 const BACKGROUND: wgpu::Color = wgpu::Color {
@@ -60,7 +61,8 @@ fn camera(camera: &Camera) -> MutexGuard<'_, OrbitCamera> {
     camera.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// How far from the origin the camera's points go.
+/// How far from the origin the camera's target goes; its eye goes as far again, its distance to
+/// the target being at most as much.
 const REACH: f64 = 100_000.0;
 
 /// A number of the camera as a property shows it: the shortest decimal of the f32.
@@ -83,24 +85,27 @@ fn camera_json(camera: &OrbitCamera) -> Value {
     json!({ "position": three(camera.eye()), "target": three(camera.target()), "fov": widen(camera.fov()) })
 }
 
-/// The argument `name`: three finite numbers within reach.
-fn point_argument(arguments: &Value, name: &str) -> Result<Vec3, String> {
+/// The argument `name`: three finite numbers within `reach` of the origin on each axis.
+fn point_argument(arguments: &Value, name: &str, reach: f64) -> Result<Vec3, String> {
     let numbers: Option<Vec<f64>> = arguments[name]
         .as_array()
         .map(|items| items.iter().filter_map(Value::as_f64).collect());
     match numbers.as_deref() {
-        Some([x, y, z]) if [x, y, z].iter().all(|n| n.is_finite() && n.abs() <= REACH) => {
+        Some([x, y, z]) if [x, y, z].iter().all(|n| n.is_finite() && n.abs() <= reach) => {
             Ok(Vec3::new(*x as f32, *y as f32, *z as f32))
         }
-        _ => Err(format!("'{name}' must be three numbers within {REACH:e}")),
+        _ => Err(format!("'{name}' must be three numbers within {reach:e}")),
     }
 }
 
 /// The camera and frame drawn, the camera locked once.
 fn view(shared: &Camera, size: [u32; 2], time: f32) -> View {
-    let camera = camera(shared);
+    let mut camera = camera(shared);
+    let aspect = size[0] as f32 / size[1] as f32;
+    // Kept for viewport.frame, which fits a box in the width as in the height.
+    camera.set_aspect(aspect);
     View {
-        view_proj: camera.view_proj(size[0] as f32 / size[1] as f32),
+        view_proj: camera.view_proj(aspect),
         eye: camera.eye(),
         size,
         time,
@@ -110,8 +115,8 @@ fn view(shared: &Camera, size: [u32; 2], time: f32) -> View {
 /// `viewport.look_at`: the eye at `position`, looking at `target`, with the angle `fov` if given.
 fn look_at(shared: &Camera, arguments: &Value) -> Result<Value, String> {
     let (position, target) = (
-        point_argument(arguments, "position")?,
-        point_argument(arguments, "target")?,
+        point_argument(arguments, "position", 2.0 * REACH)?,
+        point_argument(arguments, "target", REACH)?,
     );
     let fov = match &arguments["fov"] {
         Value::Null => None,
@@ -132,7 +137,10 @@ fn look_at(shared: &Camera, arguments: &Value) -> Result<Value, String> {
 
 /// `viewport.frame`: the box from `min` to `max` in view, seen from the same direction.
 fn frame(shared: &Camera, arguments: &Value) -> Result<Value, String> {
-    let (min, max) = (point_argument(arguments, "min")?, point_argument(arguments, "max")?);
+    let (min, max) = (
+        point_argument(arguments, "min", REACH)?,
+        point_argument(arguments, "max", REACH)?,
+    );
     if min.cmpgt(max).any() {
         return Err("'min' must be below 'max' on every axis".to_owned());
     }
@@ -215,7 +223,7 @@ impl Module for ViewportModule {
             "camera_position",
             "Camera position",
             PropertyKind::Vector,
-            [-REACH, REACH],
+            [-2.0 * REACH, 2.0 * REACH],
             move || vector(camera(&read).eye()),
             move |value| camera(&write).set_position(point(value)),
         );
@@ -401,7 +409,8 @@ impl ViewportModule {
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &targets.depth,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
+                        // Reverse Z: infinity is 0.
+                        load: wgpu::LoadOp::Clear(0.0),
                         store: wgpu::StoreOp::Discard,
                     }),
                     stencil_ops: None,
@@ -529,6 +538,15 @@ mod tests {
         assert_eq!(moved["fov"], json!(60.0));
         assert!(look_at(&camera, &json!({ "position": [1, 2], "target": [0, 0, 0] })).is_err());
         assert!(look_at(&camera, &json!({ "position": [1e9, 0, 0], "target": [0, 0, 0] })).is_err());
+        // The eye goes twice as far as the target: a position read is a position written back.
+        let far = look_at(
+            &camera,
+            &json!({ "position": [200000, 0, 0], "target": [100000, 0, 0] }),
+        )
+        .unwrap();
+        assert_eq!(far["position"], json!([200000.0, 0.0, 0.0]));
+        let eye = super::vector(super::camera(&camera).eye()).components();
+        assert!(eye.iter().all(|n| n.abs() <= 2.0 * super::REACH));
         assert!(
             look_at(
                 &camera,
