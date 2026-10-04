@@ -5,6 +5,8 @@
 
 mod panel;
 mod sequence;
+#[cfg(test)]
+mod testing;
 
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
@@ -151,14 +153,16 @@ impl TimelineModule {
                     return;
                 }
             }
-            "discard" => {
-                // Undo would otherwise bring back the changes left.
-                self.documents.remove(&current);
-                ctx.forget_document(&current);
-            }
+            "discard" => self.discard(&current, ctx),
             _ => return,
         }
         panel::open(self, &question.target);
+    }
+
+    /// Drops the unsaved changes of the sequence `name`: Undo would otherwise bring them back.
+    fn discard(&mut self, name: &str, ctx: &mut Context) {
+        self.documents.remove(name);
+        ctx.forget_document(name);
     }
 
     fn panel_message(&mut self, message: &str) {
@@ -378,6 +382,7 @@ mod tests {
 
     use super::{Document, SequenceEdit, TimelineModule};
     use crate::sequence::{Sequence, Track};
+    use crate::testing::FakeHost;
 
     #[test]
     fn an_edit_is_undone_and_redone_and_marks_the_sequence() {
@@ -420,6 +425,31 @@ mod tests {
         edit.apply(&mut timeline);
         edit.revert(&mut timeline);
         assert!(timeline.documents.is_empty() && !timeline.keys_changed);
+    }
+
+    #[test]
+    fn leaving_an_unsaved_sequence_without_a_window_to_ask_in_forgets_its_changes() {
+        let folder = std::env::temp_dir().join(format!("uniwow-timeline-leave-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("outro.json"), Sequence::default().to_text()).unwrap();
+        let mut timeline = TimelineModule {
+            folder: folder.clone(),
+            current: Some("intro".to_owned()),
+            ..TimelineModule::default()
+        };
+        timeline.documents.insert(
+            "intro".to_owned(),
+            Document {
+                sequence: Sequence::default(),
+                dirty: true,
+            },
+        );
+        let mut host = FakeHost::default();
+        crate::panel::switch(&mut timeline, &mut host.context(), "outro".to_owned(), true);
+        assert_eq!(host.forgotten, vec!["intro".to_owned()]);
+        assert!(!timeline.documents.contains_key("intro"));
+        assert_eq!(timeline.current.as_deref(), Some("outro"));
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     #[test]

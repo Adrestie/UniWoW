@@ -147,7 +147,7 @@ fn sequence_bar(timeline: &mut TimelineModule, ui: &mut egui::Ui, ctx: &mut Cont
 
 /// Shows another sequence. The unsaved changes of the one shown are asked about first, in a
 /// window of the module `dialogs`, which answers later; without that module, they are lost.
-fn switch(timeline: &mut TimelineModule, ctx: &mut Context, target: String, dirty: bool) {
+pub(crate) fn switch(timeline: &mut TimelineModule, ctx: &mut Context, target: String, dirty: bool) {
     if !dirty {
         open(timeline, &target);
         return;
@@ -161,7 +161,8 @@ fn switch(timeline: &mut TimelineModule, ctx: &mut Context, target: String, dirt
         .as_ref()
         .is_some_and(|editor| editor.commands().iter().any(|c| c.name == DIALOG_COMMAND));
     if !asked {
-        timeline.documents.remove(&current);
+        // Without a window to ask in, the changes are lost, as when closing the editor.
+        timeline.discard(&current, ctx);
         open(timeline, &target);
         return;
     }
