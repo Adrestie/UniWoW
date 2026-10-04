@@ -453,6 +453,18 @@ Not guaranteed:
 
 Stress tests with random interleavings, seeded so that a failure can be replayed: threads calling and grouping at once through the router, each getting its answers in its order; the undo groups against a model of rule S4; Undo at random moments while a compiled module's thread records changes, never before the module's last change reaches the history.
 
+Points to revisit: work of milestones 1 to 7 still done on the interface thread, small today;
+milestone 9 takes up those that concern it.
+
+- Loading the modules: at start, on the interface thread, one module after another (the hash of
+  the runtime, the copy and hash of each DLL, its loading, then each `init`); the window waits for
+  all of it, and the start grows with the number of modules.
+- The files of the Timeline: listed, read, parsed and written on the interface thread when a
+  sequence is opened or saved; a large sequence would freeze the editor while it loads or saves.
+- The 3D view: each layer records its render bundle again at every frame on the interface thread,
+  and creates its GPU resources there when it first draws; large data (terrain, models) uploaded
+  that way would stall frames.
+
 ---
 
 ## 6. Libraries (libs/*)
