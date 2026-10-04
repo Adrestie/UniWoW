@@ -3421,6 +3421,7 @@ dependencies = [
  "egui_dock",
  "glam",
  "log",
+ "miniz_oxide 0.8.9",
  "serde",
  "serde_json",
  "uniwow-lua",
@@ -3449,6 +3450,13 @@ name = "uniwow-lua"
 version = "0.1.0"
 dependencies = [
  "mlua",
+]
+
+[[package]]
+name = "uniwow-module-assets"
+version = "0.1.0"
+dependencies = [
+ "uniwow-api",
 ]
 
 [[package]]

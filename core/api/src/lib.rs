@@ -12,6 +12,8 @@ pub use eframe::wgpu;
 pub use egui_dock;
 pub use glam;
 pub use log;
+/// zlib, for the files of the client's archives.
+pub use miniz_oxide;
 pub use serde;
 pub use serde_json;
 /// Lua 5.1 (`libs/lua`), part of the runtime.
@@ -52,6 +54,7 @@ mod registrar;
 pub mod sequence;
 mod service;
 pub mod ui;
+pub mod vfs;
 pub mod viewport;
 
 pub use command::{AppliedChange, Command};

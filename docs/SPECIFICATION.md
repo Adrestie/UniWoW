@@ -266,6 +266,7 @@ fills it, or *not planned* when no milestone does yet.
 | The dopesheet | The service `dopesheet`; the objects `DopesheetView` and `CurveView`, as the Timeline does | `DopesheetView`; `CurveView` showing a `Sequence` | `uniwow::DopesheetView`; `DopesheetView` | — milestones 10 and 11 |
 | Tree, table, property grid | egui; the service `property-grid` | `TreeView`, `TableView`, with `set_cell`, `insert_rows`, `remove_rows`; `PropertyGrid` | `uniwow::TreeView`, `uniwow::TableView`, `uniwow::PropertyGrid`; `TreeView`, `TableView`, `PropertyGrid` | — milestones 10 and 11 |
 | Drawing in the 3D view | The service `viewport` and its layers | — not planned (an other 3D access of step 8.3) | — | — |
+| The client's files, read from its archives | The service `vfs` of the module `assets` — step 9.1 | — not planned yet | — | — |
 | The live world: entities of the server around a point, their moves | Inside the module `live-world` | — step 9.3 (commands and events) | — step 9.3 | — milestones 10 and 11 |
 | Splitting work over the cores, `parallel_for` | `uniwow_api::parallel_for` — step 9.2a | — not planned; compiled modules run threads of their own (T7) | — | — |
 | Picking in the 3D view, the selection shown in 3D | — designed in milestone 9, not built | — | — | — |
@@ -1658,10 +1659,8 @@ Decisions of the user:
   verifications of step 9.1): with the allocator of Windows, reading the archives from more than 8
   threads at once gets slower, where mimalloc kept scaling (*Results of the verifications*, below);
   but mimalloc cannot be the allocator of the editor (section 2). `assets` allocates the data of a
-  file once, at its size, and reuses its buffers thread by thread; its scaling is measured in step
-  9.1. Should it still fall beyond 8 threads, the bytes of a file come in a buffer that mimalloc
-  allocates and frees, a type of the runtime, the rest of the editor keeping the allocator of
-  Windows.
+  file once, at its size, and reuses its buffers thread by thread. Measured in step 9.1, it scales
+  to 32 threads (*As built*, below): mimalloc is not needed.
 
 Rules:
 
@@ -1921,7 +1920,7 @@ Each step is reviewed before the next one; the milestone is delivered once all a
 | The volume of data in a crowded city at the rate chosen | To verify |
 | The work of the M2 animations (bones, interpolation) | To estimate |
 | Speed of the terrain and the models in a city (the goal to fix), and the cost of rebuilding one terrain chunk alone, for the editing to come | To measure |
-| Reading the archives from many threads at once: does it scale with the cores, or does the disk or a lock limit it? | Measured in step 9.1: the archives scale with the cores, the allocator of Windows does not beyond 8 threads; `assets` reads economically, measured again on its own reader (below) |
+| Reading the archives from many threads at once: does it scale with the cores, or does the disk or a lock limit it? | Measured in step 9.1: the archives scale with the cores, the allocator of Windows does not beyond 8 threads; `assets` reads economically, which scales to 32 threads (step 9.1) |
 | The time the interface thread spends per frame while flying fast over a city: handing over, culling, recording | To measure |
 | The bytes of animation (instances and bones) written to the GPU per frame in a crowded city | To measure |
 | What warcraft-rs reads and writes correctly in 3.3.5a, format by format; what `assets` copies of it, without `rayon` | Reading verified in step 9.1 (below): archives, DBC, WDT, ADT and WMO groups read; M2, skins, WMO roots and BLP have faults to correct in the copy. Writing not verified yet |
@@ -1995,6 +1994,64 @@ commits, which may change what follows:
 archives hold no `.db2`, no split tile, and 2 `MD21` models of 23,155, one of version 274, the other
 an `MD21` around a model of version 264, which WarcraftXL does not take. The acceptance of the
 modern files needs files exported with wow.export and the two tables of DB2Gen installed.
+
+#### As built
+
+Step 9.1 is built in two parts, each reviewed: the archives and the service `vfs` (9.1a), then the
+FileDataIDs, the DB2 and the service `formats` (9.1b).
+
+First part (9.1a), the archives:
+
+- `uniwow_api::vfs`: the trait `Vfs`, shared between threads (T3): the bytes of a file by its path,
+  case and slashes ignored, or none when no archive holds it or a patch deleted it; whether a file
+  exists; the files listed under a folder; the state, no client (with why), opening, or ready with
+  its archives and files. The runtime re-exports `miniz_oxide`, for zlib: it already held it.
+- The module `assets` offers it as the service `vfs`. Its panel *Assets* sets the folder of the
+  client, kept in its settings (`client_folder`), and says how far its files are and which
+  archives were left out. The locale is the one `WTF\Config.wtf` sets, else the one folder of
+  `Data` holding its `locale-<locale>.MPQ`.
+- The order is that of Wow.exe 12340 for the patches, widened to any name as the patcher of
+  WarcraftXL does, a folder of that name mounted as an archive; the base archives follow in the
+  order the community documents, not checked against Wow.exe.
+- An archive of format 1 or 2, its positions unsigned (`patch-Z.MPQ`, past 2 GB), has its tables
+  read once, then its files read by position from any thread, without a lock: the packed bytes in a
+  buffer each thread reuses (kept up to 64 MB), the file in one allocation of its size; stored,
+  compressed with zlib in one unit or in sectors, with or without their checksums (not checked).
+  The entry of the neutral locale comes first. A delete marker hides the file of the archives read
+  after it. The encryption of files, PKWare's implode, the other compressions and the incremental
+  patches are refused by name: the archives of 3.3.5a hold none.
+- The lists of the archives are merged, a name deleted by the first archive listing it left out; a
+  file no list names is read, but not listed.
+- `modules/assets/THIRD_PARTY.md` names what comes from wow-mpq, its commit, its authors and its
+  licence.
+- Measured on the user's client, the reader of `assets` with the allocator of Windows (1,500 files
+  a run):
+
+  | Threads | Files cached | Files read for the first time |
+  |---|---|---|
+  | 1 | 330 MB/s | 230 MB/s |
+  | 8 | 2,400 to 2,600 MB/s | 770 MB/s |
+  | 32 | 4,100 to 4,300 MB/s | 860 MB/s |
+
+  More than wow-mpq with mimalloc (3,600 MB/s at 32 threads): the bytes it allocates per file, not
+  the allocator, held the reading back.
+- Tests: archives the tests write (the formats, the ways of storing a file, a delete marker, the
+  order of the patches and a folder mounted, the files refused, 16 threads reading at once); the
+  client's own archives, their DBC checked and a sample read, and the reading measured, when
+  `UNIWOW_CLIENT` names its folder, skipped otherwise.
+- Not in this part: the FileDataIDs, the DB2 and the service `formats` (9.1b); the observer's
+  address, port and token, with the observer (9.3). Other languages do not reach the client's files
+  yet: the table of capabilities says so.
+
+Where the work of the archives is done:
+
+| Work | Thread | Lock |
+|---|---|---|
+| The locale and the order of the archives | Interface, at start or when the folder changes: a few listings of folders | — |
+| An archive opened: its header and tables, or a folder walked | A job of the pool, one per archive | None |
+| The lists merged into the chain | A job of the pool | None |
+| The chain handed to the service | Interface, when that job ends | The state of the service, the time of an exchange |
+| A file read | The thread calling `read`, any | The state of the service, to take the chain; none while reading |
 
 #### Tests
 
