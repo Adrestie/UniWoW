@@ -14,6 +14,8 @@ use uniwow_api::{Context, DIALOG_ANSWERED_TOPIC, DIALOG_COMMAND, Module, Registr
 #[derive(Debug, PartialEq)]
 struct Request {
     number: u64,
+    /// Who asked for it.
+    caller: String,
     title: String,
     text: String,
     /// Id and label of each button, left to right.
@@ -23,6 +25,9 @@ struct Request {
 }
 
 type Job = Box<dyn FnOnce() + Send>;
+
+/// The most windows one caller may have waiting.
+const MAX_WAITING: usize = 8;
 
 struct DialogsModule {
     ui: SharedUi,
@@ -84,14 +89,13 @@ impl Module for DialogsModule {
         );
     }
 
-    fn on_command(&mut self, name: &str, arguments: Value, _ctx: &mut Context) -> Result<Value, String> {
+    fn on_command(&mut self, name: &str, arguments: Value, ctx: &mut Context) -> Result<Value, String> {
         if name != DIALOG_COMMAND {
             return Err(format!("'{name}' is not a command of the dialogs"));
         }
-        let request = request(self.next, &arguments)?;
-        self.next += 1;
-        let number = request.number;
-        self.waiting.push_back(request);
+        let caller = ctx.command_caller().unwrap_or("unknown");
+        let first = arguments["first"].as_bool() == Some(true);
+        let number = self.ask(request(self.next, caller, &arguments)?, first)?;
         self.show_next()?;
         Ok(json!({ "dialog": number }))
     }
@@ -118,6 +122,25 @@ impl Module for DialogsModule {
 }
 
 impl DialogsModule {
+    /// Puts a window in the queue, at its head when `first`; returns its number.
+    fn ask(&mut self, request: Request, first: bool) -> Result<u64, String> {
+        let waiting = self.waiting.iter().filter(|r| r.caller == request.caller).count();
+        if waiting >= MAX_WAITING {
+            return Err(format!(
+                "'{}' has {MAX_WAITING} windows waiting already",
+                request.caller
+            ));
+        }
+        self.next += 1;
+        let number = request.number;
+        if first {
+            self.waiting.push_front(request);
+        } else {
+            self.waiting.push_back(request);
+        }
+        Ok(number)
+    }
+
     /// Shows the next window waiting, unless one is shown.
     fn show_next(&mut self) -> Result<(), String> {
         if self.shown.is_some() {
@@ -163,7 +186,7 @@ impl DialogsModule {
 }
 
 /// Reads the arguments of `ui.dialog`.
-fn request(number: u64, arguments: &Value) -> Result<Request, String> {
+fn request(number: u64, caller: &str, arguments: &Value) -> Result<Request, String> {
     let text = |key: &str| arguments[key].as_str().unwrap_or_default().to_owned();
     let buttons: Vec<(String, String)> = arguments["buttons"]
         .as_array()
@@ -181,6 +204,7 @@ fn request(number: u64, arguments: &Value) -> Result<Request, String> {
     }
     Ok(Request {
         number,
+        caller: caller.to_owned(),
         title: text("title"),
         text: text("text"),
         buttons,
@@ -195,7 +219,7 @@ mod tests {
     use uniwow_api::serde_json::json;
     use uniwow_api::ui;
 
-    use super::{DialogsModule, request};
+    use super::{DialogsModule, MAX_WAITING, request};
 
     #[test]
     fn a_request_names_its_buttons_and_the_one_escape_stands_for() {
@@ -204,25 +228,47 @@ mod tests {
             "text": "Save?",
             "buttons": [{ "id": "save", "label": "Save" }, { "id": "cancel", "label": "Cancel" }],
         });
-        let read = request(7, &asked).unwrap();
+        let read = request(7, "timeline", &asked).unwrap();
         assert_eq!(
             (read.number, read.escape.as_str(), read.buttons.len()),
             (7, "cancel", 2)
         );
-        assert!(request(1, &json!({ "text": "x", "buttons": [] })).is_err());
-        assert!(request(1, &json!({ "buttons": [{ "id": "a", "label": "A" }], "escape": "b" })).is_err());
+        assert!(request(1, "timeline", &json!({ "text": "x", "buttons": [] })).is_err());
+        assert!(
+            request(
+                1,
+                "timeline",
+                &json!({ "buttons": [{ "id": "a", "label": "A" }], "escape": "b" })
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn windows_asked_for_at_once_are_shown_one_after_the_other() {
         let mut dialogs = DialogsModule::default();
         let asked = json!({ "text": "x", "buttons": [{ "id": "ok", "label": "OK" }] });
-        dialogs.waiting.push_back(request(1, &asked).unwrap());
-        dialogs.waiting.push_back(request(2, &asked).unwrap());
+        dialogs.waiting.push_back(request(1, "timeline", &asked).unwrap());
+        dialogs.waiting.push_back(request(2, "timeline", &asked).unwrap());
         dialogs.show_next().unwrap();
         dialogs.show_next().unwrap();
         assert_eq!(ui::lock(&dialogs.ui).dialogs().len(), 1);
         assert_eq!(dialogs.shown.map(|(number, _)| number), Some(1));
         assert_eq!(dialogs.waiting.len(), 1);
+    }
+
+    #[test]
+    fn the_kernel_question_goes_first_and_a_caller_cannot_flood_the_queue() {
+        let mut dialogs = DialogsModule::default();
+        let asked = json!({ "text": "x", "buttons": [{ "id": "ok", "label": "OK" }] });
+        for _ in 0..MAX_WAITING {
+            let next = request(dialogs.next, "lua", &asked).unwrap();
+            dialogs.ask(next, false).unwrap();
+        }
+        let next = request(dialogs.next, "lua", &asked).unwrap();
+        assert!(dialogs.ask(next, false).is_err());
+        let next = request(dialogs.next, "kernel", &asked).unwrap();
+        let kernel = dialogs.ask(next, true).unwrap();
+        assert_eq!(dialogs.waiting.front().map(|r| r.number), Some(kernel));
     }
 }

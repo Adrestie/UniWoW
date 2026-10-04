@@ -24,11 +24,32 @@ pub trait Host {
 pub struct Context<'a> {
     host: &'a mut dyn Host,
     module: &'a str,
+    /// Who called the command `Module::on_command` runs.
+    caller: Option<&'a str>,
 }
 
 impl<'a> Context<'a> {
     pub fn new(host: &'a mut dyn Host, module: &'a str) -> Self {
-        Self { host, module }
+        Self {
+            host,
+            module,
+            caller: None,
+        }
+    }
+
+    /// The context of `Module::on_command`, for a command `caller` called.
+    pub fn for_command(host: &'a mut dyn Host, module: &'a str, caller: &'a str) -> Self {
+        Self {
+            host,
+            module,
+            caller: Some(caller),
+        }
+    }
+
+    /// In `Module::on_command`, who called the command: a module id, `kernel`, or
+    /// `<module>#<name>` for a script run of that module.
+    pub fn command_caller(&self) -> Option<&str> {
+        self.caller
     }
 
     /// Id of the module this context belongs to.

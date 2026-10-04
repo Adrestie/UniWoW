@@ -669,9 +669,10 @@ impl Shell {
         let index = self
             .running_index(&owner)
             .ok_or_else(|| format!("'{name}' belongs to '{owner}', which is not running"))?;
-        let outcome = call_module(&mut self.slots[index], &mut self.host, |f, ctx| {
-            f.on_command(name, arguments, ctx)
-        });
+        let slot = &mut self.slots[index];
+        let module = slot.module.as_deref_mut().expect("running modules are loaded");
+        let mut ctx = Context::for_command(&mut self.host, &slot.id, caller);
+        let outcome = guarded_as(&slot.id, || module.on_command(name, arguments, &mut ctx));
         match outcome {
             Ok(result) => {
                 self.apply_pending_for(Some((caller, thread)));
@@ -740,11 +741,13 @@ impl Shell {
     fn close_requested(&mut self, ctx: &egui::Context) {
         match self.closing {
             Closing::Confirmed => return,
-            Closing::Asking(_) => {
+            Closing::Asking(_) if self.host.bridge.lookup(DIALOG_COMMAND).is_ok() => {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 show_window(ctx);
                 return;
             }
+            // Its window went with the module that showed it: the editor closes as without it.
+            Closing::Asking(_) => self.closing = Closing::Open,
             Closing::Open => {}
         }
         let unsaved = self.unsaved();
@@ -764,6 +767,7 @@ impl Shell {
                 { "id": "cancel", "label": "Cancel" },
             ],
             "escape": "cancel",
+            "first": true,
         });
         match self
             .run_command("kernel", std::thread::current().id(), DIALOG_COMMAND, arguments)
@@ -823,6 +827,7 @@ impl Shell {
                     "text": text,
                     "buttons": [{ "id": "ok", "label": "OK" }],
                     "escape": "ok",
+                    "first": true,
                 });
                 if let Err(error) = self.run_command("kernel", std::thread::current().id(), DIALOG_COMMAND, arguments) {
                     log::error!("{error}");

@@ -47,8 +47,9 @@ pub use service::ServiceKey;
 pub const MODULE_FAILED_TOPIC: &str = "kernel.module_failed";
 
 /// Command opening a modal window, offered by the module `dialogs` when it runs. Arguments:
-/// `{ "title", "text", "buttons": [{ "id", "label" }], "escape": <id of a button> }`; result:
-/// `{ "dialog": <number> }`.
+/// `{ "title", "text", "buttons": [{ "id", "label" }], "escape": <id of a button>, "first": <bool> }`,
+/// `first` putting the window before those waiting, for the kernel's question when the editor
+/// closes; result: `{ "dialog": <number> }`.
 pub const DIALOG_COMMAND: &str = "ui.dialog";
 
 /// Topic of the answer to a window opened with `DIALOG_COMMAND`. Payload:
