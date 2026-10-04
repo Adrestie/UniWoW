@@ -132,3 +132,16 @@ numbered!(
         CurvesChanged = 19,
     }
 );
+
+numbered!(
+    /// Types of the values of animatable properties.
+    PropertyKind {
+        Number = 1,
+        /// three numbers, such as a position
+        Vector = 2,
+        /// red, green and blue, from 0 to 1
+        Colour = 3,
+        /// one number, 0 or 1
+        Boolean = 4,
+    }
+);

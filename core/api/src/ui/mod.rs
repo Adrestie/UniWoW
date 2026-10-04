@@ -35,28 +35,7 @@ pub type Slot = Arc<dyn Fn(&SignalData) + Send + Sync>;
 /// The objects of one module, shared between its threads and the interface thread.
 pub type SharedUi = Arc<Mutex<Ui>>;
 
-/// An enumeration of numbers shared with every language, read back from a number.
-macro_rules! numbered {
-    ($(#[$meta:meta])* $name:ident { $($(#[$doc:meta])* $variant:ident = $value:literal,)* }) => {
-        $(#[$meta])*
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-        #[repr(u32)]
-        pub enum $name { $($(#[$doc])* $variant = $value,)* }
-
-        impl $name {
-            pub fn from_u32(value: u32) -> Option<Self> {
-                match value {
-                    $($value => Some(Self::$variant),)*
-                    _ => None,
-                }
-            }
-        }
-    };
-}
-
-mod numbers;
-
-pub use numbers::{Kind, Property, Signal};
+pub use crate::numbers::{Kind, Property, Signal};
 
 impl Kind {
     pub fn is_layout(self) -> bool {

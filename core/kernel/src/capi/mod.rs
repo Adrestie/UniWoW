@@ -2,7 +2,9 @@
 //! start of a compiled module once the kernel has loaded its DLL.
 
 mod objects;
+mod properties;
 
+use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -14,7 +16,7 @@ use uniwow_api::serde_json::{self, Value, json};
 use uniwow_api::ui::{self, Post, SharedUi, Ui};
 use uniwow_api::{DockArea, Editor, PanelSpec, log};
 
-const API_VERSION: u32 = 3;
+const API_VERSION: u32 = 4;
 /// The name under which a compiled module exports its entry point.
 pub const INIT_SYMBOL: &[u8] = b"uniwow_module_init\0";
 
@@ -46,6 +48,10 @@ pub struct Api {
     end_group: extern "C" fn(*mut c_void),
     record_change: extern "C" fn(*mut c_void, *const c_char, *const c_char, *const c_char) -> i32,
     objects: objects::Table,
+    properties: extern "C" fn(*mut c_void, Option<Reply>, *mut c_void),
+    read_property: extern "C" fn(*mut c_void, *const c_char, *mut f64, u32) -> u32,
+    write_property: extern "C" fn(*mut c_void, *const c_char, *const f64, u32) -> i32,
+    set_property: extern "C" fn(*mut c_void, *const c_char, *const f64, u32) -> i32,
 }
 
 #[repr(C)]
@@ -83,6 +89,10 @@ pub struct ModuleInfo {
     /// Applies an undo or redo value recorded with `record_change`, on the module's thread.
     apply_change: Option<ApplyFn>,
     user: *mut c_void,
+    properties: *const properties::PropertyEntry,
+    property_count: u32,
+    /// `sizeof(uniwow_property)` in the module.
+    property_size: u32,
 }
 
 /// A pointer a module gives back to its own functions, which uniwow.h requires to accept any
@@ -105,6 +115,8 @@ pub struct ModuleContext {
     /// What waits for or runs on the module's thread.
     pub activity: Arc<Activity>,
     apply: OnceLock<(ApplyFn, UserPointer)>,
+    /// Its animatable properties by name, once it has started.
+    properties: OnceLock<HashMap<String, Arc<properties::CompiledProperty>>>,
 }
 
 impl ModuleContext {
@@ -162,6 +174,7 @@ pub struct Started {
     pub context: &'static ModuleContext,
     pub commands: Vec<OfferedCommand>,
     pub panels: Vec<PanelSpec>,
+    pub properties: Vec<Arc<properties::CompiledProperty>>,
 }
 
 /// The work waiting for or running on a compiled module's thread: Undo and Redo wait for it,
@@ -230,6 +243,7 @@ pub fn start(init: InitFn, id: &str) -> Result<Started, String> {
         ui: Ui::new(post),
         activity,
         apply: OnceLock::new(),
+        properties: OnceLock::new(),
     }));
     let api: &'static Api = Box::leak(Box::new(Api {
         version: API_VERSION,
@@ -247,6 +261,10 @@ pub fn start(init: InitFn, id: &str) -> Result<Started, String> {
         end_group: api_end_group,
         record_change: api_record_change,
         objects: objects::TABLE,
+        properties: properties::api_properties,
+        read_property: properties::api_read_property,
+        write_property: properties::api_write_property,
+        set_property: properties::api_set_property,
     }));
 
     let mut info = ModuleInfo {
@@ -260,6 +278,9 @@ pub fn start(init: InitFn, id: &str) -> Result<Started, String> {
         panels: std::ptr::null(),
         apply_change: None,
         user: std::ptr::null_mut(),
+        properties: std::ptr::null(),
+        property_count: 0,
+        property_size: 0,
     };
     let mut error = String::new();
     // SAFETY: the module receives valid pointers that outlive it.
@@ -325,12 +346,15 @@ pub fn start(init: InitFn, id: &str) -> Result<Started, String> {
             open_by_default: true,
         });
     }
+    let properties = properties::declared(info.properties, info.property_count, info.property_size, context)?;
+    let _ = context.properties.set(properties::by_name(&properties));
     Ok(Started {
         name: read(info.name).unwrap_or_default(),
         version: read(info.version).unwrap_or_default(),
         context,
         commands,
         panels,
+        properties,
     })
 }
 
@@ -611,17 +635,20 @@ extern "C" fn api_end_group(context: *mut c_void) {
 #[cfg(test)]
 pub(crate) mod testing {
     use std::ffi::{CStr, CString, c_char, c_void};
-    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
     use std::sync::{Condvar, Mutex};
 
+    use super::properties::PropertyEntry;
     use super::{API_VERSION, Api, CommandEntry, ModuleContext, ModuleInfo, Reply, Started, api_record_change, start};
 
-    /// What the module keeps: a value its undo and redo values change, and a gate `native.wait`
-    /// waits on.
+    /// What the module keeps: a value its undo and redo values change, a gate `native.wait` waits
+    /// on, and its property `level`, with the number of writes it received.
     pub struct Native {
         value: AtomicI64,
         open: Mutex<bool>,
         opened: Condvar,
+        level: Mutex<f64>,
+        writes: AtomicUsize,
     }
 
     thread_local! {
@@ -668,6 +695,27 @@ pub(crate) mod testing {
         0
     }
 
+    /// Writes `level`, rounded to a whole number; 7 is an error.
+    extern "C-unwind" fn write_level(
+        user: *mut c_void,
+        values: *mut f64,
+        _count: u32,
+        error: Reply,
+        context: *mut c_void,
+    ) -> i32 {
+        let native = native_of(user);
+        native.writes.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: the editor passes one number for a number.
+        let value = unsafe { &mut *values };
+        if *value == 7.0 {
+            error(context, c"seven is refused".as_ptr());
+            return 1;
+        }
+        *value = value.round();
+        *native.level.lock().unwrap_or_else(|e| e.into_inner()) = *value;
+        0
+    }
+
     unsafe extern "C-unwind" fn init(
         _api: *const Api,
         info: *mut ModuleInfo,
@@ -697,6 +745,19 @@ pub(crate) mod testing {
         info.command_size = std::mem::size_of::<CommandEntry>() as u32;
         info.apply_change = Some(apply);
         info.user = user;
+        let properties: &'static [PropertyEntry] = Box::leak(Box::new([PropertyEntry {
+            name: c"level".as_ptr(),
+            label: c"Level".as_ptr(),
+            kind: uniwow_api::PropertyKind::Number as u32,
+            minimum: 0.0,
+            maximum: 10.0,
+            initial: [2.0, 0.0, 0.0],
+            write: Some(write_level),
+            user,
+        }]));
+        info.properties = properties.as_ptr();
+        info.property_count = 1;
+        info.property_size = std::mem::size_of::<PropertyEntry>() as u32;
         0
     }
 
@@ -706,6 +767,8 @@ pub(crate) mod testing {
             value: AtomicI64::new(0),
             open: Mutex::new(false),
             opened: Condvar::new(),
+            level: Mutex::new(2.0),
+            writes: AtomicUsize::new(0),
         }));
         STARTING.set(std::ptr::from_ref(state) as usize);
         start(init, id).expect("starts")
@@ -718,6 +781,43 @@ pub(crate) mod testing {
     /// The module's value.
     pub fn value(module: &ModuleContext) -> i64 {
         state(module).value.load(Ordering::SeqCst)
+    }
+
+    /// The level the module has, and how many writes it received.
+    pub fn level(module: &ModuleContext) -> (f64, usize) {
+        let native = state(module);
+        (
+            *native.level.lock().unwrap_or_else(|e| e.into_inner()),
+            native.writes.load(Ordering::SeqCst),
+        )
+    }
+
+    /// The JSON `properties` replies to the module.
+    pub fn properties_json(module: &'static ModuleContext) -> String {
+        let mut text = String::new();
+        super::properties::api_properties(context_of(module), Some(super::collect), super::text_target(&mut text));
+        text
+    }
+
+    /// `read_property`: how many numbers, and the first one.
+    pub fn read_number(module: &'static ModuleContext, path: &CStr) -> (u32, f64) {
+        let mut values = [0.0; 3];
+        let count = super::properties::api_read_property(context_of(module), path.as_ptr(), values.as_mut_ptr(), 3);
+        (count, values[0])
+    }
+
+    /// `write_property` of numbers.
+    pub fn write_numbers(module: &'static ModuleContext, path: &CStr, values: &[f64]) -> i32 {
+        super::properties::api_write_property(context_of(module), path.as_ptr(), values.as_ptr(), values.len() as u32)
+    }
+
+    /// `set_property` of numbers.
+    pub fn tell_numbers(module: &'static ModuleContext, name: &CStr, values: &[f64]) -> i32 {
+        super::properties::api_set_property(context_of(module), name.as_ptr(), values.as_ptr(), values.len() as u32)
+    }
+
+    fn context_of(module: &'static ModuleContext) -> *mut c_void {
+        std::ptr::from_ref(module).cast_mut().cast()
     }
 
     /// Lets `native.wait` return.

@@ -17,6 +17,25 @@ pub use serde_json;
 /// Lua 5.1 (`libs/lua`), part of the runtime.
 pub use uniwow_lua::mlua;
 
+/// An enumeration of numbers shared with every language, read back from a number.
+macro_rules! numbered {
+    ($(#[$meta:meta])* $name:ident { $($(#[$doc:meta])* $variant:ident = $value:literal,)* }) => {
+        $(#[$meta])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        #[repr(u32)]
+        pub enum $name { $($(#[$doc])* $variant = $value,)* }
+
+        impl $name {
+            pub fn from_u32(value: u32) -> Option<Self> {
+                match value {
+                    $($value => Some(Self::$variant),)*
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
 mod command;
 mod commands;
 mod context;
@@ -25,6 +44,7 @@ mod editor;
 mod event;
 mod job;
 mod module;
+mod numbers;
 mod property;
 mod registrar;
 mod service;

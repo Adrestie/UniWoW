@@ -205,6 +205,17 @@ public enum SignalId : uint
 }
 // </generated signal>
 
+// <generated value_kind> from sdk/bindings.toml by cargo xtask bindings
+/// <summary>Types of the values of animatable properties.</summary>
+public enum ValueKind : uint
+{
+    Number = 1,
+    Vector = 2,  // three numbers, such as a position
+    Colour = 3,  // red, green and blue, from 0 to 1
+    Boolean = 4, // one number, 0 or 1
+}
+// </generated value_kind>
+
 public enum LogLevel { Error = 1, Warning = 2, Information = 3, Debug = 4 }
 
 /// <summary>Where a panel docks first.</summary>

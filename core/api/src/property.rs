@@ -5,16 +5,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-/// The type of an animatable property.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum PropertyKind {
-    Number,
-    /// Three numbers, such as a position.
-    Vector,
-    /// Red, green and blue, from 0 to 1.
-    Colour,
-    Boolean,
-}
+pub use crate::numbers::PropertyKind;
 
 impl PropertyKind {
     pub fn name(self) -> &'static str {

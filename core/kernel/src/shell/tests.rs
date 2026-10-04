@@ -686,3 +686,93 @@ fn undo_at_random_moments_never_crosses_a_compiled_module_s_changes() {
         );
     }
 }
+
+#[test]
+fn a_compiled_module_s_property_is_read_at_once_and_written_on_its_thread_merged() {
+    let native = CompiledModule::started(capi::testing::native("native"));
+    let mut harness = Harness::with_slots(vec![Slot::compiled("native", native)]);
+    let module = harness.shell.slots[0].compiled.expect("compiled");
+    let editor = harness.shell.host.editor(KERNEL);
+    let listed = editor.properties();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        (listed[0].path.as_str(), listed[0].range),
+        ("native/level", [0.0, 10.0])
+    );
+    assert_eq!(
+        editor.read_property("native/level"),
+        Ok(uniwow_api::PropertyValue::Number(2.0))
+    );
+    // The module's thread busy: writes neither wait nor pile up.
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    ui::lock(&module.ui).post_job(Box::new(move || {
+        let _ = wait.recv();
+    }));
+    for value in [3.4, 5.6, 4.2] {
+        editor
+            .write_property("native/level", uniwow_api::PropertyValue::Number(value))
+            .unwrap();
+    }
+    assert_eq!(
+        editor.read_property("native/level"),
+        Ok(uniwow_api::PropertyValue::Number(4.2))
+    );
+    release.send(()).unwrap();
+    harness.until("the module's work done", |shell| shell.blocking_undo().is_none());
+    assert_eq!(
+        capi::testing::level(module),
+        (4.0, 1),
+        "one write, the last, rounded by the module"
+    );
+    assert_eq!(
+        editor.read_property("native/level"),
+        Ok(uniwow_api::PropertyValue::Number(4.0)),
+        "the kernel's copy follows what the module kept"
+    );
+}
+
+#[test]
+fn a_write_its_module_fails_on_makes_the_module_fail() {
+    let native = CompiledModule::started(capi::testing::native("native"));
+    let mut harness = Harness::with_slots(vec![Slot::compiled("native", native)]);
+    let editor = harness.shell.host.editor(KERNEL);
+    editor
+        .write_property("native/level", uniwow_api::PropertyValue::Number(7.0))
+        .unwrap();
+    harness.until("the module's failure", |shell| {
+        matches!(shell.slots[0].state, State::Failed(_))
+    });
+    let State::Failed(reason) = &harness.shell.slots[0].state else {
+        unreachable!()
+    };
+    assert!(reason.contains("level") && reason.contains("seven"), "{reason}");
+}
+
+#[test]
+fn a_compiled_module_lists_reads_writes_and_tells_properties_through_the_c_functions() {
+    let native = CompiledModule::started(capi::testing::native("native"));
+    let mut harness = Harness::with_slots(vec![Slot::compiled("native", native)]);
+    let module = harness.shell.slots[0].compiled.expect("compiled");
+    let listed: Value = uniwow_api::serde_json::from_str(&capi::testing::properties_json(module)).unwrap();
+    assert_eq!(listed[0]["path"], json!("native/level"));
+    assert_eq!(listed[0]["kind"], json!("number"));
+    assert_eq!(capi::testing::read_number(module, c"native/level"), (1, 2.0));
+    assert_eq!(capi::testing::write_numbers(module, c"native/level", &[9.0]), 0);
+    assert_eq!(
+        capi::testing::write_numbers(module, c"native/level", &[1.0, 2.0]),
+        1,
+        "a number is one number"
+    );
+    harness.until("the write delivered", |shell| shell.blocking_undo().is_none());
+    assert_eq!(capi::testing::level(module).0, 9.0);
+    assert_eq!(capi::testing::tell_numbers(module, c"level", &[5.0]), 0);
+    assert_eq!(capi::testing::read_number(module, c"native/level"), (1, 5.0));
+    assert_eq!(capi::testing::tell_numbers(module, c"level", &[f64::NAN]), 1);
+    assert_eq!(capi::testing::tell_numbers(module, c"other", &[1.0]), 1);
+    assert_eq!(capi::testing::tell_numbers(module, c"level", &[50.0]), 0);
+    assert_eq!(
+        capi::testing::read_number(module, c"native/level"),
+        (1, 10.0),
+        "kept within its range"
+    );
+}

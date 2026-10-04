@@ -76,6 +76,18 @@ entries = [
     [31, "Curves", "CURVES", "curve view, text: JSON [{label, colour: [r, g, b], visible, keys: [{time, value, mode, left, right}]}]; keys in time order, each at a time of its own, numbers within 1e9"],
 ]
 
+[value_kind]
+description = "Types of the values of animatable properties."
+rust = "PropertyKind"
+csharp = "ValueKind"
+c_prefix = "UNIWOW_VALUE_"
+entries = [
+    [1, "Number", "NUMBER"],
+    [2, "Vector", "VECTOR", "three numbers, such as a position"],
+    [3, "Colour", "COLOUR", "red, green and blue, from 0 to 1"],
+    [4, "Boolean", "BOOLEAN", "one number, 0 or 1"],
+]
+
 [signal]
 description = "Signals, named as in Qt. Each tells what the user did, never a change the module made."
 rust = "Signal"

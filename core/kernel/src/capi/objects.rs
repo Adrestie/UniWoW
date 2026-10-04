@@ -399,6 +399,7 @@ mod tests {
             ui: Ui::new(Arc::new(|job| job())),
             activity: Arc::default(),
             apply: OnceLock::new(),
+            properties: OnceLock::new(),
         }));
         let context = std::ptr::from_ref(module).cast_mut().cast::<c_void>();
         let root = panel(context, c"p".as_ptr());

@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define UNIWOW_API_VERSION 3
+#define UNIWOW_API_VERSION 4
 
 /* Receives a text produced for the caller: JSON for a result, plain text for an error message.
    A module may pass NULL to the functions of uniwow_api that take one: the text is then ignored.
@@ -123,6 +123,16 @@ enum {
     UNIWOW_SIGNAL_CURVES_CHANGED = 19        /* curve view: text, the curves; boolean, whether the change is done */
 };
 /* </generated signal> */
+
+/* <generated value_kind> from sdk/bindings.toml by cargo xtask bindings */
+/* Types of the values of animatable properties. */
+enum {
+    UNIWOW_VALUE_NUMBER = 1,
+    UNIWOW_VALUE_VECTOR = 2, /* three numbers, such as a position */
+    UNIWOW_VALUE_COLOUR = 3, /* red, green and blue, from 0 to 1 */
+    UNIWOW_VALUE_BOOLEAN = 4 /* one number, 0 or 1 */
+};
+/* </generated value_kind> */
 
 /* What a slot receives; the fields its signal does not use are zero. button: 1 left, 2 right,
    3 middle. modifiers: 1 Ctrl, 2 Shift, 4 Alt. text is valid during the call only. */
@@ -231,6 +241,24 @@ typedef struct uniwow_api {
     void (*scale)(void *context, uniwow_handle painter, double sx, double sy);
     void (*save)(void *context, uniwow_handle painter);
     void (*restore)(void *context, uniwow_handle painter);
+
+    /* --- Animatable properties, of every module (version 4). A property's path is
+       <module>/<name>; its value is one number (a number, a boolean as 0 or 1) or three (a vector,
+       a colour). The editor keeps the value of the module's own properties: reading never waits
+       for any module. --- */
+
+    /* Replies the properties of the running modules as JSON:
+       [{"path", "owner", "label", "kind": "number" | "vector" | "colour" | "boolean", "range": [lowest, highest]}]. */
+    void (*properties)(void *context, uniwow_reply reply, void *reply_context);
+    /* Reads the numbers of a property into values, at most capacity of them; returns how many it
+       has, or 0 when refused. */
+    uint32_t (*read_property)(void *context, const char *path, double *values, uint32_t capacity);
+    /* Writes a property, kept within its range, without the history: its module's write function
+       receives it on its thread. Returns 0, or non-zero when refused. */
+    int32_t (*write_property)(void *context, const char *path, const double *values, uint32_t count);
+    /* Tells the value the module's own property `name` now has, for the readers to see; kept
+       within its range. Returns 0, or non-zero when refused. */
+    int32_t (*set_property)(void *context, const char *name, const double *values, uint32_t count);
 } uniwow_api;
 
 /* A command offered by the module, run on the calling thread, possibly several at once. Returns 0
@@ -258,6 +286,27 @@ typedef struct uniwow_panel {
    error message and returns non-zero: the module then fails. */
 typedef int32_t (*uniwow_apply_change)(void *user, const char *value_json, uniwow_reply error, void *error_context);
 
+/* Receives a value written to one of the module's properties, on the module's thread; writes of
+   the same property waiting their turn are merged, the last one kept. values holds count numbers,
+   which the module may change into the value it keeps instead (a value it refuses: the one it
+   has); the editor's copy follows. Returns 0, or replies an error message and returns non-zero:
+   the module then fails. */
+typedef int32_t (*uniwow_property_write)(void *user, double *values, uint32_t count, uniwow_reply error,
+                                         void *error_context);
+
+/* An animatable property the module declares: kind is a UNIWOW_VALUE_*, the range the lowest and
+   highest value of each number, initial the value it has at start (its first numbers used). */
+typedef struct uniwow_property {
+    const char *name;
+    const char *label;
+    uint32_t kind;
+    double minimum;
+    double maximum;
+    double initial[3];
+    uniwow_property_write write;
+    void *user; /* given back to write */
+} uniwow_property;
+
 typedef struct uniwow_module_info {
     const char *name;
     const char *version;
@@ -271,6 +320,10 @@ typedef struct uniwow_module_info {
     const uniwow_panel *panels;
     uniwow_apply_change apply_change;
     void *user; /* given back to apply_change */
+    /* Its animatable properties, and sizeof(uniwow_property). */
+    const uniwow_property *properties;
+    uint32_t property_count;
+    uint32_t property_size;
 } uniwow_module_info;
 
 /* Exported by every module under the name UNIWOW_MODULE_INIT. Fills info, whose texts must stay

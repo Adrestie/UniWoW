@@ -30,6 +30,17 @@ impl Module for CompiledModule {
         for panel in &self.started.panels {
             reg.panel(&panel.id, &panel.title, panel.area);
         }
+        for property in &self.started.properties {
+            let (read, write) = (property.clone(), property.clone());
+            reg.animatable(
+                &property.name,
+                &property.label,
+                property.kind,
+                property.range,
+                move || read.read(),
+                move |value| write.write(value),
+            );
+        }
     }
 
     fn init(&mut self, ctx: &mut Context) {

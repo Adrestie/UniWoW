@@ -1,5 +1,5 @@
-//! The numbers of the interface objects, written from `sdk/bindings.toml` into every language that
-//! carries them (S1): the C header, the C# classes and the Rust runtime. The C++ classes use those
+//! The numbers of the interface objects and of the values of properties, written from
+//! `sdk/bindings.toml` into every language that carries them (S1): the C header, the C# classes and the Rust runtime. The C++ classes use those
 //! of the header.
 
 use std::path::Path;
@@ -9,7 +9,7 @@ use crate::workspace::Workspace;
 
 const SOURCE: &str = "sdk/bindings.toml";
 /// The groups of numbers, in the order of the files.
-const GROUPS: [&str; 3] = ["kind", "property", "signal"];
+const GROUPS: [&str; 4] = ["kind", "property", "signal", "value_kind"];
 /// Lines of prose are wrapped at this width, notes after the code at the second.
 const PROSE: usize = 100;
 const CODE: usize = 120;
@@ -36,13 +36,7 @@ pub fn run(check: bool) -> Result {
     let groups = load(&ws.root.join(SOURCE))?;
     let header = ws.root.join("sdk").join("uniwow.h");
     let csharp = ws.root.join("sdk").join("UniWoW.cs");
-    let rust = ws
-        .root
-        .join("core")
-        .join("api")
-        .join("src")
-        .join("ui")
-        .join("numbers.rs");
+    let rust = ws.root.join("core").join("api").join("src").join("numbers.rs");
     let expected = [
         (header.clone(), regions(&read(&header)?, &groups, "/* ", " */", c_enum)?),
         (
