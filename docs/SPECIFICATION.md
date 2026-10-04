@@ -1403,6 +1403,28 @@ playback bars, *Add property*), but its sequences are `Sequence` objects, its pl
 its dopesheet a `DopesheetView` and its Curves view a `CurveView`; no sequence logic remains in the
 module. For the user nothing changes: files, undo, unsaved changes, as in milestones 6 and 7.
 
+Built in two parts, each reviewed. The user chose that the Curves view be a `CurveView` with, on
+its left, the rows of the dopesheet.
+
+As built, first part (8.6a), the views doing what the Timeline does by hand:
+
+- The left of a dopesheet's rows, taken from the Timeline: each track's value at the playhead in a
+  field per number (a box for a boolean, a swatch for a colour), kept within the property's range;
+  a value set is a key at the playhead, which pauses there, one undo entry *set a key of <label>*
+  for a value dragged or typed; a button adds a key at the playhead with the property's value,
+  *add a key to <label>*; another removes the track, *remove <label>*. The fields of a property no
+  running module declares are greyed. `RowProperty` gives the property's current value and range.
+- A `CurveView` showing a sequence has the rows of the dopesheet on its left, through
+  `Dopesheet::curve_properties`, the kernel drawing both services side by side; a box on each row
+  shows or hides the curves of its numbers. The curves of a boolean, which holds its value from key
+  to key, are not shown.
+- A change under way now goes to the sequence at once, as in the Timeline, so that what the
+  sequence animates follows it: the kernel sets the tracks without recording
+  (`Ui::set_tracks_under_way`), then records one entry when the change is done, from the tracks
+  before it began (`Ui::finish_tracks`). A change dropped, nothing being done by the user any more,
+  is undone; one the tracks changed under, elsewhere, starts again from them. Step 8.5 showed a
+  change under way in the view alone.
+
 **Step 8.7, data widgets**, as in Qt:
 
 - `TreeView` (as `QTreeWidget`), drawn by the kernel: items with a text and children, folded or

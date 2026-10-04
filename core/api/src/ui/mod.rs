@@ -621,9 +621,34 @@ impl Ui {
 
     /// `set_tracks`, the undo entry named `label`.
     pub fn change_tracks(&mut self, handle: Handle, tracks: Vec<Track>, label: &str) -> Result<(), String> {
-        let before = self.sequence(handle)?.tracks.clone();
+        self.finish_tracks(handle, None, tracks, label)
+    }
+
+    /// Sets the tracks of a sequence while a change of them goes on, recording nothing: the kernel
+    /// records the change once done, with `finish_tracks`.
+    pub fn set_tracks_under_way(&mut self, handle: Handle, tracks: Vec<Track>) -> Result<(), String> {
+        self.replace_tracks(handle, tracks)
+    }
+
+    /// Sets the tracks of a sequence at the end of a change, which is one undo entry named `label`
+    /// from the tracks `before` it began, or from those it has when none are given.
+    pub fn finish_tracks(
+        &mut self,
+        handle: Handle,
+        before: Option<Vec<Track>>,
+        tracks: Vec<Track>,
+        label: &str,
+    ) -> Result<(), String> {
+        let current = self.sequence(handle)?.tracks.clone();
+        let unchanged = current == tracks;
+        let before = before.unwrap_or(current);
+        // Back where it began: nothing to undo.
         if before == tracks {
-            return Ok(());
+            return if unchanged {
+                Ok(())
+            } else {
+                self.replace_tracks(handle, tracks)
+            };
         }
         if let Some(record) = &self.recorder {
             let change = TracksChange {
