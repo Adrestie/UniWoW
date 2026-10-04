@@ -82,6 +82,10 @@ code or of its global state, and the library's own dependencies are those of the
 `cargo xtask check` refuses a library that `uniwow-api` does not include, whether a module uses
 it or not.
 
+No crate sets a global allocator (`#[global_allocator]`): the Rust standard library, shared as a
+DLL with the runtime, keeps the allocator of Windows, and what one side allocated, the other would
+free. Tried in step 9.1 with mimalloc in the runtime: every program crashed as it started.
+
 ---
 
 ## 3. Module contract
@@ -1650,10 +1654,14 @@ Decisions of the user:
   conversion. The view shows them **from this milestone on**, as the client does.
 - **The readers of the files**: those of 3.3.5a copied from warcraft-rs, the modern ones translated
   from wow.export, inside the module `assets` (*Components*).
-- **The allocator of the editor is mimalloc, in the runtime** (after the verifications of step 9.1):
-  with the allocator of Windows, reading the archives from more than 8 threads at once gets slower;
-  with mimalloc it keeps scaling (*Results of the verifications*, below). That it serves the modules
-  loaded as well as the executable, through the shared runtime, is to prove in step 9.1.
+- **The editor keeps the allocator of Windows, and `assets` reads economically** (after the
+  verifications of step 9.1): with the allocator of Windows, reading the archives from more than 8
+  threads at once gets slower, where mimalloc kept scaling (*Results of the verifications*, below);
+  but mimalloc cannot be the allocator of the editor (section 2). `assets` allocates the data of a
+  file once, at its size, and reuses its buffers thread by thread; its scaling is measured in step
+  9.1. Should it still fall beyond 8 threads, the bytes of a file come in a buffer that mimalloc
+  allocates and frees, a type of the runtime, the rest of the editor keeping the allocator of
+  Windows.
 
 Rules:
 
@@ -1896,7 +1904,7 @@ Each step is reviewed before the next one; the milestone is delivered once all a
 
 | Step | Content |
 |---|---|
-| 9.1 | Installations; mimalloc as the allocator of the editor; the module `assets` and its services `vfs` and `formats`, with their interfaces in `core/api`, read from any thread at once: the archives in the order of the client and of the patcher of WarcraftXL, folders mounted as archives, the delete markers of the patches; the FileDataIDs turned into paths through `TextureFilePath.db2` and `ModelFilePath.db2` (WDC1), as WarcraftXL does; the DBC `Map`, `AreaTable`, `CreatureDisplayInfo`, `CreatureModelData`, and those the next steps need |
+| 9.1 | Installations; the module `assets` and its services `vfs` and `formats`, with their interfaces in `core/api`, read from any thread at once: the archives in the order of the client and of the patcher of WarcraftXL, folders mounted as archives, the delete markers of the patches; read economically (one allocation for the data of a file, buffers reused by each thread); the FileDataIDs turned into paths through `TextureFilePath.db2` and `ModelFilePath.db2`, of the versions WarcraftXL reads (WDC1 to WDC3 and WDC5), as WarcraftXL does; the DBC `Map`, `AreaTable`, `CreatureDisplayInfo`, `CreatureModelData`, and those the next steps need |
 | 9.2a | The additions to the core: `parallel_for`, bundles kept in the viewport with `prepare`, its frame signal |
 | 9.2 | The terrain model that can be edited (point 1 above), from the ADT of 3.3.5a and the split tiles, loaded in jobs in the order of *Threads*, its uploads submitted by the jobs, the GPU memory budget, drawn chunk by chunk; the free camera |
 | 9.3 | The observer and its threads, on both sides; the entities as markers (a coloured shape and the name) moving in real time; the commands and events of L4 |
@@ -1913,7 +1921,7 @@ Each step is reviewed before the next one; the milestone is delivered once all a
 | The volume of data in a crowded city at the rate chosen | To verify |
 | The work of the M2 animations (bones, interpolation) | To estimate |
 | Speed of the terrain and the models in a city (the goal to fix), and the cost of rebuilding one terrain chunk alone, for the editing to come | To measure |
-| Reading the archives from many threads at once: does it scale with the cores, or does the disk or a lock limit it? | Measured in step 9.1: it scales with the cores once the allocator does; mimalloc chosen (below) |
+| Reading the archives from many threads at once: does it scale with the cores, or does the disk or a lock limit it? | Measured in step 9.1: the archives scale with the cores, the allocator of Windows does not beyond 8 threads; `assets` reads economically, measured again on its own reader (below) |
 | The time the interface thread spends per frame while flying fast over a city: handing over, culling, recording | To measure |
 | The bytes of animation (instances and bones) written to the GPU per frame in a crowded city | To measure |
 | What warcraft-rs reads and writes correctly in 3.3.5a, format by format; what `assets` copies of it, without `rayon` | Reading verified in step 9.1 (below): archives, DBC, WDT, ADT and WMO groups read; M2, skins, WMO roots and BLP have faults to correct in the copy. Writing not verified yet |
@@ -1954,7 +1962,7 @@ thread with handles of its own, opened beforehand; the client on a SATA SSD; 32 
 
 The archives scale with the cores; the allocator of Windows does not, beyond 8 threads, as three
 runs showed. With mimalloc, files never read reach 763 MB/s at 32 threads. Hence the decision of the
-user above. Opening an archive reads its tables, up to 60 ms for `common.mpq`: the `vfs` service
+user above, after mimalloc failed as the allocator of the editor (section 2). Opening an archive reads its tables, up to 60 ms for `common.mpq`: the `vfs` service
 reads them once and shares them.
 
 **WarcraftXL**, read in its sources (wxl-core 60033ab, wxl-modern-m2 feba6b3, wxl-modern-wmo e56fa7c,
@@ -2009,7 +2017,7 @@ On the user's machine, with the client and the server on it:
 |---|---|
 | A map chosen, then flown over | Terrain, buildings, doodads and water right |
 | Creatures and NPCs | At their place, animated, moving as on the server |
-| A creature, a building or a terrain tile exported from the retail game and loaded by WarcraftXL | Shown as the client shows it, animated for a creature |
+| A creature, a building or a terrain tile exported from the retail game and loaded by WarcraftXL; to prepare: files exported with wow.export, and `TextureFilePath.db2` and `ModelFilePath.db2` of DB2Gen installed in the client | Shown as the client shows it, animated for a creature |
 | A player connected meanwhile with the real client | Seen moving |
 | The server stopped, then started again | The view says so, then reconnects |
 | Anything changed? | Nothing: no undo entry, no write in the database or the files |
