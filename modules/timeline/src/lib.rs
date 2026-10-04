@@ -494,6 +494,34 @@ mod tests {
     }
 
     #[test]
+    fn a_change_under_way_dropped_puts_the_sequence_back_as_it_was() {
+        let mut timeline = TimelineModule {
+            current: Some("intro".to_owned()),
+            ..TimelineModule::default()
+        };
+        timeline.documents.insert(
+            "intro".to_owned(),
+            Document {
+                sequence: Sequence::default(),
+                dirty: false,
+            },
+        );
+        crate::panel::change_live(&mut timeline, "edit curves", |s| {
+            s.tracks.push(Track::new("cube/scale", PropertyKind::Vector));
+        });
+        crate::panel::cancel_editing(&mut timeline);
+        assert_eq!(timeline.documents["intro"].sequence, Sequence::default());
+        assert!(!timeline.documents["intro"].dirty);
+        // Changed since, as by an undo: the next change starts from there, not from the old snapshot.
+        let mut since = Sequence::default();
+        since.tracks.push(Track::new("cube/position", PropertyKind::Vector));
+        timeline.documents.get_mut("intro").unwrap().sequence = since.clone();
+        crate::panel::change_live(&mut timeline, "edit curves", |s| s.tracks.clear());
+        crate::panel::cancel_editing(&mut timeline);
+        assert_eq!(timeline.documents["intro"].sequence, since);
+    }
+
+    #[test]
     fn a_new_sequence_never_replaces_a_file_whose_name_differs_by_its_case() {
         let folder = std::env::temp_dir().join(format!("uniwow-timeline-{}", std::process::id()));
         std::fs::create_dir_all(&folder).unwrap();

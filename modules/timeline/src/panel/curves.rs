@@ -100,6 +100,8 @@ pub(super) fn curves_side(
             if let Some(provider) = ctx.service_provider(curve::SERVICE) {
                 ctx.report_failure(&provider, "the curve editor panicked in the Timeline");
             }
+            // A drag under way is dropped: the next change starts from the sequence as it was.
+            cancel_editing(timeline);
             shown = shown_before;
             CurveChange::None
         }

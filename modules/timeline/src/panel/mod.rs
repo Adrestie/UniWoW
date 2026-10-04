@@ -208,7 +208,7 @@ fn ended(response: &egui::Response) -> bool {
 
 /// Changes the shown sequence at once, for a change made over several frames: `finish_editing`
 /// records it as one undo entry.
-fn change_live(timeline: &mut TimelineModule, label: &str, change: impl FnOnce(&mut Sequence)) {
+pub(crate) fn change_live(timeline: &mut TimelineModule, label: &str, change: impl FnOnce(&mut Sequence)) {
     let Some(document) = timeline
         .current
         .as_ref()
@@ -222,6 +222,22 @@ fn change_live(timeline: &mut TimelineModule, label: &str, change: impl FnOnce(&
     change(&mut document.sequence);
     document.dirty = true;
     timeline.keys_changed = true;
+}
+
+/// Puts the sequence back as it was before a change under way, which is dropped.
+pub(crate) fn cancel_editing(timeline: &mut TimelineModule) {
+    let Some((_, before, dirty)) = timeline.panel.editing.take() else {
+        return;
+    };
+    if let Some(document) = timeline
+        .current
+        .as_ref()
+        .and_then(|name| timeline.documents.get_mut(name))
+    {
+        document.sequence = before;
+        document.dirty = dirty;
+        timeline.keys_changed = true;
+    }
 }
 
 /// Puts the sequence back as it was before the change, and records the change as one undo entry.
