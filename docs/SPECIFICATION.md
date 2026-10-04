@@ -206,7 +206,9 @@ within bounds), selectable and selected or not. Colours are `0xRRGGBBAA`, sizes 
   on its thread; when that function fails, the module fails and its changes leave the history.
   While a compiled module's thread still has signals, changes or commands to handle, Undo and
   Redo are refused with the reason; one job running for more than 3 seconds shows the module as
-  not responding in the Modules panel.
+  not responding in the Modules panel, where it can be disabled: its changes leave the history and
+  Undo comes back. The Commands panel never waits for an answer: another call replaces the one
+  awaited, or the wait is given up.
 
 ---
 

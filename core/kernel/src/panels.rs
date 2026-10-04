@@ -48,11 +48,26 @@ pub struct CommandsPanel {
 }
 
 impl CommandsPanel {
+    /// The answer of a call; that of a call given up, or replaced by another, is dropped.
     pub fn answer(&mut self, call: u64, result: Result<Value, String>) {
         if self.waiting == Some(call) {
             self.waiting = None;
             self.answer = Some(result);
         }
+    }
+
+    /// Calls `name`, giving up the answer still awaited, if any.
+    fn call(&mut self, bridge: &Bridge, name: &str, arguments: Value) {
+        self.next_call += 1;
+        self.waiting = Some(self.next_call);
+        self.answer = None;
+        bridge.queue(Request::Call {
+            caller: "kernel".to_owned(),
+            thread: std::thread::current().id(),
+            name: name.to_owned(),
+            arguments,
+            reply: ReplyTo::Kernel(self.next_call),
+        });
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, bridge: &Bridge) {
@@ -98,23 +113,11 @@ impl CommandsPanel {
                             .desired_rows(3)
                             .desired_width(f32::INFINITY),
                     );
-                    if ui
-                        .add_enabled(self.waiting.is_none(), egui::Button::new("Call"))
-                        .clicked()
-                    {
+                    // A module that never answers does not keep the panel waiting: another call
+                    // replaces the one awaited, or the wait is given up.
+                    if ui.button("Call").clicked() {
                         match serde_json::from_str::<Value>(&self.arguments) {
-                            Ok(arguments) => {
-                                self.next_call += 1;
-                                self.waiting = Some(self.next_call);
-                                self.answer = None;
-                                bridge.queue(Request::Call {
-                                    caller: "kernel".to_owned(),
-                                    thread: std::thread::current().id(),
-                                    name: command.name.clone(),
-                                    arguments,
-                                    reply: ReplyTo::Kernel(self.next_call),
-                                });
-                            }
+                            Ok(arguments) => self.call(bridge, &command.name, arguments),
                             Err(error) => self.answer = Some(Err(format!("invalid JSON: {error}"))),
                         }
                     }
@@ -126,7 +129,12 @@ impl CommandsPanel {
                             ui.colored_label(ui.visuals().error_fg_color, error);
                         }
                         None if self.waiting.is_some() => {
-                            ui.weak("waiting for the answer…");
+                            ui.horizontal(|ui| {
+                                ui.weak("waiting for the answer…");
+                                if ui.button("Stop waiting").clicked() {
+                                    self.waiting = None;
+                                }
+                            });
                         }
                         None => {}
                     }
@@ -138,4 +146,35 @@ impl CommandsPanel {
 
 fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use uniwow_api::serde_json::json;
+
+    use super::CommandsPanel;
+    use crate::router::{Bridge, ReplyTo, Request};
+
+    #[test]
+    fn a_call_replaces_the_one_awaited_and_the_wait_can_be_given_up() {
+        let (bridge, requests) = Bridge::new(None);
+        let mut panel = CommandsPanel::default();
+        panel.call(&bridge, "x.stuck", json!({}));
+        panel.call(&bridge, "x.quick", json!({}));
+        let calls: Vec<u64> = requests
+            .try_iter()
+            .filter_map(|request| match request {
+                Request::Call {
+                    reply: ReplyTo::Kernel(call),
+                    ..
+                } => Some(call),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls.len(), 2, "the second call is sent while the first one waits");
+        panel.answer(calls[0], Ok(json!("late")));
+        assert!(panel.answer.is_none(), "the answer of the call replaced is dropped");
+        panel.answer(calls[1], Ok(json!("quick")));
+        assert_eq!(panel.answer, Some(Ok(json!("quick"))));
+    }
 }

@@ -541,6 +541,33 @@ fn undo_refuses_when_a_call_it_serves_puts_a_first_change_into_a_group() {
 }
 
 #[test]
+fn disabling_a_compiled_module_that_never_answers_gives_undo_back() {
+    let (module, value) = counter("a");
+    let native = CompiledModule::started(capi::testing::native("stuck"));
+    let mut harness = Harness::with_slots(vec![Slot::loaded("a", module), Slot::compiled("stuck", native)]);
+    harness.call("a", "a.add", json!({})).unwrap();
+    let (reply, _answer) = std::sync::mpsc::channel();
+    harness.shell.answer(Request::Call {
+        caller: KERNEL.to_owned(),
+        thread: std::thread::current().id(),
+        name: "native.wait".to_owned(),
+        arguments: json!({}),
+        reply: ReplyTo::Thread(reply),
+    });
+    assert!(
+        harness.shell.blocking_undo().is_some(),
+        "its thread never ends its work"
+    );
+    // What the button of the Modules panel does.
+    let index = harness.index("stuck");
+    harness.shell.fail(index, "disabled from the Modules panel".to_owned());
+    assert!(harness.shell.blocking_undo().is_none());
+    harness.shell.undo();
+    assert_eq!(*lock(&value), 0, "Undo is back");
+    capi::testing::open(harness.shell.slots[1].compiled.expect("compiled"));
+}
+
+#[test]
 fn undo_at_random_moments_never_crosses_a_compiled_module_s_changes() {
     let native = CompiledModule::started(capi::testing::native("native"));
     let mut harness = Harness::with_slots(vec![Slot::compiled("native", native)]);

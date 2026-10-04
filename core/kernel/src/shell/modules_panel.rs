@@ -19,7 +19,8 @@ impl Viewer<'_> {
                     ui.strong(header);
                 }
                 ui.end_row();
-                for slot in self.slots.iter() {
+                let mut disable = None;
+                for (index, slot) in self.slots.iter().enumerate() {
                     let mut enabled = !self.host.settings.disabled_modules.contains(&slot.id);
                     let toggle = ui.add_enabled(slot.manifest.is_some(), egui::Checkbox::without_text(&mut enabled));
                     if toggle.changed() {
@@ -51,10 +52,23 @@ impl Viewer<'_> {
                         .filter(|running| *running >= NOT_RESPONDING);
                     match stuck {
                         Some(running) if slot.state.is_running() => {
-                            ui.colored_label(
-                                ui.visuals().warn_fg_color,
-                                format!("not responding: busy for {} s", running.as_secs()),
-                            );
+                            ui.horizontal(|ui| {
+                                ui.colored_label(
+                                    ui.visuals().warn_fg_color,
+                                    format!("not responding: busy for {} s", running.as_secs()),
+                                );
+                                // Its work never ends: disabled, its changes leave the history and
+                                // Undo comes back.
+                                if ui.button("Disable this module").clicked() {
+                                    disable = Some((
+                                        index,
+                                        format!(
+                                            "disabled from the Modules panel: not responding for {} s",
+                                            running.as_secs()
+                                        ),
+                                    ));
+                                }
+                            });
                         }
                         _ => {
                             let color = match slot.state {
@@ -77,6 +91,7 @@ impl Viewer<'_> {
                     });
                     ui.end_row();
                 }
+                self.failures.extend(disable);
             });
         });
     }
