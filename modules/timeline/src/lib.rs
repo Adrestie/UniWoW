@@ -8,6 +8,7 @@ mod sequence;
 
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -232,17 +233,23 @@ impl TimelineModule {
         if !valid {
             return Err("a name is made of letters, digits, spaces, '-' and '_'".to_owned());
         }
-        if self.names.iter().any(|existing| existing == name) {
-            return Err(format!("'{name}' exists already"));
+        // Windows does not tell names apart by their case: nor does the list.
+        self.refresh_names();
+        if let Some(existing) = self.names.iter().find(|existing| existing.eq_ignore_ascii_case(name)) {
+            return Err(format!("'{existing}' exists already"));
         }
-        self.documents.insert(
-            name.to_owned(),
-            Document {
-                sequence: Sequence::default(),
-                dirty: false,
-            },
-        );
-        self.save(name)
+        let sequence = Sequence::default();
+        let path = self.path(name);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .and_then(|mut file| file.write_all(sequence.to_text().as_bytes()))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        self.documents
+            .insert(name.to_owned(), Document { sequence, dirty: false });
+        self.refresh_names();
+        Ok(())
     }
 
     /// Moves the playhead while playing.
@@ -390,6 +397,22 @@ mod tests {
         edit.revert(&mut timeline);
         assert_eq!(timeline.documents["intro"].sequence, Sequence::default());
         assert_eq!(edit.label(), "timeline: add a track");
+    }
+
+    #[test]
+    fn a_new_sequence_never_replaces_a_file_whose_name_differs_by_its_case() {
+        let folder = std::env::temp_dir().join(format!("uniwow-timeline-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("Intro.json"), "kept").unwrap();
+        let mut timeline = TimelineModule {
+            folder: folder.clone(),
+            ..TimelineModule::default()
+        };
+        assert!(timeline.create("intro").is_err());
+        assert_eq!(std::fs::read_to_string(folder.join("Intro.json")).unwrap(), "kept");
+        assert!(timeline.create("outro").is_ok());
+        assert!(timeline.names.contains(&"outro".to_owned()));
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     #[test]
