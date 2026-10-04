@@ -210,8 +210,9 @@ within bounds), selectable and selected or not. Colours are `0xRRGGBBAA`, sizes 
   stops and sends `finished`, or starts again with *loop*. Whenever its time or its sequence
   changes, the kernel writes the value of each track at that time into its property, through the
   catalogue of animatable properties, and only the values that changed. The dopesheet views and the
-  curve views showing a sequence with the same player share their time axis, zoom and scrolling;
-  when the sequence they show changes, they fit it again as when first shown.
+  curve views showing the same sequence with the same player share their time axis, zoom and
+  scrolling; a sequence no view shows with that player any more is forgotten, and fitted again as
+  when first shown once a view shows it again.
 - **Undo**: a module records a change it has made with a label and two JSON values, one undoing it
   and one redoing it. Undo and Redo hand the matching value to the function the module declared,
   on its thread; when that function fails, the module fails and its changes leave the history.
@@ -1452,8 +1453,8 @@ As built, second part (8.6b), the Timeline a client:
 - After the review, for nothing to change for the user: the curve editor, shown with a playhead,
   has a ruler above the curves, whose press moves the playhead (`CurveOutput::playhead`), the kernel
   pausing the player there and sending `playheadMoved`, for every curve view showing a sequence and
-  a player; the views showing the same player share one time axis in the kernel, made again when
-  the sequence shown changes; the button adding a key is greyed, with *a value beyond 1e9 cannot be
+  a player; the views showing the same sequence with the same player share one time axis in the
+  kernel, fitted again for a sequence shown again; the button adding a key is greyed, with *a value beyond 1e9 cannot be
   keyed*, when the property's value is beyond the limit of the curves, as is a field showing such a
   value, and a value typed beyond is brought back to the limit.
 

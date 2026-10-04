@@ -1,7 +1,7 @@
 //! Draws the panels of a module from its interface objects, on the interface thread, and turns
 //! what the user does into signals.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
@@ -40,28 +40,18 @@ pub struct PanelView {
     prepared: Option<u64>,
     /// The time axis of each curve view and dopesheet view.
     time_axes: HashMap<AxisKey, TimeAxis>,
-    /// The sequence each time axis was last drawn for: another one makes it fit again.
-    axis_sequences: HashMap<AxisKey, Handle>,
     /// The change of its sequence each view has under way.
     editing: HashMap<Handle, Editing>,
     /// Why a service failed while drawing, by service, for its provider to be reported.
     failures: Vec<(&'static str, String)>,
 }
 
-/// Whose time axis a view draws on: that of the player it shows with a sequence, which the views
-/// of the same player share, or its own.
+/// Whose time axis a view draws on: that of a player and the sequence it shows, which the views of
+/// the same player showing the same sequence share, or its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum AxisKey {
-    Player(Handle),
+    Played { player: Handle, sequence: Handle },
     View(Handle),
-}
-
-impl AxisKey {
-    fn of(&self) -> Handle {
-        match self {
-            AxisKey::Player(handle) | AxisKey::View(handle) => *handle,
-        }
-    }
 }
 
 /// A change of a view's sequence under way, shown at once: the sequence, the tracks before the
@@ -208,6 +198,19 @@ impl PanelView {
         self.prepared = Some(pass);
         let shown = lock(shared).shown_sequences();
         self.rows.clear();
+        // The axis of a sequence no view shows with its player any more is forgotten: shown again,
+        // it fits again.
+        let played: HashSet<AxisKey> = shown
+            .iter()
+            .filter_map(|shown| {
+                Some(AxisKey::Played {
+                    player: shown.player?,
+                    sequence: shown.sequence,
+                })
+            })
+            .collect();
+        self.time_axes
+            .retain(|key, _| matches!(key, AxisKey::View(_)) || played.contains(key));
         if shown.is_empty() {
             return;
         }
@@ -219,9 +222,9 @@ impl PanelView {
             .into_iter()
             .map(|info| (info.path.clone(), info))
             .collect();
-        for (view, data, playhead) in shown {
-            let rows = self.row_properties(&data, playhead);
-            self.rows.insert(view, rows);
+        for shown in shown {
+            let rows = self.row_properties(&shown.data, shown.time);
+            self.rows.insert(shown.view, rows);
         }
     }
 
@@ -265,8 +268,10 @@ impl PanelView {
         self.scenes.retain(|handle, _| alive(handle));
         self.painted.retain(|handle, _| alive(handle));
         self.sizes.retain(|handle, _| alive(handle));
-        self.time_axes.retain(|key, _| alive(&key.of()));
-        self.axis_sequences.retain(|key, _| alive(&key.of()));
+        self.time_axes.retain(|key, _| match key {
+            AxisKey::Played { player, sequence } => alive(player) && alive(sequence),
+            AxisKey::View(view) => alive(view),
+        });
         let sheet = self.dopesheet.clone();
         self.sheet_ids.retain(|handle, id| {
             let kept = alive(handle);
@@ -768,19 +773,14 @@ impl PanelView {
         response
     }
 
-    /// The time axis of `view`: that of its player when it shows `sequence`, shared with the views
-    /// of the same player, made again when the sequence shown changes so that the view fits it as
-    /// when first shown; its own otherwise.
+    /// The time axis of `view`: when it shows `sequence` with a player, that of the player and the
+    /// sequence, shared with the views showing them, new when first shown so that the view fits it;
+    /// its own otherwise.
     fn time_axis(&mut self, view: Handle, object: &Object, sequence: Option<Handle>) -> &mut TimeAxis {
         let key = match (sequence, object.player) {
-            (Some(_), Some(player)) => AxisKey::Player(player),
+            (Some(sequence), Some(player)) => AxisKey::Played { player, sequence },
             _ => AxisKey::View(view),
         };
-        if let Some(sequence) = sequence
-            && self.axis_sequences.insert(key, sequence) != Some(sequence)
-        {
-            self.time_axes.insert(key, TimeAxis::default());
-        }
         self.time_axes.entry(key).or_default()
     }
 
@@ -1831,6 +1831,56 @@ mod tests {
                 .lock()
                 .unwrap()
                 .contains(&(Signal::PlayheadMoved, String::new(), false, 12.0))
+        );
+    }
+
+    #[test]
+    fn views_of_one_player_showing_two_sequences_keep_their_own_axes_and_one_shown_again_fits() {
+        let fixture = fixture(Kind::DopesheetView);
+        let other = {
+            let mut store = lock(&fixture.shared);
+            let panel = store.find_panel("p").unwrap();
+            let layout = store.object(panel).unwrap().children[0];
+            let other = store.create(Kind::Sequence, None).unwrap();
+            let second = store.create(Kind::DopesheetView, None).unwrap();
+            store.set_numbers(second, Property::Sequence, &[other as f64]).unwrap();
+            store
+                .set_numbers(second, Property::Player, &[fixture.player as f64])
+                .unwrap();
+            store.add_to(layout, second, [0, 0, 1, 1]).unwrap();
+            other
+        };
+        let sheet = Arc::new(Zooming::default());
+        let mut panels = PanelView {
+            dopesheet: Some(sheet.clone()),
+            ..PanelView::default()
+        };
+        fixture.frame(&mut panels);
+        fixture.frame(&mut panels);
+        let zoomed = TimeAxis {
+            first: 3.0,
+            pixels_per_unit: 7.0,
+        };
+        assert_eq!(
+            sheet.0.lock().unwrap()[2..],
+            [zoomed, zoomed],
+            "each keeps its axis, made once"
+        );
+        // The first view shows the other sequence, then its own again: it fits again.
+        let show = |sequence: Handle| {
+            lock(&fixture.shared)
+                .set_numbers(fixture.view, Property::Sequence, &[sequence as f64])
+                .unwrap();
+        };
+        show(other);
+        fixture.frame(&mut panels);
+        show(fixture.sequence);
+        fixture.frame(&mut panels);
+        let given = sheet.0.lock().unwrap();
+        assert_eq!(
+            given[given.len() - 2],
+            TimeAxis::default(),
+            "shown again: fitting again"
         );
     }
 }

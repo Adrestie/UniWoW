@@ -236,6 +236,17 @@ impl Object {
     }
 }
 
+/// A view showing a sequence: the view, the sequence and what it holds, and the player whose time
+/// the view shows.
+#[derive(Clone, Debug)]
+pub struct SequenceShown {
+    pub view: Handle,
+    pub sequence: Handle,
+    pub data: Arc<Sequence>,
+    pub player: Option<Handle>,
+    pub time: Option<f64>,
+}
+
 /// What a player shows at the end of a frame: its time in the sequence it plays.
 #[derive(Clone, Debug)]
 pub struct PlayerFrame {
@@ -1105,19 +1116,27 @@ impl Ui {
             .any(|c| c.sender == sender && c.signal == signal)
     }
 
-    /// The views showing a sequence, with that sequence and the time of the player they show.
-    pub fn shown_sequences(&self) -> Vec<(Handle, Arc<Sequence>, Option<f64>)> {
+    /// The views showing a sequence, with that sequence and the player they show.
+    pub fn shown_sequences(&self) -> Vec<SequenceShown> {
         self.sequence_views
             .iter()
             .filter_map(|handle| {
                 let view = self.objects.get(handle)?;
-                let data = self.objects.get(&view.plays?)?.sequence.clone()?;
-                let time = view
+                let sequence = view.plays?;
+                let data = self.objects.get(&sequence)?.sequence.clone()?;
+                let player = view
                     .player
+                    .filter(|player| self.objects.get(player).is_some_and(|o| o.kind == Kind::Player));
+                let time = player
                     .and_then(|player| self.objects.get(&player))
-                    .filter(|player| player.kind == Kind::Player)
                     .map(|player| player.time);
-                Some((*handle, data, time))
+                Some(SequenceShown {
+                    view: *handle,
+                    sequence,
+                    data,
+                    player,
+                    time,
+                })
             })
             .collect()
     }
