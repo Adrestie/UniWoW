@@ -17,6 +17,8 @@ mod logger;
 mod manifest;
 mod order;
 mod panels;
+#[cfg(test)]
+mod random;
 mod requirements;
 mod router;
 mod settings;

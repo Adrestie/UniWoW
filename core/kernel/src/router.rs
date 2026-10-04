@@ -217,13 +217,16 @@ impl Bridge {
 
     /// The command, if it exists and its module is running.
     pub fn lookup(&self, name: &str) -> Result<(String, Option<CommandHandler>), String> {
-        let catalogue = self.catalogue.read().unwrap_or_else(|e| e.into_inner());
-        let entry = catalogue.get(name).ok_or_else(|| format!("unknown command '{name}'"))?;
-        let owner = &entry.info.owner;
-        if !self.running.read().unwrap_or_else(|e| e.into_inner()).contains(owner) {
+        // The set of running modules is never read while the catalogue is held (section 5).
+        let (owner, handler) = {
+            let catalogue = self.catalogue.read().unwrap_or_else(|e| e.into_inner());
+            let entry = catalogue.get(name).ok_or_else(|| format!("unknown command '{name}'"))?;
+            (entry.info.owner.clone(), entry.handler.clone())
+        };
+        if !self.running.read().unwrap_or_else(|e| e.into_inner()).contains(&owner) {
             return Err(format!("'{name}' belongs to '{owner}', which is not running"));
         }
-        Ok((owner.clone(), entry.handler.clone()))
+        Ok((owner, handler))
     }
 
     /// Runs a command handled on the calling thread. A panic makes its module fail.
@@ -518,6 +521,7 @@ mod tests {
     use uniwow_api::{CommandSpec, RunsOn};
 
     use super::{Bridge, Entry, PropertyEntry, ReplyTo, Request, choose_commands, serve};
+    use crate::random::Random;
 
     fn declared(owner: &str, name: &str, delegated: bool) -> (String, CommandSpec) {
         let spec = CommandSpec {
@@ -594,6 +598,78 @@ mod tests {
         drop(catalogue);
         bridge.running.write().unwrap().insert("cube".to_owned());
         (bridge, receiver)
+    }
+
+    #[test]
+    fn threads_calling_at_once_each_get_their_answers_in_their_order() {
+        let (bridge, receiver) = bridge();
+        const THREADS: u64 = 8;
+        const CALLS: u64 = 150;
+        let workers: Vec<_> = (0..THREADS)
+            .map(|index| {
+                let editor = uniwow_api::Editor::new(bridge.clone(), "cube");
+                std::thread::spawn(move || {
+                    let mut random = Random::new(index + 1);
+                    for n in 0..CALLS {
+                        if n % 10 == 0 {
+                            editor.begin_group("ten").unwrap();
+                        }
+                        if random.below(4) == 0 {
+                            std::thread::yield_now();
+                        }
+                        let asked = json!({ "thread": index, "n": n });
+                        assert_eq!(editor.call("cube.paint", asked.clone()), Ok(asked));
+                        if n % 10 == 9 {
+                            editor.end_group().unwrap();
+                        }
+                    }
+                })
+            })
+            .collect();
+        // What each thread's requests were, in the order served: B, its ten numbers, E, B…
+        let mut served: std::collections::HashMap<std::thread::ThreadId, Vec<String>> = Default::default();
+        let mut random = Random::new(99);
+        while workers.iter().any(|worker| !worker.is_finished()) || !receiver_empty(&receiver) {
+            let budget = Duration::from_micros(random.below(2_000));
+            serve(&receiver, budget, Duration::from_micros(100), |request| match request {
+                Request::Call {
+                    thread,
+                    arguments,
+                    reply: ReplyTo::Thread(reply),
+                    ..
+                } => {
+                    served.entry(thread).or_default().push(arguments["n"].to_string());
+                    let _ = reply.send(Ok(arguments));
+                }
+                Request::BeginGroup { thread, .. } => served.entry(thread).or_default().push("B".to_owned()),
+                Request::EndGroup { thread, .. } => served.entry(thread).or_default().push("E".to_owned()),
+                _ => {}
+            });
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let expected: Vec<String> = (0..CALLS)
+            .flat_map(|n| {
+                let mut step = Vec::new();
+                if n % 10 == 0 {
+                    step.push("B".to_owned());
+                }
+                step.push(n.to_string());
+                if n % 10 == 9 {
+                    step.push("E".to_owned());
+                }
+                step
+            })
+            .collect();
+        assert_eq!(served.len(), THREADS as usize);
+        for sequence in served.values() {
+            assert_eq!(sequence, &expected);
+        }
+    }
+
+    fn receiver_empty(receiver: &std::sync::mpsc::Receiver<Request>) -> bool {
+        matches!(receiver.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty))
     }
 
     #[test]

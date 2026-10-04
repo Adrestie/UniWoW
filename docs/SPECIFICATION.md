@@ -330,6 +330,67 @@ Threads:
 | T6 | Each run of a script has a named thread of its own (T2), never the interface thread. Each run of a Lua script has its own Lua state, so several run in parallel. Python scripts run on worker threads too, but standard CPython lets one thread at a time execute Python code (the GIL): their parallel work comes from the commands they call. |
 | T7 | Every function of the C interface can be called from any thread; compiled modules may create their own threads. |
 
+### Concurrency model
+
+Who runs what, and how the threads reach each other:
+
+```
+ other threads: scripts (T6), jobs (T2), the threads of compiled modules (T7), any thread
+ holding an Editor
+   |  requests, in one queue (mpsc): Call, Answer, BeginGroup, EndGroup, RecordChange,
+   |  ThreadEnded; events and failures in lists under a lock; ended jobs in a list
+   v
+ interface thread (T1): owns each module's state, the history and the open groups, the views of
+ the interface objects, the pending commands and events (KernelHost)
+   logic: collect events and failures -> apply commands -> serve requests for a time budget
+          -> ended jobs -> events -> closing
+   ui:    panels, modules' windows (modal windows), menus, Undo and Redo
+   |  jobs posted (mpsc, one queue per compiled module)
+   v
+ thread of a compiled module (one each): its slots, paintings, undo and redo values, and its
+ commands called from the interface thread
+```
+
+| Thread | Owns | Runs |
+|---|---|---|
+| Interface | Every module's state, the history and the open groups, the views of the interface objects, the kernel's state | The `Module` methods of every module, the undoable commands, Undo and Redo, the requests of the queue, the drawing |
+| Worker of the pool | Nothing | Jobs of `Context::spawn` (T2) |
+| Thread of its own | Nothing | Scripts and jobs that wait (`Context::spawn_thread`) |
+| Thread of a compiled module | The module's data, by its own rules | Its slots, paintings and `apply_change`, and its commands called from the interface thread |
+| Any thread | — | Commands running on the caller (T4), the reading and writing of animatable properties, the C functions (T7) |
+
+Shared state and locks:
+
+| What | Lock | Taken by |
+|---|---|---|
+| Catalogue of commands, running modules, properties, settings | Read-write locks of the bridge | Any thread, briefly. Only the set of running modules is held while another is read (the catalogue or the properties, to list them); only the interface thread writes them |
+| Events and failures from other threads | Lock of the bridge | Pushed by any thread, taken by the interface thread at each frame |
+| Subscriptions | Lock of the bridge, then one queue per subscription | Delivered by the interface thread, read by the subscriber's thread |
+| Interface objects of a compiled module | One lock per module | The interface thread while it draws them, any thread in the C functions. Never held while module code runs: slots, paintings and replies are called once it is released. In C++ and C#, the lock of the classes' connections is taken before it, never after |
+| Queue of the pool | One lock | Released before a job runs |
+
+No lock is held while the kernel calls a module.
+
+Orders guaranteed:
+
+- The requests of one thread are served in the order sent; `ThreadEnded` comes after every request of the job that ended.
+- The events a thread published before a call are delivered before those the call causes.
+- A module's queued commands are applied once its call returns, in the order queued, into its caller's group when one is open on the calling thread (S4).
+- On a compiled module's thread, jobs run in the order posted. A mouse move, or a curves change still under way, replaces the same signal of the same object still waiting, never across another job.
+- After `disconnect` on the module's thread, or the destruction of the sender, the slot is not called again.
+- A painting area is painted once at a time; a size asked meanwhile is painted next.
+- The answer of a command a compiled module's thread ran comes through the queue (`Answer`), after the requests sent before it.
+- Undo and Redo run only when no open group holds a change and no compiled module's thread has work; they first serve the requests waiting, so a change a compiled module recorded is in the history before them.
+
+Not guaranteed:
+
+- An order between the requests of different threads, beyond their arrival.
+- The order, relative to an open group, of a change made by hand meanwhile (S4).
+- `disconnect` from another thread does not wait for a call already under way.
+- An event published during a frame is delivered at the next one.
+
+Stress tests with random interleavings, seeded so that a failure can be replayed: threads calling and grouping at once through the router, each getting its answers in its order; the undo groups against a model of rule S4; Undo at random moments while a compiled module's thread records changes, never before the module's last change reaches the history.
+
 ---
 
 ## 6. Libraries (libs/*)

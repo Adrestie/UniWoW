@@ -11,6 +11,7 @@ use uniwow_api::ui::{self, Kind, Property, SharedUi, Signal, SignalData, Ui};
 
 use super::*;
 use crate::compiled::CompiledModule;
+use crate::random::Random;
 
 type Jobs = Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
 
@@ -478,4 +479,72 @@ fn undo_waits_while_a_compiled_module_has_work_on_its_thread() {
     harness.until("the module's work done", |shell| shell.blocking_undo().is_none());
     harness.frame(key(Key::Z, true));
     assert_eq!(*lock(&value), 0);
+}
+
+/// One change of a compiled module, undone and redone by its thread's value.
+struct Step(Arc<Mutex<i64>>);
+
+impl uniwow_api::AppliedChange for Step {
+    fn undo(&mut self) {
+        *lock(&self.0) -= 1;
+    }
+
+    fn redo(&mut self) {
+        *lock(&self.0) += 1;
+    }
+}
+
+#[test]
+fn undo_at_random_moments_never_crosses_a_compiled_module_s_changes() {
+    let native = CompiledModule::started(capi::testing::native("native"));
+    let mut harness = Harness::with_slots(vec![Slot::compiled("native", native)]);
+    let module = harness.shell.slots[0].compiled.expect("compiled");
+    let editor = module.editor.get().cloned().expect("given at init");
+    let value = Arc::new(Mutex::new(0));
+    const CHANGES: usize = 60;
+    for seed in 1..=3 {
+        let mut random = Random::new(seed);
+        let mut posted = 0;
+        while posted < CHANGES || module.activity.pending() > 0 {
+            if posted < CHANGES && random.below(3) == 0 {
+                let (editor, value, pause) = (editor.clone(), value.clone(), random.below(300));
+                let label = format!("{seed}/{posted}");
+                posted += 1;
+                ui::lock(&module.ui).post_job(Box::new(move || {
+                    std::thread::sleep(Duration::from_micros(pause));
+                    *lock(&value) += 1;
+                    editor.record_change(&label, Box::new(Step(value.clone()))).unwrap();
+                }));
+            }
+            if random.below(4) == 0 {
+                let before = harness.shell.history.done.len();
+                harness.shell.undo();
+                if harness.shell.history.done.len() < before && posted > 0 {
+                    // It ran: the module's work was done, and its last change is in the history.
+                    let last = format!("{seed}/{}", posted - 1);
+                    let history = &harness.shell.history;
+                    assert!(
+                        history
+                            .done
+                            .iter()
+                            .chain(&history.undone)
+                            .any(|entry| entry.label == last),
+                        "seed {seed}: Undo ran before the change {last} reached the history"
+                    );
+                }
+            } else {
+                harness.frame(RawInput::default());
+            }
+        }
+        let last = format!("{seed}/{}", CHANGES - 1);
+        harness.until("the last change", |shell| {
+            shell
+                .history
+                .done
+                .iter()
+                .chain(&shell.history.undone)
+                .any(|entry| entry.label == last)
+        });
+        assert_eq!(*lock(&value), harness.shell.history.done.len() as i64, "seed {seed}");
+    }
 }

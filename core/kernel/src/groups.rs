@@ -180,8 +180,10 @@ mod tests {
 
     use uniwow_api::Command;
 
-    use super::{Ended, Groups};
+    use super::{Closed, Ended, Groups};
     use crate::history::Part;
+    use crate::random::Random;
+    use crate::router::module_of;
 
     struct Named(&'static str);
 
@@ -201,6 +203,85 @@ mod tests {
             label: label.to_owned(),
             document: None,
             command: Box::new(Named(label)),
+        }
+    }
+
+    #[test]
+    fn random_interleavings_put_every_change_where_the_rule_says() {
+        let interface = std::thread::current().id();
+        let threads = [interface, other_thread(), other_thread(), other_thread()];
+        let callers = ["lua#a", "lua#b", "native"];
+        for seed in 1..=40 {
+            let mut random = Random::new(seed);
+            let mut groups = Groups::new(interface);
+            // The open groups as the rule has them: caller, thread, label, depth; oldest first.
+            let mut model: Vec<(usize, usize, String, u32)> = Vec::new();
+            let mut expected: Vec<(String, String)> = Vec::new();
+            let mut closed: Vec<Closed> = Vec::new();
+            let mut history: Vec<String> = Vec::new();
+            for step in 0..300 {
+                let (c, t) = (random.below(3) as usize, random.below(4) as usize);
+                let (caller, thread) = (callers[c], threads[t]);
+                match random.below(6) {
+                    0 => {
+                        let label = format!("{c}/{t}/{step}");
+                        groups.begin(caller, thread, &label);
+                        match model.iter_mut().find(|g| (g.0, g.1) == (c, t)) {
+                            Some(group) => group.3 += 1,
+                            None => model.push((c, t, label, 1)),
+                        }
+                    }
+                    1 => {
+                        if let Ended::Closed(group) = groups.end(caller, thread) {
+                            closed.push(group);
+                        }
+                        if let Some(index) = model.iter().position(|g| (g.0, g.1) == (c, t)) {
+                            model[index].3 -= 1;
+                            if model[index].3 == 0 {
+                                model.remove(index);
+                            }
+                        }
+                    }
+                    2 => {
+                        closed.extend(groups.close_thread(thread));
+                        model.retain(|g| g.1 != t);
+                    }
+                    _ => {
+                        let label = step.to_string();
+                        let into = model
+                            .iter()
+                            .find(|g| (g.0, g.1) == (c, t))
+                            .or_else(|| (t != 0).then(|| model.iter().rev().find(|g| g.1 == t)).flatten())
+                            .map_or_else(|| "history".to_owned(), |g| g.2.clone());
+                        expected.push((label.clone(), into));
+                        let part = Part {
+                            owner: module_of(caller).to_owned(),
+                            label: label.clone(),
+                            document: None,
+                            command: Box::new(Named("change")),
+                        };
+                        match groups.parts_of(caller, thread) {
+                            Some(parts) => parts.push(part),
+                            None => history.push(label),
+                        }
+                    }
+                }
+            }
+            for thread in threads {
+                closed.extend(groups.close_thread(thread));
+            }
+            let mut found: Vec<(String, String)> = history.into_iter().map(|l| (l, "history".to_owned())).collect();
+            for group in &closed {
+                let numbers: Vec<u64> = group.parts.iter().map(|p| p.label.parse().unwrap()).collect();
+                assert!(
+                    numbers.windows(2).all(|w| w[0] < w[1]),
+                    "seed {seed}: order in {}",
+                    group.label
+                );
+                found.extend(group.parts.iter().map(|p| (p.label.clone(), group.label.clone())));
+            }
+            found.sort_by_key(|(label, _)| label.parse::<u64>().unwrap());
+            assert_eq!(found, expected, "seed {seed}");
         }
     }
 
