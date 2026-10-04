@@ -337,11 +337,20 @@ pub enum CurveChange {
     Finished,
 }
 
+/// What the user did during one frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CurveOutput {
+    pub change: CurveChange,
+    /// The time the user moved the playhead to, on the ruler of an editor shown with one.
+    pub playhead: Option<f64>,
+}
+
 /// The curve editor, offered by the module `curves`.
 pub trait CurveEditor: Send + Sync {
     /// Draws `curves` in the room left in `ui` and lets the user edit them; `time` is read and
-    /// changed by zooming and scrolling. `id` tells the editors of a module apart: each keeps its
-    /// value axis, its selection and the gesture under way.
+    /// changed by zooming and scrolling. With a playhead, a ruler above the curves moves it. `id`
+    /// tells the editors of a module apart: each keeps its value axis, its selection and the
+    /// gesture under way.
     fn show(
         &self,
         ui: &mut egui::Ui,
@@ -349,7 +358,7 @@ pub trait CurveEditor: Send + Sync {
         curves: &mut [ShownCurve],
         time: &mut TimeAxis,
         options: &CurveOptions,
-    ) -> CurveChange;
+    ) -> CurveOutput;
 }
 
 /// The service of the curve editor.

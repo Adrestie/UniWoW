@@ -193,6 +193,14 @@ fn row_keys(sequence: &Sequence, row: &Row) -> BTreeMap<u32, Vec<KeyId>> {
     keys
 }
 
+/// Why a value cannot be a key, if it cannot.
+const BEYOND: &str = "a value beyond 1e9 cannot be keyed";
+
+/// Whether the numbers of `value` may be keys: within the limit of the curves.
+fn keyable(value: &PropertyValue) -> bool {
+    value.components().iter().all(|number| sequence::admissible(*number))
+}
+
 /// The tracks with a key of each value given, on its number of `property`, at `frame`.
 fn with_keys(tracks: &[Track], property: &str, frame: f64, values: &[(usize, f64)]) -> Vec<Track> {
     let mut tracks = tracks.to_vec();
@@ -563,7 +571,17 @@ fn values(
                 if only.is_some_and(|only| only != number) {
                     continue;
                 }
-                let response = number_field(ui, value, range, speed);
+                // A value beyond the limit is shown, greyed: it cannot be a key. One typed beyond
+                // is brought back to the limit.
+                let within = sequence::admissible(*value);
+                let response = ui
+                    .add_enabled_ui(within, |ui| number_field(ui, value, range, speed))
+                    .inner;
+                let response = if within {
+                    response
+                } else {
+                    response.on_disabled_hover_text(BEYOND)
+                };
                 if response.changed() {
                     changed.push(number);
                 }
@@ -579,11 +597,14 @@ fn values(
                 );
             }
         }
-        let admissible = current.is_some_and(|value| value.components().iter().all(|n| sequence::admissible(*n)));
-        if icon_button(ui, Icon::Key)
-            .on_hover_text("Add a key at the playhead with the current value")
-            .clicked()
-            && admissible
+        let admissible = current.as_ref().is_none_or(keyable);
+        let button = ui.add_enabled_ui(admissible, |ui| icon_button(ui, Icon::Key)).inner;
+        let button = if admissible {
+            button.on_hover_text("Add a key at the playhead with the current value")
+        } else {
+            button.on_disabled_hover_text(BEYOND)
+        };
+        if button.clicked()
             && let Some(value) = current
         {
             let keys: Vec<(usize, f64)> = value
@@ -1019,8 +1040,8 @@ mod tests {
     use uniwow_api::{PropertyKind, PropertyValue};
 
     use super::{
-        Gesture, Row, Sheet, State, field_range, field_text, lock, number_field, row_keys, rows, tick_step, typed,
-        with_keys, without_track,
+        Gesture, Row, Sheet, State, field_range, field_text, keyable, lock, number_field, row_keys, rows, tick_step,
+        typed, with_keys, without_track,
     };
 
     /// `cube/position` with keys at frames 10 and 20 on x, and `cube/opacity` with one at 10.
@@ -1185,6 +1206,13 @@ mod tests {
         let left = without_track(&sequence.tracks, "cube/position");
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].property, "cube/opacity");
+    }
+
+    #[test]
+    fn a_value_beyond_the_limit_of_the_curves_is_no_key() {
+        assert!(keyable(&PropertyValue::Vector([1.0, -1e9, 1e9])));
+        assert!(!keyable(&PropertyValue::Vector([1.0, 2e9, 0.0])));
+        assert!(!keyable(&PropertyValue::Number(f64::INFINITY)));
     }
 
     #[test]

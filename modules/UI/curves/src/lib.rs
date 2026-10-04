@@ -6,7 +6,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use uniwow_api::curve::{
-    self, Curve, CurveChange, CurveEditor, CurveOptions, DEFAULT_WEIGHT, ShownCurve, SideMode, TangentMode, TimeAxis,
+    self, Curve, CurveChange, CurveEditor, CurveOptions, CurveOutput, DEFAULT_WEIGHT, ShownCurve, SideMode,
+    TangentMode, TimeAxis,
 };
 use uniwow_api::egui::{self, Align2, Color32, FontId, PointerButton, Pos2, Rect, Sense, Stroke, Vec2};
 use uniwow_api::{Module, Registrar};
@@ -19,6 +20,9 @@ const REACH: f32 = 7.0;
 /// The length of a handle drawn on a key without neighbour on that side, in pixels.
 const LONE_HANDLE: f32 = 40.0;
 const ZOOM: [f32; 2] = [1e-4, 1e5];
+/// Height of the ruler above the curves of an editor shown with a playhead.
+const RULER: f32 = 20.0;
+const PLAYHEAD: Color32 = Color32::from_rgb(225, 65, 55);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Side {
@@ -491,11 +495,16 @@ impl CurveEditor for Editor {
         curves: &mut [ShownCurve],
         time: &mut TimeAxis,
         options: &CurveOptions,
-    ) -> CurveChange {
+    ) -> CurveOutput {
         let mut states = lock(&self.states);
         let state = states.entry(id).or_default();
         let size = ui.available_size().max(egui::vec2(120.0, 80.0));
-        let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+        let ruler = options.playhead.map(|_| {
+            let (ruler, _) = ui.allocate_exact_size(egui::vec2(size.x, RULER), Sense::hover());
+            ruler
+        });
+        let height = size.y - ruler.map_or(0.0, |ruler| ruler.height());
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(size.x, height.max(40.0)), Sense::click_and_drag());
         let mut graph = Graph {
             rect,
             time: *time,
@@ -720,12 +729,60 @@ impl CurveEditor for Editor {
             }
         }
 
+        // The ruler moves the playhead to where it is pressed.
+        let mut playhead = None;
+        if let Some(ruler) = ruler {
+            let pressed = ui.interact(ruler, id.with("ruler"), Sense::click_and_drag());
+            if (pressed.is_pointer_button_down_on() || pressed.clicked())
+                && let Some(pointer) = pressed.interact_pointer_pos()
+            {
+                let [low, high] = options.span.unwrap_or([-curve::LIMIT, curve::LIMIT]);
+                playhead = Some(snapped(graph.time(pointer.x), options).clamp(low, high.max(low)));
+            }
+            draw_ruler(ui, ruler, &graph, playhead.or(options.playhead), options);
+        }
         draw(ui, curves, state, &graph, options);
         state.left = keys_of(curves);
         *time = graph.time;
         state.bottom = graph.bottom;
         state.pixels_per_value = graph.pixels_per_value;
-        change
+        CurveOutput { change, playhead }
+    }
+}
+
+/// The ruler above the curves: times at the steps of the grid, and the playhead's marker.
+fn draw_ruler(ui: &egui::Ui, ruler: Rect, graph: &Graph, playhead: Option<f64>, options: &CurveOptions) {
+    let painter = ui.painter_at(ruler);
+    let visuals = ui.visuals();
+    painter.rect_filled(ruler, 0.0, visuals.faint_bg_color);
+    let step = grid_step(graph.time.pixels_per_unit, 60.0, options.snap).unwrap_or(f64::NAN);
+    for time in grid_lines(graph.time(ruler.left()), graph.time(ruler.right()), step) {
+        let x = graph.x(time);
+        painter.line_segment(
+            [egui::pos2(x, ruler.bottom() - 5.0), egui::pos2(x, ruler.bottom())],
+            Stroke::new(1.0, visuals.weak_text_color()),
+        );
+        painter.text(
+            egui::pos2(x + 3.0, ruler.top() + 2.0),
+            Align2::LEFT_TOP,
+            number_label(time, step),
+            FontId::proportional(10.0),
+            visuals.weak_text_color(),
+        );
+    }
+    if let Some(time) = playhead {
+        let marker = Rect::from_center_size(
+            egui::pos2(graph.x(time), ruler.center().y),
+            egui::vec2(28.0, ruler.height() - 4.0),
+        );
+        painter.rect_filled(marker, 3.0, PLAYHEAD);
+        painter.text(
+            marker.center(),
+            Align2::CENTER_CENTER,
+            number_label(time, step),
+            FontId::proportional(10.0),
+            Color32::WHITE,
+        );
     }
 }
 
@@ -834,7 +891,7 @@ fn draw(ui: &egui::Ui, curves: &[ShownCurve], state: &State, graph: &Graph, opti
         let x = graph.x(playhead);
         painter.line_segment(
             [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-            Stroke::new(1.5, Color32::from_rgb(225, 65, 55)),
+            Stroke::new(1.5, PLAYHEAD),
         );
     }
 }
@@ -1058,5 +1115,43 @@ mod tests {
         assert!(grid_lines(1e16, 1e16 + 1e6, 1.0).len() <= MAX_LINES);
         assert!(grid_lines(0.0, 1.0, f64::NAN).is_empty());
         assert!(grid_lines(f64::NAN, 1.0, 1.0).is_empty());
+    }
+
+    #[test]
+    fn pressing_on_the_ruler_gives_the_time_where_the_playhead_goes() {
+        let editor = Editor::default();
+        let id = egui::Id::new("curves");
+        let ctx = egui::Context::default();
+        let options = CurveOptions {
+            snap: Some(1.0),
+            playhead: Some(0.0),
+            span: Some([0.0, 100.0]),
+        };
+        let mut curves = vec![shown(&[(0.0, 0.0), (100.0, 1.0)])];
+        let at = egui::pos2(200.0, 10.0);
+        let press = egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut output = None;
+        // The first frame lays the ruler out, where the second presses.
+        for events in [vec![egui::Event::PointerMoved(at)], vec![press]] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                events,
+                ..egui::RawInput::default()
+            };
+            let mut rendered = ctx.run_ui(input, |ui| {
+                let mut time = TimeAxis {
+                    first: 0.0,
+                    pixels_per_unit: 4.0,
+                };
+                output = Some(editor.show(ui, id, &mut curves, &mut time, &options));
+            });
+            rendered.textures_delta.clear();
+        }
+        assert_eq!(output.expect("shown").playhead, Some(50.0));
     }
 }

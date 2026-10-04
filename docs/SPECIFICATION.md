@@ -209,7 +209,9 @@ within bounds), selectable and selected or not. Colours are `0xRRGGBBAA`, sizes 
   plays, the kernel moves it on at each frame by the time elapsed, times its speed; at the end it
   stops and sends `finished`, or starts again with *loop*. Whenever its time or its sequence
   changes, the kernel writes the value of each track at that time into its property, through the
-  catalogue of animatable properties, and only the values that changed.
+  catalogue of animatable properties, and only the values that changed. The dopesheet views and the
+  curve views showing a sequence with the same player share their time axis, zoom and scrolling;
+  when the sequence they show changes, they fit it again as when first shown.
 - **Undo**: a module records a change it has made with a label and two JSON values, one undoing it
   and one redoing it. Undo and Redo hand the matching value to the function the module declared,
   on its thread; when that function fails, the module fails and its changes leave the history.
@@ -1447,10 +1449,13 @@ As built, second part (8.6b), the Timeline a client:
 - The title of a sequence names the document its changes belong to (`AppliedChange::document`): a
   sequence left without saving is destroyed, and `Context::forget_document` forgets the kernel's
   entries of its tracks with the Timeline's own.
-- What differs from milestones 6 and 7: in the Curves view the playhead moves from the playback
-  bar, the view having no ruler; the dopesheet and the Curves view each keep their own time axis,
-  which no longer follow each other nor fit a sequence shown again; a key of a value beyond 1e9
-  is not added, without a message.
+- After the review, for nothing to change for the user: the curve editor, shown with a playhead,
+  has a ruler above the curves, whose press moves the playhead (`CurveOutput::playhead`), the kernel
+  pausing the player there and sending `playheadMoved`, for every curve view showing a sequence and
+  a player; the views showing the same player share one time axis in the kernel, made again when
+  the sequence shown changes; the button adding a key is greyed, with *a value beyond 1e9 cannot be
+  keyed*, when the property's value is beyond the limit of the curves, as is a field showing such a
+  value, and a value typed beyond is brought back to the limit.
 
 **Step 8.7, data widgets**, as in Qt:
 

@@ -10,7 +10,7 @@ mod scene;
 
 use painter::replay;
 use scene::{SceneView, modifiers};
-use uniwow_api::curve::{self, CurveChange, CurveEditor, CurveOptions, ShownCurve, TimeAxis};
+use uniwow_api::curve::{self, CurveChange, CurveEditor, CurveOptions, CurveOutput, ShownCurve, TimeAxis};
 use uniwow_api::dopesheet::{self, Dopesheet, DopesheetInput, KeysChange, RowProperty};
 use uniwow_api::sequence::{Sequence, Track, number_colour, number_names, tracks_to_json};
 use uniwow_api::ui::{Handle, Kind, Object, Property, SharedUi, Signal, SignalData, Ui, lock};
@@ -39,11 +39,29 @@ pub struct PanelView {
     /// The frame `rows` were read for: once a frame, whatever the panels and dialogs drawn.
     prepared: Option<u64>,
     /// The time axis of each curve view and dopesheet view.
-    time_axes: HashMap<Handle, TimeAxis>,
+    time_axes: HashMap<AxisKey, TimeAxis>,
+    /// The sequence each time axis was last drawn for: another one makes it fit again.
+    axis_sequences: HashMap<AxisKey, Handle>,
     /// The change of its sequence each view has under way.
     editing: HashMap<Handle, Editing>,
     /// Why a service failed while drawing, by service, for its provider to be reported.
     failures: Vec<(&'static str, String)>,
+}
+
+/// Whose time axis a view draws on: that of the player it shows with a sequence, which the views
+/// of the same player share, or its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum AxisKey {
+    Player(Handle),
+    View(Handle),
+}
+
+impl AxisKey {
+    fn of(&self) -> Handle {
+        match self {
+            AxisKey::Player(handle) | AxisKey::View(handle) => *handle,
+        }
+    }
 }
 
 /// A change of a view's sequence under way, shown at once: the sequence, the tracks before the
@@ -247,7 +265,8 @@ impl PanelView {
         self.scenes.retain(|handle, _| alive(handle));
         self.painted.retain(|handle, _| alive(handle));
         self.sizes.retain(|handle, _| alive(handle));
-        self.time_axes.retain(|handle, _| alive(handle));
+        self.time_axes.retain(|key, _| alive(&key.of()));
+        self.axis_sequences.retain(|key, _| alive(&key.of()));
         let sheet = self.dopesheet.clone();
         self.sheet_ids.retain(|handle, id| {
             let kept = alive(handle);
@@ -577,7 +596,7 @@ impl PanelView {
                 }
                 self.drop_editing(store, handle);
                 let mut curves = object.curves.clone();
-                let time = self.time_axes.entry(handle).or_default();
+                let time = self.time_axis(handle, object, None);
                 let inner = ui.allocate_ui(size, |ui| {
                     let id = ui.id().with(("uniwow-curves", handle));
                     catch_unwind(AssertUnwindSafe(|| {
@@ -585,7 +604,7 @@ impl PanelView {
                     }))
                 });
                 let change = match inner.inner {
-                    Ok(change) => change,
+                    Ok(output) => output.change,
                     Err(panic) => {
                         let message = format!("the curve editor panicked: {}", panic_text(&*panic));
                         self.failures.push((curve::SERVICE.id(), message));
@@ -627,7 +646,7 @@ impl PanelView {
                 let properties = self.rows.remove(&handle).unwrap_or_default();
                 let id = ui.id().with(("uniwow-dopesheet", handle));
                 self.sheet_ids.insert(handle, id);
-                let time = self.time_axes.entry(handle).or_default();
+                let time = self.time_axis(handle, object, Some(sequence));
                 let inner = ui.allocate_ui(size, |ui| {
                     let input = DopesheetInput {
                         sequence: &data,
@@ -716,12 +735,15 @@ impl PanelView {
         };
         let area = egui::Rect::from_min_max(egui::pos2(rect.left() + left_width, rect.top()), rect.max);
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area));
-        let time = self.time_axes.entry(view).or_default();
+        let time = self.time_axis(view, object, Some(sequence));
         let shown = catch_unwind(AssertUnwindSafe(|| {
             editor.show(&mut child, id.with("curves"), &mut curves, time, &options)
         }));
-        let change = match shown {
-            Ok(change) => change,
+        let CurveOutput {
+            change,
+            playhead: on_ruler,
+        } = match shown {
+            Ok(output) => output,
             Err(panic) => {
                 let message = format!("the curve editor panicked: {}", panic_text(&*panic));
                 self.failures.push((curve::SERVICE.id(), message));
@@ -738,12 +760,28 @@ impl PanelView {
             },
             (keys, _) => keys,
         };
-        if let Some(frame) = moved {
+        if let Some(frame) = moved.or(on_ruler) {
             move_playhead(store, view, object, frame, events);
         }
         let idle = idle(ui);
         self.apply_keys(store, view, sequence, keys, idle, events);
         response
+    }
+
+    /// The time axis of `view`: that of its player when it shows `sequence`, shared with the views
+    /// of the same player, made again when the sequence shown changes so that the view fits it as
+    /// when first shown; its own otherwise.
+    fn time_axis(&mut self, view: Handle, object: &Object, sequence: Option<Handle>) -> &mut TimeAxis {
+        let key = match (sequence, object.player) {
+            (Some(_), Some(player)) => AxisKey::Player(player),
+            _ => AxisKey::View(view),
+        };
+        if let Some(sequence) = sequence
+            && self.axis_sequences.insert(key, sequence) != Some(sequence)
+        {
+            self.time_axes.insert(key, TimeAxis::default());
+        }
+        self.time_axes.entry(key).or_default()
     }
 
     /// Puts back the sequence a view was changing, when the view can no longer end the change: gone,
@@ -997,7 +1035,7 @@ fn change_keys(
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use uniwow_api::curve::{CurveChange, CurveEditor, CurveOptions, ShownCurve, TimeAxis};
+    use uniwow_api::curve::{CurveChange, CurveEditor, CurveOptions, CurveOutput, ShownCurve, TimeAxis};
     use uniwow_api::dopesheet::{CurveProperties, Dopesheet, DopesheetInput, DopesheetOutput, KeysChange};
     use uniwow_api::sequence::Track;
     use uniwow_api::serde_json::Value;
@@ -1011,6 +1049,68 @@ mod tests {
     type Jobs = Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
     /// The changes the module would record.
     type Changes = Arc<Mutex<Vec<Box<dyn AppliedChange>>>>;
+
+    /// What a curve editor gives when the user did nothing.
+    fn unchanged() -> CurveOutput {
+        CurveOutput {
+            change: CurveChange::None,
+            playhead: None,
+        }
+    }
+
+    /// A dopesheet noting the time axis it is given, which it zooms to 7 points a frame from frame 3
+    /// when it has none yet.
+    #[derive(Default)]
+    struct Zooming(Mutex<Vec<TimeAxis>>);
+
+    impl Dopesheet for Zooming {
+        fn show(
+            &self,
+            _ui: &mut egui::Ui,
+            _id: egui::Id,
+            _input: &DopesheetInput,
+            time: &mut TimeAxis,
+        ) -> DopesheetOutput {
+            self.0.lock().unwrap().push(*time);
+            if time.pixels_per_unit == 0.0 {
+                *time = TimeAxis {
+                    first: 3.0,
+                    pixels_per_unit: 7.0,
+                };
+            }
+            DopesheetOutput {
+                keys: KeysChange::None,
+                playhead: None,
+            }
+        }
+
+        fn curve_properties(&self, _ui: &mut egui::Ui, _id: egui::Id, _input: &DopesheetInput) -> CurveProperties {
+            nothing_hidden()
+        }
+
+        fn forget(&self, _id: egui::Id) {}
+    }
+
+    /// A curve editor noting the time axis it is given, and moving the playhead to `.1` on its ruler.
+    #[derive(Default)]
+    struct Ruling(Mutex<Vec<TimeAxis>>, Option<f64>);
+
+    impl CurveEditor for Ruling {
+        fn show(
+            &self,
+            _ui: &mut egui::Ui,
+            _id: egui::Id,
+            _curves: &mut [ShownCurve],
+            time: &mut TimeAxis,
+            _options: &CurveOptions,
+        ) -> CurveOutput {
+            self.0.lock().unwrap().push(*time);
+            CurveOutput {
+                playhead: self.1,
+                ..unchanged()
+            }
+        }
+    }
 
     /// The left of a curve view hiding nothing and changing nothing.
     fn nothing_hidden() -> CurveProperties {
@@ -1060,9 +1160,9 @@ mod tests {
             curves: &mut [ShownCurve],
             _time: &mut TimeAxis,
             _options: &CurveOptions,
-        ) -> CurveChange {
+        ) -> CurveOutput {
             *self.0.lock().unwrap() = curves.iter().map(|shown| shown.visible).collect();
-            CurveChange::None
+            unchanged()
         }
     }
     /// The signals a view sent: which, its text, its boolean and its number.
@@ -1218,9 +1318,12 @@ mod tests {
             curves: &mut [ShownCurve],
             _time: &mut TimeAxis,
             _options: &CurveOptions,
-        ) -> CurveChange {
+        ) -> CurveOutput {
             curves[0].curve.keys[0].value = 0.75;
-            self.0
+            CurveOutput {
+                change: self.0,
+                playhead: None,
+            }
         }
     }
 
@@ -1494,7 +1597,7 @@ mod tests {
             _curves: &mut [ShownCurve],
             _time: &mut TimeAxis,
             _options: &CurveOptions,
-        ) -> CurveChange {
+        ) -> CurveOutput {
             panic!("broken editor")
         }
     }
@@ -1659,5 +1762,75 @@ mod tests {
         fixture.frame_with_dialogs(&mut panels);
         fixture.frame_with_dialogs(&mut panels);
         assert_eq!(catalogue.free.lock().unwrap().len(), 2, "once in each frame");
+    }
+
+    #[test]
+    fn views_of_the_same_player_share_their_time_axis_which_fits_again_for_another_sequence() {
+        let fixture = fixture(Kind::DopesheetView);
+        let other = {
+            let mut store = lock(&fixture.shared);
+            let panel = store.find_panel("p").unwrap();
+            let layout = store.object(panel).unwrap().children[0];
+            let curves = store.create(Kind::CurveView, None).unwrap();
+            store
+                .set_numbers(curves, Property::Sequence, &[fixture.sequence as f64])
+                .unwrap();
+            store
+                .set_numbers(curves, Property::Player, &[fixture.player as f64])
+                .unwrap();
+            store.add_to(layout, curves, [0, 0, 1, 1]).unwrap();
+            let other = store.create(Kind::Sequence, None).unwrap();
+            (curves, other)
+        };
+        let (curves, other) = other;
+        let sheet = Arc::new(Zooming::default());
+        let ruling = Arc::new(Ruling::default());
+        let mut panels = PanelView {
+            dopesheet: Some(sheet.clone()),
+            curve_editor: Some(ruling.clone()),
+            ..PanelView::default()
+        };
+        fixture.frame(&mut panels);
+        let zoomed = TimeAxis {
+            first: 3.0,
+            pixels_per_unit: 7.0,
+        };
+        assert_eq!(*ruling.0.lock().unwrap(), vec![zoomed], "the dopesheet's zoom");
+        // Both views show another sequence: the axis is made again, for them to fit it.
+        {
+            let mut store = lock(&fixture.shared);
+            for view in [fixture.view, curves] {
+                store.set_numbers(view, Property::Sequence, &[other as f64]).unwrap();
+            }
+        }
+        fixture.frame(&mut panels);
+        let given = sheet.0.lock().unwrap();
+        assert_eq!(given.len(), 2);
+        assert_eq!(given[1], TimeAxis::default(), "fitting again");
+    }
+
+    #[test]
+    fn the_ruler_of_a_curve_view_moves_its_player_s_playhead() {
+        let fixture = fixture(Kind::CurveView);
+        let mut panels = PanelView {
+            curve_editor: Some(Arc::new(Ruling(Mutex::default(), Some(12.0)))),
+            ..PanelView::default()
+        };
+        fixture.frame(&mut panels);
+        let store = lock(&fixture.shared);
+        assert_eq!(store.numbers(fixture.player, Property::Time).unwrap(), vec![12.0]);
+        assert_eq!(
+            store.numbers(fixture.player, Property::Playing).unwrap(),
+            vec![0.0],
+            "paused there"
+        );
+        drop(store);
+        assert!(
+            fixture
+                .signals
+                .lock()
+                .unwrap()
+                .contains(&(Signal::PlayheadMoved, String::new(), false, 12.0))
+        );
     }
 }
