@@ -1650,6 +1650,10 @@ Decisions of the user:
   conversion. The view shows them **from this milestone on**, as the client does.
 - **The readers of the files**: those of 3.3.5a copied from warcraft-rs, the modern ones translated
   from wow.export, inside the module `assets` (*Components*).
+- **The allocator of the editor is mimalloc, in the runtime** (after the verifications of step 9.1):
+  with the allocator of Windows, reading the archives from more than 8 threads at once gets slower;
+  with mimalloc it keeps scaling (*Results of the verifications*, below). That it serves the modules
+  loaded as well as the executable, through the shared runtime, is to prove in step 9.1.
 
 Rules:
 
@@ -1673,7 +1677,7 @@ make every Rust module be rebuilt, while making the runtime export more. So they
     and BLP. They are read with the parts of warcraft-rs (MIT/Apache) the milestone uses;
   - **the modern files WarcraftXL makes the client load directly**, without conversion: the M2 of
     recent versions (chunked, with their `.skin`, `.anim` and `.bone`), the modern WMO, the split
-    ADT, the DB2 tables, files named by their FileDataID through a listfile. The user exports them
+    ADT, and two DB2 tables that turn a FileDataID into the path of its file. The user exports them
     from the retail game with wow.export and the client loads them through the extensions of
     WarcraftXL (`wxl-modern-m2`, `wxl-modern-wmo`, `wxl-modern-adt`, `wxl-db2`), installed with
     wxl-hub. The editor reads the same files from the same places, so that what the client shows,
@@ -1684,7 +1688,7 @@ make every Rust module be rebuilt, while making the runtime export more. So they
 - WarcraftXL is GPL-3: nothing of its code is copied into UniWoW, whose own licence is still to
   choose (section 10). It stays a dependency of the player's client, not of the editor's code.
 - It offers the services `vfs` (the bytes of a file, whether it exists, the files under a folder,
-  and a modern file by its FileDataID through the listfile) and `formats` (a tile, a model, a texture, the rows of a DBC, parsed), shared between threads
+  and a modern file by its FileDataID, through the same two tables as WarcraftXL) and `formats` (a tile, a model, a texture, the rows of a DBC, parsed), shared between threads
   (T3). Their interfaces, and the plain data they return (heights, layers and alpha maps of a chunk,
   vertices, bones and keyframes of a model, the levels of a texture), are declared in `core/api`:
   they change far less often than the code reading the files.
@@ -1892,7 +1896,7 @@ Each step is reviewed before the next one; the milestone is delivered once all a
 
 | Step | Content |
 |---|---|
-| 9.1 | Installations; the module `assets` and its services `vfs` and `formats`, with their interfaces in `core/api`, read from any thread at once: MPQ, then the files WarcraftXL adds where it finds them, the list of files and the listfile of FileDataIDs, the DBC `Map`, `AreaTable`, `CreatureDisplayInfo`, `CreatureModelData`, and the DB2 tables WarcraftXL reads where they extend them, and those the next steps need |
+| 9.1 | Installations; mimalloc as the allocator of the editor; the module `assets` and its services `vfs` and `formats`, with their interfaces in `core/api`, read from any thread at once: the archives in the order of the client and of the patcher of WarcraftXL, folders mounted as archives, the delete markers of the patches; the FileDataIDs turned into paths through `TextureFilePath.db2` and `ModelFilePath.db2` (WDC1), as WarcraftXL does; the DBC `Map`, `AreaTable`, `CreatureDisplayInfo`, `CreatureModelData`, and those the next steps need |
 | 9.2a | The additions to the core: `parallel_for`, bundles kept in the viewport with `prepare`, its frame signal |
 | 9.2 | The terrain model that can be edited (point 1 above), from the ADT of 3.3.5a and the split tiles, loaded in jobs in the order of *Threads*, its uploads submitted by the jobs, the GPU memory budget, drawn chunk by chunk; the free camera |
 | 9.3 | The observer and its threads, on both sides; the entities as markers (a coloured shape and the name) moving in real time; the commands and events of L4 |
@@ -1909,13 +1913,80 @@ Each step is reviewed before the next one; the milestone is delivered once all a
 | The volume of data in a crowded city at the rate chosen | To verify |
 | The work of the M2 animations (bones, interpolation) | To estimate |
 | Speed of the terrain and the models in a city (the goal to fix), and the cost of rebuilding one terrain chunk alone, for the editing to come | To measure |
-| Reading the archives from many threads at once: does it scale with the cores, or does the disk or a lock limit it? | To measure |
+| Reading the archives from many threads at once: does it scale with the cores, or does the disk or a lock limit it? | Measured in step 9.1: it scales with the cores once the allocator does; mimalloc chosen (below) |
 | The time the interface thread spends per frame while flying fast over a city: handing over, culling, recording | To measure |
 | The bytes of animation (instances and bones) written to the GPU per frame in a crowded city | To measure |
-| What warcraft-rs reads and writes correctly in 3.3.5a, format by format; what `assets` copies of it, without `rayon` | To verify |
-| Which versions of the modern formats the extensions of WarcraftXL load, and where they find the files (their folders, loose files, FileDataIDs and listfile): the editor must read the same files from the same places | To verify |
+| What warcraft-rs reads and writes correctly in 3.3.5a, format by format; what `assets` copies of it, without `rayon` | Reading verified in step 9.1 (below): archives, DBC, WDT, ADT and WMO groups read; M2, skins, WMO roots and BLP have faults to correct in the copy. Writing not verified yet |
+| Which versions of the modern formats the extensions of WarcraftXL load, and where they find the files (their folders, loose files, FileDataIDs and listfile): the editor must read the same files from the same places | Verified in step 9.1 in their sources (below) |
 | What wow.export reads of those formats, and how much of it the translation takes | To verify |
 | Does the active invisible object stay out of the game (no aggro, no AI, not seen by game masters), and is it always removed (unsubscription, disconnection, heartbeat lost)? | To verify |
+
+#### Results of the verifications (step 9.1)
+
+**warcraft-rs 0.7.0 on the 3.3.5a client of the user** (`E:\world of warcraft 3.3.5a hd`, enUS),
+read only, by a probe outside the repository:
+
+- The 35 archives of the chain open, in the order of Wow.exe 12340, `patch-Z.MPQ` included (format
+  1, 3.4 GB, its tables beyond 2 GB): 235,111 names. 4,911 of them are deleted by a **delete marker**
+  of a patch (flag `0x02000000`, size 0), which wow-mpq lists and reads as an empty file: the `vfs`
+  service takes them as deleted.
+- Read and checked: every DBC (245, their header against their size), every WDT (107), 400 ADT of
+  3.3.5a (256 chunks each), 199 WMO groups.
+- Faults the copy corrects, each with its test on the client's files:
+  - **M2**: 273 of 500 models read, their bones and vertices as their header counts them; not one
+    model with particles, ribbons, cameras or lights (0 of 183), and few with events: those
+    structures are not read as 3.3.5a (version 264) lays them out, and they are those of the torches
+    and braziers of the scene.
+  - **Skins**: 480 of 500; an empty skin (48 bytes, valid) is refused.
+  - **WMO roots**: 199 of 200; a name that is not UTF-8 is refused.
+  - **BLP**: 597 of 600 decoded; three DXT5 textures whose last levels are empty are refused.
+- Writing, needed by later milestones, is not verified in this step.
+
+**Reading the archives from several threads at once** (1,500 files, about 220 MB, a run; each
+thread with handles of its own, opened beforehand; the client on a SATA SSD; 32 threads):
+
+| Threads | Files never read (Windows allocator) | Files cached (Windows allocator) | Files cached (mimalloc) |
+|---|---|---|---|
+| 1 | 104 MB/s | 260 MB/s | 250 MB/s |
+| 8 | 325 MB/s | 1,450 MB/s | 1,950 MB/s |
+| 16 | 500 MB/s | 990 to 1,180 MB/s | 2,700 MB/s |
+| 32 | 545 to 620 MB/s | 630 to 760 MB/s | 3,600 MB/s |
+
+The archives scale with the cores; the allocator of Windows does not, beyond 8 threads, as three
+runs showed. With mimalloc, files never read reach 763 MB/s at 32 threads. Hence the decision of the
+user above. Opening an archive reads its tables, up to 60 ms for `common.mpq`: the `vfs` service
+reads them once and shares them.
+
+**WarcraftXL**, read in its sources (wxl-core 60033ab, wxl-modern-m2 feba6b3, wxl-modern-wmo e56fa7c,
+wxl-modern-adt 5f2726c, wxl-db2 30e4f2c, wxl-hub 884a0da, DB2Gen 7e86924), nothing copied. wxl-hub
+installs the last release of each extension, v1.0.0 of August 2026; the M2 and ADT ones have later
+commits, which may change what follows:
+
+- **Where the files are**: through the client's own reading, in its archives. The patcher of
+  WarcraftXL widens `patch-?.MPQ` and `patch-<locale>-?.MPQ` to any name, `Data\Patch-<name>.MPQ`,
+  which may also be a **folder** of that name mounted as an archive. No CASC, no listfile at run
+  time.
+- **FileDataIDs**: turned into the path of the file through `TextureFilePath.db2` (`.blp`) and
+  `ModelFilePath.db2` (models, `.skin`, `.anim`...), WDC1 tables that DB2Gen builds from the
+  community listfile, read loose from `DBFilesClient\` beside the client, then from the archives;
+  the file must then exist at that path. wxl-hub does not install these tables.
+- **M2**: only the `MD21` container, of versions 272 to 274; the skins by name, `<model>NN.skin`,
+  and `<model>_lodNN.skin`; the `.anim` by name, unwrapped from `AFM2`; the textures of `TXID`
+  through the tables; `.bone` and `.phys` left aside; a model with `.skel` refused; with more than 4
+  skin profiles, the first only.
+- **WMO**: modern when the root has no `MOTX` or has `GFID`; the textures of `MOMT` through the
+  tables; the groups by name, `<root>_NNN.wmo`; the doodads of a modern WMO are not placed.
+- **ADT**: split when `<tile>_tex0.adt` exists; the root, `_tex0` and `_obj0` only; the doodads and
+  buildings flagged as FileDataIDs (`MDDF` 0x40, `MODF` 0x8) through the tables; at most 4 texture
+  layers.
+- **DB2**: WDC1 to WDC3 and WDC5; no DBC of 3.3.5a is replaced or extended: the four extensions use
+  only the two tables of paths.
+- The view shows what the client shows: a modern WMO without its doodads, for one.
+
+**The client of the user**: the extensions of WarcraftXL are installed (since 2 October), but its
+archives hold no `.db2`, no split tile, and 2 `MD21` models of 23,155, one of version 274, the other
+an `MD21` around a model of version 264, which WarcraftXL does not take. The acceptance of the
+modern files needs files exported with wow.export and the two tables of DB2Gen installed.
 
 #### Tests
 
