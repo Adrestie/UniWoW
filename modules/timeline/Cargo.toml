@@ -19,4 +19,4 @@ name = "Timeline"
 category = "Animation"
 # Services the module cannot work without, and services it uses when present.
 requires = []
-uses = []
+uses = ["curve-editor"]
