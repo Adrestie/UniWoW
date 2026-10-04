@@ -154,7 +154,7 @@ The panels of compiled, Lua and Python modules, written once for every language.
 typed functions of `uniwow.h`, which numbers the objects, properties and signals below; C++ has the
 classes of `sdk/uniwow.hpp` (`uniwow::PushButton`, `button.clicked.connect(...)`), C# those of
 `sdk/UniWoW.cs` with the names of C# (`button.Clicked.Connect(...)`, `UiObject` for `QObject`); Lua
-and Python receive theirs in milestones 10 and 11.
+and Python receive theirs in milestones 9 and 10.
 
 | Object | As in Qt | Properties | Signals |
 |---|---|---|---|
@@ -209,6 +209,14 @@ within bounds), selectable and selected or not. Colours are `0xRRGGBBAA`, sizes 
   not responding in the Modules panel, where it can be disabled: its changes leave the history and
   Undo comes back. The Commands panel never waits for an answer: another call replaces the one
   awaited, or the wait is given up.
+- **Undo of the state the kernel keeps** (milestone 8): for the objects whose state the kernel
+  keeps, it knows the value before and after a change, and records the undo entry itself: keys
+  moved in a `DopesheetView` or a `CurveView` showing a `Sequence`, a value changed in a
+  `PropertyGrid`, the `TRACKS` of a `Sequence` set by its module, the value of a property of a
+  module of another language changed by hand. The entry belongs to the module owning the object or
+  the property, and joins its open group (S4). The author of a tool in any language has nothing to
+  write for these; `record_change` stays for the module's own data. Rust modules using these
+  objects get the same.
 
 ---
 
@@ -1131,7 +1139,7 @@ As built:
   tells it from the frame it draws it in.
 - **One source for the numbers**: `sdk/bindings.toml` (section 8).
 
-### Milestone 8: parity of the languages (proposed)
+### Milestone 8: parity of the languages (specified)
 
 Whatever a built-in module can do, a module in any language can do (R9). This milestone completes
 the unified API where it falls short, and splits the Timeline into an engine, widgets and a window
@@ -1148,7 +1156,8 @@ What the unified API lacks today:
 | Tree, table, property grid | egui | Nothing |
 | The viewport's camera | Inside the viewport module | Nothing |
 
-It is built in seven small steps, each checked and validated before the next one.
+Specified and validated by the user, with the adjustments of the seventh review. It is built in
+seven small steps, each checked and reviewed before the next one.
 
 **Step 8.1, the rule.** R9 in section 1, and in section 3 a table *Capabilities and their unified
 form*: each capability a built-in module offers, with the object, property, command or function
@@ -1167,6 +1176,13 @@ table up to date, and its review checks it.
   handed to `write` on the module's thread, in order. Otherwise as in Rust: the path is
   `<module>/<name>`, a property is listed only while its module runs, and a failing `write` makes
   the module fail.
+- When `write` refuses or adjusts a value, it gives back the value it kept, and the kernel's copy
+  follows; a module may also tell it later with `set_property`.
+- The writes of one property still waiting for the module's thread are merged, the last one
+  winning: playback writing at each frame never fills the queue of a slow module.
+- A value changed by hand (a property grid, the fields of the Timeline) is one undo entry the kernel
+  records, owned by the property's module (section 3, undo of the state the kernel keeps); a write
+  by playback is none.
 - Functions: `properties` lists them as JSON (path, owner, label, kind, range); `read_property` and
   `write_property` read and write the numbers of one. Classes: C++ `uniwow::Property` and
   `uniwow::properties()`, C# `Editor.DeclareProperty`, `Editor.Properties`, `ReadProperty`,
@@ -1201,8 +1217,9 @@ table up to date, and its review checks it.
     played or set by its module, the kernel writes the value of each track at that time into its
     property, through the catalogue of step 8.2, and nothing where a value did not change.
 - Like every object, a sequence and its player belong to the module that created them; a module may
-  animate any property of the catalogue: its own, the cube's, the camera's. A module records its
-  changes to its sequences in the history as it records its other changes.
+  animate any property of the catalogue: its own, the cube's, the camera's. The kernel records the
+  undo entry of each change of a sequence's `TRACKS`, set by its module or made in a widget, owned
+  by that module and joining its open group (section 3): the module records nothing itself.
 - Sample: the C++ scene plays a sequence of its own on its first card, which moves; pause and loop
   from its panel.
 
@@ -1215,8 +1232,15 @@ table up to date, and its review checks it.
   at the playhead. Signals `keysChanged` (the tracks as JSON, with whether the change is finished,
   as `curvesChanged`) and `playheadMoved`. Without the module `dopesheet`, a `DopesheetView` says
   that it is not running.
+- Shown with a `Sequence`, a `DopesheetView` or a `CurveView` changes it directly, and the kernel
+  records each finished change as one undo entry, owned by the sequence's module.
+- The widgets drawn by modules of the interface through a service, `DopesheetView` and
+  `PropertyGrid` as `CurveView`, have the protections of `CurveView` from the start: their data
+  checked when given (finite numbers within 1e9, keys in time order and at times of their own),
+  every loop bounded, the drawing inside `catch_unwind` with the provider of the service reported
+  as the culprit (F5), and a gesture ended when its data change outside it.
 - Sample: the C# *Counter* shows a dopesheet of its own sequence on its value; each change of keys
-  is one undo entry.
+  is one undo entry, without the module recording anything.
 
 **Step 8.6, the Timeline, a client:** the Timeline module keeps its egui window (sequence and
 playback bars, *Add property*), but its sequences are `Sequence` objects, its playback a `Player`,
@@ -1230,19 +1254,25 @@ module. For the user nothing changes: files, undo, unsaved changes, as in milest
 - `TableView` (as `QTableWidget`), drawn by the kernel: columns with headers, rows of cells, cells
   edited in place, sorted by a column when the user clicks its header; signals `cellChanged`
   (row, column, text), `currentCellChanged` and `sortChanged`. Only the rows in sight are drawn, so
-  that 100,000 rows scroll smoothly.
+  that 100,000 rows scroll smoothly. Besides the rows given at once, functions change one cell,
+  insert rows and remove rows, without giving the whole table again. The kernel sorts, keeping the
+  id of each row, which the signals and these functions use, whatever the order shown. The SQL
+  tool of milestone 11 relies on it.
 - `PropertyGrid`, drawn by a new module of the interface, `modules/UI/properties/`, through a
   service: the properties of the catalogue whose paths it is given, each with its label and an
   editor for its kind (numbers dragged or typed, a colour, a box); a change by hand writes the
-  property and is one undo entry, *Set <label>*, which belongs to the property's module.
+  property and is one undo entry, *Set <label>*, which the kernel records and which belongs to the
+  property's module.
 - The rows of a tree or a table are given as JSON (`ITEMS`, `ROWS`), each with an id the signals
   give back.
 - Sample: a C# panel with a table of 100,000 rows, a tree, and a property grid of the cube.
 
-Choices proposed, to be confirmed by the review:
+Choices confirmed by the review:
 
 - The properties of the modules of other languages are read from the kernel's copy, never by
   calling the module, so that reading never waits on a module's thread.
+- The kernel records the undo entries of the state it keeps (section 3), owned by the module of the
+  object or the property.
 - Players are moved on by the kernel, as part of the objects of the core, so that a module plays its
   sequences without the Timeline module; the Timeline module itself becomes removable without
   taking the engine away.
@@ -1260,9 +1290,11 @@ Acceptance, automated where possible (the shell run without a window, the tests 
 | 8.3 | Keys on the camera's position, then play | The 3D view follows the camera's path |
 | 8.3 | `viewport.look_at` from the Commands panel | The camera moves there |
 | 8.4 | *Play* in the C++ scene's panel | The first card moves along its sequence; *Pause* stops it; with *Loop*, it starts again |
-| 8.5 | A key dragged in the Counter's dopesheet | The key moves; one undo entry; Ctrl+Z puts it back |
+| 8.5 | A key dragged in the Counter's dopesheet | The key moves; one undo entry, though the module records nothing; Ctrl+Z puts it back |
+| 8.5 | A key removed by the module while the user drags it | The drag ends; no key changes but those the user moved |
 | 8.6 | The checks of milestones 6 and 7 | The same results |
-| 8.7 | The table of 100,000 rows scrolled, sorted, a cell edited | Smooth; sorted by the column clicked; `cellChanged` received |
+| 8.7 | The table of 100,000 rows scrolled, sorted, a cell edited | Smooth; sorted by the column clicked; `cellChanged` received with the row's id |
+| 8.7 | A row inserted, then one removed, by the module | The table changes there only, its order kept |
 | 8.7 | The cube's colour changed in the property grid | The cube changes; one undo entry |
 | All | Tests, `cargo xtask check`, the tests of the SDK, CI | Green |
 
@@ -1301,7 +1333,10 @@ Three tools written only with the unified API, without touching the core:
 - a SQL tool in Python;
 - the equipment of a creature in Lua, which reads and writes the AzerothCore database (`libs/db`
   and a module of the database offering its commands);
-- a timeline of particles in Lua, with its own sequences, players and widgets.
+- a timeline of particles in Lua: a module of particles, built in and written in Rust, draws them in
+  the 3D view and offers their settings as animatable properties; the Lua tool has its own
+  timeline (`Sequence`, `Player`, `DopesheetView`), which animates them. Drawing in 3D from the
+  other languages stays out of this milestone: it is one of the other 3D accesses of step 8.3.
 
 Specifying it needs the project model of section 10 decided first.
 
