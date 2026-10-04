@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 6 built and validated; milestone 7 validated, in progress; milestones 8 to 11 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 6 built and validated; milestone 7 built, awaiting validation; milestones 8 to 11 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -173,6 +173,7 @@ and Python receive theirs in milestones 10 and 11.
 | `ItemGroup` | `QGraphicsItemGroup` | items | |
 | `PaintArea` | a `QWidget` and its `paintEvent` | minimum height | `paint` (painter, width, height), `mousePress`, `mouseMove`, `mouseRelease`, `wheel` (x, y, dx, dy, button, keys) |
 | `Dialog` | `QDialog` | title, the one layout it holds, shown or hidden | `rejected` |
+| `CurveView` | a `QWidget` drawn by the module `curves` | curves (JSON), minimum height | `curvesChanged` (curves, finished) |
 
 Every widget is enabled or not, visible or not, and has a tooltip. Every item has a position in its
 parent, a pen, a brush, a stacking order, a tooltip, and is visible, movable (along x, y or both,
@@ -948,7 +949,7 @@ As built:
   lowercase); the kernel loads the modules of the group folder `modules\UI\`; `cargo xtask build`
   deploys there, and removes a deployed module whose folder no longer matches its source.
 
-### Milestone 7: the Curves view of the Timeline (validated, in progress)
+### Milestone 7: the Curves view of the Timeline (built, awaiting validation)
 
 As the Curves view of the Animation window of Unity: every number of an animated property is a
 curve of its own, whose keys and tangents are edited by hand. A module of the interface draws and
@@ -1017,6 +1018,26 @@ Acceptance:
 | The curve of the C# panel: drag a key, then Ctrl+Z | The curve changes, then comes back |
 | Remove `modules\UI\curves`, restart | The Curves view and the curve of the C# panel say that the module is not running; the dopesheet works |
 | Tests, `cargo xtask check`, CI | Green |
+
+As built:
+
+- **Curves** are in `uniwow_api::curve`: a handle that is not weighted has a third of the time to
+  the neighbouring key; Auto and Clamped Auto are flat at the first and last keys. A segment
+  without weights is the cubic of Hermite; with a weight, a Bézier curve whose time is found by
+  bisection.
+- **Contract of the curve editor**: the trait `CurveEditor` and the service `curve-editor`. Its
+  caller keeps the time axis, so that the graph of the Timeline lines up with its ruler, and gives
+  the snap, the playhead and the span to shade; the editor answers whether a change goes on or is
+  done.
+- **Module `curves`**: the handles of the selected keys are drawn, at the length of their weight,
+  or 40 pixels from a key without neighbour on that side; dragging the handle of a key set
+  automatically makes it Free Smooth; a dragged key cannot pass a key that does not move; the
+  values are written inside the graph, along its left edge.
+- **Timeline**: a property's row has a button unfolding the rows of its numbers; in the Curves
+  view each row has a box showing or hiding its curves; a boolean has no curve there, its value
+  holding from key to key. Delete in the Curves view is the curve editor's.
+- **`CurveView`**: drawn by the core through the service; `curvesChanged` is sent while a key or a
+  handle is dragged, with the change not finished, then once it is.
 
 ### Milestone 8: the Timeline in Montage mode (outline)
 
