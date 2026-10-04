@@ -8,7 +8,7 @@ use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
 use uniwow_api::serde_json::Value;
-use uniwow_api::{CallId, CommandHandler, CommandInfo, CommandSpec, EditorBackend, Event, egui, log};
+use uniwow_api::{AppliedChange, CallId, CommandHandler, CommandInfo, CommandSpec, EditorBackend, Event, egui, log};
 
 use crate::guard::guarded_as;
 use crate::host::Reported;
@@ -48,6 +48,13 @@ pub enum Request {
     EndGroup {
         caller: String,
         thread: ThreadId,
+    },
+    /// A change the caller's module already made, to record (F2).
+    RecordChange {
+        caller: String,
+        thread: ThreadId,
+        label: String,
+        change: Box<dyn AppliedChange>,
     },
     /// A job's thread finished its job: the groups it left open are closed.
     ThreadEnded {
@@ -353,6 +360,30 @@ impl EditorBackend for Bridge {
             thread: std::thread::current().id(),
         });
         Ok(())
+    }
+
+    fn record_change(&self, caller: &str, label: &str, change: Box<dyn AppliedChange>) -> Result<(), String> {
+        self.active(caller)?;
+        self.queue(Request::RecordChange {
+            caller: caller.to_owned(),
+            thread: std::thread::current().id(),
+            label: label.to_owned(),
+            change,
+        });
+        Ok(())
+    }
+
+    fn report_failure(&self, caller: &str, message: &str) {
+        self.failures.lock().unwrap_or_else(|e| e.into_inner()).push(Reported {
+            reporter: "kernel".to_owned(),
+            culprit: module_of(caller).to_owned(),
+            message: message.to_owned(),
+        });
+        self.wake();
+    }
+
+    fn is_active(&self, caller: &str) -> bool {
+        self.active(caller).is_ok()
     }
 }
 

@@ -1,16 +1,19 @@
 //! The C interface of `sdk/uniwow.h` over an `Editor`: what a compiled module receives, and the
 //! start of a compiled module once the kernel has loaded its DLL.
 
+mod objects;
+
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, mpsc};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::Editor;
+use crate::ui::{Post, SharedUi, Ui};
+use crate::{DockArea, Editor, PanelSpec};
 
-const API_VERSION: u32 = 2;
+const API_VERSION: u32 = 3;
 /// The name under which a compiled module exports its entry point.
 pub const INIT_SYMBOL: &[u8] = b"uniwow_module_init\0";
 
@@ -18,6 +21,8 @@ pub const INIT_SYMBOL: &[u8] = b"uniwow_module_init\0";
 // ends the process in a defined way, instead of being undefined behaviour.
 type Reply = extern "C-unwind" fn(*mut c_void, *const c_char);
 type Handler = extern "C-unwind" fn(*mut c_void, *const c_char, Reply, *mut c_void) -> i32;
+/// Applies an undo or redo value of the module: the value, then where to reply an error.
+type ApplyFn = extern "C-unwind" fn(*mut c_void, *const c_char, Reply, *mut c_void) -> i32;
 /// The entry point of a compiled module.
 pub type InitFn = unsafe extern "C-unwind" fn(*const Api, *mut ModuleInfo, Reply, *mut c_void) -> i32;
 
@@ -38,6 +43,8 @@ pub struct Api {
     log: extern "C" fn(*mut c_void, i32, *const c_char),
     begin_group: extern "C" fn(*mut c_void, *const c_char),
     end_group: extern "C" fn(*mut c_void),
+    record_change: extern "C" fn(*mut c_void, *const c_char, *const c_char, *const c_char) -> i32,
+    objects: objects::Table,
 }
 
 #[repr(C)]
@@ -48,6 +55,15 @@ struct CommandEntry {
     result_schema: *const c_char,
     handler: Option<Handler>,
     user: *mut c_void,
+}
+
+/// A panel a module declares: its id, its title, and its area (1 centre, 2 left, 3 right,
+/// 4 bottom).
+#[repr(C)]
+struct PanelEntry {
+    id: *const c_char,
+    title: *const c_char,
+    area: u32,
 }
 
 /// What the entry point of a compiled module fills in.
@@ -61,12 +77,48 @@ pub struct ModuleInfo {
     header_version: u32,
     /// `sizeof(uniwow_command)` in the module, so that its table is read with the right step.
     command_size: u32,
+    panel_count: u32,
+    panels: *const PanelEntry,
+    /// Applies an undo or redo value recorded with `record_change`, on the module's thread.
+    apply_change: Option<ApplyFn>,
+    user: *mut c_void,
 }
+
+/// A pointer a module gives back to its own functions, which uniwow.h requires to accept any
+/// thread.
+#[derive(Clone, Copy)]
+struct UserPointer(*mut c_void);
+
+// SAFETY: uniwow.h requires the module's functions to accept being called from any thread.
+unsafe impl Send for UserPointer {}
+unsafe impl Sync for UserPointer {}
 
 /// What the C functions know of the module calling them. Lives until the process ends.
 pub struct ModuleContext {
+    /// The module's id, for its log lines.
+    pub id: String,
     /// The module's `Editor`, set when the module starts (`Module::init`).
     pub editor: OnceLock<Editor>,
+    /// Its interface objects.
+    pub ui: SharedUi,
+    /// Runs a job on the module's own thread.
+    post: Post,
+    apply: OnceLock<(ApplyFn, UserPointer)>,
+}
+
+impl ModuleContext {
+    /// Logs a refusal under the module's name.
+    fn refuse(&self, what: &str, error: &str) {
+        match self.editor.get() {
+            Some(editor) => editor.log(log::Level::Warn, &format!("{what}: {error}")),
+            None => log::warn!("module '{}': {what}: {error}", self.id),
+        }
+    }
+
+    /// Whether the module still runs; once it failed, nothing reaches it any more.
+    fn active(&self) -> bool {
+        self.editor.get().is_none_or(Editor::is_active)
+    }
 }
 
 /// A command handler of a compiled module.
@@ -108,13 +160,40 @@ pub struct Started {
     pub version: String,
     pub context: &'static ModuleContext,
     pub commands: Vec<OfferedCommand>,
+    pub panels: Vec<PanelSpec>,
 }
 
-/// Calls the entry point of a compiled module with the table of the C interface, and reads what
-/// it offers. The table and the context live until the process ends, as the module does.
-pub fn start(init: InitFn) -> Result<Started, String> {
+/// The thread a module's signals, paintings and undo values run on, in order.
+fn module_thread(id: &str) -> Post {
+    let (sender, receiver) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
+    let name = id.to_owned();
+    let spawned = std::thread::Builder::new()
+        .name(format!("uniwow module {id}"))
+        .spawn(move || {
+            for job in receiver {
+                if catch_unwind(AssertUnwindSafe(job)).is_err() {
+                    log::error!("module '{name}': a call on its thread panicked in the editor");
+                }
+            }
+        });
+    if let Err(error) = spawned {
+        log::error!("module '{id}': its thread could not start: {error}");
+    }
+    std::sync::Arc::new(move |job| {
+        let _ = sender.send(job);
+    })
+}
+
+/// Calls the entry point of the compiled module `id` with the table of the C interface, and reads
+/// what it offers. The table and the context live until the process ends, as the module does.
+pub fn start(init: InitFn, id: &str) -> Result<Started, String> {
+    let post = module_thread(id);
     let context: &'static ModuleContext = Box::leak(Box::new(ModuleContext {
+        id: id.to_owned(),
         editor: OnceLock::new(),
+        ui: Ui::new(post.clone()),
+        post,
+        apply: OnceLock::new(),
     }));
     let api: &'static Api = Box::leak(Box::new(Api {
         version: API_VERSION,
@@ -130,6 +209,8 @@ pub fn start(init: InitFn) -> Result<Started, String> {
         log: api_log,
         begin_group: api_begin_group,
         end_group: api_end_group,
+        record_change: api_record_change,
+        objects: objects::TABLE,
     }));
 
     let mut info = ModuleInfo {
@@ -139,6 +220,10 @@ pub fn start(init: InitFn) -> Result<Started, String> {
         command_count: 0,
         header_version: 0,
         command_size: 0,
+        panel_count: 0,
+        panels: std::ptr::null(),
+        apply_change: None,
+        user: std::ptr::null_mut(),
     };
     let mut error = String::new();
     // SAFETY: the module receives valid pointers that outlive it.
@@ -158,6 +243,9 @@ pub fn start(init: InitFn) -> Result<Started, String> {
             info.command_size,
             std::mem::size_of::<CommandEntry>()
         ));
+    }
+    if let Some(apply) = info.apply_change {
+        let _ = context.apply.set((apply, UserPointer(info.user)));
     }
 
     let mut commands = Vec::new();
@@ -184,12 +272,101 @@ pub fn start(init: InitFn) -> Result<Started, String> {
             },
         });
     }
+    let mut panels = Vec::new();
+    for index in 0..info.panel_count as usize {
+        // SAFETY: the module declared `panel_count` panels, valid while it is loaded.
+        let entry = unsafe { &*info.panels.add(index) };
+        let id = read(entry.id).map_err(|e| format!("panel {index}: {e}"))?;
+        panels.push(PanelSpec {
+            title: read(entry.title).unwrap_or_else(|_| id.clone()),
+            id,
+            area: match entry.area {
+                2 => DockArea::Left,
+                3 => DockArea::Right,
+                4 => DockArea::Bottom,
+                _ => DockArea::Center,
+            },
+            open_by_default: true,
+        });
+    }
     Ok(Started {
         name: read(info.name).unwrap_or_default(),
         version: read(info.version).unwrap_or_default(),
         context,
         commands,
+        panels,
     })
+}
+
+/// A change a compiled module recorded: undoing or redoing hands the matching value to its
+/// `apply_change`, on its thread.
+struct CompiledChange {
+    context: &'static ModuleContext,
+    undo: CString,
+    redo: CString,
+}
+
+impl CompiledChange {
+    fn send(&self, value: CString) {
+        let context = self.context;
+        (context.post)(Box::new(move || {
+            let (Some((apply, user)), Some(editor)) = (context.apply.get(), context.editor.get()) else {
+                return;
+            };
+            if !editor.is_active() {
+                return;
+            }
+            let mut error = String::new();
+            if apply(user.0, value.as_ptr(), collect, text_target(&mut error)) != 0 {
+                editor.report_failure(&format!("could not apply an undo or redo value: {error}"));
+            }
+        }));
+    }
+}
+
+impl crate::AppliedChange for CompiledChange {
+    fn undo(&mut self) {
+        self.send(self.undo.clone());
+    }
+
+    fn redo(&mut self) {
+        self.send(self.redo.clone());
+    }
+}
+
+extern "C" fn api_record_change(
+    context: *mut c_void,
+    label: *const c_char,
+    undo: *const c_char,
+    redo: *const c_char,
+) -> i32 {
+    guarded(1, || {
+        let module = module(context);
+        let result = (|| {
+            if module.apply.get().is_none() {
+                return Err("the module gives no apply_change".to_owned());
+            }
+            let change = CompiledChange {
+                context: module,
+                undo: c_text(&read(undo)?),
+                redo: c_text(&read(redo)?),
+            };
+            editor(context)?.record_change(&read(label)?, Box::new(change))
+        })();
+        match result {
+            Ok(()) => 0,
+            Err(error) => {
+                module.refuse("a change could not be recorded", &error);
+                1
+            }
+        }
+    })
+}
+
+/// The module calling a C function.
+fn module(context: *mut c_void) -> &'static ModuleContext {
+    // SAFETY: the `context` field of the table, a leaked `ModuleContext`.
+    unsafe { &*context.cast::<ModuleContext>() }
 }
 
 extern "C-unwind" fn collect(target: *mut c_void, text: *const c_char) {
@@ -228,9 +405,7 @@ fn reply_with(reply: Option<Reply>, reply_context: *mut c_void, text: &str) {
 }
 
 fn editor(context: *mut c_void) -> Result<&'static Editor, String> {
-    // SAFETY: the `context` field of the table, a leaked `ModuleContext`.
-    let context = unsafe { &*context.cast::<ModuleContext>() };
-    context
+    module(context)
         .editor
         .get()
         .ok_or_else(|| "the editor is not ready yet: call it from the module's commands or threads".to_owned())
@@ -470,7 +645,7 @@ mod tests {
 
     #[test]
     fn a_module_starts_and_its_commands_answer() {
-        let started = start(good).expect("starts");
+        let started = start(good, "test").expect("starts");
         assert_eq!((started.name.as_str(), started.version.as_str()), ("test", "1.0"));
         assert_eq!(started.commands.len(), 1);
         assert_eq!(started.commands[0].name, "test.echo");
@@ -482,11 +657,11 @@ mod tests {
 
     #[test]
     fn a_module_built_with_another_header_is_refused_with_the_reason() {
-        let older = start(older_header).err().expect("refused");
+        let older = start(older_header, "test").err().expect("refused");
         assert!(older.contains("version 1 of uniwow.h"), "{older}");
-        let size = start(other_command_size).err().expect("refused");
+        let size = start(other_command_size, "test").err().expect("refused");
         assert!(size.contains("uniwow_command"), "{size}");
-        let refused = start(refuses).err().expect("refused");
+        let refused = start(refuses, "test").err().expect("refused");
         assert!(refused.contains("no licence file"), "{refused}");
     }
 }

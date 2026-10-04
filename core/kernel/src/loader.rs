@@ -120,7 +120,7 @@ pub fn discover(exe_dir: &Path, disabled: &BTreeSet<String>) -> Discovery {
         if slot.state.is_running() {
             let loaded = match kind {
                 Kind::Rust => load(&dll, &shadow_dir, &slot),
-                Kind::Compiled => compiled::load(&dll)
+                Kind::Compiled => compiled::load(&dll, &slot.id)
                     .map(|module| Box::new(module) as Box<dyn Module>)
                     .map_err(State::Refused),
             };

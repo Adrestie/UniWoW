@@ -18,3 +18,11 @@ pub trait Command {
 
     fn revert(&mut self, module: &mut dyn Any);
 }
+
+/// A change a module not written in Rust made to its own state, recorded afterwards with
+/// `Editor::record_change` (F2). Undo and redo hand it back to the module, on its own thread:
+/// they must return at once.
+pub trait AppliedChange: Send {
+    fn undo(&mut self);
+    fn redo(&mut self);
+}

@@ -27,9 +27,10 @@ mod job;
 mod module;
 mod registrar;
 mod service;
+pub mod ui;
 pub mod viewport;
 
-pub use command::Command;
+pub use command::{AppliedChange, Command};
 pub use commands::{CallId, CommandHandler, CommandInfo, CommandSpec, RunsOn, decode_arguments};
 pub use context::{Context, Host};
 pub use editor::{Editor, EditorBackend};

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::{CommandInfo, Event};
+use crate::{AppliedChange, CommandInfo, Event};
 
 /// What the kernel offers behind an `Editor` handle. Implemented by the kernel only. Every request
 /// of a caller whose module no longer runs is refused with an error.
@@ -24,6 +24,20 @@ pub trait EditorBackend: Send + Sync {
     fn set_setting(&self, caller: &str, space: &str, key: &str, value: Value) -> Result<(), String>;
     fn begin_group(&self, caller: &str, label: &str) -> Result<(), String>;
     fn end_group(&self, caller: &str) -> Result<(), String>;
+
+    /// Records a change the caller's module already made, into the history or the caller's open
+    /// undo group.
+    fn record_change(&self, _caller: &str, _label: &str, _change: Box<dyn AppliedChange>) -> Result<(), String> {
+        Err("changes cannot be recorded here".to_owned())
+    }
+
+    /// Makes the caller's module fail, as if it had panicked.
+    fn report_failure(&self, _caller: &str, _message: &str) {}
+
+    /// Whether the caller's module still runs.
+    fn is_active(&self, _caller: &str) -> bool {
+        true
+    }
 }
 
 /// The generic interface of the editor (rule S1), usable from any thread: jobs, scripts and,
@@ -139,5 +153,20 @@ impl Editor {
 
     pub fn end_group(&self) -> Result<(), String> {
         self.backend.end_group(&self.caller)
+    }
+
+    /// Records a change the module already made to its own state (F2); see `AppliedChange`.
+    pub fn record_change(&self, label: &str, change: Box<dyn AppliedChange>) -> Result<(), String> {
+        self.backend.record_change(&self.caller, label, change)
+    }
+
+    /// Makes the module fail, as if it had panicked, for a fault found on one of its threads.
+    pub fn report_failure(&self, message: &str) {
+        self.backend.report_failure(&self.caller, message);
+    }
+
+    /// Whether the module still runs: once it failed, its threads should stop.
+    pub fn is_active(&self) -> bool {
+        self.backend.is_active(&self.caller)
     }
 }

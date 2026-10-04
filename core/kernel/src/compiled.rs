@@ -6,12 +6,14 @@ use std::sync::Arc;
 
 use libloading::os::windows::{LOAD_WITH_ALTERED_SEARCH_PATH, Library};
 use uniwow_api::capi::{self, InitFn, Started};
-use uniwow_api::{Context, Module, Registrar, log};
+use uniwow_api::ui::PanelView;
+use uniwow_api::{Context, Module, Registrar, egui, log};
 
-/// Its commands are declared on its behalf (delegated, F6), and the C interface acts through an
-/// `Editor` of the module itself.
+/// Its commands are declared on its behalf (delegated, F6), its panels are drawn from its
+/// interface objects, and the C interface acts through an `Editor` of the module itself.
 pub struct CompiledModule {
     started: Started,
+    view: PanelView,
 }
 
 impl Module for CompiledModule {
@@ -26,16 +28,23 @@ impl Module for CompiledModule {
                 Arc::new(move |arguments| handler.invoke(&arguments)),
             );
         }
+        for panel in &self.started.panels {
+            reg.panel(&panel.id, &panel.title, panel.area);
+        }
     }
 
     fn init(&mut self, ctx: &mut Context) {
         let _ = self.started.context.editor.set(ctx.editor());
     }
+
+    fn panel_ui(&mut self, panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
+        self.view.show(&self.started.context.ui, panel, ui, ctx.gpu());
+    }
 }
 
 /// Loads the DLL of a compiled module where it is, so that the DLLs it needs are found in its
 /// folder, then starts it. A loaded module is never unloaded.
-pub fn load(dll: &Path) -> Result<CompiledModule, String> {
+pub fn load(dll: &Path, id: &str) -> Result<CompiledModule, String> {
     let file = dll.file_name().unwrap_or_default();
     // Windows would hand back the DLL of that name already in the process instead of the module.
     if Library::open_already_loaded(file).is_ok() {
@@ -54,12 +63,15 @@ pub fn load(dll: &Path) -> Result<CompiledModule, String> {
             .map_err(|_| "no uniwow_module_init entry point: not a UniWoW compiled module".to_owned())?
     };
     std::mem::forget(library);
-    let started = capi::start(init)?;
+    let started = capi::start(init, id)?;
     log::info!(
         "compiled module '{}' {} started from {}",
         started.name,
         started.version,
         file.to_string_lossy()
     );
-    Ok(CompiledModule { started })
+    Ok(CompiledModule {
+        started,
+        view: PanelView::default(),
+    })
 }

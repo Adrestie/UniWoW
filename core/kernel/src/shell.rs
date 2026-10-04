@@ -581,6 +581,26 @@ impl Shell {
                 Ended::StillOpen => {}
                 Ended::NotOpen => log::warn!("'{caller}' ended an undo group it had not opened"),
             },
+            Request::RecordChange {
+                caller,
+                thread,
+                label,
+                change,
+            } => {
+                let owner = router::module_of(&caller).to_owned();
+                if self.host.bridge.active(&caller).is_err() || self.running_index(&owner).is_none() {
+                    return;
+                }
+                let part = history::Part {
+                    owner,
+                    label: label.clone(),
+                    command: Box::new(Recorded { label, change }),
+                };
+                match self.groups.parts_of(&caller, thread) {
+                    Some(parts) => parts.push(part),
+                    None => self.history.push(part),
+                }
+            }
             Request::ThreadEnded { thread } => {
                 for closed in self.groups.close_thread(thread) {
                     log::warn!("undo group '{}' closed: its job ended without ending it", closed.label);
@@ -775,6 +795,26 @@ impl Shell {
                 ui.colored_label(ui.visuals().warn_fg_color, text);
             }
         });
+    }
+}
+
+/// A change a module already made, in the history: undoing and redoing hand it back to the module.
+struct Recorded {
+    label: String,
+    change: Box<dyn uniwow_api::AppliedChange>,
+}
+
+impl uniwow_api::Command for Recorded {
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn apply(&mut self, _module: &mut dyn std::any::Any) {
+        self.change.redo();
+    }
+
+    fn revert(&mut self, _module: &mut dyn std::any::Any) {
+        self.change.undo();
     }
 }
 

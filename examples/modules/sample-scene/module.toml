@@ -1,0 +1,8 @@
+# Written by the module's author, beside the DLL.
+id = "sample-scene"
+name = "Sample C++ scene"
+version = "0.1.0"
+kind = "compiled"
+category = "Samples"
+description = "A board of coloured cards on the graphics scene, written in C++ with the interface objects"
+dll = "sample-scene.dll"
