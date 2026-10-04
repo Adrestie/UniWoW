@@ -1,6 +1,9 @@
 use std::any::Any;
 
-use crate::{CallId, Command, Editor, JobContext, JobFn, JobId, PropertyInfo, PropertyValue, ServiceKey, egui_wgpu};
+use crate::ui::SharedUi;
+use crate::{
+    CallId, Command, Editor, JobContext, JobFn, JobId, PropertyInfo, PropertyValue, ServiceKey, egui, egui_wgpu,
+};
 
 /// What the kernel offers to modules. Implemented by the kernel only.
 pub trait Host {
@@ -11,6 +14,8 @@ pub trait Host {
     /// The module providing the service `id`.
     fn service_provider(&self, id: &str) -> Option<String>;
     fn gpu(&self) -> Option<&egui_wgpu::RenderState>;
+    fn draw_panel(&mut self, owner: &str, objects: &SharedUi, panel: &str, ui: &mut egui::Ui);
+    fn draw_dialogs(&mut self, owner: &str, objects: &SharedUi, egui: &egui::Context);
     fn setting(&self, module: &str, key: &str) -> Option<serde_json::Value>;
     fn set_setting(&mut self, module: &str, key: &str, value: serde_json::Value);
     fn report_failure(&mut self, reporter: &str, culprit: &str, message: &str);
@@ -100,6 +105,17 @@ impl<'a> Context<'a> {
     /// The GPU device used by the editor window.
     pub fn gpu(&self) -> Option<&egui_wgpu::RenderState> {
         self.host.gpu()
+    }
+
+    /// Draws the panel `panel` of interface objects (section 3) in `ui`, as the kernel draws those
+    /// of compiled modules, and turns what the user does into their signals.
+    pub fn draw_objects(&mut self, objects: &SharedUi, panel: &str, ui: &mut egui::Ui) {
+        self.host.draw_panel(self.module, objects, panel, ui);
+    }
+
+    /// Draws the dialogs shown among interface objects, each in a modal window over the editor.
+    pub fn draw_dialogs(&mut self, objects: &SharedUi, egui: &egui::Context) {
+        self.host.draw_dialogs(self.module, objects, egui);
     }
 
     /// Reads a setting of this module, kept between sessions.

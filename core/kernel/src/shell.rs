@@ -4,7 +4,7 @@ use std::sync::{Arc, mpsc};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
-use uniwow_api::capi;
+use crate::capi;
 use uniwow_api::egui_dock::tab_viewer::OnCloseResponse;
 use uniwow_api::egui_dock::{DockArea, DockState, Style, TabViewer};
 use uniwow_api::{
@@ -264,6 +264,8 @@ impl Shell {
         let id = self.slots[index].id.clone();
         self.slots[index].state = State::Blocked(reason);
         self.host.services.retain(|_, s| s.provider != id);
+        // What the interface kept of its objects goes, their textures with it.
+        self.host.views.retain(|(owner, _), _| *owner != id);
         self.sync_running();
     }
 

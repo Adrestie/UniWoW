@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use uniwow_api::serde_json::{Value, json};
-use uniwow_api::ui::{self, Handle, Kind, PanelView, Property, SharedUi, Signal, Ui};
+use uniwow_api::ui::{self, Handle, Kind, Property, SharedUi, Signal, Ui};
 use uniwow_api::{Context, DIALOG_ANSWERED_TOPIC, DIALOG_COMMAND, Module, Registrar, egui, log};
 
 /// A window asked for.
@@ -31,7 +31,6 @@ const MAX_WAITING: usize = 8;
 
 struct DialogsModule {
     ui: SharedUi,
-    view: PanelView,
     /// The slots of the objects, run once the windows are drawn.
     jobs: Arc<Mutex<Vec<Job>>>,
     /// The buttons chosen: the window's number and the button's id.
@@ -52,7 +51,6 @@ impl Default for DialogsModule {
         let queue = jobs.clone();
         Self {
             ui: Ui::new(Arc::new(move |job| lock(&queue).push(job))),
-            view: PanelView::default(),
             jobs,
             answers: Arc::default(),
             waiting: VecDeque::new(),
@@ -101,7 +99,7 @@ impl Module for DialogsModule {
     }
 
     fn windows_ui(&mut self, egui: &egui::Context, ctx: &mut Context) {
-        self.view.dialogs(&self.ui, egui, ctx.gpu());
+        ctx.draw_dialogs(&self.ui, egui);
         let jobs = std::mem::take(&mut *lock(&self.jobs));
         for job in jobs {
             job();

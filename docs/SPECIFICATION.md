@@ -53,7 +53,10 @@ Crates are prefixed `uniwow-` (`uniwow-api`, `uniwow-kernel`, `uniwow-module-<id
 `uniwow_api.dll`; the Rust standard library is shared as `std-<hash>.dll`. Together they are the
 **runtime**. Every Rust module links to the runtime, so each of these exists once in memory.
 `core/kernel` is linked into the executable: modules never link to it, so changing the kernel
-does not affect them.
+does not affect them. The runtime keeps the contracts shared with modules (the model of the
+interface objects, curves, properties); the C interface of compiled modules and the drawing of the
+interface objects are in the kernel, which draws a module's objects through
+`Context::draw_objects` and `Context::draw_dialogs`.
 
 Allowed dependencies (enforced by `xtask check`):
 
@@ -674,8 +677,8 @@ Acceptance:
 
 As built:
 
-- **Compiled modules in the kernel**: the C interface over an `Editor` is in the runtime
-  (`uniwow_api::capi`); the kernel loads a compiled module's DLL where it is, so that the DLLs it
+- **Compiled modules in the kernel**: the C interface over an `Editor` was in the runtime
+  (`uniwow_api::capi`), in the kernel since the sixth review; the kernel loads a compiled module's DLL where it is, so that the DLLs it
   needs are found in its folder, and refuses one named like a DLL already in the process. Each
   compiled module is a module of its own in the catalogue, with its own `Editor`, settings and log
   name, and its commands declared on its behalf as delegated (F6).
@@ -1041,6 +1044,14 @@ As built:
   holding from key to key. Delete in the Curves view is the curve editor's.
 - **`CurveView`**: drawn by the core through the service; `curvesChanged` is sent while a key or a
   handle is dragged, with the change not finished, then once it is.
+
+### Sixth review (milestones 5 to 7)
+
+- **Lighter runtime**: the C interface (`capi`) and the drawing of the interface objects moved
+  from `core/api` to `core/kernel`; the runtime went from about 5,800 to 2,900 lines, and changing
+  either no longer changes its fingerprint. Exported symbols: 18,364 before, 18,350 after in debug;
+  16,559 before, 16,546 after in release. Nearly all of them come from the crates the runtime
+  re-exports (egui, wgpu…), not from its own code.
 
 ### Milestone 8: the Timeline in Montage mode (outline)
 

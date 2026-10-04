@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::ffi::CStr;
 use std::path::{Path, PathBuf};
 
-use uniwow_api::capi;
+use crate::capi;
 use uniwow_api::{CREATE_SYMBOL, CreateFn, MenuItemSpec, Module, PACKAGE_SYMBOL, PackageFn, PanelSpec, RUNTIME_DLL};
 
 use crate::compiled;

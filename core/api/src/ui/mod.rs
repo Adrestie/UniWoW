@@ -3,15 +3,12 @@
 //! any thread; the core keeps them, draws them on the interface thread, and sends their signals to
 //! the module's own thread. The object model is defined once here, for every language.
 
-mod draw;
 mod painter;
-mod scene;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
-pub use draw::PanelView;
-pub use painter::PaintCommand;
+pub use painter::{MAX_TEXT, PaintCommand};
 
 use crate::curve::ShownCurve;
 use crate::egui;
@@ -351,7 +348,7 @@ impl Ui {
         self.objects.get(&handle)
     }
 
-    pub(crate) fn object_mut(&mut self, handle: Handle) -> Option<&mut Object> {
+    pub fn object_mut(&mut self, handle: Handle) -> Option<&mut Object> {
         self.objects.get_mut(&handle)
     }
 
@@ -383,7 +380,8 @@ impl Ui {
             .map(|(_, handle)| *handle)
     }
 
-    pub(crate) fn set_wake(&mut self, wake: &egui::Context) {
+    /// The editor's window, repainted when the objects change from another thread.
+    pub fn set_wake(&mut self, wake: &egui::Context) {
         if self.wake.is_none() {
             self.wake = Some(wake.clone());
         }
@@ -739,7 +737,7 @@ impl Ui {
 
     /// Sends a signal to the slots connected to it, on the module's thread. A mouse move, or a
     /// curves change still under way, replaces the same one of the same object still waiting.
-    pub(crate) fn emit(&mut self, data: SignalData) {
+    pub fn emit(&mut self, data: SignalData) {
         let mergeable =
             data.signal == Signal::MouseMove as u32 || (data.signal == Signal::CurvesChanged as u32 && !data.boolean);
         let (sender, signal) = (data.sender, data.signal);
@@ -773,7 +771,7 @@ impl Ui {
 
     /// Asks the module to paint an area of `size`; the picture replaces the area's once painted.
     /// One painting at a time per area: a size asked meanwhile is painted when it ends.
-    pub(crate) fn request_paint(&mut self, shared: &SharedUi, area: Handle, size: [f64; 2]) {
+    pub fn request_paint(&mut self, shared: &SharedUi, area: Handle, size: [f64; 2]) {
         let slots = self.slots(area, Signal::Paint as u32);
         if slots.is_empty() {
             return;
@@ -807,7 +805,7 @@ impl Ui {
     }
 
     /// The scene an item belongs to, through its groups.
-    pub(crate) fn scene_of(&self, mut handle: Handle) -> Option<Handle> {
+    pub fn scene_of(&self, mut handle: Handle) -> Option<Handle> {
         loop {
             let object = self.objects.get(&handle)?;
             if object.kind == Kind::GraphicsScene {
@@ -818,7 +816,7 @@ impl Ui {
     }
 
     /// The version of a scene's set of items and their order.
-    pub(crate) fn structure(&self, scene: Handle) -> u64 {
+    pub fn structure(&self, scene: Handle) -> u64 {
         self.structure.get(&scene).copied().unwrap_or(0)
     }
 
@@ -837,7 +835,7 @@ impl Ui {
     }
 
     /// A moved item, and every item of a moved group, are drawn again.
-    pub(crate) fn moved(&mut self, handle: Handle) {
+    pub fn moved(&mut self, handle: Handle) {
         let mut stack = vec![handle];
         while let Some(next) = stack.pop() {
             if let Some(object) = self.objects.get_mut(&next) {
@@ -853,9 +851,7 @@ impl Ui {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::{Kind, PanelView, Property, Signal, SignalData, Ui, lock};
-    use crate::curve::{CurveChange, CurveEditor, CurveOptions, ShownCurve, TimeAxis};
-    use crate::egui;
+    use super::{Kind, Property, Signal, SignalData, Ui, lock};
 
     type Jobs = Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
 
@@ -1109,44 +1105,6 @@ mod tests {
         let structure = ui.structure(scene);
         ui.set_numbers(group, Property::Visible, &[0.0]).unwrap();
         assert!(ui.structure(scene) > structure);
-    }
-
-    struct Broken;
-
-    impl CurveEditor for Broken {
-        fn show(
-            &self,
-            _ui: &mut egui::Ui,
-            _id: egui::Id,
-            _curves: &mut [ShownCurve],
-            _time: &mut TimeAxis,
-            _options: &CurveOptions,
-        ) -> CurveChange {
-            panic!("broken editor")
-        }
-    }
-
-    #[test]
-    fn a_panic_of_the_curve_editor_is_kept_for_its_provider_to_be_reported() {
-        let shared = ui();
-        {
-            let mut store = lock(&shared);
-            let panel = store.panel("p");
-            let layout = store.create(Kind::VBoxLayout, None).unwrap();
-            store.add_to(panel, layout, [0, 0, 1, 1]).unwrap();
-            let view = store.create(Kind::CurveView, None).unwrap();
-            store.add_to(layout, view, [0, 0, 1, 1]).unwrap();
-        }
-        let mut panels = PanelView::default();
-        panels.set_curve_editor(Some(Arc::new(Broken)));
-        let ctx = egui::Context::default();
-        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| panels.show(&shared, "p", ui, None));
-        output.textures_delta.clear();
-        assert!(
-            panels
-                .take_editor_failure()
-                .is_some_and(|m| m.contains("broken editor"))
-        );
     }
 
     #[test]

@@ -3,7 +3,9 @@
 //! The kernel is linked into the executable. Modules never depend on it: they only see the
 //! contracts of `uniwow-api`.
 
+mod capi;
 mod compiled;
+mod draw;
 mod groups;
 mod guard;
 mod history;

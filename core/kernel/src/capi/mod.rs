@@ -9,10 +9,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
+use uniwow_api::serde_json::{self, Value, json};
 
-use crate::ui::{self, Post, SharedUi, Ui};
-use crate::{DockArea, Editor, PanelSpec};
+use uniwow_api::ui::{self, Post, SharedUi, Ui};
+use uniwow_api::{DockArea, Editor, PanelSpec, log};
 
 const API_VERSION: u32 = 3;
 /// The name under which a compiled module exports its entry point.
@@ -360,7 +360,7 @@ impl CompiledChange {
     }
 }
 
-impl crate::AppliedChange for CompiledChange {
+impl uniwow_api::AppliedChange for CompiledChange {
     fn undo(&mut self) {
         self.send(self.undo.clone());
     }
@@ -614,10 +614,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use serde_json::{Value, json};
+    use uniwow_api::serde_json::{Value, json};
 
     use super::{API_VERSION, Api, CommandEntry, ModuleInfo, PanelEntry, Reply, start};
-    use crate::{AppliedChange, CommandInfo, DockArea, Editor, EditorBackend, Event};
+    use uniwow_api::{AppliedChange, CommandInfo, DockArea, Editor, EditorBackend, Event};
 
     extern "C-unwind" fn echo(_user: *mut c_void, arguments: *const c_char, reply: Reply, context: *mut c_void) -> i32 {
         reply(context, arguments);
@@ -689,7 +689,7 @@ mod tests {
         let activity = &started.context.activity;
         assert_eq!(activity.pending(), 0);
         let (release, wait) = std::sync::mpsc::channel::<()>();
-        let mut ui = crate::ui::lock(&started.context.ui);
+        let mut ui = uniwow_api::ui::lock(&started.context.ui);
         ui.post_job(Box::new(move || {
             let _ = wait.recv();
         }));

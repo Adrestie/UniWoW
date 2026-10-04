@@ -6,9 +6,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use uniwow_api::ui::{Handle, Kind, Object, Signal, SignalData, Ui};
+use uniwow_api::{bytemuck, egui, egui_wgpu, wgpu};
+
 use super::painter::{color, text_pixels};
-use super::{Handle, Kind, Object, Signal, SignalData, Ui};
-use crate::{bytemuck, egui, egui_wgpu, wgpu};
 
 const SAMPLES: u32 = 4;
 /// Not sRGB: egui shows a texture's values as they are, so the scene keeps egui's gamma-encoded
@@ -41,6 +42,7 @@ fn fs(input: Out) -> @location(0) vec4<f32> {
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[bytemuck(crate = "uniwow_api::bytemuck")]
 struct ViewUniform {
     scale: [f32; 2],
     offset: [f32; 2],
@@ -843,7 +845,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::{absolute, drawing_order, hits};
-    use crate::ui::{Kind, Property, Ui, lock};
+    use uniwow_api::ui::{Kind, Property, Ui, lock};
 
     #[test]
     fn items_are_drawn_by_stacking_order_and_hit_from_the_top() {

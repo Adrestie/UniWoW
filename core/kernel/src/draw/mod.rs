@@ -4,11 +4,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::painter::replay;
-use super::scene::{SceneView, modifiers};
-use super::{Handle, Kind, Object, SharedUi, Signal, SignalData, Ui, lock};
-use crate::curve::{CurveChange, CurveEditor, CurveOptions, ShownCurve, TimeAxis};
-use crate::{egui, egui_wgpu};
+mod painter;
+mod scene;
+
+use painter::replay;
+use scene::{SceneView, modifiers};
+use uniwow_api::curve::{CurveChange, CurveEditor, CurveOptions, ShownCurve, TimeAxis};
+use uniwow_api::ui::{Handle, Kind, Object, SharedUi, Signal, SignalData, Ui, lock};
+use uniwow_api::{egui, egui_wgpu};
 
 /// What the interface thread keeps of a module's panels between frames.
 #[derive(Default)]
@@ -546,9 +549,49 @@ fn close_button(ui: &mut egui::Ui) -> bool {
 mod tests {
     use std::sync::Arc;
 
+    use uniwow_api::curve::{CurveChange, CurveEditor, CurveOptions, ShownCurve, TimeAxis};
+    use uniwow_api::egui;
+    use uniwow_api::ui::{Kind, Property, Ui, lock};
+
     use super::PanelView;
-    use crate::egui;
-    use crate::ui::{Kind, Property, Ui, lock};
+
+    struct Broken;
+
+    impl CurveEditor for Broken {
+        fn show(
+            &self,
+            _ui: &mut egui::Ui,
+            _id: egui::Id,
+            _curves: &mut [ShownCurve],
+            _time: &mut TimeAxis,
+            _options: &CurveOptions,
+        ) -> CurveChange {
+            panic!("broken editor")
+        }
+    }
+
+    #[test]
+    fn a_panic_of_the_curve_editor_is_kept_for_its_provider_to_be_reported() {
+        let shared = Ui::new(Arc::new(|_job| {}));
+        {
+            let mut store = lock(&shared);
+            let panel = store.panel("p");
+            let layout = store.create(Kind::VBoxLayout, None).unwrap();
+            store.add_to(panel, layout, [0, 0, 1, 1]).unwrap();
+            let view = store.create(Kind::CurveView, None).unwrap();
+            store.add_to(layout, view, [0, 0, 1, 1]).unwrap();
+        }
+        let mut panels = PanelView::default();
+        panels.set_curve_editor(Some(Arc::new(Broken)));
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| panels.show(&shared, "p", ui, None));
+        output.textures_delta.clear();
+        assert!(
+            panels
+                .take_editor_failure()
+                .is_some_and(|m| m.contains("broken editor"))
+        );
+    }
 
     #[test]
     fn what_was_kept_of_a_destroyed_view_is_forgotten() {

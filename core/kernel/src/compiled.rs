@@ -5,15 +5,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use libloading::os::windows::{LOAD_WITH_ALTERED_SEARCH_PATH, Library};
-use uniwow_api::capi::{self, InitFn, Started};
-use uniwow_api::ui::PanelView;
-use uniwow_api::{Context, Module, Registrar, curve, egui, log};
+use uniwow_api::{Context, Module, Registrar, egui, log};
+
+use crate::capi::{self, InitFn, Started};
 
 /// Its commands are declared on its behalf (delegated, F6), its panels are drawn from its
 /// interface objects, and the C interface acts through an `Editor` of the module itself.
 pub struct CompiledModule {
     started: Started,
-    view: PanelView,
 }
 
 impl Module for CompiledModule {
@@ -38,15 +37,11 @@ impl Module for CompiledModule {
     }
 
     fn panel_ui(&mut self, panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
-        self.view.set_curve_editor(ctx.service(curve::SERVICE));
-        self.view.show(&self.started.context.ui, panel, ui, ctx.gpu());
-        self.report_editor_failure(ctx);
+        ctx.draw_objects(&self.started.context.ui, panel, ui);
     }
 
     fn windows_ui(&mut self, egui: &egui::Context, ctx: &mut Context) {
-        self.view.set_curve_editor(ctx.service(curve::SERVICE));
-        self.view.dialogs(&self.started.context.ui, egui, ctx.gpu());
-        self.report_editor_failure(ctx);
+        ctx.draw_dialogs(&self.started.context.ui, egui);
     }
 }
 
@@ -55,15 +50,6 @@ impl CompiledModule {
     /// the work waiting there.
     pub fn context(&self) -> &'static capi::ModuleContext {
         self.started.context
-    }
-
-    /// A panic of the curve editor in a curve view is its provider's fault, not this module's (F5).
-    fn report_editor_failure(&mut self, ctx: &mut Context) {
-        if let Some(message) = self.view.take_editor_failure()
-            && let Some(provider) = ctx.service_provider(curve::SERVICE)
-        {
-            ctx.report_failure(&provider, &message);
-        }
     }
 }
 
@@ -95,8 +81,5 @@ pub fn load(dll: &Path, id: &str) -> Result<CompiledModule, String> {
         started.version,
         file.to_string_lossy()
     );
-    Ok(CompiledModule {
-        started,
-        view: PanelView::default(),
-    })
+    Ok(CompiledModule { started })
 }

@@ -6,8 +6,8 @@ use std::ffi::{c_char, c_void};
 use std::sync::Arc;
 
 use super::{Reply, UserPointer, c_text, guarded, module, read, reply_with};
-use crate::curve::ShownCurve;
-use crate::ui::{self, Kind, PaintCommand, Property, Signal, SignalData, Ui};
+use uniwow_api::curve::ShownCurve;
+use uniwow_api::ui::{self, Kind, PaintCommand, Property, Signal, SignalData, Ui};
 
 /// What a slot receives; the fields its signal does not use are zero.
 #[repr(C)]
@@ -373,7 +373,7 @@ mod tests {
 
     use super::{create, panel, set_text, text};
     use crate::capi::ModuleContext;
-    use crate::ui::{Kind, Property, Ui};
+    use uniwow_api::ui::{Kind, Property, Ui};
 
     /// What `answer` saw: the text, and whether the module could take its objects' lock.
     #[derive(Default)]
