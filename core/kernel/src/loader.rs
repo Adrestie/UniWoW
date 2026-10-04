@@ -46,6 +46,23 @@ pub struct Slot {
 }
 
 impl Slot {
+    /// A running module given as it is, without a folder nor a manifest, for the tests.
+    #[cfg(test)]
+    pub fn loaded(id: &str, module: Box<dyn Module>) -> Self {
+        let mut slot = Self::new(id.to_owned(), PathBuf::new(), None, State::Running);
+        slot.module = Some(module);
+        slot
+    }
+
+    /// A compiled module already started, for the tests.
+    #[cfg(test)]
+    pub fn compiled(id: &str, module: compiled::CompiledModule) -> Self {
+        let mut slot = Self::new(id.to_owned(), PathBuf::new(), None, State::Running);
+        slot.compiled = Some(module.context());
+        slot.module = Some(Box::new(module));
+        slot
+    }
+
     fn new(id: String, folder: PathBuf, manifest: Option<Manifest>, state: State) -> Self {
         Self {
             id,

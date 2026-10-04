@@ -3,9 +3,30 @@
 use super::*;
 
 impl eframe::App for Shell {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.logic_pass(ctx);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.ui_pass(ui);
+    }
+
+    fn on_exit(&mut self) {
+        for slot in self.slots.iter_mut().filter(|s| s.state.is_running()) {
+            let module = slot.module.as_deref_mut().expect("running modules are loaded");
+            if let Err(message) = guarded_as(&slot.id, || module.shutdown()) {
+                log::error!("module '{}' failed in shutdown: {message}", slot.id);
+            }
+        }
+        self.host.settings.layout = serde_json::to_value(&self.dock).ok();
+        self.host.save_settings();
+    }
+}
+
+impl Shell {
     /// The work of the kernel. eframe calls it before each `ui`, and also while the window is
     /// minimised whenever a repaint is requested, as other threads do when they need the kernel.
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    pub(super) fn logic_pass(&mut self, ctx: &egui::Context) {
         // Before the calls and jobs: an event a thread published before a call is delivered
         // before the events that call causes.
         self.collect_from_threads();
@@ -66,7 +87,7 @@ impl eframe::App for Shell {
     }
 
     /// Draws the window and handles what the user did in it; the rest waits for `logic`.
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    pub(super) fn ui_pass(&mut self, ui: &mut egui::Ui) {
         let mut actions = Vec::new();
         egui::Panel::top("menu_bar").show(ui, |ui| actions = self.menu_bar(ui));
         egui::Panel::bottom("status_bar").show(ui, |ui| self.status_bar(ui));
@@ -138,8 +159,9 @@ impl eframe::App for Shell {
                 self.fail(index, format!("windows: {message}"));
             }
         }
-        // A modal window takes the keyboard from the editor.
-        let modal = ctx.memory(|memory| memory.top_modal_layer().is_some());
+        // A modal window takes the keyboard from the editor, from the frame it is drawn in to the
+        // last one: egui knows of it only from the frame after.
+        let modal = std::mem::take(&mut self.host.modal_shown);
         // Nor while something is dragged: undoing under a drag would change what it moves.
         let dragging = ctx.dragged_id().is_some();
         if !ctx.egui_wants_keyboard_input() && !modal && !dragging {
@@ -186,16 +208,5 @@ impl eframe::App for Shell {
         {
             ctx.request_repaint();
         }
-    }
-
-    fn on_exit(&mut self) {
-        for slot in self.slots.iter_mut().filter(|s| s.state.is_running()) {
-            let module = slot.module.as_deref_mut().expect("running modules are loaded");
-            if let Err(message) = guarded_as(&slot.id, || module.shutdown()) {
-                log::error!("module '{}' failed in shutdown: {message}", slot.id);
-            }
-        }
-        self.host.settings.layout = serde_json::to_value(&self.dock).ok();
-        self.host.save_settings();
     }
 }

@@ -42,6 +42,8 @@ pub struct KernelHost {
     /// What the interface keeps between frames of the interface objects each module draws, by
     /// module and set of objects.
     pub views: HashMap<(String, usize), PanelView>,
+    /// Whether a modal window was drawn this frame: it takes the keyboard from the editor.
+    pub modal_shown: bool,
     next_call: u64,
 }
 
@@ -81,6 +83,7 @@ impl KernelHost {
             pending: Vec::new(),
             forgotten: Vec::new(),
             views: HashMap::new(),
+            modal_shown: false,
             services: HashMap::new(),
             gpu,
             settings,
@@ -140,7 +143,7 @@ impl Host for KernelHost {
         let editor = self.curve_editor();
         let view = self.views.entry(view_key(owner, objects)).or_default();
         view.set_curve_editor(editor);
-        view.dialogs(objects, egui, self.gpu.as_ref());
+        self.modal_shown |= view.dialogs(objects, egui, self.gpu.as_ref());
         self.report_editor_failure(owner, objects);
     }
 

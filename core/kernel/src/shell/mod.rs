@@ -41,6 +41,9 @@ use menus::MenuAction;
 use modules_panel::{short, state_text};
 use tabs::{Viewer, log_panel};
 
+#[cfg(test)]
+mod tests;
+
 const KERNEL: &str = "kernel";
 const BUILT_IN_MENUS: [&str; 4] = ["File", "Edit", "Window", "Help"];
 /// Settings changed by modules are written at most this often, and once more at exit.
@@ -112,13 +115,31 @@ impl Shell {
             }));
         }
         let discovery = loader::discover(&exe_dir, &host.settings.disabled_modules);
+        Self::start(
+            host,
+            requests,
+            discovery.slots,
+            discovery.runtime_fingerprint,
+            exe_dir.join("modules"),
+        )
+    }
+
+    /// Starts the modules of `slots` found in `modules_dir`, the kernel's state in `host`, the
+    /// calls of other threads coming through `requests`.
+    fn start(
+        host: KernelHost,
+        requests: mpsc::Receiver<Request>,
+        slots: Vec<Slot>,
+        runtime_fingerprint: Option<String>,
+        modules_dir: PathBuf,
+    ) -> Self {
         let mut shell = Self {
             host,
-            slots: discovery.slots,
+            slots,
             dock: DockState::new(Vec::new()),
             history: History::default(),
-            runtime_fingerprint: discovery.runtime_fingerprint,
-            modules_dir: exe_dir.join("modules"),
+            runtime_fingerprint,
+            modules_dir,
             restart_needed: false,
             last_settings_save: Instant::now(),
             panels: PanelsHealth::Drawn,

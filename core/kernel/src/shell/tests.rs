@@ -1,0 +1,481 @@
+//! The shell run without a window, as eframe runs it, on input made up here and with modules
+//! defined here: the checks of the milestones that need no eye.
+
+use std::any::Any;
+use std::sync::Mutex;
+
+use uniwow_api::Command;
+use uniwow_api::egui::{Key, Modifiers, RawInput, ViewportCommand, ViewportEvent, ViewportId};
+use uniwow_api::serde_json::{Value, json};
+use uniwow_api::ui::{self, Kind, Property, SharedUi, Signal, SignalData, Ui};
+
+use super::*;
+use crate::compiled::CompiledModule;
+
+type Jobs = Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+struct Harness {
+    shell: Shell,
+    ctx: egui::Context,
+}
+
+impl Harness {
+    fn new(modules: Vec<(&str, Box<dyn Module>)>) -> Self {
+        Self::with_slots(
+            modules
+                .into_iter()
+                .map(|(id, module)| Slot::loaded(id, module))
+                .collect(),
+        )
+    }
+
+    /// The modules start as in the editor; the settings stay in memory.
+    fn with_slots(slots: Vec<Slot>) -> Self {
+        let ctx = egui::Context::default();
+        let (bridge, requests) = Bridge::new(Some(ctx.clone()));
+        let pool = Pool::new(2, Some(ctx.clone()), Some(bridge.clone()));
+        let settings = Settings {
+            in_memory: true,
+            ..Settings::default()
+        };
+        let host = KernelHost::new(None, settings, pool, bridge);
+        let shell = Shell::start(host, requests, slots, None, PathBuf::new());
+        Self { shell, ctx }
+    }
+
+    /// A frame with the window shown: `logic` then `ui`. Returns the commands sent to the window.
+    fn frame(&mut self, input: RawInput) -> Vec<ViewportCommand> {
+        let shell = &mut self.shell;
+        let mut output = self.ctx.run_ui(input, |ui| {
+            shell.logic_pass(ui.ctx());
+            shell.ui_pass(ui);
+        });
+        output.textures_delta.clear();
+        output
+            .viewport_output
+            .remove(&ViewportId::ROOT)
+            .map(|viewport| viewport.commands)
+            .unwrap_or_default()
+    }
+
+    /// The window minimised: eframe runs `logic` alone.
+    fn minimised(&mut self, input: RawInput) -> Vec<ViewportCommand> {
+        let shell = &mut self.shell;
+        let output = self.ctx.run_logic(&input, |ctx| shell.logic_pass(ctx));
+        output
+            .viewport_commands
+            .get(&ViewportId::ROOT)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Runs frames until `done`, for what other threads do.
+    fn until(&mut self, what: &str, done: impl Fn(&Shell) -> bool) {
+        let started = Instant::now();
+        while !done(&self.shell) {
+            assert!(started.elapsed() < Duration::from_secs(10), "never: {what}");
+            self.frame(RawInput::default());
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Calls a command from the interface thread, as a panel does.
+    fn call(&mut self, caller: &str, name: &str, arguments: Value) -> Result<Value, String> {
+        self.shell
+            .run_command(caller, std::thread::current().id(), name, arguments)
+    }
+
+    fn index(&self, id: &str) -> usize {
+        self.shell.running_index(id).expect("running")
+    }
+}
+
+/// The window asked to close, shown or minimised.
+fn closing(minimised: bool) -> RawInput {
+    let mut input = RawInput::default();
+    let viewport = input.viewports.entry(ViewportId::ROOT).or_default();
+    viewport.events.push(ViewportEvent::Close);
+    viewport.minimized = Some(minimised);
+    input
+}
+
+/// A key pressed with Ctrl, or alone.
+fn key(key: Key, ctrl: bool) -> RawInput {
+    let modifiers = if ctrl {
+        Modifiers {
+            ctrl: true,
+            command: true,
+            ..Modifiers::default()
+        }
+    } else {
+        Modifiers::default()
+    };
+    RawInput {
+        events: vec![egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }],
+        ..RawInput::default()
+    }
+}
+
+/// A number changed by its command `<id>.add` as one undo entry each time, whose command
+/// `<id>.panic` panics and `<id>.discard` drops its changes, as closing a document without saving.
+struct Counter {
+    id: &'static str,
+    value: Arc<Mutex<i64>>,
+    saved: i64,
+}
+
+fn counter(id: &'static str) -> (Box<dyn Module>, Arc<Mutex<i64>>) {
+    let value = Arc::new(Mutex::new(0));
+    let module = Counter {
+        id,
+        value: value.clone(),
+        saved: 0,
+    };
+    (Box::new(module), value)
+}
+
+impl Module for Counter {
+    fn register(&mut self, reg: &mut Registrar) {
+        reg.command(&format!("{}.add", self.id), "Adds to the number", json!({}), json!({}));
+        reg.command(&format!("{}.panic", self.id), "Panics", json!({}), json!({}));
+        reg.command(
+            &format!("{}.discard", self.id),
+            "Drops the changes",
+            json!({}),
+            json!({}),
+        );
+    }
+
+    fn on_command(&mut self, name: &str, arguments: Value, ctx: &mut Context) -> Result<Value, String> {
+        if name.ends_with(".panic") {
+            panic!("the counter breaks");
+        }
+        if name.ends_with(".discard") {
+            *lock(&self.value) = self.saved;
+            ctx.forget_document("the number");
+            return Ok(json!({}));
+        }
+        ctx.execute(Add(arguments["by"].as_i64().unwrap_or(1)));
+        Ok(json!({}))
+    }
+
+    fn unsaved(&self) -> Vec<String> {
+        if *lock(&self.value) == self.saved {
+            Vec::new()
+        } else {
+            vec!["the number".to_owned()]
+        }
+    }
+
+    fn save_unsaved(&mut self, _ctx: &mut Context) -> Result<(), String> {
+        self.saved = *lock(&self.value);
+        Ok(())
+    }
+}
+
+struct Add(i64);
+
+impl Command for Add {
+    fn label(&self) -> String {
+        format!("add {}", self.0)
+    }
+
+    fn apply(&mut self, module: &mut dyn Any) {
+        let counter: &mut Counter = module.downcast_mut().expect("a counter");
+        *lock(&counter.value) += self.0;
+    }
+
+    fn revert(&mut self, module: &mut dyn Any) {
+        let counter: &mut Counter = module.downcast_mut().expect("a counter");
+        *lock(&counter.value) -= self.0;
+    }
+
+    fn document(&self) -> Option<String> {
+        Some("the number".to_owned())
+    }
+}
+
+/// Offers `ui.dialog` as the module dialogs does, keeping the windows asked for: the tests answer.
+struct Dialogs {
+    asked: Arc<Mutex<Vec<Value>>>,
+}
+
+fn dialogs() -> (Box<dyn Module>, Arc<Mutex<Vec<Value>>>) {
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    (Box::new(Dialogs { asked: asked.clone() }), asked)
+}
+
+impl Module for Dialogs {
+    fn register(&mut self, reg: &mut Registrar) {
+        reg.command(DIALOG_COMMAND, "Opens a window", json!({}), json!({}));
+    }
+
+    fn on_command(&mut self, _name: &str, arguments: Value, _ctx: &mut Context) -> Result<Value, String> {
+        let mut asked = lock(&self.asked);
+        asked.push(arguments);
+        Ok(json!({ "dialog": asked.len() }))
+    }
+}
+
+impl Harness {
+    /// The user's answer in the window `dialog` of the module `dialogs`.
+    fn answer(&mut self, dialog: usize, button: &str) {
+        self.shell.host.publish(
+            "dialogs",
+            DIALOG_ANSWERED_TOPIC,
+            json!({ "dialog": dialog, "button": button }),
+        );
+    }
+}
+
+/// A dialog object shown at start and drawn by the kernel, as a compiled module shows one.
+struct Modal {
+    ui: SharedUi,
+    rejected: Arc<Mutex<u32>>,
+}
+
+impl Module for Modal {
+    fn register(&mut self, _reg: &mut Registrar) {}
+
+    fn init(&mut self, _ctx: &mut Context) {
+        let mut store = ui::lock(&self.ui);
+        let dialog = store.create(Kind::Dialog, None).unwrap();
+        let layout = store.create(Kind::VBoxLayout, None).unwrap();
+        store.add_to(dialog, layout, [0, 0, 1, 1]).unwrap();
+        let rejected = self.rejected.clone();
+        store
+            .connect(
+                dialog,
+                Signal::Rejected,
+                Arc::new(move |_: &SignalData| *lock(&rejected) += 1),
+            )
+            .unwrap();
+        store.set_numbers(dialog, Property::Visible, &[1.0]).unwrap();
+    }
+
+    fn windows_ui(&mut self, egui: &egui::Context, ctx: &mut Context) {
+        ctx.draw_dialogs(&self.ui, egui);
+    }
+}
+
+fn modal() -> (Box<dyn Module>, Jobs, Arc<Mutex<u32>>) {
+    let jobs: Jobs = Arc::default();
+    let queue = jobs.clone();
+    let rejected = Arc::new(Mutex::new(0));
+    let module = Modal {
+        ui: Ui::new(Arc::new(move |job| lock(&queue).push(job))),
+        rejected: rejected.clone(),
+    };
+    (Box::new(module), jobs, rejected)
+}
+
+#[test]
+fn undo_and_redo_go_back_and_forth_from_the_menu_and_the_keyboard() {
+    let (module, value) = counter("a");
+    let mut harness = Harness::new(vec![("a", module)]);
+    harness.call("a", "a.add", json!({ "by": 1 })).unwrap();
+    harness.call("a", "a.add", json!({ "by": 2 })).unwrap();
+    assert_eq!(*lock(&value), 3);
+    harness.shell.undo();
+    assert_eq!(*lock(&value), 1);
+    harness.shell.redo();
+    assert_eq!(*lock(&value), 3);
+    harness.frame(key(Key::Z, true));
+    harness.frame(key(Key::Z, true));
+    assert_eq!(*lock(&value), 0);
+    harness.frame(key(Key::Y, true));
+    assert_eq!(*lock(&value), 1);
+}
+
+#[test]
+fn a_group_is_one_entry_and_blocks_undo_while_it_holds_a_change() {
+    let (module, value) = counter("a");
+    let mut harness = Harness::new(vec![("a", module)]);
+    let editor = harness.shell.host.editor("a");
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let script = std::thread::spawn(move || {
+        editor.begin_group("both").unwrap();
+        editor.call("a.add", json!({ "by": 1 })).unwrap();
+        editor.call("a.add", json!({ "by": 2 })).unwrap();
+        wait.recv().unwrap();
+        editor.end_group().unwrap();
+    });
+    harness.until("the script's changes", |_| *lock(&value) == 3);
+    assert!(harness.shell.blocking_undo().is_some());
+    harness.frame(key(Key::Z, true));
+    assert_eq!(*lock(&value), 3, "Undo refused while the group holds changes");
+    release.send(()).unwrap();
+    harness.until("the group's end", |shell| shell.groups.list().is_empty());
+    script.join().unwrap();
+    assert_eq!(harness.shell.history.undo_label().as_deref(), Some("both"));
+    harness.frame(key(Key::Z, true));
+    assert_eq!(*lock(&value), 0, "both changes undone at once");
+}
+
+#[test]
+fn a_document_closed_without_saving_takes_its_changes_out_of_the_history() {
+    let (first, a) = counter("a");
+    let (second, _) = counter("b");
+    let mut harness = Harness::new(vec![("a", first), ("b", second)]);
+    harness.call("b", "b.add", json!({})).unwrap();
+    harness.call("a", "a.add", json!({ "by": 2 })).unwrap();
+    harness.shell.undo();
+    harness.call("a", "a.add", json!({ "by": 3 })).unwrap();
+    harness.call("a", "a.discard", json!({})).unwrap();
+    assert_eq!(
+        harness.shell.history.undo_label().as_deref(),
+        Some("add 1"),
+        "b's change stays"
+    );
+    assert_eq!(harness.shell.history.redo_label(), None);
+    harness.shell.undo();
+    assert_eq!(*lock(&a), 0, "nothing brings the dropped changes back");
+}
+
+#[test]
+fn closing_with_unsaved_changes_asks_first_and_closes_once_answered() {
+    let (module, _) = counter("a");
+    let (dialogs, asked) = dialogs();
+    let mut harness = Harness::new(vec![("a", module), ("dialogs", dialogs)]);
+    harness.call("a", "a.add", json!({})).unwrap();
+    assert!(harness.frame(closing(false)).contains(&ViewportCommand::CancelClose));
+    assert_eq!(lock(&asked).len(), 1);
+    assert_eq!(lock(&asked)[0]["first"], json!(true), "before every other window");
+    // Asked again while the question waits: still open, and asked once.
+    assert!(harness.frame(closing(false)).contains(&ViewportCommand::CancelClose));
+    assert_eq!(lock(&asked).len(), 1);
+    harness.answer(1, "save");
+    assert!(harness.frame(RawInput::default()).contains(&ViewportCommand::Close));
+    assert!(harness.shell.unsaved().is_empty(), "saved");
+}
+
+#[test]
+fn closing_while_minimised_asks_and_brings_the_window_back() {
+    let (module, _) = counter("a");
+    let (dialogs, asked) = dialogs();
+    let mut harness = Harness::new(vec![("a", module), ("dialogs", dialogs)]);
+    harness.call("a", "a.add", json!({})).unwrap();
+    let commands = harness.minimised(closing(true));
+    assert!(commands.contains(&ViewportCommand::CancelClose), "{commands:?}");
+    assert!(commands.contains(&ViewportCommand::Minimized(false)), "{commands:?}");
+    assert!(commands.contains(&ViewportCommand::Focus), "{commands:?}");
+    assert_eq!(lock(&asked).len(), 1);
+    harness.answer(1, "discard");
+    assert!(harness.frame(RawInput::default()).contains(&ViewportCommand::Close));
+}
+
+#[test]
+fn closing_without_a_window_to_ask_in_loses_the_changes_and_closes() {
+    let (module, _) = counter("a");
+    let (dialogs, _) = dialogs();
+    let mut harness = Harness::new(vec![("a", module), ("dialogs", dialogs)]);
+    harness.call("a", "a.add", json!({})).unwrap();
+    assert!(harness.frame(closing(false)).contains(&ViewportCommand::CancelClose));
+    // The module showing the question fails while it waits: the next request closes.
+    let index = harness.index("dialogs");
+    harness.shell.fail(index, "broken".to_owned());
+    assert!(!harness.frame(closing(false)).contains(&ViewportCommand::CancelClose));
+
+    let (module, _) = counter("b");
+    let mut alone = Harness::new(vec![("b", module)]);
+    alone.call("b", "b.add", json!({})).unwrap();
+    assert!(!alone.frame(closing(false)).contains(&ViewportCommand::CancelClose));
+}
+
+#[test]
+fn a_failed_module_leaves_the_history_and_the_others_keep_theirs() {
+    let (first, a) = counter("a");
+    let (second, b) = counter("b");
+    let mut harness = Harness::new(vec![("a", first), ("b", second)]);
+    harness.call("b", "b.add", json!({ "by": 5 })).unwrap();
+    harness.call("a", "a.add", json!({ "by": 1 })).unwrap();
+    assert!(harness.call("a", "a.panic", json!({})).is_err());
+    assert!(matches!(harness.shell.slots[0].state, State::Failed(_)));
+    assert!(harness.call("b", "a.add", json!({})).is_err(), "its commands are gone");
+    harness.shell.undo();
+    assert_eq!(
+        (*lock(&a), *lock(&b)),
+        (1, 0),
+        "Undo goes to the change of the module still running"
+    );
+}
+
+#[test]
+fn a_modal_window_takes_the_keyboard_until_escape_closes_it() {
+    let (module, value) = counter("a");
+    let (window, jobs, rejected) = modal();
+    let mut harness = Harness::new(vec![("a", module), ("modal", window)]);
+    harness.call("a", "a.add", json!({})).unwrap();
+    harness.frame(RawInput::default());
+    harness.frame(key(Key::Z, true));
+    assert_eq!(*lock(&value), 1, "no shortcut under a modal window");
+    harness.frame(key(Key::Escape, false));
+    for job in std::mem::take(&mut *lock(&jobs)) {
+        job();
+    }
+    assert_eq!(*lock(&rejected), 1, "Escape hides it and sends rejected");
+    harness.frame(key(Key::Z, true));
+    assert_eq!(*lock(&value), 0);
+}
+
+#[test]
+fn a_compiled_module_command_called_from_the_interface_runs_on_its_thread() {
+    let native = CompiledModule::started(capi::testing::native("native"));
+    let mut harness = Harness::with_slots(vec![Slot::compiled("native", native)]);
+    let (reply, answer) = std::sync::mpsc::channel();
+    harness.shell.answer(Request::Call {
+        caller: KERNEL.to_owned(),
+        thread: std::thread::current().id(),
+        name: "native.where".to_owned(),
+        arguments: json!({}),
+        reply: ReplyTo::Thread(reply),
+    });
+    assert!(
+        answer.try_recv().is_err(),
+        "answered later, not on the interface thread"
+    );
+    let started = Instant::now();
+    let result = loop {
+        if let Ok(result) = answer.try_recv() {
+            break result;
+        }
+        assert!(started.elapsed() < Duration::from_secs(10), "no answer");
+        harness.frame(RawInput::default());
+    };
+    assert_eq!(result, Ok(json!("uniwow module native")));
+}
+
+#[test]
+fn undo_waits_while_a_compiled_module_has_work_on_its_thread() {
+    let (module, value) = counter("a");
+    let native = CompiledModule::started(capi::testing::native("native"));
+    let mut harness = Harness::with_slots(vec![Slot::loaded("a", module), Slot::compiled("native", native)]);
+    harness.call("a", "a.add", json!({})).unwrap();
+    let thread = harness.shell.slots[1].compiled.expect("compiled");
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    ui::lock(&thread.ui).post_job(Box::new(move || {
+        let _ = wait.recv();
+    }));
+    assert!(
+        harness
+            .shell
+            .blocking_undo()
+            .is_some_and(|reason| reason.contains("native"))
+    );
+    harness.frame(key(Key::Z, true));
+    assert_eq!(*lock(&value), 1, "Undo refused while the module works");
+    release.send(()).unwrap();
+    harness.until("the module's work done", |shell| shell.blocking_undo().is_none());
+    harness.frame(key(Key::Z, true));
+    assert_eq!(*lock(&value), 0);
+}

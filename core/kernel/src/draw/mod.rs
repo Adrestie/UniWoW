@@ -93,14 +93,16 @@ impl PanelView {
         }
     }
 
-    /// Draws the dialogs of a module that are shown, each in a modal window over the editor. The
-    /// user closes one with Escape or its close button: it is then hidden and sends `Rejected`.
-    pub fn dialogs(&mut self, shared: &SharedUi, ctx: &egui::Context, gpu: Option<&egui_wgpu::RenderState>) {
+    /// Draws the dialogs of a module that are shown, each in a modal window over the editor, and
+    /// tells whether there was one. The user closes one with Escape or its close button: it is
+    /// then hidden and sends `Rejected`.
+    pub fn dialogs(&mut self, shared: &SharedUi, ctx: &egui::Context, gpu: Option<&egui_wgpu::RenderState>) -> bool {
         let mut store = lock(shared);
         store.set_wake(ctx);
         self.forget_gone(&store);
         let mut events = Vec::new();
-        for handle in store.dialogs() {
+        let shown = store.dialogs();
+        for &handle in &shown {
             let Some(object) = store.object(handle).cloned() else {
                 continue;
             };
@@ -136,6 +138,7 @@ impl PanelView {
         for event in events {
             store.emit(event);
         }
+        !shown.is_empty()
     }
 
     fn object(

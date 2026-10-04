@@ -20,6 +20,9 @@ pub struct Settings {
     /// Settings of each module, by module id then key.
     #[serde(default, alias = "features")]
     pub modules: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
+    /// Never written to disk, for the tests.
+    #[serde(skip)]
+    pub in_memory: bool,
 }
 
 impl Settings {
@@ -44,7 +47,7 @@ impl Settings {
     }
 
     pub fn save(&self) {
-        let Some(path) = Self::path() else {
+        let Some(path) = Self::path().filter(|_| !self.in_memory) else {
             return;
         };
         // Written beside, then renamed over the old file: a crash never leaves it half written.

@@ -607,6 +607,57 @@ extern "C" fn api_end_group(context: *mut c_void) {
     })
 }
 
+/// A compiled module defined in the process, for the tests of the kernel.
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::ffi::{CString, c_char, c_void};
+
+    use super::{API_VERSION, Api, CommandEntry, ModuleInfo, Reply, Started, start};
+
+    /// Answers the name of the thread it runs on.
+    extern "C-unwind" fn where_it_runs(
+        _user: *mut c_void,
+        _arguments: *const c_char,
+        reply: Reply,
+        context: *mut c_void,
+    ) -> i32 {
+        let name = std::thread::current().name().unwrap_or_default().to_owned();
+        let answer = CString::new(format!("\"{name}\"")).expect("no NUL");
+        reply(context, answer.as_ptr());
+        0
+    }
+
+    unsafe extern "C-unwind" fn init(
+        _api: *const Api,
+        info: *mut ModuleInfo,
+        _error: Reply,
+        _context: *mut c_void,
+    ) -> i32 {
+        let commands: &'static [CommandEntry] = Box::leak(Box::new([CommandEntry {
+            name: c"native.where".as_ptr(),
+            description: c"Answers the name of its thread".as_ptr(),
+            arguments_schema: c"{}".as_ptr(),
+            result_schema: c"{}".as_ptr(),
+            handler: Some(where_it_runs),
+            user: std::ptr::null_mut(),
+        }]));
+        // SAFETY: the editor gives a valid `info`.
+        let info = unsafe { &mut *info };
+        info.name = c"native".as_ptr();
+        info.version = c"1.0".as_ptr();
+        info.commands = commands.as_ptr();
+        info.command_count = 1;
+        info.header_version = API_VERSION;
+        info.command_size = std::mem::size_of::<CommandEntry>() as u32;
+        0
+    }
+
+    /// The module `id`, offering `native.where`.
+    pub fn native(id: &str) -> Started {
+        start(init, id).expect("starts")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::{CStr, c_char, c_void};

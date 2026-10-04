@@ -1056,6 +1056,14 @@ As built:
   either no longer changes its fingerprint. Exported symbols: 18,364 before, 18,350 after in debug;
   16,559 before, 16,546 after in release. Nearly all of them come from the crates the runtime
   re-exports (egui, wgpu…), not from its own code.
+- **Checks without a window**: the tests run the shell as eframe does, `logic` then `ui`, or
+  `logic` alone while minimised, on input they make up and with modules they define
+  (`core/kernel/src/shell/tests.rs`): Undo and Redo from the menu and the keyboard, a group as one
+  entry, closing with unsaved changes shown and minimised, without a window to ask in, a module
+  failing, a modal window, a compiled module's command and its work on its thread, a document
+  closed without saving. They found that a modal window was known one frame late: the kernel now
+  tells it from the frame it draws it in.
+- **One source for the numbers**: `sdk/bindings.toml` (section 8).
 
 ### Milestone 8: the Timeline in Montage mode (outline)
 

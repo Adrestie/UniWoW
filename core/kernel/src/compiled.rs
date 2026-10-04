@@ -46,6 +46,12 @@ impl Module for CompiledModule {
 }
 
 impl CompiledModule {
+    /// A module started from an entry point in the process, for the tests.
+    #[cfg(test)]
+    pub fn started(started: Started) -> Self {
+        Self { started }
+    }
+
     /// What the C interface knows of it: its objects, through which jobs reach its thread, and
     /// the work waiting there.
     pub fn context(&self) -> &'static capi::ModuleContext {
