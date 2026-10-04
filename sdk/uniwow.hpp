@@ -12,6 +12,7 @@
 #include <exception>
 #include <functional>
 #include <initializer_list>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -263,7 +264,11 @@ class HBoxLayout : public Layout {
 class GridLayout : public Layout {
   public:
     GridLayout() : Layout(make(UNIWOW_GRID_LAYOUT)) {}
+    // Rows and columns count from 0, spans from 1, up to 10000.
     void addWidget(const Object &widget, int row, int column, int rowSpan = 1, int columnSpan = 1) const {
+        if (row < 0 || column < 0 || rowSpan < 1 || columnSpan < 1) {
+            throw std::invalid_argument("a grid cell has a row and a column from 0 and spans from 1");
+        }
         api().add_to(detail::context(), handle_, widget.handle(), uint32_t(row), uint32_t(column), uint32_t(rowSpan),
                      uint32_t(columnSpan));
     }

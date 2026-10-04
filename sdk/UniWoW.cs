@@ -581,8 +581,15 @@ public class HBoxLayout() : Layout(Make(Kind.HBoxLayout));
 
 public unsafe class GridLayout() : Layout(Make(Kind.GridLayout))
 {
-    public void AddWidget(UiObject widget, int row, int column, int rowSpan = 1, int columnSpan = 1) =>
+    /// <summary>Rows and columns count from 0, spans from 1, up to 10000.</summary>
+    public void AddWidget(UiObject widget, int row, int column, int rowSpan = 1, int columnSpan = 1)
+    {
+        if (row < 0 || column < 0 || rowSpan < 1 || columnSpan < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(row), "a grid cell has a row and a column from 0 and spans from 1");
+        }
         Table->AddTo(Context, Handle, widget.Handle, (uint)row, (uint)column, (uint)rowSpan, (uint)columnSpan);
+    }
 }
 
 public unsafe class GroupBox : Widget

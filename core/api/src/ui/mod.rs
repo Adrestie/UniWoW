@@ -19,6 +19,10 @@ use crate::egui;
 /// Identifies an object of one module.
 pub type Handle = u64;
 
+/// The highest row, column or span of a grid layout: a wrapped negative number would otherwise
+/// ask for billions of cells.
+pub const MAX_CELL: u32 = 10_000;
+
 /// Runs a job on the module's own thread.
 pub type Post = Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync>;
 
@@ -405,6 +409,9 @@ impl Ui {
 
     /// Places a widget or layout in a layout, or the layout of a panel, group box or dialog.
     pub fn add_to(&mut self, container: Handle, child: Handle, cell: [u32; 4]) -> Result<(), String> {
+        if cell.iter().any(|number| *number > MAX_CELL) {
+            return Err(format!("a grid's rows, columns and spans go up to {MAX_CELL}"));
+        }
         let container_kind = self.get(container)?.kind;
         let child_kind = self.get(child)?.kind;
         match container_kind {
@@ -912,6 +919,19 @@ mod tests {
                 .take_editor_failure()
                 .is_some_and(|m| m.contains("broken editor"))
         );
+    }
+
+    #[test]
+    fn a_grid_refuses_cells_beyond_its_limit() {
+        let shared = ui();
+        let mut ui = lock(&shared);
+        let grid = ui.create(Kind::GridLayout, None).unwrap();
+        let label = ui.create(Kind::Label, None).unwrap();
+        assert!(
+            ui.add_to(grid, label, [0, u32::MAX, 1, 1]).is_err(),
+            "a column of -1 from C#"
+        );
+        assert!(ui.add_to(grid, label, [3, 4, 1, 2]).is_ok());
     }
 
     #[test]

@@ -190,8 +190,8 @@ typedef struct uniwow_api {
     uniwow_handle (*create)(void *context, uint32_t kind, uniwow_handle parent);
     /* Destroys an object and its children. */
     void (*destroy)(void *context, uniwow_handle object);
-    /* Places a widget or layout in a layout (row and column for a grid layout), or sets the layout
-       of a panel, group box or dialog. */
+    /* Places a widget or layout in a layout (row and column for a grid layout, each up to 10000), or
+       sets the layout of a panel, group box or dialog. */
     int32_t (*add_to)(void *context, uniwow_handle container, uniwow_handle child, uint32_t row, uint32_t column,
                       uint32_t row_span, uint32_t column_span);
     int32_t (*set_text)(void *context, uniwow_handle object, uint32_t property, const char *text);
