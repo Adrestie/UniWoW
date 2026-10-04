@@ -30,9 +30,10 @@ typedef void (*uniwow_reply)(void *reply_context, const char *text);
 /* An interface object of the module; 0 is no object. */
 typedef uint64_t uniwow_handle;
 
+/* <generated kind> from sdk/bindings.toml by cargo xtask bindings */
 /* Kinds of interface objects, named as in Qt. */
 enum {
-    UNIWOW_PANEL = 1, /* a dock panel; obtained with panel(), never created */
+    UNIWOW_PANEL = 1,           /* a dock panel; obtained with panel(), never created */
     UNIWOW_LABEL = 2,
     UNIWOW_PUSH_BUTTON = 3,
     UNIWOW_CHECK_BOX = 4,
@@ -53,10 +54,12 @@ enum {
     UNIWOW_TEXT_ITEM = 19,
     UNIWOW_ITEM_GROUP = 20,
     UNIWOW_PAINT_AREA = 21,
-    UNIWOW_DIALOG = 22,     /* a modal window; created hidden, shown and hidden through VISIBLE */
-    UNIWOW_CURVE_VIEW = 23  /* curves edited by hand, drawn by the module curves */
+    UNIWOW_DIALOG = 22,         /* a modal window; created hidden, shown and hidden through VISIBLE */
+    UNIWOW_CURVE_VIEW = 23      /* curves edited by hand, drawn by the module curves */
 };
+/* </generated kind> */
 
+/* <generated property> from sdk/bindings.toml by cargo xtask bindings */
 /* Properties. Texts go through set_text; everything else through set_numbers: a flag is 0 or 1,
    a colour is 0xRRGGBBAA, positions and sizes are in points. */
 enum {
@@ -94,7 +97,9 @@ enum {
                                             value, mode, left, right}]}]; keys in time order, each at a time of its
                                             own, numbers within 1e9 */
 };
+/* </generated property> */
 
+/* <generated signal> from sdk/bindings.toml by cargo xtask bindings */
 /* Signals, named as in Qt. Each tells what the user did, never a change the module made. */
 enum {
     UNIWOW_SIGNAL_CLICKED = 1,               /* push button */
@@ -117,6 +122,7 @@ enum {
     UNIWOW_SIGNAL_REJECTED = 18,             /* dialog: the user closed it, which hid it */
     UNIWOW_SIGNAL_CURVES_CHANGED = 19        /* curve view: text, the curves; boolean, whether the change is done */
 };
+/* </generated signal> */
 
 /* What a slot receives; the fields its signal does not use are zero. button: 1 left, 2 right,
    3 middle. modifiers: 1 Ctrl, 2 Shift, 4 Alt. text is valid during the call only. */

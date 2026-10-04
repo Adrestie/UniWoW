@@ -1,5 +1,6 @@
 //! UniWoW developer commands, run with `cargo xtask <command>`.
 
+mod bindings;
 mod check;
 mod pe;
 mod workspace;
@@ -19,7 +20,8 @@ usage: cargo xtask <command>
   build-module <id> [--release]  build and deploy one module, leaving the editor untouched
   run [--release]               build everything, then start the editor
   check                         check the dependency rules and the runtime size
-  test-sdk                      run the tests of the C++ and C# classes of sdk/";
+  test-sdk                      run the tests of the C++ and C# classes of sdk/
+  bindings [--check]            write the numbers of sdk/bindings.toml into every language, or check them";
 
 const RUNTIME_DLL: &str = "uniwow_api.dll";
 const EXECUTABLE: &str = "UniWoW.exe";
@@ -41,6 +43,7 @@ fn main() -> ExitCode {
         ["run"] => run(release),
         ["check"] => check::run(),
         ["test-sdk"] => test_sdk(),
+        ["bindings"] => bindings::run(args.iter().any(|a| a == "--check")),
         _ => Err(USAGE.to_owned()),
     };
     match result {

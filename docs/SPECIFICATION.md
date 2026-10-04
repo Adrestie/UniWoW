@@ -44,7 +44,7 @@ libs/*         shared libraries without user interface (section 6)
 modules/*      one crate per Rust module, built as one DLL (section 7)
 examples/*     sample modules in C++, C#, Lua and Python, built and installed as an author would
 client-bridge  C++ WXL module running inside the client (outside the Cargo workspace)
-xtask          developer commands: new-module, build, build-module, run, check
+xtask          developer commands: new-module, build, build-module, run, check, test-sdk, bindings
 ```
 
 Crates are prefixed `uniwow-` (`uniwow-api`, `uniwow-kernel`, `uniwow-module-<id>`…).
@@ -455,11 +455,15 @@ E:\WoW-editor
                         `cargo xtask build` as their author would
   sdk/uniwow.h          the C interface of compiled modules (S1)
   sdk/uniwow.hpp, sdk/UniWoW.cs  its classes for C++ and C#
+  sdk/bindings.toml     the numbers of the kinds, properties and signals of the interface objects,
+                        written into every language by `cargo xtask bindings`
+  sdk/tests/            tests of the C++ and C# classes, run by `cargo xtask test-sdk`
   scripts/<language>-<version>/<tool>/  sample scripts, copied beside the executable
   client-bridge/        C++ (WXL SDK), own build
   xtask/
   docs/
-  .github/workflows/    CI on Windows with .NET 10: fmt, clippy -D warnings, cargo test, xtask build and check
+  .github/workflows/    CI on Windows with .NET 10: fmt, bindings --check, clippy -D warnings, cargo test,
+                        xtask build, test-sdk and check
 ```
 
 ---

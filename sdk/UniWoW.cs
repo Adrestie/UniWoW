@@ -109,26 +109,101 @@ public unsafe struct ModuleInfo
     public IntPtr User;
 }
 
+// <generated kind> from sdk/bindings.toml by cargo xtask bindings
+/// <summary>Kinds of interface objects, named as in Qt.</summary>
 public enum Kind : uint
 {
-    Panel = 1, Label, PushButton, CheckBox, Slider, SpinBox, LineEdit, ComboBox, Separator, GroupBox,
-    VBoxLayout, HBoxLayout, GridLayout, GraphicsView, GraphicsScene, RectItem, LineItem, EllipseItem,
-    TextItem, ItemGroup, PaintArea, Dialog, CurveView,
+    Panel = 1,          // a dock panel; obtained with panel(), never created
+    Label = 2,
+    PushButton = 3,
+    CheckBox = 4,
+    Slider = 5,
+    SpinBox = 6,
+    LineEdit = 7,
+    ComboBox = 8,
+    Separator = 9,
+    GroupBox = 10,
+    VBoxLayout = 11,
+    HBoxLayout = 12,
+    GridLayout = 13,
+    GraphicsView = 14,
+    GraphicsScene = 15,
+    RectItem = 16,
+    LineItem = 17,
+    EllipseItem = 18,
+    TextItem = 19,
+    ItemGroup = 20,
+    PaintArea = 21,
+    Dialog = 22,        // a modal window; created hidden, shown and hidden through VISIBLE
+    CurveView = 23,     // curves edited by hand, drawn by the module curves
 }
+// </generated kind>
 
+// <generated property> from sdk/bindings.toml by cargo xtask bindings
+/// <summary>Properties. Texts go through set_text; everything else through set_numbers: a flag is 0 or 1, a
+/// colour is 0xRRGGBBAA, positions and sizes are in points.</summary>
 public enum Property : uint
 {
-    Text = 1, ToolTip, Enabled, Visible, Checked, Value, Minimum, Maximum, Step, Decimals, Placeholder,
-    CurrentIndex, Title, Pos, Rect, Line, PenColor, PenWidth, BrushColor, Radius, ZValue, Movable,
-    Selectable, Selected, MoveBounds, FontSize, MinimumHeight, ViewScale, ViewCenter, Count, Curves,
+    Text = 1,
+    ToolTip = 2,
+    Enabled = 3,
+    Visible = 4,
+    Checked = 5,
+    Value = 6,          // slider, spin box; kept within the range
+    Minimum = 7,
+    Maximum = 8,
+    Step = 9,
+    Decimals = 10,
+    Placeholder = 11,   // line edit, text
+    CurrentIndex = 12,  // combo box
+    Title = 13,         // group box, text
+    Pos = 14,           // item: x, y in its parent
+    Rect = 15,          // rectangle or ellipse item: x, y, width, height
+    Line = 16,          // line item: x1, y1, x2, y2
+    PenColor = 17,
+    PenWidth = 18,
+    BrushColor = 19,
+    Radius = 20,        // rectangle item: corner radius
+    ZValue = 21,        // item: stacking order among its siblings
+    Movable = 22,       // item: 0 no, 1 along x, 2 along y, 3 both
+    Selectable = 23,
+    Selected = 24,
+    MoveBounds = 25,    // movable item: x, y, width, height its position stays in
+    FontSize = 26,      // text item, 1 to 512, finite
+    MinimumHeight = 27, // graphics view, paint area
+    ViewScale = 28,     // graphics view: zoom
+    ViewCenter = 29,    // graphics view: x, y of the scene at its centre
+    Count = 30,         // read only: entries of a combo box, children otherwise
+    Curves = 31,        // curve view, text: JSON [{label, colour: [r, g, b], visible, keys: [{time, value, mode, left,
+                        // right}]}]; keys in time order, each at a time of its own, numbers within 1e9
 }
+// </generated property>
 
+// <generated signal> from sdk/bindings.toml by cargo xtask bindings
+/// <summary>Signals, named as in Qt. Each tells what the user did, never a change the module made.</summary>
 public enum SignalId : uint
 {
-    Clicked = 1, Toggled, ValueChanged, SliderPressed, SliderReleased, TextChanged, EditingFinished,
-    CurrentIndexChanged, ItemPressed, ItemMoved, ItemDoubleClicked, SelectionChanged, Paint, MousePress,
-    MouseMove, MouseRelease, Wheel, Rejected, CurvesChanged,
+    Clicked = 1,             // push button
+    Toggled = 2,             // check box: boolean
+    ValueChanged = 3,        // slider, spin box: number
+    SliderPressed = 4,       // slider: number
+    SliderReleased = 5,      // slider: number; also after a click or a key
+    TextChanged = 6,         // line edit: text
+    EditingFinished = 7,     // line edit: text; spin box: number
+    CurrentIndexChanged = 8, // combo box: integer
+    ItemPressed = 9,         // scene: item, x, y in the scene, button, modifiers
+    ItemMoved = 10,          // scene: item dropped at x, y, moved by dx, dy
+    ItemDoubleClicked = 11,  // scene: item, x, y
+    SelectionChanged = 12,   // scene; read each item's SELECTED
+    Paint = 13,              // paint area: painter, width, height
+    MousePress = 14,         // paint area: x, y, button, modifiers
+    MouseMove = 15,          // paint area, while a button is held: x, y
+    MouseRelease = 16,       // paint area: x, y
+    Wheel = 17,              // paint area: x, y, dx, dy
+    Rejected = 18,           // dialog: the user closed it, which hid it
+    CurvesChanged = 19,      // curve view: text, the curves; boolean, whether the change is done
 }
+// </generated signal>
 
 public enum LogLevel { Error = 1, Warning = 2, Information = 3, Debug = 4 }
 

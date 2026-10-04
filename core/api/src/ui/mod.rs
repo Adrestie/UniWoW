@@ -35,12 +35,13 @@ pub type Slot = Arc<dyn Fn(&SignalData) + Send + Sync>;
 /// The objects of one module, shared between its threads and the interface thread.
 pub type SharedUi = Arc<Mutex<Ui>>;
 
+/// An enumeration of numbers shared with every language, read back from a number.
 macro_rules! numbered {
-    ($(#[$meta:meta])* $name:ident { $($variant:ident = $value:literal),* $(,)? }) => {
+    ($(#[$meta:meta])* $name:ident { $($(#[$doc:meta])* $variant:ident = $value:literal,)* }) => {
         $(#[$meta])*
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         #[repr(u32)]
-        pub enum $name { $($variant = $value),* }
+        pub enum $name { $($(#[$doc])* $variant = $value,)* }
 
         impl $name {
             pub fn from_u32(value: u32) -> Option<Self> {
@@ -53,37 +54,9 @@ macro_rules! numbered {
     };
 }
 
-numbered!(
-    /// The kinds of objects, named as in Qt. The numbers are those of `uniwow.h`.
-    Kind {
-        Panel = 1, Label = 2, PushButton = 3, CheckBox = 4, Slider = 5, SpinBox = 6, LineEdit = 7,
-        ComboBox = 8, Separator = 9, GroupBox = 10, VBoxLayout = 11, HBoxLayout = 12,
-        GridLayout = 13, GraphicsView = 14, GraphicsScene = 15, RectItem = 16, LineItem = 17,
-        EllipseItem = 18, TextItem = 19, ItemGroup = 20, PaintArea = 21, Dialog = 22, CurveView = 23,
-    }
-);
+mod numbers;
 
-numbered!(
-    /// The properties of the objects. The numbers are those of `uniwow.h`.
-    Property {
-        Text = 1, ToolTip = 2, Enabled = 3, Visible = 4, Checked = 5, Value = 6, Minimum = 7,
-        Maximum = 8, Step = 9, Decimals = 10, Placeholder = 11, CurrentIndex = 12, Title = 13,
-        Pos = 14, Rect = 15, Line = 16, PenColor = 17, PenWidth = 18, BrushColor = 19,
-        Radius = 20, ZValue = 21, Movable = 22, Selectable = 23, Selected = 24, MoveBounds = 25,
-        FontSize = 26, MinimumHeight = 27, ViewScale = 28, ViewCenter = 29, Count = 30, Curves = 31,
-    }
-);
-
-numbered!(
-    /// The signals, named as in Qt. Each tells what the user did, never a change the module
-    /// made itself. The numbers are those of `uniwow.h`.
-    Signal {
-        Clicked = 1, Toggled = 2, ValueChanged = 3, SliderPressed = 4, SliderReleased = 5,
-        TextChanged = 6, EditingFinished = 7, CurrentIndexChanged = 8, ItemPressed = 9,
-        ItemMoved = 10, ItemDoubleClicked = 11, SelectionChanged = 12, Paint = 13,
-        MousePress = 14, MouseMove = 15, MouseRelease = 16, Wheel = 17, Rejected = 18, CurvesChanged = 19,
-    }
-);
+pub use numbers::{Kind, Property, Signal};
 
 impl Kind {
     pub fn is_layout(self) -> bool {

@@ -1,0 +1,104 @@
+# The numbers of the interface objects, one source for every language (S1).
+#
+# `cargo xtask bindings` writes them into sdk/uniwow.h, sdk/UniWoW.cs and
+# core/api/src/ui/numbers.rs; CI refuses a file that differs (`cargo xtask bindings --check`).
+# A number never changes once published: a new entry takes the next one.
+#
+# Each entry: [number, name in Rust and C#, name in C after the prefix, note].
+
+[kind]
+description = "Kinds of interface objects, named as in Qt."
+rust = "Kind"
+csharp = "Kind"
+c_prefix = "UNIWOW_"
+entries = [
+    [1, "Panel", "PANEL", "a dock panel; obtained with panel(), never created"],
+    [2, "Label", "LABEL"],
+    [3, "PushButton", "PUSH_BUTTON"],
+    [4, "CheckBox", "CHECK_BOX"],
+    [5, "Slider", "SLIDER"],
+    [6, "SpinBox", "SPIN_BOX"],
+    [7, "LineEdit", "LINE_EDIT"],
+    [8, "ComboBox", "COMBO_BOX"],
+    [9, "Separator", "SEPARATOR"],
+    [10, "GroupBox", "GROUP_BOX"],
+    [11, "VBoxLayout", "VBOX_LAYOUT"],
+    [12, "HBoxLayout", "HBOX_LAYOUT"],
+    [13, "GridLayout", "GRID_LAYOUT"],
+    [14, "GraphicsView", "GRAPHICS_VIEW"],
+    [15, "GraphicsScene", "GRAPHICS_SCENE"],
+    [16, "RectItem", "RECT_ITEM"],
+    [17, "LineItem", "LINE_ITEM"],
+    [18, "EllipseItem", "ELLIPSE_ITEM"],
+    [19, "TextItem", "TEXT_ITEM"],
+    [20, "ItemGroup", "ITEM_GROUP"],
+    [21, "PaintArea", "PAINT_AREA"],
+    [22, "Dialog", "DIALOG", "a modal window; created hidden, shown and hidden through VISIBLE"],
+    [23, "CurveView", "CURVE_VIEW", "curves edited by hand, drawn by the module curves"],
+]
+
+[property]
+description = "Properties. Texts go through set_text; everything else through set_numbers: a flag is 0 or 1, a colour is 0xRRGGBBAA, positions and sizes are in points."
+rust = "Property"
+csharp = "Property"
+c_prefix = "UNIWOW_PROPERTY_"
+entries = [
+    [1, "Text", "TEXT"],
+    [2, "ToolTip", "TOOL_TIP"],
+    [3, "Enabled", "ENABLED"],
+    [4, "Visible", "VISIBLE"],
+    [5, "Checked", "CHECKED"],
+    [6, "Value", "VALUE", "slider, spin box; kept within the range"],
+    [7, "Minimum", "MINIMUM"],
+    [8, "Maximum", "MAXIMUM"],
+    [9, "Step", "STEP"],
+    [10, "Decimals", "DECIMALS"],
+    [11, "Placeholder", "PLACEHOLDER", "line edit, text"],
+    [12, "CurrentIndex", "CURRENT_INDEX", "combo box"],
+    [13, "Title", "TITLE", "group box, text"],
+    [14, "Pos", "POS", "item: x, y in its parent"],
+    [15, "Rect", "RECT", "rectangle or ellipse item: x, y, width, height"],
+    [16, "Line", "LINE", "line item: x1, y1, x2, y2"],
+    [17, "PenColor", "PEN_COLOR"],
+    [18, "PenWidth", "PEN_WIDTH"],
+    [19, "BrushColor", "BRUSH_COLOR"],
+    [20, "Radius", "RADIUS", "rectangle item: corner radius"],
+    [21, "ZValue", "Z_VALUE", "item: stacking order among its siblings"],
+    [22, "Movable", "MOVABLE", "item: 0 no, 1 along x, 2 along y, 3 both"],
+    [23, "Selectable", "SELECTABLE"],
+    [24, "Selected", "SELECTED"],
+    [25, "MoveBounds", "MOVE_BOUNDS", "movable item: x, y, width, height its position stays in"],
+    [26, "FontSize", "FONT_SIZE", "text item, 1 to 512, finite"],
+    [27, "MinimumHeight", "MINIMUM_HEIGHT", "graphics view, paint area"],
+    [28, "ViewScale", "VIEW_SCALE", "graphics view: zoom"],
+    [29, "ViewCenter", "VIEW_CENTER", "graphics view: x, y of the scene at its centre"],
+    [30, "Count", "COUNT", "read only: entries of a combo box, children otherwise"],
+    [31, "Curves", "CURVES", "curve view, text: JSON [{label, colour: [r, g, b], visible, keys: [{time, value, mode, left, right}]}]; keys in time order, each at a time of its own, numbers within 1e9"],
+]
+
+[signal]
+description = "Signals, named as in Qt. Each tells what the user did, never a change the module made."
+rust = "Signal"
+csharp = "SignalId"
+c_prefix = "UNIWOW_SIGNAL_"
+entries = [
+    [1, "Clicked", "CLICKED", "push button"],
+    [2, "Toggled", "TOGGLED", "check box: boolean"],
+    [3, "ValueChanged", "VALUE_CHANGED", "slider, spin box: number"],
+    [4, "SliderPressed", "SLIDER_PRESSED", "slider: number"],
+    [5, "SliderReleased", "SLIDER_RELEASED", "slider: number; also after a click or a key"],
+    [6, "TextChanged", "TEXT_CHANGED", "line edit: text"],
+    [7, "EditingFinished", "EDITING_FINISHED", "line edit: text; spin box: number"],
+    [8, "CurrentIndexChanged", "CURRENT_INDEX_CHANGED", "combo box: integer"],
+    [9, "ItemPressed", "ITEM_PRESSED", "scene: item, x, y in the scene, button, modifiers"],
+    [10, "ItemMoved", "ITEM_MOVED", "scene: item dropped at x, y, moved by dx, dy"],
+    [11, "ItemDoubleClicked", "ITEM_DOUBLE_CLICKED", "scene: item, x, y"],
+    [12, "SelectionChanged", "SELECTION_CHANGED", "scene; read each item's SELECTED"],
+    [13, "Paint", "PAINT", "paint area: painter, width, height"],
+    [14, "MousePress", "MOUSE_PRESS", "paint area: x, y, button, modifiers"],
+    [15, "MouseMove", "MOUSE_MOVE", "paint area, while a button is held: x, y"],
+    [16, "MouseRelease", "MOUSE_RELEASE", "paint area: x, y"],
+    [17, "Wheel", "WHEEL", "paint area: x, y, dx, dy"],
+    [18, "Rejected", "REJECTED", "dialog: the user closed it, which hid it"],
+    [19, "CurvesChanged", "CURVES_CHANGED", "curve view: text, the curves; boolean, whether the change is done"],
+]

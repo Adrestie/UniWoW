@@ -18,6 +18,8 @@ jobs:
           dotnet-version: 10.0.x
       - name: Format
         run: cargo fmt --all -- --check
+      - name: Bindings
+        run: cargo xtask bindings --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
