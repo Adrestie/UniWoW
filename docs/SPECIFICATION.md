@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 5 built and validated; milestone 6 validated, in progress; milestones 7 to 10 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 5 built and validated; milestone 6 built, awaiting validation; milestones 7 to 10 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -795,7 +795,7 @@ As built:
   `scene.fill` with 10,000 cards took 0.66 s; the first frame after it, which builds the meshes,
   88 ms.
 
-### Milestone 6: animatable properties and the Timeline in Animation mode (validated, in progress)
+### Milestone 6: animatable properties and the Timeline in Animation mode (built, awaiting validation)
 
 The Animation mode comes first, as the user asked: dragging the playhead shows the cube's position,
 rotation, scale and colour change in the 3D view as it moves. The Montage mode follows in
@@ -864,6 +864,25 @@ Acceptance:
 | Change sequence with unsaved changes | The panel asks whether to save them |
 | Disable `sample-cube`, restart | The timeline starts; the cube's tracks greyed, their keys kept when saving |
 | Tests, `cargo xtask check`, CI | Green |
+
+As built:
+
+- **Contract**: `Registrar::animatable` declares a property; `Context` and `Editor` list, read and
+  write them (`properties`, `read_property`, `write_property`), with typed values
+  (`PropertyValue`); a value of the wrong type is refused, and each number is kept within the
+  range. A panic in a property's function makes its module fail, as in a command.
+- **Cube**: position from -100 to 100, rotation from -3600 to 3600 degrees on each axis. Its normals
+  go through the inverse transpose of its transform, so that its lighting stays right when its scale
+  differs between axes. Its numbers are read back as they were written (0.15, not
+  0.15000000596046448).
+- **Interpolation**: cubic between two keys with the slopes of Fritsch and Butland, flat at the
+  first and last keys and at each peak or trough.
+- **Panel**: a track's label is the property's; its value fields show the value at the playhead,
+  or the property's current value while the track has no keys. The playhead shows its frame in the
+  ruler, and the frame and time (`2:15`) beside it.
+- **File**: JSON with each track's property first and one key per line.
+- **Limits**: unsaved changes are lost when the editor closes, without a question; the playhead
+  moves and the values are written only while the *Timeline* panel is shown.
 
 ### Milestone 7: the Timeline in Montage mode (outline)
 
