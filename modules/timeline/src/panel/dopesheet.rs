@@ -1,49 +1,9 @@
-//! The panel of the timeline: the sequence and playback bars, the animated properties on the
-//! left, and the dopesheet on the right, with its ruler and playhead.
+//! The dopesheet: its rows, ruler and keys, the properties on its left, and the playhead.
 
-use std::collections::{BTreeMap, BTreeSet};
-
-use uniwow_api::curve::{self, CurveChange, CurveOptions, ShownCurve, TimeAxis};
-use uniwow_api::egui::{self, Align, Align2, Color32, FontId, Layout, Pos2, Rect, Sense, Stroke, UiBuilder, Vec2};
-use uniwow_api::serde_json::json;
-use uniwow_api::{Context, DIALOG_COMMAND, PropertyInfo, PropertyKind, PropertyValue};
-
-use crate::sequence::{KeyId, MAX_FRAME_RATE, MAX_LENGTH, Sequence, Track, frame_of};
-use crate::{Question, TimelineModule};
-
-/// Height of a row of the dopesheet.
-const ROW: f32 = 22.0;
-const RULER: f32 = 22.0;
-/// Width of the properties, left of the dopesheet.
-const LEFT: f32 = 430.0;
-/// Half the width of a key's diamond.
-const DIAMOND: f32 = 5.0;
-const ZOOM: [f32; 2] = [0.2, 200.0];
-const PLAYHEAD: Color32 = Color32::from_rgb(225, 65, 55);
-
-/// What the panel keeps between frames.
-#[derive(Default)]
-pub struct State {
-    /// The frame at the left edge of the dopesheet.
-    first_frame: f64,
-    pixels_per_frame: f32,
-    /// Set once the dopesheet fits the sequence shown.
-    pub fitted: bool,
-    gesture: Gesture,
-    /// The sequence and its unsaved mark before a change made over several frames, such as a
-    /// value dragged, recorded as one undo entry when it ends.
-    editing: Option<(String, Sequence, bool)>,
-    new_name: String,
-    message: Option<String>,
-    /// The properties whose numbers have rows of their own.
-    unfolded: BTreeSet<String>,
-    curves: bool,
-    /// The numbers whose curves the Curves view does not show.
-    hidden: BTreeSet<(String, usize)>,
-}
+use super::*;
 
 #[derive(Default)]
-enum Gesture {
+pub(super) enum Gesture {
     #[default]
     None,
     /// The selected keys dragged, from and to these x.
@@ -53,7 +13,7 @@ enum Gesture {
 }
 
 /// A row of the dopesheet, with the keys it shows.
-enum Row {
+pub(super) enum Row {
     /// Every key of the sequence.
     Summary,
     /// The keys of one module's tracks.
@@ -64,321 +24,8 @@ enum Row {
     Number(usize, usize),
 }
 
-/// Where frames are drawn.
-#[derive(Clone, Copy)]
-struct View {
-    left: f32,
-    first: f64,
-    pixels_per_frame: f32,
-}
-
-impl View {
-    fn x(self, frame: f64) -> f32 {
-        self.left + ((frame - self.first) as f32) * self.pixels_per_frame
-    }
-
-    fn frame(self, x: f32) -> f64 {
-        self.first + f64::from((x - self.left) / self.pixels_per_frame)
-    }
-}
-
-pub fn show(timeline: &mut TimelineModule, ui: &mut egui::Ui, ctx: &mut Context) {
-    let declared: BTreeMap<String, PropertyInfo> = timeline
-        .editor
-        .as_ref()
-        .map(|editor| editor.properties())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|info| (info.path.clone(), info))
-        .collect();
-    sequence_bar(timeline, ui, ctx);
-    if let Some(message) = &timeline.panel.message {
-        ui.colored_label(ui.visuals().warn_fg_color, message);
-    }
-    let Some(sequence) = timeline.sequence().cloned() else {
-        ui.weak("No sequence shown: choose one or create one.");
-        return;
-    };
-    timeline.selection.retain(|key| sequence.has_key(key));
-    playback_bar(timeline, &sequence, &declared, ui, ctx);
-    ui.separator();
-    dopesheet(timeline, &sequence, &declared, ui, ctx);
-    keyboard(timeline, &sequence, ui, ctx);
-}
-
-/// Chooses, creates and saves sequences.
-fn sequence_bar(timeline: &mut TimelineModule, ui: &mut egui::Ui, ctx: &mut Context) {
-    let dirty = timeline
-        .current
-        .as_ref()
-        .and_then(|name| timeline.documents.get(name))
-        .is_some_and(|document| document.dirty);
-    ui.horizontal(|ui| {
-        ui.label("Sequence");
-        let shown = match &timeline.current {
-            Some(name) if dirty => format!("{name} *"),
-            Some(name) => name.clone(),
-            None => "none".to_owned(),
-        };
-        let mut chosen = None;
-        egui::ComboBox::from_id_salt("timeline-sequence")
-            .selected_text(shown)
-            .show_ui(ui, |ui| {
-                for name in &timeline.names {
-                    if ui
-                        .selectable_label(timeline.current.as_ref() == Some(name), name)
-                        .clicked()
-                    {
-                        chosen = Some(name.clone());
-                    }
-                }
-            });
-        if let Some(name) = chosen.filter(|name| timeline.current.as_ref() != Some(name)) {
-            switch(timeline, ctx, name, dirty);
-        }
-        let save = ui.add_enabled(dirty, egui::Button::new("Save"));
-        if save.clicked()
-            && let Some(name) = timeline.current.clone()
-        {
-            timeline.panel.message = timeline.save(&name).err();
-        }
-        ui.separator();
-        ui.add(
-            egui::TextEdit::singleline(&mut timeline.panel.new_name)
-                .hint_text("name")
-                .desired_width(120.0),
-        );
-        if ui.button("New").clicked() {
-            let name = timeline.panel.new_name.trim().to_owned();
-            match timeline.create(&name) {
-                Ok(()) => switch(timeline, ctx, name, dirty),
-                Err(error) => timeline.panel.message = Some(error),
-            }
-            timeline.panel.new_name.clear();
-        }
-    });
-}
-
-/// Shows another sequence. The unsaved changes of the one shown are asked about first, in a
-/// window of the module `dialogs`, which answers later; without that module, they are lost.
-fn switch(timeline: &mut TimelineModule, ctx: &mut Context, target: String, dirty: bool) {
-    if !dirty {
-        open(timeline, &target);
-        return;
-    }
-    if timeline.question.is_some() {
-        return;
-    }
-    let current = timeline.current.clone().unwrap_or_default();
-    let asked = timeline
-        .editor
-        .as_ref()
-        .is_some_and(|editor| editor.commands().iter().any(|c| c.name == DIALOG_COMMAND));
-    if !asked {
-        timeline.documents.remove(&current);
-        open(timeline, &target);
-        return;
-    }
-    let call = ctx.call(
-        DIALOG_COMMAND,
-        json!({
-            "title": "Unsaved changes",
-            "text": format!("The sequence '{current}' has unsaved changes. Save them before showing '{target}'?"),
-            "buttons": [
-                { "id": "save", "label": "Save" },
-                { "id": "discard", "label": "Don't save" },
-                { "id": "cancel", "label": "Cancel" },
-            ],
-            "escape": "cancel",
-        }),
-    );
-    timeline.question = Some(Question {
-        call,
-        dialog: None,
-        target,
-    });
-}
-
-impl State {
-    /// A message shown under the sequence bar.
-    pub fn say(&mut self, message: &str) {
-        self.message = Some(message.to_owned());
-    }
-}
-
-/// Shows the sequence `name`, or says why it cannot.
-pub fn open(timeline: &mut TimelineModule, name: &str) {
-    timeline.panel.message = timeline.open(name).err();
-    timeline.panel.editing = None;
-}
-
-/// Playback, the frame, the frame rate and the length, and the properties to add.
-fn playback_bar(
-    timeline: &mut TimelineModule,
-    sequence: &Sequence,
-    declared: &BTreeMap<String, PropertyInfo>,
-    ui: &mut egui::Ui,
-    ctx: &mut Context,
-) {
-    let frames = sequence.key_frames();
-    let at = timeline.playhead.round() as u32;
-    ui.horizontal(|ui| {
-        if ui.button("⏮").on_hover_text("First frame").clicked() {
-            timeline.playing = None;
-            timeline.playhead = 0.0;
-        }
-        let previous = frames.range(..at).next_back().copied();
-        if ui
-            .add_enabled(previous.is_some(), egui::Button::new("◀"))
-            .on_hover_text("Previous key")
-            .clicked()
-        {
-            timeline.playing = None;
-            timeline.playhead = f64::from(previous.unwrap_or(0));
-        }
-        let playing = timeline.playing.is_some();
-        if ui
-            .button(if playing { "⏸" } else { "▶" })
-            .on_hover_text("Play or pause (Space)")
-            .clicked()
-        {
-            toggle_playback(timeline);
-        }
-        let next = frames.range(at + 1..).next().copied();
-        if ui
-            .add_enabled(next.is_some(), egui::Button::new("▶|"))
-            .on_hover_text("Next key")
-            .clicked()
-        {
-            timeline.playing = None;
-            timeline.playhead = f64::from(next.unwrap_or(0));
-        }
-        if ui.button("⏭").on_hover_text("Last frame").clicked() {
-            timeline.playing = None;
-            timeline.playhead = f64::from(sequence.length);
-        }
-        ui.checkbox(&mut timeline.looping, "Loop");
-        ui.separator();
-
-        ui.label("Frame");
-        let mut frame = at;
-        if ui
-            .add(
-                egui::DragValue::new(&mut frame)
-                    .range(0..=sequence.length)
-                    .clamp_existing_to_range(false),
-            )
-            .changed()
-        {
-            timeline.playing = None;
-            timeline.playhead = f64::from(frame);
-        }
-        ui.label("Frame rate");
-        let mut frame_rate = sequence.frame_rate;
-        let response = ui.add(
-            egui::DragValue::new(&mut frame_rate)
-                .range(1..=MAX_FRAME_RATE)
-                .update_while_editing(false),
-        );
-        if response.changed() {
-            change_live(timeline, "frame rate", |s| s.frame_rate = frame_rate);
-        }
-        let mut finished = ended(&response);
-        ui.label("Length");
-        let mut length = sequence.length;
-        let response = ui.add(
-            egui::DragValue::new(&mut length)
-                .range(1..=MAX_LENGTH)
-                .update_while_editing(false),
-        );
-        if response.changed() {
-            change_live(timeline, "length", |s| s.length = length);
-        }
-        finished |= ended(&response);
-        if finished {
-            finish_editing(timeline, ctx);
-        }
-        ui.separator();
-        if ui.selectable_label(!timeline.panel.curves, "Dopesheet").clicked() {
-            timeline.panel.curves = false;
-        }
-        if ui.selectable_label(timeline.panel.curves, "Curves").clicked() {
-            timeline.panel.curves = true;
-        }
-        ui.separator();
-
-        let addable: Vec<&PropertyInfo> = declared
-            .values()
-            .filter(|info| sequence.track(&info.path).is_none())
-            .collect();
-        ui.add_enabled_ui(!addable.is_empty(), |ui| {
-            ui.menu_button("Add property", |ui| {
-                for info in addable {
-                    if ui.button(format!("{}: {}", info.owner, info.label)).clicked() {
-                        let mut after = sequence.clone();
-                        after.tracks.push(Track::new(&info.path, info.kind));
-                        timeline.edit(ctx, &format!("add {}", info.label), after);
-                        ui.close();
-                    }
-                }
-            });
-        });
-    });
-}
-
-fn toggle_playback(timeline: &mut TimelineModule) {
-    if timeline.playing.take().is_none() {
-        timeline.play();
-    }
-}
-
-/// Whether a value being changed over several frames is done with.
-fn ended(response: &egui::Response) -> bool {
-    response.drag_stopped()
-        || response.lost_focus()
-        || (response.changed() && !response.dragged() && !response.has_focus())
-}
-
-/// Changes the shown sequence at once, for a change made over several frames: `finish_editing`
-/// records it as one undo entry.
-fn change_live(timeline: &mut TimelineModule, label: &str, change: impl FnOnce(&mut Sequence)) {
-    let Some(document) = timeline
-        .current
-        .as_ref()
-        .and_then(|name| timeline.documents.get_mut(name))
-    else {
-        return;
-    };
-    if timeline.panel.editing.is_none() {
-        timeline.panel.editing = Some((label.to_owned(), document.sequence.clone(), document.dirty));
-    }
-    change(&mut document.sequence);
-    document.dirty = true;
-    timeline.keys_changed = true;
-}
-
-/// Puts the sequence back as it was before the change, and records the change as one undo entry.
-fn finish_editing(timeline: &mut TimelineModule, ctx: &mut Context) {
-    let Some((label, before, dirty)) = timeline.panel.editing.take() else {
-        return;
-    };
-    let Some(document) = timeline
-        .current
-        .as_ref()
-        .and_then(|name| timeline.documents.get_mut(name))
-    else {
-        return;
-    };
-    let after = std::mem::replace(&mut document.sequence, before);
-    if after == document.sequence {
-        document.dirty = dirty;
-    } else {
-        timeline.edit(ctx, &label, after);
-    }
-}
-
 /// The rows of the dopesheet: every key, then each module's tracks under its name.
-fn rows(sequence: &Sequence, unfolded: &BTreeSet<String>) -> Vec<Row> {
+pub(super) fn rows(sequence: &Sequence, unfolded: &BTreeSet<String>) -> Vec<Row> {
     let mut rows = vec![Row::Summary];
     let mut owners: Vec<&str> = Vec::new();
     for track in &sequence.tracks {
@@ -401,12 +48,8 @@ fn rows(sequence: &Sequence, unfolded: &BTreeSet<String>) -> Vec<Row> {
     rows
 }
 
-fn owner(path: &str) -> &str {
-    path.split_once('/').map_or(path, |(owner, _)| owner)
-}
-
 /// The keys a row shows, by frame.
-fn row_keys(sequence: &Sequence, row: &Row) -> BTreeMap<u32, Vec<KeyId>> {
+pub(super) fn row_keys(sequence: &Sequence, row: &Row) -> BTreeMap<u32, Vec<KeyId>> {
     let mut keys: BTreeMap<u32, Vec<KeyId>> = BTreeMap::new();
     let (tracks, only): (Vec<&Track>, Option<usize>) = match row {
         Row::Summary => (sequence.tracks.iter().collect(), None),
@@ -437,33 +80,7 @@ fn row_keys(sequence: &Sequence, row: &Row) -> BTreeMap<u32, Vec<KeyId>> {
     keys
 }
 
-/// The names of a property's numbers.
-pub fn number_names(kind: PropertyKind) -> &'static [&'static str] {
-    match kind {
-        PropertyKind::Vector => &["x", "y", "z"],
-        PropertyKind::Colour => &["red", "green", "blue"],
-        PropertyKind::Number | PropertyKind::Boolean => &["value"],
-    }
-}
-
-/// The colour a number's curve is drawn in.
-pub fn number_colour(kind: PropertyKind, number: usize) -> Color32 {
-    match (kind.components(), number) {
-        (3, 0) => Color32::from_rgb(220, 70, 60),
-        (3, 1) => Color32::from_rgb(80, 170, 60),
-        (3, _) => Color32::from_rgb(60, 120, 230),
-        _ => Color32::from_rgb(230, 160, 40),
-    }
-}
-
-fn label(track: &Track, declared: &BTreeMap<String, PropertyInfo>) -> String {
-    declared.get(&track.property).map_or_else(
-        || track.property.rsplit('/').next().unwrap_or(&track.property).to_owned(),
-        |info| info.label.clone(),
-    )
-}
-
-fn dopesheet(
+pub(super) fn dopesheet(
     timeline: &mut TimelineModule,
     sequence: &Sequence,
     declared: &BTreeMap<String, PropertyInfo>,
@@ -510,7 +127,7 @@ fn dopesheet(
         });
 }
 
-fn draw_ruler(
+pub(super) fn draw_ruler(
     timeline: &mut TimelineModule,
     sequence: &Sequence,
     ui: &mut egui::Ui,
@@ -572,13 +189,13 @@ fn draw_ruler(
 }
 
 /// Seconds and frames, as `1:15`.
-fn time_label(frame: i64, frame_rate: u32) -> String {
+pub(super) fn time_label(frame: i64, frame_rate: u32) -> String {
     let rate = i64::from(frame_rate.max(1));
     format!("{}:{:02}", frame / rate, frame % rate)
 }
 
 /// Frames between two labels of the ruler, at least 50 pixels apart.
-fn tick_step(pixels_per_frame: f32, frame_rate: u32) -> u32 {
+pub(super) fn tick_step(pixels_per_frame: f32, frame_rate: u32) -> u32 {
     let mut steps: Vec<u32> = vec![1, 2, 5, 10];
     steps.extend([1, 2, 5, 10, 30, 60, 120, 300, 600, 1800, 3600].map(|seconds| seconds * frame_rate));
     steps.sort_unstable();
@@ -591,7 +208,7 @@ fn tick_step(pixels_per_frame: f32, frame_rate: u32) -> u32 {
 /// The left side of a row: a module's name, a property with the values of its numbers at the
 /// playhead, or one of those numbers.
 #[allow(clippy::too_many_arguments)]
-fn properties_row(
+pub(super) fn properties_row(
     timeline: &mut TimelineModule,
     sequence: &Sequence,
     declared: &BTreeMap<String, PropertyInfo>,
@@ -765,119 +382,8 @@ fn properties_row(
     }
 }
 
-/// A box showing or hiding the curves of these numbers in the Curves view.
-fn shown_box(timeline: &mut TimelineModule, property: &str, numbers: std::ops::Range<usize>, ui: &mut egui::Ui) {
-    let hidden = &mut timeline.panel.hidden;
-    let mut shown = numbers.clone().any(|n| !hidden.contains(&(property.to_owned(), n)));
-    if ui
-        .checkbox(&mut shown, "")
-        .on_hover_text("Show the curve in the Curves view")
-        .changed()
-    {
-        for number in numbers {
-            let key = (property.to_owned(), number);
-            if shown {
-                hidden.remove(&key);
-            } else {
-                hidden.insert(key);
-            }
-        }
-    }
-}
-
-/// The Curves view: the properties on the left, the curve editor of the module `curves` on the
-/// right, its time following the ruler's.
-#[allow(clippy::too_many_arguments)]
-fn curves_side(
-    timeline: &mut TimelineModule,
-    sequence: &Sequence,
-    declared: &BTreeMap<String, PropertyInfo>,
-    rows: &[Row],
-    ui: &mut egui::Ui,
-    ctx: &mut Context,
-    view: View,
-) {
-    let body = ui.available_rect_before_wrap();
-    ui.allocate_rect(body, Sense::hover());
-    let mut left =
-        ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(body.min, egui::pos2(view.left, body.bottom()))));
-    egui::ScrollArea::vertical()
-        .id_salt("timeline-curve-rows")
-        .auto_shrink([false, false])
-        .show(&mut left, |ui| {
-            let (area, _) = ui.allocate_exact_size(egui::vec2(LEFT, rows.len() as f32 * ROW), Sense::hover());
-            for (index, row) in rows.iter().enumerate() {
-                let rect = Rect::from_min_size(area.min + egui::vec2(0.0, index as f32 * ROW), egui::vec2(LEFT, ROW));
-                properties_row(timeline, sequence, declared, row, rect, ui, ctx);
-            }
-        });
-    let mut right =
-        ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(egui::pos2(view.left, body.top()), body.max)));
-    let Some(editor) = ctx.service(curve::SERVICE) else {
-        right.centered_and_justified(|ui| {
-            ui.weak("No curve editor: the module curves is not running.");
-        });
-        return;
-    };
-    // The curves of the numbers, a boolean holding its value from key to key without a curve.
-    let mut shown = Vec::new();
-    let mut origin = Vec::new();
-    for (index, track) in sequence.tracks.iter().enumerate() {
-        if track.kind == PropertyKind::Boolean {
-            continue;
-        }
-        let name = label(track, declared);
-        for (number, curve) in track.curves.iter().enumerate() {
-            let colour = number_colour(track.kind, number);
-            shown.push(ShownCurve {
-                label: format!("{name}.{}", number_names(track.kind)[number]),
-                colour: [colour.r(), colour.g(), colour.b()],
-                curve: curve.clone(),
-                visible: !timeline.panel.hidden.contains(&(track.property.clone(), number)),
-            });
-            origin.push((index, number));
-        }
-    }
-    let mut time = TimeAxis {
-        first: view.first,
-        pixels_per_unit: view.pixels_per_frame,
-    };
-    let options = CurveOptions {
-        snap: Some(1.0),
-        playhead: Some(timeline.playhead),
-        span: Some([0.0, f64::from(sequence.length)]),
-    };
-    let id = right.id().with("timeline-curves");
-    let shown_before = shown.clone();
-    let change = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        editor.show(&mut right, id, &mut shown, &mut time, &options)
-    })) {
-        Ok(change) => change,
-        Err(_) => {
-            // The curve editor's fault, not the Timeline's (F5): its sequences stay.
-            if let Some(provider) = ctx.service_provider(curve::SERVICE) {
-                ctx.report_failure(&provider, "the curve editor panicked in the Timeline");
-            }
-            shown = shown_before;
-            CurveChange::None
-        }
-    };
-    timeline.panel.first_frame = time.first;
-    timeline.panel.pixels_per_frame = time.pixels_per_unit;
-    if change != CurveChange::None {
-        change_live(timeline, "edit curves", |s| {
-            for ((index, number), edited) in origin.iter().zip(shown) {
-                s.tracks[*index].curves[*number] = edited.curve;
-            }
-        });
-        if change == CurveChange::Finished {
-            finish_editing(timeline, ctx);
-        }
-    }
-}
-
 /// The wheel zooms the time around the pointer, the middle button scrolls it.
-fn navigate(timeline: &mut TimelineModule, ui: &mut egui::Ui, dope: Rect, view: View) {
+pub(super) fn navigate(timeline: &mut TimelineModule, ui: &mut egui::Ui, dope: Rect, view: View) {
     if !ui.rect_contains_pointer(dope) {
         return;
     }
@@ -905,7 +411,7 @@ fn navigate(timeline: &mut TimelineModule, ui: &mut egui::Ui, dope: Rect, view: 
 
 /// The keys as diamonds, their selection, moves and box, and the playhead across the rows.
 #[allow(clippy::too_many_arguments)]
-fn keys_area(
+pub(super) fn keys_area(
     timeline: &mut TimelineModule,
     sequence: &Sequence,
     declared: &BTreeMap<String, PropertyInfo>,
@@ -1075,7 +581,7 @@ fn keys_area(
     );
 }
 
-fn diamond(painter: &egui::Painter, centre: Pos2, fill: Color32, outline: Color32) {
+pub(super) fn diamond(painter: &egui::Painter, centre: Pos2, fill: Color32, outline: Color32) {
     let points = vec![
         centre + Vec2::new(0.0, -DIAMOND),
         centre + Vec2::new(DIAMOND, 0.0),
@@ -1083,82 +589,4 @@ fn diamond(painter: &egui::Painter, centre: Pos2, fill: Color32, outline: Color3
         centre + Vec2::new(-DIAMOND, 0.0),
     ];
     painter.add(egui::Shape::convex_polygon(points, fill, Stroke::new(1.0, outline)));
-}
-
-enum Icon {
-    /// A diamond: add a key.
-    Key,
-    /// A cross: remove.
-    Remove,
-    /// A triangle pointing right: rows to show.
-    Folded,
-    /// A triangle pointing down: rows shown.
-    Unfolded,
-}
-
-/// A small button with a drawn icon, the fonts having no such characters.
-fn icon_button(ui: &mut egui::Ui, icon: Icon) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(ROW - 4.0, ROW - 4.0), Sense::click());
-    let style = ui.style().interact(&response);
-    let painter = ui.painter();
-    painter.rect_filled(rect, 2.0, style.weak_bg_fill);
-    let (centre, size) = (rect.center(), 4.0);
-    match icon {
-        Icon::Key => {
-            let points = vec![
-                centre + Vec2::new(0.0, -size),
-                centre + Vec2::new(size, 0.0),
-                centre + Vec2::new(0.0, size),
-                centre + Vec2::new(-size, 0.0),
-            ];
-            painter.add(egui::Shape::convex_polygon(points, style.fg_stroke.color, Stroke::NONE));
-        }
-        Icon::Folded | Icon::Unfolded => {
-            let points = if matches!(icon, Icon::Folded) {
-                vec![
-                    centre + Vec2::new(-size * 0.6, -size),
-                    centre + Vec2::new(size, 0.0),
-                    centre + Vec2::new(-size * 0.6, size),
-                ]
-            } else {
-                vec![
-                    centre + Vec2::new(-size, -size * 0.6),
-                    centre + Vec2::new(size, -size * 0.6),
-                    centre + Vec2::new(0.0, size),
-                ]
-            };
-            painter.add(egui::Shape::convex_polygon(points, style.fg_stroke.color, Stroke::NONE));
-        }
-        Icon::Remove => {
-            let stroke = Stroke::new(1.5, style.fg_stroke.color);
-            painter.line_segment([centre + Vec2::splat(-size), centre + Vec2::splat(size)], stroke);
-            painter.line_segment(
-                [centre + Vec2::new(-size, size), centre + Vec2::new(size, -size)],
-                stroke,
-            );
-        }
-    }
-    response
-}
-
-/// Space plays or pauses and Delete removes the selected keys, while the pointer is over the
-/// panel and no field has the keyboard.
-fn keyboard(timeline: &mut TimelineModule, sequence: &Sequence, ui: &mut egui::Ui, ctx: &mut Context) {
-    let typing = ui.ctx().memory(|memory| memory.focused().is_some());
-    if typing || !ui.ui_contains_pointer() {
-        return;
-    }
-    if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space)) {
-        toggle_playback(timeline);
-    }
-    // In the Curves view, the curve editor deletes its own keys.
-    if !timeline.panel.curves
-        && !timeline.selection.is_empty()
-        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Delete))
-    {
-        let mut after = sequence.clone();
-        after.remove_keys(&timeline.selection);
-        timeline.edit(ctx, "delete keys", after);
-        timeline.selection = BTreeSet::new();
-    }
 }
