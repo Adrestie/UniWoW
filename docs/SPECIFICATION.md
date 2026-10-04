@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 5 built and validated; milestones 6 to 9 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 5 built and validated; milestone 6 proposed; milestones 7 to 10 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -150,7 +150,7 @@ The panels of compiled, Lua and Python modules, written once for every language.
 typed functions of `uniwow.h`, which numbers the objects, properties and signals below; C++ has the
 classes of `sdk/uniwow.hpp` (`uniwow::PushButton`, `button.clicked.connect(...)`), C# those of
 `sdk/UniWoW.cs` with the names of C# (`button.Clicked.Connect(...)`, `UiObject` for `QObject`); Lua
-and Python receive theirs in milestones 8 and 9.
+and Python receive theirs in milestones 9 and 10.
 
 | Object | As in Qt | Properties | Signals |
 |---|---|---|---|
@@ -683,7 +683,7 @@ As built:
 
 An interface API modelled on Qt, defined once in the core for every module that is not written in
 Rust, offered here to compiled modules with classes for C++ and C#; Lua and Python modules receive
-the same objects, with classes in their language, in milestones 8 and 9.
+the same objects, with classes in their language, in milestones 9 and 10.
 
 Measures taken first, with egui 0.36.2 as the editor uses it:
 
@@ -737,7 +737,7 @@ Content:
   coloured cards, each card dragged as one undo entry, a click on a card painting the cube in its
   colour through `cube.paint`, zoom and scroll outside the history, Add card, the selected card
   shown under the view; commands `scene.cards`, `scene.add_card` and `scene.fill` (many cards at
-  once, to measure). The Timeline is a Rust module of its own (milestones 6 and 7).
+  once, to measure). The Timeline is a Rust module of its own (milestones 6 to 8).
 - **Sample C# module** in `examples/modules/sample-csharp/` (.NET 10, NativeAOT): `cs.sum`,
   `cs.paint_from_threads` (each thread's paints as one undo entry), and a panel: a counter changed
   by buttons, a slider and a spin box, each change undoable, with a `PaintArea` drawing its history
@@ -795,47 +795,104 @@ As built:
   `scene.fill` with 10,000 cards took 0.66 s; the first frame after it, which builds the meshes,
   88 ms.
 
-### Milestone 6: animatable properties and the Timeline in Montage mode (outline)
+### Milestone 6: animatable properties and the Timeline in Animation mode (proposed)
 
-- **Animatable properties**, a contract of the core open to every module, as Unity animates any
-  field of a component: a module declares the properties it lets be animated, each with a path, a
-  type (number, vector, colour, boolean) and its range, and how they are read and written. Writing
-  one while a sequence plays enters no history. The sample cube declares its colour and its speed.
-- **`timeline` module** (Rust, egui, like the viewport), Montage mode: sequences of tracks holding
-  clips; a clip moved along its track or to another one, trimmed at either end, cut in two at the
-  playhead; edges snapping to the playhead, to the other clips and to the frames; each change one
-  undo entry. Sequences opened and saved as files (readable JSON, one sequence per file) until the
-  project model exists (section 10).
+The Animation mode comes first, as the user asked: dragging the playhead shows the cube's position,
+rotation, scale and colour change in the 3D view as it moves. The Montage mode follows in
+milestone 7, curves and recording in milestone 8.
 
-Specified in detail when milestone 5 is done.
+Content:
 
-### Milestone 7: the Timeline in Animation mode (outline)
+- **Animatable properties**, a contract of the core, as Unity animates any field of a component. A
+  Rust module declares, when it registers, each property it lets be animated: its path
+  (`<module>/<name>`), its label, its type (number, vector of three numbers, colour, boolean), its
+  range, and two functions that read and write its value, callable from any thread. The kernel
+  keeps their catalogue as it keeps the commands; the properties of a module that stops or fails
+  leave it, and a write to them is refused. A module lists the properties and reads and writes them
+  through its `Context`. A write is not an undoable change: it enters no history. Compiled, Lua and
+  Python modules declare theirs in a later milestone, through the C interface.
+- **The sample cube** declares `position` (vector, its centre, at (0, 0, 1) as now), `rotation`
+  (vector, Euler angles in degrees, applied around x, then y, then z), `scale` (vector, from 0.01 to
+  100 on each axis, 1 by default) and `colour`. Its rotation by itself disappears, with its speed:
+  the slider of its panel, the command that changed it, and `speed` in the result of `cube.color`.
+- **`timeline` module** (Rust, egui), a panel *Timeline* in the bottom area, as the Animation window
+  of Unity:
+  - **Sequence**: frame rate (30 by default), length in frames (120 by default), and one track per
+    animated property, holding keys. A key is a whole frame and a value of the property's type.
+  - **Properties** on the left: the tracks, grouped by module, each with its value at the playhead.
+    *Add property* lists the declared properties not yet in the sequence; a track can be removed.
+    Editing a value sets the key at the playhead, adding it when there is none. The key button adds
+    a key at the playhead with the property's current value, as its module holds it.
+  - **Dopesheet** on the right: a ruler in seconds and frames (`1:15`), a summary row of all the
+    keys, then one row per track with its keys as diamonds. A click selects a key, Ctrl+click adds
+    or removes one, a box drawn on the rows selects the keys inside; dragging moves the selected
+    keys by whole frames, a key landing on another of its track replacing it; Delete removes them.
+    Dragging a diamond of the summary row moves every key of its frame. The wheel zooms the time,
+    the middle button scrolls it.
+  - **Playhead**: clicked or dragged in the ruler. Each time it moves, every track is evaluated and
+    its value written to its property, so the 3D view follows it while it is dragged. Between two
+    keys the values change smoothly without overshooting them (as the *Clamped Auto* keys of Unity),
+    each number of a vector or colour on its own; a boolean keeps the value of the previous key;
+    before the first key and after the last, the value of that key.
+  - **Playback**: play and pause (also Space over the panel), first frame, previous key, next key,
+    last frame, loop, the current frame typed in a field. Playing follows the clock at the
+    sequence's frame rate and writes the values at each frame.
+  - **Undo (F2)**: each change of the sequence is one undo entry (a key added, moved, set or
+    removed, a track added or removed, the frame rate, the length); after Undo or Redo, the values
+    at the playhead are written again. Moving the playhead and playing enter no history. The
+    timeline writes only when the playhead or the keys change: a value changed elsewhere meanwhile,
+    in the cube's panel or by `cube.paint`, stays until then.
+  - **Files**: one sequence per file, readable JSON, in `sequences\` beside the executable until the
+    project model exists (section 10). The panel lists them, creates one with a name, and saves the
+    one shown, marked while it has unsaved changes; changing sequence with unsaved changes asks
+    whether to save them. A track whose property is not declared (its module absent or stopped) is
+    shown greyed, its keys kept and saved.
 
-As the Animation window of Unity, on the properties of milestone 6:
+Acceptance:
 
-- **Dopesheet**: one row per animated property, keys as diamonds; keys added, moved, deleted,
-  selected with a box, copied and pasted, snapping to the frames.
-- **Playback**: playhead dragged by hand, play, pause, loop, frame rate; the interpolated values
-  applied to the properties while it plays, outside the history.
+| Check | Expected result |
+|---|---|
+| Start the editor | The *Timeline* panel in the bottom area; the cube still, without its speed slider |
+| *Add property* | Lists the position, rotation, scale and colour of the cube |
+| Add the four tracks, a key on each at frame 0, the playhead at frame 60, other values typed | Keys at frames 0 and 60 on each track |
+| Drag the playhead between 0 and 60 | The cube moves, turns, grows or shrinks and changes colour in the 3D view while the playhead is dragged |
+| Play, with and without loop; Pause | The animation plays at the frame rate, starts again or stops at the end; Pause stops it |
+| Move a key, delete a key, select keys with a box and move them | Each action one undo entry; Ctrl+Z puts it back and the cube shows the value at the playhead |
+| Move the playhead, play | Nothing enters the history |
+| Paint the cube from its panel, without moving the playhead | The colour stays until the playhead moves |
+| Save, restart, choose the sequence | Keys, frame rate and length as saved; the file is readable JSON in `sequences\` |
+| Change sequence with unsaved changes | The panel asks whether to save them |
+| Disable `sample-cube`, restart | The timeline starts; the cube's tracks greyed, their keys kept when saving |
+| Tests, `cargo xtask check`, CI | Green |
+
+### Milestone 7: the Timeline in Montage mode (outline)
+
+Sequences of tracks holding clips; a clip moved along its track or to another one, trimmed at
+either end, cut in two at the playhead; edges snapping to the playhead, to the other clips and to
+the frames; each change one undo entry. Specified in detail when milestone 6 is done.
+
+### Milestone 8: curves and recording in the Timeline (outline)
+
 - **Curves**: the curve of each property, its keys' tangents edited (auto, linear, constant, free).
 - **Recording**: while recording, changing a property by hand sets a key at the playhead.
+- **Keys copied and pasted** in the dopesheet.
 
-Specified in detail when milestone 6 is done.
+Specified in detail when milestone 7 is done.
 
-### Milestone 8: Lua modules (outline)
+### Milestone 9: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
 hosts them through a contract of the core open to the module of any language: their own Lua state
 kept while the editor runs, commands, events, settings, the interface objects of milestone 5 with
-Lua classes, undo. Specified in detail when milestone 7 is done.
+Lua classes, undo. Specified in detail when milestone 8 is done.
 
-### Milestone 9: Python (outline)
+### Milestone 10: Python (outline)
 
 Python scripts, console and modules, with the behaviour of Lua: the host built apart and reaching
 the editor through `uniwow.h`, the embeddable distribution in `interpreters\python-3.14\`, scripts
 by tool in `scripts\python-3.14\` (the tool folder is a package), Stop even when a script catches
 exceptions, the editor starting without Python, the interface objects with Python classes.
-Specified in detail when milestone 8 is done.
+Specified in detail when milestone 9 is done.
 
 Risks verified first:
 
