@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 proposed; milestones 10 to 14 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestones 10 to 14 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -1619,11 +1619,11 @@ Acceptance, automated where possible (the shell run without a window, the tests 
 | 8.7 | The cube's colour changed in the property grid | The cube changes; one undo entry |
 | All | Tests, `cargo xtask check`, the tests of the SDK, CI | Green |
 
-### Milestone 9: live view of the world (proposed)
+### Milestone 9: live view of the world (validated)
 
 *Written by the external review from the user's request, brought up to date with milestone 8 as
-built, then completed and corrected against the code by the instance; to be validated by the user
-before anything is built.*
+built, then completed and corrected against the code by the instance; validated by the user as
+merged (5a77086).*
 
 The world of WoW as it runs now on the AzerothCore server, shown in the editor: a map with its
 terrain, buildings, doodads and water, and the creatures, NPCs, game objects and players where they
@@ -1911,6 +1911,7 @@ Each step is reviewed before the next one; the milestone is delivered once all a
 | Speed of the terrain and the models in a city (the goal to fix), and the cost of rebuilding one terrain chunk alone, for the editing to come | To measure |
 | Reading the archives from many threads at once: does it scale with the cores, or does the disk or a lock limit it? | To measure |
 | The time the interface thread spends per frame while flying fast over a city: handing over, culling, recording | To measure |
+| The bytes of animation (instances and bones) written to the GPU per frame in a crowded city | To measure |
 | What warcraft-rs reads and writes correctly in 3.3.5a, format by format; what `assets` copies of it, without `rayon` | To verify |
 | Which versions of the modern formats the extensions of WarcraftXL load, and where they find the files (their folders, loose files, FileDataIDs and listfile): the editor must read the same files from the same places | To verify |
 | What wow.export reads of those formats, and how much of it the translation takes | To verify |
