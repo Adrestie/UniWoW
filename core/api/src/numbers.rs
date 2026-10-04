@@ -37,6 +37,11 @@ numbered!(
         /// the keys of a sequence edited by hand, and the playhead of a player, drawn by the module
         /// dopesheet
         DopesheetView = 26,
+        /// items with a text and children, folded or unfolded, one current, as QTreeWidget
+        TreeView = 27,
+        /// rows of cells under headers, edited in place and sorted by a column, as QTableWidget;
+        /// only the rows in sight are drawn
+        TableView = 28,
     }
 );
 
@@ -115,6 +120,21 @@ numbered!(
         /// dopesheet view, curve view: the handle of the player whose time it shows as the
         /// playhead, 0 for none
         Player = 40,
+        /// tree view, text: JSON [{id, text, expanded, children: [...]}]; ids whole numbers from 1,
+        /// each of its own; 64 levels and 1000000 items at most
+        Items = 41,
+        /// table view, text: JSON [header, ...], 1000 columns at most
+        Columns = 42,
+        /// table view, text: JSON [{id, cells: [text, ...]}] in the module's order; ids whole
+        /// numbers from 1, each of its own; 1000000 rows at most
+        Rows = 43,
+        /// tree view, table view: the id of the current item or row, 0 for none; an id the view
+        /// does not hold is refused, and an item or row removed is no longer current
+        CurrentItem = 44,
+        /// table view: the column the rows are shown sorted by, -1 for the module's order
+        SortColumn = 45,
+        /// table view: sorted from the highest
+        SortDescending = 46,
     }
 );
 
@@ -170,6 +190,19 @@ numbered!(
         /// dopesheet view: number, the frame the user moved the playhead to, its player paused
         /// there
         PlayheadMoved = 23,
+        /// tree view: item, the id of the item clicked
+        ItemClicked = 24,
+        /// tree view: item, the id of the item now current
+        CurrentItemChanged = 25,
+        /// tree view: item, the id of the item unfolded or folded; boolean, whether unfolded
+        ItemExpanded = 26,
+        /// table view: item, the id of the row; integer, the column; text, the cell edited by hand
+        CellChanged = 27,
+        /// table view: item, the id of the row; integer, the column of the cell now current
+        CurrentCellChanged = 28,
+        /// table view: integer, the column whose header was clicked, now sorted by; boolean,
+        /// whether from the highest
+        SortChanged = 29,
     }
 );
 

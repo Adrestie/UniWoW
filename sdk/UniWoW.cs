@@ -63,6 +63,10 @@ public unsafe struct Api
     public delegate* unmanaged<IntPtr, byte*, double*, uint, uint> ReadProperty;
     public delegate* unmanaged<IntPtr, byte*, double*, uint, int> WriteProperty;
     public delegate* unmanaged<IntPtr, byte*, double*, uint, int> SetProperty;
+
+    public delegate* unmanaged<IntPtr, ulong, ulong, uint, byte*, int> SetCell;
+    public delegate* unmanaged<IntPtr, ulong, uint, byte*, int> InsertRows;
+    public delegate* unmanaged<IntPtr, ulong, ulong*, uint, int> RemoveRows;
 }
 
 /// <summary>uniwow_signal: what a slot receives; the fields its signal does not use are zero.</summary>
@@ -159,6 +163,9 @@ public enum Kind : uint
     Player = 25,        // plays a sequence, as QTimeLine; moved on by the kernel; not drawn
     DopesheetView = 26, // the keys of a sequence edited by hand, and the playhead of a player, drawn by the module
                         // dopesheet
+    TreeView = 27,      // items with a text and children, folded or unfolded, one current, as QTreeWidget
+    TableView = 28,     // rows of cells under headers, edited in place and sorted by a column, as QTableWidget; only
+                        // the rows in sight are drawn
 }
 // </generated kind>
 
@@ -172,46 +179,55 @@ public enum Property : uint
     Enabled = 3,
     Visible = 4,
     Checked = 5,
-    Value = 6,          // slider, spin box; kept within the range
+    Value = 6,           // slider, spin box; kept within the range
     Minimum = 7,
     Maximum = 8,
     Step = 9,
     Decimals = 10,
-    Placeholder = 11,   // line edit, text
-    CurrentIndex = 12,  // combo box
-    Title = 13,         // group box, text
-    Pos = 14,           // item: x, y in its parent
-    Rect = 15,          // rectangle or ellipse item: x, y, width, height
-    Line = 16,          // line item: x1, y1, x2, y2
+    Placeholder = 11,    // line edit, text
+    CurrentIndex = 12,   // combo box
+    Title = 13,          // group box, text
+    Pos = 14,            // item: x, y in its parent
+    Rect = 15,           // rectangle or ellipse item: x, y, width, height
+    Line = 16,           // line item: x1, y1, x2, y2
     PenColor = 17,
     PenWidth = 18,
     BrushColor = 19,
-    Radius = 20,        // rectangle item: corner radius
-    ZValue = 21,        // item: stacking order among its siblings
-    Movable = 22,       // item: 0 no, 1 along x, 2 along y, 3 both
+    Radius = 20,         // rectangle item: corner radius
+    ZValue = 21,         // item: stacking order among its siblings
+    Movable = 22,        // item: 0 no, 1 along x, 2 along y, 3 both
     Selectable = 23,
     Selected = 24,
-    MoveBounds = 25,    // movable item: x, y, width, height its position stays in
-    FontSize = 26,      // text item, 1 to 512, finite
-    MinimumHeight = 27, // graphics view, paint area
-    ViewScale = 28,     // graphics view: zoom
-    ViewCenter = 29,    // graphics view: x, y of the scene at its centre
-    Count = 30,         // read only: entries of a combo box, children otherwise
-    Curves = 31,        // curve view, text: JSON [{label, colour: [r, g, b], visible, keys: [{time, value, mode, left,
-                        // right}]}]; keys in time order, each at a time of its own, numbers within 1e9
-    Tracks = 32,        // sequence, text: JSON [{property, kind, curves: [{keys: [{time, value, mode, left,
-                        // right}]}]}], one curve per number of the property; keys at whole frames from 0, numbers
-                        // within 1e9; each change is an undo entry the kernel records
-    FrameRate = 33,     // sequence: frames per second, a whole number from 1 to 240
-    Length = 34,        // sequence: in frames, a whole number from 1 to 1000000
-    Sequence = 35,      // player, dopesheet view, curve view: the handle of the sequence it plays or shows, 0 for none;
-                        // a view changes it directly, each change done an undo entry the kernel records
-    Time = 36,          // player: in frames, fractional, from 0 to the length of its sequence
-    Playing = 37,       // player: 1 plays from the time, or from 0 when at the end; 0 pauses
-    Loop = 38,          // player: at the end, starts again from 0
-    Speed = 39,         // player: times the frame rate, from 0 to 100
-    Player = 40,        // dopesheet view, curve view: the handle of the player whose time it shows as the playhead, 0
-                        // for none
+    MoveBounds = 25,     // movable item: x, y, width, height its position stays in
+    FontSize = 26,       // text item, 1 to 512, finite
+    MinimumHeight = 27,  // graphics view, paint area
+    ViewScale = 28,      // graphics view: zoom
+    ViewCenter = 29,     // graphics view: x, y of the scene at its centre
+    Count = 30,          // read only: entries of a combo box, children otherwise
+    Curves = 31,         // curve view, text: JSON [{label, colour: [r, g, b], visible, keys: [{time, value, mode, left,
+                         // right}]}]; keys in time order, each at a time of its own, numbers within 1e9
+    Tracks = 32,         // sequence, text: JSON [{property, kind, curves: [{keys: [{time, value, mode, left,
+                         // right}]}]}], one curve per number of the property; keys at whole frames from 0, numbers
+                         // within 1e9; each change is an undo entry the kernel records
+    FrameRate = 33,      // sequence: frames per second, a whole number from 1 to 240
+    Length = 34,         // sequence: in frames, a whole number from 1 to 1000000
+    Sequence = 35,       // player, dopesheet view, curve view: the handle of the sequence it plays or shows, 0 for
+                         // none; a view changes it directly, each change done an undo entry the kernel records
+    Time = 36,           // player: in frames, fractional, from 0 to the length of its sequence
+    Playing = 37,        // player: 1 plays from the time, or from 0 when at the end; 0 pauses
+    Loop = 38,           // player: at the end, starts again from 0
+    Speed = 39,          // player: times the frame rate, from 0 to 100
+    Player = 40,         // dopesheet view, curve view: the handle of the player whose time it shows as the playhead, 0
+                         // for none
+    Items = 41,          // tree view, text: JSON [{id, text, expanded, children: [...]}]; ids whole numbers from 1,
+                         // each of its own; 64 levels and 1000000 items at most
+    Columns = 42,        // table view, text: JSON [header, ...], 1000 columns at most
+    Rows = 43,           // table view, text: JSON [{id, cells: [text, ...]}] in the module's order; ids whole numbers
+                         // from 1, each of its own; 1000000 rows at most
+    CurrentItem = 44,    // tree view, table view: the id of the current item or row, 0 for none; an id the view does
+                         // not hold is refused, and an item or row removed is no longer current
+    SortColumn = 45,     // table view: the column the rows are shown sorted by, -1 for the module's order
+    SortDescending = 46, // table view: sorted from the highest
 }
 // </generated property>
 
@@ -245,6 +261,13 @@ public enum SignalId : uint
                              // change is done, then made to the sequence
     PlayheadMoved = 23,      // dopesheet view: number, the frame the user moved the playhead to, its player paused
                              // there
+    ItemClicked = 24,        // tree view: item, the id of the item clicked
+    CurrentItemChanged = 25, // tree view: item, the id of the item now current
+    ItemExpanded = 26,       // tree view: item, the id of the item unfolded or folded; boolean, whether unfolded
+    CellChanged = 27,        // table view: item, the id of the row; integer, the column; text, the cell edited by hand
+    CurrentCellChanged = 28, // table view: item, the id of the row; integer, the column of the cell now current
+    SortChanged = 29,        // table view: integer, the column whose header was clicked, now sorted by; boolean,
+                             // whether from the highest
 }
 // </generated signal>
 
@@ -298,7 +321,7 @@ public static class Colors
 /// <summary>The editor, as the module reaches it.</summary>
 public static unsafe class Editor
 {
-    public const uint ApiVersion = 4;
+    public const uint ApiVersion = 5;
 
     static Api* table;
     static Action<string>? applyChange;
@@ -703,6 +726,10 @@ public readonly record struct ItemEvent(ulong Item, double X, double Y, double D
 /// <summary>What a mouse signal of a paint area carries.</summary>
 public readonly record struct MouseEvent(double X, double Y, double Dx, double Dy, uint Button, uint Modifiers);
 
+/// <summary>What a signal of a cell of a table view carries: the id of its row, its column, and the
+/// text edited by hand for CellChanged.</summary>
+public readonly record struct CellEvent(ulong Row, int Column, string Text);
+
 /// <summary>A signal carrying nothing; Connect returns the connection, for Disconnect.</summary>
 public sealed class Signal(ulong sender, SignalId id)
 {
@@ -1013,6 +1040,107 @@ public class DopesheetView : Widget
     /// <summary>The name of the row of every key.</summary>
     public void SetTitle(string title) => WriteText(Property.Title, title);
     public void SetMinimumHeight(double height) => WriteNumbers(Property.MinimumHeight, height);
+}
+
+/// <summary>Items with a text and children, as QTreeWidget: SetItems and Items take the JSON of
+/// the property ITEMS of uniwow.h, each item with an id of its own from 1. A click on an item makes
+/// it current; the triangle before an item folds or unfolds its children, kept in the
+/// items.</summary>
+public class TreeView : Widget
+{
+    public TreeView() : base(Make(Kind.TreeView))
+    {
+        ItemClicked = new Signal<ulong>(Handle, SignalId.ItemClicked, s => s.Item);
+        CurrentItemChanged = new Signal<ulong>(Handle, SignalId.CurrentItemChanged, s => s.Item);
+        ItemExpanded = new Signal<(ulong Item, bool Expanded)>(Handle, SignalId.ItemExpanded,
+                                                                s => (s.Item, s.Boolean != 0));
+    }
+
+    public Signal<ulong> ItemClicked { get; }
+    public Signal<ulong> CurrentItemChanged { get; }
+    public Signal<(ulong Item, bool Expanded)> ItemExpanded { get; }
+
+    public void SetItems(string json) => WriteText(Property.Items, json);
+    public string Items() => ReadText(Property.Items);
+    /// <summary>0 for none.</summary>
+    public void SetCurrentItem(ulong id) => WriteNumbers(Property.CurrentItem, id);
+    public ulong CurrentItem() => (ulong)ReadNumber(Property.CurrentItem);
+    public void SetMinimumHeight(double height) => WriteNumbers(Property.MinimumHeight, height);
+}
+
+/// <summary>Rows of cells under headers, as QTableWidget: SetColumns takes the JSON of the property
+/// COLUMNS of uniwow.h, SetRows and Rows the JSON of ROWS, each row with an id of its own from 1,
+/// in the module's order. Only the rows in sight are drawn. A click on a header shows the rows
+/// sorted by its column, then from the highest, the module's order kept. A double click edits a
+/// cell in place: CellChanged gives the text, kept in the rows.</summary>
+public unsafe class TableView : Widget
+{
+    public TableView() : base(Make(Kind.TableView))
+    {
+        CellChanged = CellSignal(SignalId.CellChanged);
+        CurrentCellChanged = CellSignal(SignalId.CurrentCellChanged);
+        SortChanged = new Signal<(int Column, bool Descending)>(Handle, SignalId.SortChanged,
+                                                                 s => ((int)s.Integer, s.Boolean != 0));
+    }
+
+    public Signal<CellEvent> CellChanged { get; }
+    public Signal<CellEvent> CurrentCellChanged { get; }
+    public Signal<(int Column, bool Descending)> SortChanged { get; }
+
+    public void SetColumns(string json) => WriteText(Property.Columns, json);
+    public string Columns() => ReadText(Property.Columns);
+    public void SetRows(string json) => WriteText(Property.Rows, json);
+    public string Rows() => ReadText(Property.Rows);
+
+    /// <summary>One cell of the row of id <paramref name="row"/>, without giving the rows
+    /// again.</summary>
+    public bool SetCell(ulong row, int column, string text)
+    {
+        if (column < 0)
+        {
+            return false;
+        }
+        using var copy = new Utf8(text);
+        return Table->SetCell(Context, Handle, row, (uint)column, copy.Pointer) == 0;
+    }
+
+    /// <summary>Rows inserted at <paramref name="at"/> in the module's order, given as the JSON of
+    /// ROWS.</summary>
+    public bool InsertRows(int at, string json)
+    {
+        if (at < 0)
+        {
+            return false;
+        }
+        using var copy = new Utf8(json);
+        return Table->InsertRows(Context, Handle, (uint)at, copy.Pointer) == 0;
+    }
+
+    public bool RemoveRows(params ReadOnlySpan<ulong> ids)
+    {
+        fixed (ulong* rows = ids)
+        {
+            return Table->RemoveRows(Context, Handle, rows, (uint)ids.Length) == 0;
+        }
+    }
+
+    /// <summary>The id of the current row, 0 for none.</summary>
+    public void SetCurrentRow(ulong id) => WriteNumbers(Property.CurrentItem, id);
+    public ulong CurrentRow() => (ulong)ReadNumber(Property.CurrentItem);
+
+    /// <summary>-1 for the module's order.</summary>
+    public void SortByColumn(int column, bool descending = false)
+    {
+        WriteNumbers(Property.SortColumn, column);
+        WriteNumbers(Property.SortDescending, Flag(descending));
+    }
+
+    public int SortColumn() => (int)ReadNumber(Property.SortColumn);
+    public bool SortDescending() => ReadNumber(Property.SortDescending) != 0.0;
+    public void SetMinimumHeight(double height) => WriteNumbers(Property.MinimumHeight, height);
+
+    Signal<CellEvent> CellSignal(SignalId id) =>
+        new(Handle, id, s => new CellEvent(s.Item, (int)s.Integer, s.Text));
 }
 
 /// <summary>Tracks of keys on animatable properties, with a frame rate and a length, as in the

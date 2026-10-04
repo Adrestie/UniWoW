@@ -8,6 +8,7 @@ use std::sync::Arc;
 use super::{Reply, UserPointer, c_text, guarded, module, read, reply_with};
 use uniwow_api::curve::ShownCurve;
 use uniwow_api::sequence::{self, Sequence, Track};
+use uniwow_api::ui::data::{self, Row, Table as TableData, TreeItem};
 use uniwow_api::ui::{self, Kind, PaintCommand, Property, Signal, SignalData, Ui};
 
 /// What a slot receives; the fields its signal does not use are zero.
@@ -143,10 +144,13 @@ extern "C" fn add_to(
     })
 }
 
-/// Curves or tracks read from their JSON.
+/// Curves, tracks, items, rows or columns read from their JSON.
 enum Read {
     Curves(Result<Vec<ShownCurve>, String>),
     Tracks(Result<Vec<Track>, String>),
+    Items(Result<Vec<TreeItem>, String>),
+    Rows(Result<Vec<Row>, String>),
+    Columns(Result<Vec<String>, String>),
 }
 
 extern "C" fn set_text(context: *mut c_void, object: u64, which: u32, text: *const c_char) -> i32 {
@@ -156,11 +160,17 @@ extern "C" fn set_text(context: *mut c_void, object: u64, which: u32, text: *con
     let parsed = match (&which, &text) {
         (Ok(Property::Curves), Ok(text)) => Some(Read::Curves(ui::read_curves(text))),
         (Ok(Property::Tracks), Ok(text)) => Some(Read::Tracks(ui::read_tracks(text))),
+        (Ok(Property::Items), Ok(text)) => Some(Read::Items(ui::read_items(text))),
+        (Ok(Property::Rows), Ok(text)) => Some(Read::Rows(ui::read_rows(text))),
+        (Ok(Property::Columns), Ok(text)) => Some(Read::Columns(ui::read_columns(text))),
         _ => None,
     };
     with_ui(context, "set_text", 1, |ui| match parsed {
         Some(Read::Curves(curves)) => status(ui.set_curves(object, curves?)),
         Some(Read::Tracks(tracks)) => status(ui.set_tracks(object, tracks?)),
+        Some(Read::Items(items)) => status(ui.set_items(object, items?)),
+        Some(Read::Rows(rows)) => status(ui.set_rows(object, rows?)),
+        Some(Read::Columns(columns)) => status(ui.set_columns(object, columns?)),
         None => status(ui.set_text(object, which?, &text?)),
     })
 }
@@ -181,6 +191,8 @@ enum Copied {
     Text(String),
     Curves(Vec<ShownCurve>),
     Sequence(std::sync::Arc<Sequence>),
+    Items(std::sync::Arc<Vec<TreeItem>>),
+    Table(std::sync::Arc<TableData>),
 }
 
 extern "C" fn text(
@@ -197,6 +209,8 @@ extern "C" fn text(
             match which {
                 Property::Curves => ui.curves(object).map(Copied::Curves),
                 Property::Tracks => ui.sequence(object).map(Copied::Sequence),
+                Property::Items => ui.items(object).map(Copied::Items),
+                Property::Rows => ui.table(object).map(Copied::Table),
                 _ => ui.text(object, which).map(Copied::Text),
             }
         });
@@ -211,12 +225,47 @@ extern "C" fn text(
                 reply_context,
                 &sequence::tracks_to_json(&data.tracks).to_string(),
             ),
+            Ok(Copied::Items(items)) => reply_with(reply, reply_context, &data::items_to_json(&items).to_string()),
+            Ok(Copied::Table(table)) => reply_with(reply, reply_context, &data::rows_to_json(table.rows()).to_string()),
             Err(error) => {
                 module.refuse("text", &error);
                 return 1;
             }
         }
         0
+    })
+}
+
+/// One cell of a table view, of the row `row`.
+pub(super) extern "C" fn set_cell(context: *mut c_void, table: u64, row: u64, column: u32, text: *const c_char) -> i32 {
+    let text = read(text);
+    with_ui(context, "set_cell", 1, |ui| {
+        status(ui.set_cell(table, row, column as usize, &text?))
+    })
+}
+
+/// Rows inserted at `at` in the module's order of a table view, given as the JSON of `ROWS`.
+pub(super) extern "C" fn insert_rows(context: *mut c_void, table: u64, at: u32, rows: *const c_char) -> i32 {
+    // Read before taking the lock, as the rows set whole.
+    let rows = read(rows).and_then(|rows| ui::read_rows(&rows));
+    with_ui(context, "insert_rows", 1, |ui| {
+        status(ui.insert_rows(table, at as usize, rows?))
+    })
+}
+
+/// The rows of these ids removed from a table view.
+pub(super) extern "C" fn remove_rows(context: *mut c_void, table: u64, rows: *const u64, count: u32) -> i32 {
+    with_ui(context, "remove_rows", 1, |ui| {
+        if rows.is_null() && count > 0 {
+            return Err("no rows".to_owned());
+        }
+        let ids = if count == 0 {
+            &[][..]
+        } else {
+            // SAFETY: the module passes `count` ids.
+            unsafe { std::slice::from_raw_parts(rows, count as usize) }
+        };
+        ui.remove_rows(table, ids).map(|_| 0)
     })
 }
 
@@ -387,7 +436,7 @@ mod tests {
     use std::ffi::{CStr, c_char, c_void};
     use std::sync::{Arc, OnceLock};
 
-    use super::{create, panel, set_text, text};
+    use super::{create, insert_rows, panel, remove_rows, set_cell, set_text, text};
     use crate::capi::ModuleContext;
     use uniwow_api::ui::{Kind, Property, Ui};
 
@@ -466,6 +515,48 @@ mod tests {
             set_text(context, sequence, Property::Tracks as u32, between.as_ptr()),
             1,
             "between frames"
+        );
+    }
+
+    #[test]
+    fn the_rows_of_a_table_cross_the_c_functions() {
+        let module: &'static ModuleContext = Box::leak(Box::new(ModuleContext {
+            id: "test".to_owned(),
+            editor: OnceLock::new(),
+            ui: Ui::new(Arc::new(|job| job())),
+            activity: Arc::default(),
+            apply: OnceLock::new(),
+            properties: OnceLock::new(),
+        }));
+        let context = std::ptr::from_ref(module).cast_mut().cast::<c_void>();
+        let table = create(context, Kind::TableView as u32, 0);
+        let rows = c"[{\"id\":1,\"cells\":[\"a\"]},{\"id\":2,\"cells\":[\"b\"]}]";
+        assert_eq!(set_text(context, table, Property::Rows as u32, rows.as_ptr()), 0);
+        assert_eq!(set_cell(context, table, 2, 1, c"x".as_ptr()), 0);
+        assert_eq!(
+            set_cell(context, table, 9, 0, c"x".as_ptr()),
+            1,
+            "a row it does not hold"
+        );
+        let third = c"[{\"id\":3,\"cells\":[\"c\"]}]";
+        assert_eq!(insert_rows(context, table, 1, third.as_ptr()), 0);
+        assert_eq!(insert_rows(context, table, 0, third.as_ptr()), 1, "an id taken");
+        assert_eq!(insert_rows(context, table, 0, c"[{".as_ptr()), 1, "not JSON");
+        let gone = [1u64, 9];
+        assert_eq!(remove_rows(context, table, gone.as_ptr(), 2), 0);
+        assert_eq!(remove_rows(context, table, std::ptr::null(), 1), 1, "no ids");
+        assert_eq!(remove_rows(context, table, std::ptr::null(), 0), 0, "none to remove");
+        let mut seen = Seen {
+            context: context as usize,
+            ..Seen::default()
+        };
+        let target = std::ptr::from_mut(&mut seen).cast::<c_void>();
+        assert_eq!(text(context, table, Property::Rows as u32, Some(answer), target), 0);
+        let rows: uniwow_api::serde_json::Value = uniwow_api::serde_json::from_str(&seen.text).unwrap();
+        assert_eq!(
+            rows,
+            uniwow_api::serde_json::json!([{ "id": 3, "cells": ["c"] }, { "id": 2, "cells": ["b", "x"] }]),
+            "inserted at its place, removed, a cell set beyond the row's"
         );
     }
 }

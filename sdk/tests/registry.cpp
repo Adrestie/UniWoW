@@ -45,6 +45,24 @@ int32_t fake_set_numbers(void *, uniwow_handle object, uint32_t property, const 
     return 0;
 }
 
+// The last cell set and the last ids removed from a table view.
+uint64_t cell_row = 0;
+uint32_t cell_column = 0;
+std::string cell_text;
+int cell_calls = 0;
+int32_t fake_set_cell(void *, uniwow_handle, uint64_t row, uint32_t column, const char *text) {
+    cell_row = row;
+    cell_column = column;
+    cell_text = text;
+    ++cell_calls;
+    return 0;
+}
+std::vector<uint64_t> removed_ids;
+int32_t fake_remove_rows(void *, uniwow_handle, const uint64_t *rows, uint32_t count) {
+    removed_ids.assign(rows, rows + count);
+    return 0;
+}
+
 // Counts the slot functions destroyed.
 int destroyed_slots = 0;
 struct Tracker {
@@ -71,6 +89,8 @@ int main() {
     api.disconnect = fake_disconnect;
     api.log = fake_log;
     api.set_property = fake_set_property;
+    api.set_cell = fake_set_cell;
+    api.remove_rows = fake_remove_rows;
     uniwow::start(&api);
 
     int calls = 0;
@@ -170,6 +190,44 @@ int main() {
     changed.boolean = 1;
     fake_connections[edited].slot(fake_connections[edited].user, &changed);
     expect(tracks == "[]" && done, "keysChanged gives the tracks and whether the change is done");
+
+    uniwow::TreeView tree;
+    uint64_t unfolded_item = 0;
+    bool unfolded = false;
+    const uint64_t folded = tree.itemExpanded.connect([&](uint64_t item, bool expanded) {
+        unfolded_item = item;
+        unfolded = expanded;
+    });
+    uniwow_signal toggled{};
+    toggled.item = 9007199254740993ULL;
+    toggled.boolean = 1;
+    fake_connections[folded].slot(fake_connections[folded].user, &toggled);
+    expect(unfolded_item == 9007199254740993ULL && unfolded, "itemExpanded gives the item's id whole and whether unfolded");
+
+    uniwow::TableView table;
+    expect(table.setCell(7, 2, "x") && cell_row == 7 && cell_column == 2 && cell_text == "x",
+           "setCell gives the row's id, the column and the text");
+    expect(!table.setCell(7, -1, "y") && cell_calls == 1, "a negative column is refused before the editor");
+    expect(table.removeRows({3, 5}) && removed_ids == std::vector<uint64_t>{3, 5}, "removeRows gives the ids");
+    uniwow::CellEvent cell{};
+    const uint64_t typed = table.cellChanged.connect([&cell](const uniwow::CellEvent &event) { cell = event; });
+    uniwow_signal edited_cell{};
+    edited_cell.item = 42;
+    edited_cell.integer = 1;
+    edited_cell.text = "abc";
+    fake_connections[typed].slot(fake_connections[typed].user, &edited_cell);
+    expect(cell.row == 42 && cell.column == 1 && cell.text == "abc", "cellChanged gives the row, the column and the text");
+    int sorted_column = -2;
+    bool from_highest = false;
+    const uint64_t sorting = table.sortChanged.connect([&](int column, bool descending) {
+        sorted_column = column;
+        from_highest = descending;
+    });
+    uniwow_signal sorted{};
+    sorted.integer = 3;
+    sorted.boolean = 1;
+    fake_connections[sorting].slot(fake_connections[sorting].user, &sorted);
+    expect(sorted_column == 3 && from_highest, "sortChanged gives the column and whether from the highest");
 
     std::printf("%d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

@@ -17,7 +17,7 @@ use uniwow_api::serde_json::{self, Value, json};
 use uniwow_api::ui::{self, Post, SharedUi, Ui};
 use uniwow_api::{DockArea, Editor, PanelSpec, log};
 
-const API_VERSION: u32 = 4;
+const API_VERSION: u32 = 5;
 /// The name under which a compiled module exports its entry point.
 pub const INIT_SYMBOL: &[u8] = b"uniwow_module_init\0";
 
@@ -53,6 +53,9 @@ pub struct Api {
     read_property: extern "C" fn(*mut c_void, *const c_char, *mut f64, u32) -> u32,
     write_property: extern "C" fn(*mut c_void, *const c_char, *const f64, u32) -> i32,
     set_property: extern "C" fn(*mut c_void, *const c_char, *const f64, u32) -> i32,
+    set_cell: extern "C" fn(*mut c_void, u64, u64, u32, *const c_char) -> i32,
+    insert_rows: extern "C" fn(*mut c_void, u64, u32, *const c_char) -> i32,
+    remove_rows: extern "C" fn(*mut c_void, u64, *const u64, u32) -> i32,
 }
 
 #[repr(C)]
@@ -310,6 +313,9 @@ pub fn start(init: InitFn, id: &str) -> Result<Started, String> {
         read_property: properties::api_read_property,
         write_property: properties::api_write_property,
         set_property: properties::api_set_property,
+        set_cell: objects::set_cell,
+        insert_rows: objects::insert_rows,
+        remove_rows: objects::remove_rows,
     }));
 
     let mut info = ModuleInfo {

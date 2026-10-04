@@ -13,6 +13,7 @@ use scene::{SceneView, modifiers};
 use uniwow_api::curve::{self, CurveChange, CurveEditor, CurveOptions, CurveOutput, ShownCurve, TimeAxis};
 use uniwow_api::dopesheet::{self, Dopesheet, DopesheetInput, KeysChange, RowProperty};
 use uniwow_api::sequence::{Sequence, Track, number_colour, number_names, tracks_to_json};
+use uniwow_api::ui::data::{TreeItem, find_item};
 use uniwow_api::ui::{Handle, Kind, Object, Property, SharedUi, Signal, SignalData, Ui, lock};
 use uniwow_api::{Editor, PropertyInfo, PropertyKind, egui, egui_wgpu, log};
 
@@ -44,6 +45,43 @@ pub struct PanelView {
     editing: HashMap<Handle, Editing>,
     /// Why a service failed while drawing, by service, for its provider to be reported.
     failures: Vec<(&'static str, String)>,
+    /// The cell each table view has being edited.
+    cell_edits: HashMap<Handle, CellEdit>,
+    /// What the user did in tree and table views, applied once the copy of the object drawn is
+    /// dropped, so that their data is changed in place rather than copied.
+    data_actions: Vec<(Handle, DataAction)>,
+}
+
+/// What the user did in a tree view or a table view during a frame.
+enum DataAction {
+    /// An item clicked; an item folded or unfolded, and whether now unfolded.
+    Tree {
+        clicked: Option<u64>,
+        toggled: Option<(u64, bool)>,
+    },
+    Table(TableActions),
+}
+
+/// A cell of a table view being edited in place: its row's id, its column, and the text typed.
+struct CellEdit {
+    row: u64,
+    column: usize,
+    text: String,
+    /// Whether the field has been given the keyboard.
+    focused: bool,
+}
+
+/// What the user did in a table view during a frame.
+#[derive(Default)]
+struct TableActions {
+    /// The column whose header was clicked.
+    sorted: Option<usize>,
+    /// The cell clicked, by row id and column.
+    clicked: Option<(u64, usize)>,
+    /// The cell double-clicked, to edit.
+    edit: Option<(u64, usize)>,
+    /// The text of the cell edited, done.
+    done: Option<(u64, usize, String)>,
 }
 
 /// Whose time axis a view draws on: that of a player and the sequence it shows, which the views of
@@ -160,7 +198,12 @@ fn expands(store: &Ui, handle: Handle) -> bool {
     store.object(handle).is_some_and(|object| {
         object.visible
             && match object.kind {
-                Kind::GraphicsView | Kind::PaintArea | Kind::CurveView | Kind::DopesheetView => true,
+                Kind::GraphicsView
+                | Kind::PaintArea
+                | Kind::CurveView
+                | Kind::DopesheetView
+                | Kind::TreeView
+                | Kind::TableView => true,
                 Kind::VBoxLayout | Kind::HBoxLayout | Kind::GridLayout | Kind::GroupBox => {
                     object.children.iter().any(|child| expands(store, *child))
                 }
@@ -268,6 +311,7 @@ impl PanelView {
         self.scenes.retain(|handle, _| alive(handle));
         self.painted.retain(|handle, _| alive(handle));
         self.sizes.retain(|handle, _| alive(handle));
+        self.cell_edits.retain(|handle, _| alive(handle));
         self.time_axes.retain(|key, _| match key {
             AxisKey::Played { player, sequence } => alive(player) && alive(sequence),
             AxisKey::View(view) => alive(view),
@@ -383,6 +427,17 @@ impl PanelView {
                 }
             });
         });
+        drop(object);
+        for (handle, action) in std::mem::take(&mut self.data_actions) {
+            match action {
+                DataAction::Tree { clicked, toggled } => apply_tree(store, handle, clicked, toggled, events),
+                DataAction::Table(actions) => {
+                    if let Some(edit) = apply_table(store, handle, actions, events) {
+                        self.cell_edits.insert(handle, edit);
+                    }
+                }
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -687,7 +742,102 @@ impl PanelView {
             | Kind::ItemGroup
             | Kind::Sequence
             | Kind::Player => None,
+            Kind::TreeView => Some(self.tree_view(handle, object, ui)),
+            Kind::TableView => Some(self.table_view(handle, object, ui)),
         }
+    }
+
+    /// A tree view: each item a row, indented under its parent, a triangle folding or unfolding its
+    /// children; a click makes it current. Only the rows in sight are drawn.
+    fn tree_view(&mut self, handle: Handle, object: &Object, ui: &mut egui::Ui) -> egui::Response {
+        let size = egui::vec2(
+            ui.available_width(),
+            ui.available_height().max(object.minimum_height as f32),
+        );
+        let items = object.tree.clone().unwrap_or_default();
+        let shown = shown_items(&items);
+        let (mut clicked, mut toggled) = (None, None);
+        let inner = ui.allocate_ui(size, |ui| {
+            let height = ui.spacing().interact_size.y;
+            egui::ScrollArea::vertical()
+                .id_salt(("uniwow-tree", handle))
+                .auto_shrink([false, false])
+                .show_rows(ui, height, shown.len(), |ui, positions| {
+                    for &(depth, item) in &shown[positions] {
+                        tree_row(ui, depth, item, object.current_item, height, &mut clicked, &mut toggled);
+                    }
+                });
+        });
+        if clicked.is_some() || toggled.is_some() {
+            self.data_actions.push((handle, DataAction::Tree { clicked, toggled }));
+        }
+        inner.response
+    }
+
+    /// A table view: its headers, a click sorting by a column, then again from the highest; its rows
+    /// in the order shown, only those in sight drawn; a click makes a cell current, a double click
+    /// edits it in place, Enter or leaving it keeps the text, Escape drops it.
+    fn table_view(&mut self, handle: Handle, object: &Object, ui: &mut egui::Ui) -> egui::Response {
+        let size = egui::vec2(
+            ui.available_width(),
+            ui.available_height().max(object.minimum_height as f32),
+        );
+        let table = object.table.clone().unwrap_or_default();
+        // A row removed meanwhile ends the edit of its cell.
+        let mut edit = self
+            .cell_edits
+            .remove(&handle)
+            .filter(|edit| table.row(edit.row).is_some());
+        let mut actions = TableActions::default();
+        let inner = ui.allocate_ui(size, |ui| {
+            let columns = table.columns().len().max(1);
+            let width = ((ui.available_width() - 16.0) / columns as f32).max(60.0);
+            let height = ui.spacing().interact_size.y;
+            ui.horizontal(|ui| {
+                for (column, header) in table.columns().iter().enumerate() {
+                    let sorted = table
+                        .sort()
+                        .and_then(|(sorted, descending)| (sorted == column).then_some(descending));
+                    if column_header(ui, header, sorted, [width, height]).clicked() {
+                        actions.sorted = Some(column);
+                    }
+                }
+            });
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt(("uniwow-table", handle))
+                .auto_shrink([false, false])
+                .show_rows(ui, height, table.len(), |ui, positions| {
+                    for position in positions {
+                        let Some(row) = table.shown(position) else {
+                            continue;
+                        };
+                        ui.horizontal(|ui| {
+                            for column in 0..columns {
+                                let text = row.cells.get(column).map_or("", String::as_str);
+                                let current = row.id == object.current_item;
+                                table_cell(
+                                    ui,
+                                    row.id,
+                                    column,
+                                    text,
+                                    current,
+                                    [width, height],
+                                    &mut edit,
+                                    &mut actions,
+                                );
+                            }
+                        });
+                    }
+                });
+        });
+        if let Some(edit) = edit {
+            self.cell_edits.insert(handle, edit);
+        }
+        if actions.sorted.is_some() || actions.clicked.is_some() || actions.edit.is_some() || actions.done.is_some() {
+            self.data_actions.push((handle, DataAction::Table(actions)));
+        }
+        inner.response
     }
 
     /// A curve view showing a sequence: on its left the rows of the dopesheet, when it runs, with a
@@ -990,6 +1140,245 @@ impl PanelView {
     }
 }
 
+/// What the user did in a tree view: an item folded or unfolded, an item clicked, current.
+fn apply_tree(
+    store: &mut Ui,
+    handle: Handle,
+    clicked: Option<u64>,
+    toggled: Option<(u64, bool)>,
+    events: &mut Vec<SignalData>,
+) {
+    let Some(target) = store.object_mut(handle) else {
+        return;
+    };
+    let signal = |signal: Signal, item: u64| SignalData {
+        sender: handle,
+        signal: signal as u32,
+        item,
+        ..Default::default()
+    };
+    if let Some((item, expanded)) = toggled
+        && let Some(tree) = target.tree.as_mut()
+        && let Some(found) = find_item(Arc::make_mut(tree).as_mut_slice(), item)
+    {
+        found.expanded = expanded;
+        events.push(SignalData {
+            boolean: expanded,
+            ..signal(Signal::ItemExpanded, item)
+        });
+    }
+    if let Some(item) = clicked {
+        events.push(signal(Signal::ItemClicked, item));
+        if item != target.current_item {
+            target.current_item = item;
+            events.push(signal(Signal::CurrentItemChanged, item));
+        }
+    }
+}
+
+/// What the user did in a table view: a column sorted by, from the highest when sorted by it
+/// already; a cell made current; a cell's text kept. Returns the edit of a cell double-clicked.
+fn apply_table(
+    store: &mut Ui,
+    handle: Handle,
+    actions: TableActions,
+    events: &mut Vec<SignalData>,
+) -> Option<CellEdit> {
+    let object = store.object(handle)?;
+    let table = object.table.as_ref()?;
+    let (sort, current) = (table.sort(), (object.current_item, object.current_column));
+    let edit = actions.edit.map(|(row, column)| CellEdit {
+        row,
+        column,
+        text: table
+            .row(row)
+            .and_then(|found| found.cells.get(column).cloned())
+            .unwrap_or_default(),
+        focused: false,
+    });
+    let signal = |signal: Signal, item: u64, column: usize| SignalData {
+        sender: handle,
+        signal: signal as u32,
+        item,
+        integer: column as i64,
+        ..Default::default()
+    };
+    if let Some(column) = actions.sorted {
+        let descending = sort == Some((column, false));
+        if store
+            .set_numbers(handle, Property::SortColumn, &[column as f64])
+            .and_then(|()| store.set_numbers(handle, Property::SortDescending, &[f64::from(u8::from(descending))]))
+            .is_ok()
+        {
+            events.push(SignalData {
+                boolean: descending,
+                ..signal(Signal::SortChanged, 0, column)
+            });
+        }
+    }
+    if let Some((row, column)) = actions.clicked
+        && (row, column) != current
+        && let Some(target) = store.object_mut(handle)
+    {
+        target.current_item = row;
+        target.current_column = column;
+        events.push(signal(Signal::CurrentCellChanged, row, column));
+    }
+    if let Some((row, column, text)) = actions.done
+        && store.set_cell(handle, row, column, &text).is_ok()
+    {
+        events.push(SignalData {
+            text,
+            ..signal(Signal::CellChanged, row, column)
+        });
+    }
+    edit
+}
+
+/// The items of a tree shown, each with its depth: the children of an unfolded item under it.
+fn shown_items(items: &[TreeItem]) -> Vec<(usize, &TreeItem)> {
+    let mut shown = Vec::new();
+    let mut levels = vec![items.iter()];
+    while let Some(level) = levels.last_mut() {
+        let Some(item) = level.next() else {
+            levels.pop();
+            continue;
+        };
+        shown.push((levels.len() - 1, item));
+        if item.expanded {
+            levels.push(item.children.iter());
+        }
+    }
+    shown
+}
+
+/// The row of an item of a tree view at `depth`.
+fn tree_row(
+    ui: &mut egui::Ui,
+    depth: usize,
+    item: &TreeItem,
+    current: u64,
+    height: f32,
+    clicked: &mut Option<u64>,
+    toggled: &mut Option<(u64, bool)>,
+) {
+    ui.horizontal(|ui| {
+        ui.set_height(height);
+        ui.add_space(depth as f32 * 16.0);
+        if item.children.is_empty() {
+            // The place of the triangle, for the texts to line up.
+            ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+        } else if fold_button(ui, item.expanded).clicked() {
+            *toggled = Some((item.id, !item.expanded));
+        }
+        if ui.selectable_label(item.id == current, &item.text).clicked() {
+            *clicked = Some(item.id);
+        }
+    });
+}
+
+/// The header of a column of a table view: its text, and when the rows are sorted by it a triangle
+/// pointing up, or down from the highest, the fonts having no arrow.
+fn column_header(ui: &mut egui::Ui, header: &str, sorted: Option<bool>, size: [f32; 2]) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size[0], size[1]), egui::Sense::click());
+    let visuals = ui.style().interact(&response);
+    if response.hovered() {
+        ui.painter().rect_filled(rect, 0.0, visuals.weak_bg_fill);
+    }
+    let colour = ui.visuals().strong_text_color();
+    let galley = ui
+        .painter()
+        .layout_no_wrap(header.to_owned(), egui::TextStyle::Body.resolve(ui.style()), colour);
+    let at = rect.left_center() + egui::vec2(4.0, -galley.size().y / 2.0);
+    let end = at.x + galley.size().x;
+    ui.painter_at(rect).galley(at, galley, colour);
+    if let Some(descending) = sorted {
+        let centre = egui::pos2(end + 9.0, rect.center().y);
+        let (tip, base) = if descending { (4.0, -3.0) } else { (-4.0, 3.0) };
+        ui.painter_at(rect).add(egui::Shape::convex_polygon(
+            vec![
+                centre + egui::vec2(0.0, tip),
+                centre + egui::vec2(4.0, base),
+                centre + egui::vec2(-4.0, base),
+            ],
+            colour,
+            egui::Stroke::NONE,
+        ));
+    }
+    response
+}
+
+/// A triangle folding or unfolding the children of an item, the fonts having no such character.
+fn fold_button(ui: &mut egui::Ui, unfolded: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click());
+    let colour = ui.style().interact(&response).fg_stroke.color;
+    let (centre, size) = (rect.center(), 4.0);
+    let points = if unfolded {
+        vec![
+            centre + egui::vec2(-size, -size * 0.6),
+            centre + egui::vec2(size, -size * 0.6),
+            centre + egui::vec2(0.0, size),
+        ]
+    } else {
+        vec![
+            centre + egui::vec2(-size * 0.6, -size),
+            centre + egui::vec2(size, 0.0),
+            centre + egui::vec2(-size * 0.6, size),
+        ]
+    };
+    ui.painter()
+        .add(egui::Shape::convex_polygon(points, colour, egui::Stroke::NONE));
+    response
+}
+
+/// A cell of a table view: its text, or the field editing it.
+#[allow(clippy::too_many_arguments)]
+fn table_cell(
+    ui: &mut egui::Ui,
+    row: u64,
+    column: usize,
+    text: &str,
+    current: bool,
+    size: [f32; 2],
+    edit: &mut Option<CellEdit>,
+    actions: &mut TableActions,
+) {
+    if let Some(editing) = edit.as_mut().filter(|edit| edit.row == row && edit.column == column) {
+        let response = ui.add_sized(size, egui::TextEdit::singleline(&mut editing.text));
+        if !editing.focused {
+            response.request_focus();
+            editing.focused = true;
+        } else if response.lost_focus() {
+            if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                actions.done = Some((row, column, editing.text.clone()));
+            }
+            *edit = None;
+        }
+        return;
+    }
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size[0], size[1]), egui::Sense::click());
+    let visuals = ui.visuals();
+    if current {
+        ui.painter()
+            .rect_filled(rect, 0.0, visuals.selection.bg_fill.gamma_multiply(0.5));
+    } else if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, 0.0, visuals.widgets.hovered.weak_bg_fill);
+    }
+    ui.painter_at(rect.shrink2(egui::vec2(4.0, 0.0))).text(
+        rect.left_center() + egui::vec2(4.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        text,
+        egui::TextStyle::Body.resolve(ui.style()),
+        visuals.text_color(),
+    );
+    if response.double_clicked() {
+        actions.edit = Some((row, column));
+    } else if response.clicked() {
+        actions.clicked = Some((row, column));
+    }
+}
+
 /// The close button of a dialog: a drawn cross, the fonts having no such character.
 fn close_button(ui: &mut egui::Ui) -> bool {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
@@ -1044,7 +1433,7 @@ mod tests {
         AppliedChange, CommandInfo, Editor, EditorBackend, Event, PropertyInfo, PropertyKind, PropertyValue, egui,
     };
 
-    use super::PanelView;
+    use super::{PanelView, TableActions, apply_table, apply_tree};
 
     type Jobs = Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
     /// The changes the module would record.
@@ -1655,6 +2044,180 @@ mod tests {
         lock(&shared).destroy(layout).unwrap();
         frame(&mut panels);
         assert!(panels.scenes.is_empty() && panels.sizes.is_empty() && !panels.painted.contains_key(&area));
+    }
+
+    /// A panel holding one view of `kind`.
+    fn data_view(kind: Kind) -> (SharedUi, Handle) {
+        let shared = Ui::new(Arc::new(|_job| {}));
+        let view = {
+            let mut store = lock(&shared);
+            let panel = store.panel("p");
+            let layout = store.create(Kind::VBoxLayout, None).unwrap();
+            store.add_to(panel, layout, [0, 0, 1, 1]).unwrap();
+            let view = store.create(kind, None).unwrap();
+            store.add_to(layout, view, [0, 0, 1, 1]).unwrap();
+            view
+        };
+        (shared, view)
+    }
+
+    /// The signals told, each by its number, item, integer, boolean and text.
+    fn told(events: &[SignalData]) -> Vec<(Signal, u64, i64, bool, &str)> {
+        events
+            .iter()
+            .map(|data| {
+                let signal = Signal::from_u32(data.signal).unwrap();
+                (signal, data.item, data.integer, data.boolean, data.text.as_str())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_table_view_sorts_makes_current_and_keeps_an_edit_telling_each() {
+        let (shared, table) = data_view(Kind::TableView);
+        let mut store = lock(&shared);
+        store.set_text(table, Property::Columns, r#"["Id","Name"]"#).unwrap();
+        store
+            .set_text(
+                table,
+                Property::Rows,
+                r#"[{"id":1,"cells":["1","b"]},{"id":2,"cells":["2","a"]}]"#,
+            )
+            .unwrap();
+        let mut events = Vec::new();
+        for _ in 0..3 {
+            let sorted = TableActions {
+                sorted: Some(1),
+                ..TableActions::default()
+            };
+            assert!(apply_table(&mut store, table, sorted, &mut events).is_none());
+        }
+        assert_eq!(store.table(table).unwrap().sort(), Some((1, false)));
+        assert_eq!(
+            told(&events),
+            vec![
+                (Signal::SortChanged, 0, 1, false, ""),
+                (Signal::SortChanged, 0, 1, true, ""),
+                (Signal::SortChanged, 0, 1, false, ""),
+            ],
+            "from the lowest, then the highest, then the lowest again"
+        );
+        events.clear();
+
+        for _ in 0..2 {
+            let clicked = TableActions {
+                clicked: Some((2, 1)),
+                ..TableActions::default()
+            };
+            apply_table(&mut store, table, clicked, &mut events);
+        }
+        assert_eq!(store.numbers(table, Property::CurrentItem).unwrap(), vec![2.0]);
+        assert_eq!(
+            told(&events),
+            vec![(Signal::CurrentCellChanged, 2, 1, false, "")],
+            "a cell already current is not told again"
+        );
+        events.clear();
+
+        let edit = TableActions {
+            edit: Some((1, 1)),
+            ..TableActions::default()
+        };
+        let edit = apply_table(&mut store, table, edit, &mut events).unwrap();
+        assert_eq!(
+            (edit.row, edit.column, edit.text.as_str()),
+            (1, 1, "b"),
+            "from the cell's text"
+        );
+        let done = TableActions {
+            done: Some((1, 1, "c".to_owned())),
+            ..TableActions::default()
+        };
+        apply_table(&mut store, table, done, &mut events);
+        assert_eq!(store.table(table).unwrap().row(1).unwrap().cells[1], "c");
+        let gone = TableActions {
+            done: Some((9, 1, "x".to_owned())),
+            ..TableActions::default()
+        };
+        apply_table(&mut store, table, gone, &mut events);
+        assert_eq!(
+            told(&events),
+            vec![(Signal::CellChanged, 1, 1, false, "c")],
+            "the edit of a row removed meanwhile is dropped"
+        );
+    }
+
+    #[test]
+    fn a_tree_view_folds_and_makes_current_what_is_clicked_telling_each() {
+        let (shared, tree) = data_view(Kind::TreeView);
+        let mut store = lock(&shared);
+        store
+            .set_text(
+                tree,
+                Property::Items,
+                r#"[{"id":1,"text":"a","children":[{"id":2,"text":"b"}]}]"#,
+            )
+            .unwrap();
+        let mut events = Vec::new();
+        apply_tree(&mut store, tree, Some(2), Some((1, true)), &mut events);
+        assert!(store.items(tree).unwrap()[0].expanded);
+        apply_tree(&mut store, tree, Some(2), None, &mut events);
+        apply_tree(&mut store, tree, None, Some((9, true)), &mut events);
+        assert_eq!(
+            told(&events),
+            vec![
+                (Signal::ItemExpanded, 1, 0, true, ""),
+                (Signal::ItemClicked, 2, 0, false, ""),
+                (Signal::CurrentItemChanged, 2, 0, false, ""),
+                (Signal::ItemClicked, 2, 0, false, ""),
+            ],
+            "the current item clicked again tells the click only; an item it does not hold, nothing"
+        );
+        assert_eq!(store.numbers(tree, Property::CurrentItem).unwrap(), vec![2.0]);
+    }
+
+    #[test]
+    fn a_header_clicked_sorts_the_table_in_place_once_drawn() {
+        let (shared, table) = data_view(Kind::TableView);
+        {
+            let mut store = lock(&shared);
+            store.set_text(table, Property::Columns, r#"["Id"]"#).unwrap();
+            store
+                .set_text(
+                    table,
+                    Property::Rows,
+                    r#"[{"id":1,"cells":["2"]},{"id":2,"cells":["1"]}]"#,
+                )
+                .unwrap();
+        }
+        let address = Arc::as_ptr(&lock(&shared).table(table).unwrap());
+        let mut panels = PanelView::default();
+        let ctx = egui::Context::default();
+        let header = egui::pos2(20.0, 8.0);
+        let frame = |panels: &mut PanelView, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                events,
+                ..egui::RawInput::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| panels.show(&shared, "p", ui, None));
+            output.textures_delta.clear();
+        };
+        let button = |pressed| egui::Event::PointerButton {
+            pos: header,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&mut panels, vec![egui::Event::PointerMoved(header)]);
+        frame(&mut panels, vec![button(true)]);
+        frame(&mut panels, vec![button(false)]);
+        let sorted = lock(&shared).table(table).unwrap();
+        assert_eq!(sorted.sort(), Some((0, false)), "the header was clicked");
+        assert!(
+            std::ptr::eq(Arc::as_ptr(&sorted), address),
+            "the table is changed in place, not copied"
+        );
     }
 
     #[test]

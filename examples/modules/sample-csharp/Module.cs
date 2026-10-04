@@ -2,9 +2,10 @@
 // and a spin box, each change one undo entry, with its history painted as bars; a curve edited in
 // the curve editor of the module curves, each change one undo entry; the counter's value as an
 // animatable property, with a sequence of its own shown in a dopesheet, whose changes the editor
-// records; and two commands.
+// records; a table of 100,000 rows and a tree; and two commands.
 
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using UniWoW;
 using static System.FormattableString;
@@ -38,6 +39,16 @@ static unsafe class Module
     // The curve as last recorded: what the next change of it undoes to.
     static string committedCurve = "";
 
+    // The rows the table of the panel Data starts with.
+    const int TableRows = 100_000;
+    // The id the next row inserted takes.
+    static ulong nextRow = TableRows + 1;
+    static TableView table = null!;
+    static Label dataEvent = null!;
+
+    const string Zones =
+        """[{"id":1,"text":"Kalimdor","expanded":true,"children":[{"id":2,"text":"Durotar"},{"id":3,"text":"Mulgore"}]},{"id":4,"text":"Eastern Kingdoms","children":[{"id":5,"text":"Elwynn Forest"},{"id":6,"text":"Westfall","children":[{"id":7,"text":"Sentinel Hill"}]}]}]""";
+
     const string StartCurve =
         """[{"label":"easing","colour":[230,160,40],"keys":[{"time":0,"value":0},{"time":1,"value":1}]}]""";
 
@@ -56,7 +67,8 @@ static unsafe class Module
             PaintFromThreads),
     ];
 
-    static readonly PanelDeclaration[] Panels = [new("counter", "Counter", Area.Right)];
+    static readonly PanelDeclaration[] Panels =
+        [new("counter", "Counter", Area.Right), new("data", "Data", Area.Right)];
 
     [UnmanagedCallersOnly(EntryPoint = "uniwow_module_init")]
     static int Init(Api* api, ModuleInfo* info, delegate* unmanaged<IntPtr, byte*, void> error, IntPtr errorContext)
@@ -69,6 +81,7 @@ static unsafe class Module
             }
             Editor.Start(api);
             BuildPanel();
+            BuildData();
             Editor.DeclareProperty("value", "Value", ValueKind.Number, Minimum, Maximum, [counter], WriteValue);
             Editor.Describe(info, "sample-csharp", "0.1.0", Commands, Panels, ApplyChange);
             described = true;
@@ -188,6 +201,60 @@ static unsafe class Module
         layout.AddLayout(trials);
         new Panel("counter").SetLayout(layout);
         Show();
+    }
+
+    // The panel Data: a table of 100,000 rows, edited in place and sorted by a column, rows
+    // inserted and removed without giving the others; and a tree. The last signal is shown above.
+    static void BuildData()
+    {
+        dataEvent = new Label("Double-click a cell to edit it; click a header to sort by its column.");
+        table = new TableView();
+        table.SetMinimumHeight(260);
+        table.SetColumns("""["Id","Name","Value"]""");
+        var rows = new StringBuilder("[", TableRows * 48);
+        for (int id = 1; id <= TableRows; id++)
+        {
+            rows.Append(id == 1 ? "" : ",")
+                .Append(Invariant($$"""{"id":{{id}},"cells":["{{id}}","Item {{id}}","{{id * 7919 % 1000}}"]}"""));
+        }
+        table.SetRows(rows.Append(']').ToString());
+        table.CellChanged.Connect(cell =>
+            dataEvent.SetText(Invariant($"Row {cell.Row}, column {cell.Column} edited: \"{cell.Text}\"")));
+        table.CurrentCellChanged.Connect(cell =>
+            dataEvent.SetText(Invariant($"Current cell: row {cell.Row}, column {cell.Column}")));
+        table.SortChanged.Connect(sort => dataEvent.SetText(
+            Invariant($"Sorted by column {sort.Column}, {(sort.Descending ? "from the highest" : "from the lowest")}")));
+
+        var insert = new PushButton("Insert a row at the top");
+        insert.Clicked.Connect(() =>
+        {
+            ulong id = nextRow++;
+            table.InsertRows(0, Invariant($$"""[{"id":{{id}},"cells":["{{id}}","New {{id}}","0"]}]"""));
+            dataEvent.SetText(Invariant($"Row {id} inserted"));
+        });
+        var remove = new PushButton("Remove the current row");
+        remove.Clicked.Connect(() =>
+        {
+            ulong id = table.CurrentRow();
+            dataEvent.SetText(id != 0 && table.RemoveRows(id) ? Invariant($"Row {id} removed") : "No current row.");
+        });
+        var buttons = new HBoxLayout();
+        buttons.AddWidget(insert);
+        buttons.AddWidget(remove);
+
+        var tree = new TreeView();
+        tree.SetMinimumHeight(140);
+        tree.SetItems(Zones);
+        tree.CurrentItemChanged.Connect(item => dataEvent.SetText(Invariant($"Current item: {item}")));
+        tree.ItemExpanded.Connect(change =>
+            dataEvent.SetText(Invariant($"Item {change.Item} {(change.Expanded ? "unfolded" : "folded")}")));
+
+        var layout = new VBoxLayout();
+        layout.AddWidget(dataEvent);
+        layout.AddWidget(table);
+        layout.AddLayout(buttons);
+        layout.AddWidget(tree);
+        new Panel("data").SetLayout(layout);
     }
 
     static void Step(int delta)

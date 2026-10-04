@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define UNIWOW_API_VERSION 4
+#define UNIWOW_API_VERSION 5
 
 /* Receives a text produced for the caller: JSON for a result, plain text for an error message.
    A module may pass NULL to the functions of uniwow_api that take one: the text is then ignored.
@@ -58,8 +58,11 @@ enum {
     UNIWOW_CURVE_VIEW = 23,     /* curves edited by hand, drawn by the module curves */
     UNIWOW_SEQUENCE = 24,       /* tracks of keys on animatable properties, with a frame rate and a length; not drawn */
     UNIWOW_PLAYER = 25,         /* plays a sequence, as QTimeLine; moved on by the kernel; not drawn */
-    UNIWOW_DOPESHEET_VIEW = 26  /* the keys of a sequence edited by hand, and the playhead of a player, drawn by the
+    UNIWOW_DOPESHEET_VIEW = 26, /* the keys of a sequence edited by hand, and the playhead of a player, drawn by the
                                    module dopesheet */
+    UNIWOW_TREE_VIEW = 27,      /* items with a text and children, folded or unfolded, one current, as QTreeWidget */
+    UNIWOW_TABLE_VIEW = 28      /* rows of cells under headers, edited in place and sorted by a column, as
+                                   QTableWidget; only the rows in sight are drawn */
 };
 /* </generated kind> */
 
@@ -113,8 +116,19 @@ enum {
     UNIWOW_PROPERTY_PLAYING = 37,        /* player: 1 plays from the time, or from 0 when at the end; 0 pauses */
     UNIWOW_PROPERTY_LOOP = 38,           /* player: at the end, starts again from 0 */
     UNIWOW_PROPERTY_SPEED = 39,          /* player: times the frame rate, from 0 to 100 */
-    UNIWOW_PROPERTY_PLAYER = 40          /* dopesheet view, curve view: the handle of the player whose time it shows
+    UNIWOW_PROPERTY_PLAYER = 40,         /* dopesheet view, curve view: the handle of the player whose time it shows
                                             as the playhead, 0 for none */
+    UNIWOW_PROPERTY_ITEMS = 41,          /* tree view, text: JSON [{id, text, expanded, children: [...]}]; ids whole
+                                            numbers from 1, each of its own; 64 levels and 1000000 items at most */
+    UNIWOW_PROPERTY_COLUMNS = 42,        /* table view, text: JSON [header, ...], 1000 columns at most */
+    UNIWOW_PROPERTY_ROWS = 43,           /* table view, text: JSON [{id, cells: [text, ...]}] in the module's order;
+                                            ids whole numbers from 1, each of its own; 1000000 rows at most */
+    UNIWOW_PROPERTY_CURRENT_ITEM = 44,   /* tree view, table view: the id of the current item or row, 0 for none; an
+                                            id the view does not hold is refused, and an item or row removed is no
+                                            longer current */
+    UNIWOW_PROPERTY_SORT_COLUMN = 45,    /* table view: the column the rows are shown sorted by, -1 for the module's
+                                            order */
+    UNIWOW_PROPERTY_SORT_DESCENDING = 46 /* table view: sorted from the highest */
 };
 /* </generated property> */
 
@@ -145,8 +159,18 @@ enum {
     UNIWOW_SIGNAL_FINISHED = 21,             /* player: it reached the end without LOOP and stopped */
     UNIWOW_SIGNAL_KEYS_CHANGED = 22,         /* dopesheet view, curve view showing a sequence: text, the tracks;
                                                 boolean, whether the change is done, then made to the sequence */
-    UNIWOW_SIGNAL_PLAYHEAD_MOVED = 23        /* dopesheet view: number, the frame the user moved the playhead to, its
+    UNIWOW_SIGNAL_PLAYHEAD_MOVED = 23,       /* dopesheet view: number, the frame the user moved the playhead to, its
                                                 player paused there */
+    UNIWOW_SIGNAL_ITEM_CLICKED = 24,         /* tree view: item, the id of the item clicked */
+    UNIWOW_SIGNAL_CURRENT_ITEM_CHANGED = 25, /* tree view: item, the id of the item now current */
+    UNIWOW_SIGNAL_ITEM_EXPANDED = 26,        /* tree view: item, the id of the item unfolded or folded; boolean,
+                                                whether unfolded */
+    UNIWOW_SIGNAL_CELL_CHANGED = 27,         /* table view: item, the id of the row; integer, the column; text, the
+                                                cell edited by hand */
+    UNIWOW_SIGNAL_CURRENT_CELL_CHANGED = 28, /* table view: item, the id of the row; integer, the column of the cell
+                                                now current */
+    UNIWOW_SIGNAL_SORT_CHANGED = 29          /* table view: integer, the column whose header was clicked, now sorted
+                                                by; boolean, whether from the highest */
 };
 /* </generated signal> */
 
@@ -285,6 +309,17 @@ typedef struct uniwow_api {
     /* Tells the value the module's own property `name` now has, for the readers to see; kept
        within its range. Returns 0, or non-zero when refused. */
     int32_t (*set_property)(void *context, const char *name, const double *values, uint32_t count);
+
+    /* --- Table views (version 5): rows changed without giving the whole table again. Each returns
+       0, or non-zero when refused. --- */
+
+    /* One cell, of the row `row` (its id), in column `column`. */
+    int32_t (*set_cell)(void *context, uniwow_handle table, uint64_t row, uint32_t column, const char *text);
+    /* Rows inserted at `at` in the module's order, given as the JSON of UNIWOW_PROPERTY_ROWS; their
+       ids are new. */
+    int32_t (*insert_rows)(void *context, uniwow_handle table, uint32_t at, const char *rows_json);
+    /* The rows of these ids removed. */
+    int32_t (*remove_rows)(void *context, uniwow_handle table, const uint64_t *rows, uint32_t count);
 } uniwow_api;
 
 /* A command offered by the module, run on the calling thread, possibly several at once. Returns 0

@@ -291,6 +291,13 @@ struct MouseEvent {
     double x, y, dx, dy;
     uint32_t button, modifiers;
 };
+// What a signal of a cell of a table view carries: the id of its row, its column, and the text
+// edited by hand for cellChanged.
+struct CellEvent {
+    uint64_t row;
+    int column;
+    std::string text;
+};
 
 namespace detail {
 template <typename T> struct Payload;
@@ -303,6 +310,9 @@ template <> struct Payload<double> {
 template <> struct Payload<int> {
     static int from(const uniwow_signal &s) { return int(s.integer); }
 };
+template <> struct Payload<uint64_t> {
+    static uint64_t from(const uniwow_signal &s) { return s.item; }
+};
 template <> struct Payload<std::string> {
     static std::string from(const uniwow_signal &s) { return s.text != nullptr ? s.text : ""; }
 };
@@ -311,6 +321,11 @@ template <> struct Payload<ItemEvent> {
 };
 template <> struct Payload<MouseEvent> {
     static MouseEvent from(const uniwow_signal &s) { return {s.x, s.y, s.dx, s.dy, s.button, s.modifiers}; }
+};
+template <> struct Payload<CellEvent> {
+    static CellEvent from(const uniwow_signal &s) {
+        return {s.item, int(s.integer), s.text != nullptr ? s.text : ""};
+    }
 };
 } // namespace detail
 
@@ -587,6 +602,64 @@ class DopesheetView : public Widget {
     void setMinimumHeight(double height) const { setNumbers(UNIWOW_PROPERTY_MINIMUM_HEIGHT, {height}); }
     Signal<std::string, bool> keysChanged{handle_, UNIWOW_SIGNAL_KEYS_CHANGED};
     Signal<double> playheadMoved{handle_, UNIWOW_SIGNAL_PLAYHEAD_MOVED};
+};
+
+// Items with a text and children, as QTreeWidget: setItems and items take the JSON of
+// UNIWOW_PROPERTY_ITEMS, each item with an id of its own from 1. A click on an item makes it
+// current; the triangle before an item folds or unfolds its children, kept in the items.
+class TreeView : public Widget {
+  public:
+    TreeView() : Widget(make(UNIWOW_TREE_VIEW)) {}
+    void setItems(const std::string &json) const { setString(UNIWOW_PROPERTY_ITEMS, json); }
+    std::string items() const { return string(UNIWOW_PROPERTY_ITEMS); }
+    // 0 for none.
+    void setCurrentItem(uint64_t id) const { setNumbers(UNIWOW_PROPERTY_CURRENT_ITEM, {double(id)}); }
+    uint64_t currentItem() const { return uint64_t(number(UNIWOW_PROPERTY_CURRENT_ITEM)); }
+    void setMinimumHeight(double height) const { setNumbers(UNIWOW_PROPERTY_MINIMUM_HEIGHT, {height}); }
+    Signal<uint64_t> itemClicked{handle_, UNIWOW_SIGNAL_ITEM_CLICKED};
+    Signal<uint64_t> currentItemChanged{handle_, UNIWOW_SIGNAL_CURRENT_ITEM_CHANGED};
+    // The item, and whether it is now unfolded.
+    Signal<uint64_t, bool> itemExpanded{handle_, UNIWOW_SIGNAL_ITEM_EXPANDED};
+};
+
+// Rows of cells under headers, as QTableWidget: setColumns takes the JSON of
+// UNIWOW_PROPERTY_COLUMNS, setRows and rows the JSON of UNIWOW_PROPERTY_ROWS, each row with an id
+// of its own from 1, in the module's order. Only the rows in sight are drawn. A click on a header
+// shows the rows sorted by its column, then from the highest, the module's order kept. A double
+// click edits a cell in place: cellChanged gives the text, kept in the rows.
+class TableView : public Widget {
+  public:
+    TableView() : Widget(make(UNIWOW_TABLE_VIEW)) {}
+    void setColumns(const std::string &json) const { setString(UNIWOW_PROPERTY_COLUMNS, json); }
+    std::string columns() const { return string(UNIWOW_PROPERTY_COLUMNS); }
+    void setRows(const std::string &json) const { setString(UNIWOW_PROPERTY_ROWS, json); }
+    std::string rows() const { return string(UNIWOW_PROPERTY_ROWS); }
+    // One cell of the row of id `row`, without giving the rows again.
+    bool setCell(uint64_t row, int column, const std::string &text) const {
+        return column >= 0 && api().set_cell(detail::context(), handle_, row, uint32_t(column), text.c_str()) == 0;
+    }
+    // Rows inserted at `at` in the module's order, given as the JSON of UNIWOW_PROPERTY_ROWS.
+    bool insertRows(int at, const std::string &json) const {
+        return at >= 0 && api().insert_rows(detail::context(), handle_, uint32_t(at), json.c_str()) == 0;
+    }
+    bool removeRows(const std::vector<uint64_t> &ids) const {
+        return api().remove_rows(detail::context(), handle_, ids.data(), uint32_t(ids.size())) == 0;
+    }
+    // The id of the current row, 0 for none.
+    void setCurrentRow(uint64_t id) const { setNumbers(UNIWOW_PROPERTY_CURRENT_ITEM, {double(id)}); }
+    uint64_t currentRow() const { return uint64_t(number(UNIWOW_PROPERTY_CURRENT_ITEM)); }
+    // -1 for the module's order.
+    void sortByColumn(int column, bool descending = false) const {
+        setNumbers(UNIWOW_PROPERTY_SORT_COLUMN, {double(column)});
+        setNumbers(UNIWOW_PROPERTY_SORT_DESCENDING, {descending ? 1.0 : 0.0});
+    }
+    int sortColumn() const { return int(number(UNIWOW_PROPERTY_SORT_COLUMN)); }
+    bool sortDescending() const { return number(UNIWOW_PROPERTY_SORT_DESCENDING) != 0.0; }
+    void setMinimumHeight(double height) const { setNumbers(UNIWOW_PROPERTY_MINIMUM_HEIGHT, {height}); }
+    Signal<CellEvent> cellChanged{handle_, UNIWOW_SIGNAL_CELL_CHANGED};
+    Signal<CellEvent> currentCellChanged{handle_, UNIWOW_SIGNAL_CURRENT_CELL_CHANGED};
+    // The column, and whether from the highest.
+    Signal<int, bool> sortChanged{handle_, UNIWOW_SIGNAL_SORT_CHANGED};
 };
 
 // A modal window, as QDialog: while it is shown, the rest of the editor cannot be used. It is

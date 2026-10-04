@@ -59,6 +59,30 @@ static unsafe class Fake
         return 0;
     }
 
+    /// <summary>The last cell set and the last ids removed from a table view.</summary>
+    public static (ulong Row, uint Column, string Text) Cell = (0, 0, "");
+    public static int CellCalls;
+    public static ulong[] Removed = [];
+
+    [UnmanagedCallersOnly]
+    public static int SetCell(IntPtr context, ulong table, ulong row, uint column, byte* text)
+    {
+        Cell = (row, column, Utf8.Read(text));
+        CellCalls++;
+        return 0;
+    }
+
+    [UnmanagedCallersOnly]
+    public static int RemoveRows(IntPtr context, ulong table, ulong* rows, uint count)
+    {
+        Removed = new ReadOnlySpan<ulong>(rows, (int)count).ToArray();
+        return 0;
+    }
+
+    /// <summary>Calls a slot with the data of a signal.</summary>
+    public static void CallWith((IntPtr Slot, IntPtr User) kept, SignalData data) =>
+        ((delegate* unmanaged<IntPtr, SignalData*, void>)kept.Slot)(kept.User, &data);
+
     /// <summary>Calls a slot as the editor would, even after its disconnect.</summary>
     public static void Call((IntPtr Slot, IntPtr User) kept, double number = 0)
     {
@@ -121,6 +145,8 @@ static unsafe class Program
         api->Disconnect = &Fake.Disconnect;
         api->Log = &Fake.Log;
         api->SetProperty = &Fake.SetProperty;
+        api->SetCell = &Fake.SetCell;
+        api->RemoveRows = &Fake.RemoveRows;
         Editor.Start(api);
 
         var panel = new Panel("main");
@@ -205,6 +231,28 @@ static unsafe class Program
         var edited = keys.KeysChanged.Connect(given => change = given);
         Fake.CallWithText(Fake.Connections[edited], "[]", true);
         Expect(change == ("[]", true), "KeysChanged gives the tracks and whether the change is done");
+
+        var tree = new TreeView();
+        (ulong Item, bool Expanded) unfolded = (0, false);
+        var folded = tree.ItemExpanded.Connect(given => unfolded = given);
+        Fake.CallWith(Fake.Connections[folded], new SignalData { Item = 9007199254740993UL, Boolean = 1 });
+        Expect(unfolded == (9007199254740993UL, true), "ItemExpanded gives the item's id whole and whether unfolded");
+
+        var table = new TableView();
+        Expect(table.SetCell(7, 2, "x") && Fake.Cell == (7UL, 2u, "x"), "SetCell gives the row's id, the column and the text");
+        Expect(!table.SetCell(7, -1, "y") && Fake.CellCalls == 1, "a negative column is refused before the editor");
+        Expect(table.RemoveRows(3, 5) && Fake.Removed.SequenceEqual([3UL, 5UL]), "RemoveRows gives the ids");
+        var cell = new CellEvent(0, 0, "");
+        var typed = table.CellChanged.Connect(given => cell = given);
+        using (var text = new Utf8("abc"))
+        {
+            Fake.CallWith(Fake.Connections[typed], new SignalData { Item = 42, Integer = 1, TextPointer = text.Pointer });
+        }
+        Expect(cell == new CellEvent(42, 1, "abc"), "CellChanged gives the row, the column and the text");
+        (int Column, bool Descending) sort = (-2, false);
+        var sorting = table.SortChanged.Connect(given => sort = given);
+        Fake.CallWith(Fake.Connections[sorting], new SignalData { Integer = 3, Boolean = 1 });
+        Expect(sort == (3, true), "SortChanged gives the column and whether from the highest");
 
         Console.WriteLine($"{failures} failure(s)");
         return failures == 0 ? 0 : 1;

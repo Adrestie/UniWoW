@@ -1,9 +1,10 @@
 //! Interface objects modelled on Qt (section 3): widgets, layouts, a graphics scene, painting
-//! areas, sequences and their players. A module that is not written in Rust creates them through
+//! areas, trees, tables, sequences and their players. A module that is not written in Rust creates them through
 //! handles and changes them from any thread; the core keeps them, draws them on the interface
 //! thread, and sends their signals to the module's own thread. The object model is defined once
 //! here, for every language.
 
+pub mod data;
 mod painter;
 
 use std::collections::{BTreeSet, HashMap};
@@ -15,6 +16,7 @@ use crate::AppliedChange;
 use crate::curve::ShownCurve;
 use crate::egui;
 use crate::sequence::{self, MAX_FRAME_RATE, MAX_LENGTH, Sequence, Track};
+use data::{Row, Table, TreeItem};
 
 /// Identifies an object of one module.
 pub type Handle = u64;
@@ -23,6 +25,26 @@ pub type Handle = u64;
 pub fn read_curves(text: &str) -> Result<Vec<ShownCurve>, String> {
     let value = serde_json::from_str(text).map_err(|error| format!("the curves are not JSON: {error}"))?;
     ShownCurve::list_from_json(&value)
+}
+
+/// Reads a JSON text.
+fn json(text: &str, what: &str) -> Result<serde_json::Value, String> {
+    serde_json::from_str(text).map_err(|error| format!("the {what} are not JSON: {error}"))
+}
+
+/// Reads the items of a tree view from their JSON text (`data::items_from_json`).
+pub fn read_items(text: &str) -> Result<Vec<TreeItem>, String> {
+    data::items_from_json(&json(text, "items")?)
+}
+
+/// Reads the rows of a table view from their JSON text (`data::rows_from_json`).
+pub fn read_rows(text: &str) -> Result<Vec<Row>, String> {
+    data::rows_from_json(&json(text, "rows")?)
+}
+
+/// Reads the headers of a table view's columns from their JSON text.
+pub fn read_columns(text: &str) -> Result<Vec<String>, String> {
+    data::columns_from_json(&json(text, "columns")?)
 }
 
 /// Reads the tracks of a sequence from their JSON text (`sequence::tracks_from_json`).
@@ -165,6 +187,14 @@ pub struct Object {
     pub plays: Option<Handle>,
     /// The player whose time a view shows as the playhead.
     pub player: Option<Handle>,
+    /// A tree view's items, shared with the kernel drawing them.
+    pub tree: Option<Arc<Vec<TreeItem>>>,
+    /// A table view's columns and rows, shared with the kernel drawing them.
+    pub table: Option<Arc<Table>>,
+    /// The id of a tree view's current item or a table view's current row, 0 for none.
+    pub current_item: u64,
+    /// The column of a table view's current cell.
+    pub current_column: usize,
     /// A player's time, in frames.
     pub time: f64,
     pub playing: bool,
@@ -212,7 +242,12 @@ impl Object {
             font_size: 13.0,
             minimum_height: if matches!(
                 kind,
-                Kind::GraphicsView | Kind::PaintArea | Kind::CurveView | Kind::DopesheetView
+                Kind::GraphicsView
+                    | Kind::PaintArea
+                    | Kind::CurveView
+                    | Kind::DopesheetView
+                    | Kind::TreeView
+                    | Kind::TableView
             ) {
                 200.0
             } else {
@@ -228,6 +263,10 @@ impl Object {
             sequence: (kind == Kind::Sequence).then(|| Arc::new(Sequence::default())),
             plays: None,
             player: None,
+            tree: (kind == Kind::TreeView).then(Arc::default),
+            table: (kind == Kind::TableView).then(Arc::default),
+            current_item: 0,
+            current_column: 0,
             time: 0.0,
             playing: false,
             looping: false,
@@ -592,8 +631,12 @@ impl Ui {
         if property == Property::Curves {
             return self.set_curves(handle, read_curves(text)?);
         }
-        if property == Property::Tracks {
-            return self.set_tracks(handle, read_tracks(text)?);
+        match property {
+            Property::Tracks => return self.set_tracks(handle, read_tracks(text)?),
+            Property::Items => return self.set_items(handle, read_items(text)?),
+            Property::Rows => return self.set_rows(handle, read_rows(text)?),
+            Property::Columns => return self.set_columns(handle, read_columns(text)?),
+            _ => {}
         }
         let object = self.get_mut(handle)?;
         let field = match property {
@@ -618,6 +661,88 @@ impl Ui {
     /// A copy of the curves a curve view shows.
     pub fn curves(&self, handle: Handle) -> Result<Vec<ShownCurve>, String> {
         Ok(self.get(handle)?.curves.clone())
+    }
+
+    /// The items of a tree view.
+    pub fn items(&self, handle: Handle) -> Result<Arc<Vec<TreeItem>>, String> {
+        let object = self.get(handle)?;
+        object
+            .tree
+            .clone()
+            .ok_or_else(|| format!("a {:?} is not a tree view", object.kind))
+    }
+
+    /// The columns and rows of a table view.
+    pub fn table(&self, handle: Handle) -> Result<Arc<Table>, String> {
+        let object = self.get(handle)?;
+        object
+            .table
+            .clone()
+            .ok_or_else(|| format!("a {:?} is not a table view", object.kind))
+    }
+
+    pub fn set_items(&mut self, handle: Handle, items: Vec<TreeItem>) -> Result<(), String> {
+        let object = self.get_mut(handle)?;
+        let kind = object.kind;
+        let tree = object
+            .tree
+            .as_mut()
+            .ok_or_else(|| format!("a {kind:?} is not a tree view"))?;
+        // An item gone is no longer current.
+        if !data::has_item(&items, object.current_item) {
+            object.current_item = 0;
+        }
+        *tree = Arc::new(items);
+        self.changed(handle);
+        Ok(())
+    }
+
+    /// Changes the table of a table view.
+    fn change_table<R>(
+        &mut self,
+        handle: Handle,
+        change: impl FnOnce(&mut Table) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let object = self.get_mut(handle)?;
+        let kind = object.kind;
+        let table = object
+            .table
+            .as_mut()
+            .ok_or_else(|| format!("a {kind:?} is not a table view"))?;
+        let result = change(Arc::make_mut(table))?;
+        // A row gone is no longer current.
+        if table.row(object.current_item).is_none() {
+            object.current_item = 0;
+        }
+        self.changed(handle);
+        Ok(result)
+    }
+
+    pub fn set_columns(&mut self, handle: Handle, columns: Vec<String>) -> Result<(), String> {
+        self.change_table(handle, |table| {
+            table.set_columns(columns);
+            Ok(())
+        })
+    }
+
+    /// The rows of a table view, in the module's order.
+    pub fn set_rows(&mut self, handle: Handle, rows: Vec<Row>) -> Result<(), String> {
+        self.change_table(handle, |table| table.set_rows(rows))
+    }
+
+    /// One cell of a table view, of the row `row`.
+    pub fn set_cell(&mut self, handle: Handle, row: u64, column: usize, text: &str) -> Result<(), String> {
+        self.change_table(handle, |table| table.set_cell(row, column, text))
+    }
+
+    /// Rows inserted at `at` in the module's order of a table view, without giving the others.
+    pub fn insert_rows(&mut self, handle: Handle, at: usize, rows: Vec<Row>) -> Result<(), String> {
+        self.change_table(handle, |table| table.insert_rows(at, rows))
+    }
+
+    /// The rows of these ids removed from a table view; returns how many there were.
+    pub fn remove_rows(&mut self, handle: Handle, ids: &[u64]) -> Result<usize, String> {
+        self.change_table(handle, |table| Ok(table.remove_rows(ids)))
     }
 
     /// The frame rate, length and tracks of a sequence.
@@ -716,6 +841,9 @@ impl Ui {
             Property::Title => object.title.clone(),
             Property::Curves => ShownCurve::list_to_json(&object.curves).to_string(),
             Property::Tracks => sequence::tracks_to_json(&self.sequence(handle)?.tracks).to_string(),
+            Property::Items => data::items_to_json(&self.items(handle)?).to_string(),
+            Property::Rows => data::rows_to_json(self.table(handle)?.rows()).to_string(),
+            Property::Columns => serde_json::json!(self.table(handle)?.columns()).to_string(),
             other => return Err(format!("{other:?} is not a text")),
         })
     }
@@ -730,6 +858,12 @@ impl Ui {
         let first = values[0];
         if Self::is_playback(property) {
             return self.set_playback(handle, property, first);
+        }
+        if matches!(
+            property,
+            Property::CurrentItem | Property::SortColumn | Property::SortDescending
+        ) {
+            return self.set_data_number(handle, property, first);
         }
         let object = self.get_mut(handle)?;
         // Which items a scene draws, and in which order.
@@ -790,6 +924,23 @@ impl Ui {
             return self.playback(handle, property).map(|number| vec![number]);
         }
         let object = self.get(handle)?;
+        let sort = object.table.as_ref().and_then(|table| table.sort());
+        match property {
+            Property::CurrentItem if matches!(object.kind, Kind::TreeView | Kind::TableView) => {
+                return Ok(vec![object.current_item as f64]);
+            }
+            Property::SortColumn if object.kind == Kind::TableView => {
+                return Ok(vec![sort.map_or(-1.0, |(column, _)| column as f64)]);
+            }
+            Property::SortDescending if object.kind == Kind::TableView => {
+                return Ok(vec![if sort.is_some_and(|(_, descending)| descending) {
+                    1.0
+                } else {
+                    0.0
+                }]);
+            }
+            _ => {}
+        }
         let flag = |value: bool| if value { 1.0 } else { 0.0 };
         Ok(match property {
             Property::Enabled => vec![flag(object.enabled)],
@@ -820,6 +971,54 @@ impl Ui {
             Property::Count => vec![(object.items.len().max(object.children.len())) as f64],
             other => return Err(format!("{other:?} is not a number")),
         })
+    }
+
+    /// The current item of a tree view or a table view, or the sort of a table view.
+    fn set_data_number(&mut self, handle: Handle, property: Property, value: f64) -> Result<(), String> {
+        let object = self.get(handle)?;
+        let kind = object.kind;
+        let fits = match property {
+            Property::CurrentItem => matches!(kind, Kind::TreeView | Kind::TableView),
+            _ => kind == Kind::TableView,
+        };
+        if !fits {
+            return Err(format!("a {kind:?} has no {property:?}"));
+        }
+        if !value.is_finite() || value.fract() != 0.0 {
+            return Err(format!("{property:?} is a whole number"));
+        }
+        let sort = object.table.as_ref().and_then(|table| table.sort());
+        match property {
+            Property::CurrentItem => {
+                let id = value as u64;
+                let known = value == 0.0
+                    || (value > 0.0
+                        && value <= data::MAX_ID as f64
+                        && (object.tree.as_ref().is_some_and(|items| data::has_item(items, id))
+                            || object.table.as_ref().is_some_and(|table| table.row(id).is_some())));
+                if !known {
+                    return Err(format!("no item {value}"));
+                }
+                self.get_mut(handle)?.current_item = id;
+                self.changed(handle);
+                Ok(())
+            }
+            Property::SortColumn => {
+                let descending = sort.is_some_and(|(_, descending)| descending);
+                let sort = (value >= 0.0).then_some((value as usize, descending));
+                self.change_table(handle, |table| {
+                    table.set_sort(sort);
+                    Ok(())
+                })
+            }
+            _ => {
+                let sort = sort.map(|(column, _)| (column, value != 0.0));
+                self.change_table(handle, |table| {
+                    table.set_sort(sort);
+                    Ok(())
+                })
+            }
+        }
     }
 
     /// A number of a sequence or of a player.
@@ -1841,6 +2040,81 @@ mod tests {
             *seen.lock().unwrap(),
             vec![("b".to_owned(), false), ("c".to_owned(), true)]
         );
+    }
+
+    #[test]
+    fn a_current_item_is_one_the_view_holds_and_goes_with_it() {
+        let shared = ui();
+        let mut ui = lock(&shared);
+        let tree = ui.create(Kind::TreeView, None).unwrap();
+        ui.set_text(
+            tree,
+            Property::Items,
+            r#"[{"id":1,"text":"a","children":[{"id":2,"text":"b"}]}]"#,
+        )
+        .unwrap();
+        ui.set_numbers(tree, Property::CurrentItem, &[2.0]).unwrap();
+        assert!(
+            ui.set_numbers(tree, Property::CurrentItem, &[9.0]).is_err(),
+            "an item it does not hold"
+        );
+        assert_eq!(ui.numbers(tree, Property::CurrentItem).unwrap(), vec![2.0]);
+        ui.set_text(tree, Property::Items, r#"[{"id":1,"text":"a"}]"#).unwrap();
+        assert_eq!(
+            ui.numbers(tree, Property::CurrentItem).unwrap(),
+            vec![0.0],
+            "its item gone"
+        );
+        assert!(ui.text(tree, Property::Items).unwrap().contains(r#""text":"a""#));
+
+        let table = ui.create(Kind::TableView, None).unwrap();
+        ui.set_text(table, Property::Columns, r#"["a","b"]"#).unwrap();
+        ui.set_text(
+            table,
+            Property::Rows,
+            r#"[{"id":1,"cells":["x","1"]},{"id":2,"cells":["y","2"]}]"#,
+        )
+        .unwrap();
+        ui.set_numbers(table, Property::CurrentItem, &[2.0]).unwrap();
+        ui.remove_rows(table, &[2]).unwrap();
+        assert_eq!(
+            ui.numbers(table, Property::CurrentItem).unwrap(),
+            vec![0.0],
+            "its row gone"
+        );
+        assert!(
+            ui.set_numbers(tree, Property::SortColumn, &[0.0]).is_err(),
+            "a tree is not sorted"
+        );
+    }
+
+    #[test]
+    fn a_table_is_sorted_by_a_column_from_the_lowest_or_the_highest() {
+        let shared = ui();
+        let mut ui = lock(&shared);
+        let table = ui.create(Kind::TableView, None).unwrap();
+        ui.set_text(table, Property::Columns, r#"["a","b"]"#).unwrap();
+        let sort = |ui: &Ui| {
+            (
+                ui.numbers(table, Property::SortColumn).unwrap()[0],
+                ui.numbers(table, Property::SortDescending).unwrap()[0],
+            )
+        };
+        assert_eq!(sort(&ui), (-1.0, 0.0), "the module's order");
+        ui.set_numbers(table, Property::SortDescending, &[1.0]).unwrap();
+        assert_eq!(sort(&ui), (-1.0, 0.0), "no order without a column");
+        ui.set_numbers(table, Property::SortColumn, &[1.0]).unwrap();
+        ui.set_numbers(table, Property::SortDescending, &[1.0]).unwrap();
+        assert_eq!(sort(&ui), (1.0, 1.0));
+        ui.set_numbers(table, Property::SortColumn, &[0.0]).unwrap();
+        assert_eq!(sort(&ui), (0.0, 1.0), "another column keeps the direction");
+        assert!(ui.set_numbers(table, Property::SortColumn, &[0.5]).is_err());
+        ui.set_text(table, Property::Columns, r#"["a"]"#).unwrap();
+        ui.set_numbers(table, Property::SortColumn, &[1.0]).unwrap();
+        assert_eq!(sort(&ui), (-1.0, 0.0), "a column it does not have");
+        ui.set_numbers(table, Property::SortColumn, &[0.0]).unwrap();
+        ui.set_numbers(table, Property::SortColumn, &[-1.0]).unwrap();
+        assert_eq!(sort(&ui), (-1.0, 0.0));
     }
 
     #[test]

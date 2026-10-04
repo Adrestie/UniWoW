@@ -38,6 +38,8 @@ entries = [
     [24, "Sequence", "SEQUENCE", "tracks of keys on animatable properties, with a frame rate and a length; not drawn"],
     [25, "Player", "PLAYER", "plays a sequence, as QTimeLine; moved on by the kernel; not drawn"],
     [26, "DopesheetView", "DOPESHEET_VIEW", "the keys of a sequence edited by hand, and the playhead of a player, drawn by the module dopesheet"],
+    [27, "TreeView", "TREE_VIEW", "items with a text and children, folded or unfolded, one current, as QTreeWidget"],
+    [28, "TableView", "TABLE_VIEW", "rows of cells under headers, edited in place and sorted by a column, as QTableWidget; only the rows in sight are drawn"],
 ]
 
 [property]
@@ -86,6 +88,12 @@ entries = [
     [38, "Loop", "LOOP", "player: at the end, starts again from 0"],
     [39, "Speed", "SPEED", "player: times the frame rate, from 0 to 100"],
     [40, "Player", "PLAYER", "dopesheet view, curve view: the handle of the player whose time it shows as the playhead, 0 for none"],
+    [41, "Items", "ITEMS", "tree view, text: JSON [{id, text, expanded, children: [...]}]; ids whole numbers from 1, each of its own; 64 levels and 1000000 items at most"],
+    [42, "Columns", "COLUMNS", "table view, text: JSON [header, ...], 1000 columns at most"],
+    [43, "Rows", "ROWS", "table view, text: JSON [{id, cells: [text, ...]}] in the module's order; ids whole numbers from 1, each of its own; 1000000 rows at most"],
+    [44, "CurrentItem", "CURRENT_ITEM", "tree view, table view: the id of the current item or row, 0 for none; an id the view does not hold is refused, and an item or row removed is no longer current"],
+    [45, "SortColumn", "SORT_COLUMN", "table view: the column the rows are shown sorted by, -1 for the module's order"],
+    [46, "SortDescending", "SORT_DESCENDING", "table view: sorted from the highest"],
 ]
 
 [value_kind]
@@ -129,4 +137,10 @@ entries = [
     [21, "Finished", "FINISHED", "player: it reached the end without LOOP and stopped"],
     [22, "KeysChanged", "KEYS_CHANGED", "dopesheet view, curve view showing a sequence: text, the tracks; boolean, whether the change is done, then made to the sequence"],
     [23, "PlayheadMoved", "PLAYHEAD_MOVED", "dopesheet view: number, the frame the user moved the playhead to, its player paused there"],
+    [24, "ItemClicked", "ITEM_CLICKED", "tree view: item, the id of the item clicked"],
+    [25, "CurrentItemChanged", "CURRENT_ITEM_CHANGED", "tree view: item, the id of the item now current"],
+    [26, "ItemExpanded", "ITEM_EXPANDED", "tree view: item, the id of the item unfolded or folded; boolean, whether unfolded"],
+    [27, "CellChanged", "CELL_CHANGED", "table view: item, the id of the row; integer, the column; text, the cell edited by hand"],
+    [28, "CurrentCellChanged", "CURRENT_CELL_CHANGED", "table view: item, the id of the row; integer, the column of the cell now current"],
+    [29, "SortChanged", "SORT_CHANGED", "table view: integer, the column whose header was clicked, now sorted by; boolean, whether from the highest"],
 ]

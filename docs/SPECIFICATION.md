@@ -179,6 +179,8 @@ and Python receive theirs in milestones 9 and 10.
 | `Dialog` | `QDialog` | title, the one layout it holds, shown or hidden | `rejected` |
 | `CurveView` | a `QWidget` drawn by the module `curves` | curves (JSON), minimum height; or a sequence and a player | `curvesChanged` (curves, finished); `keysChanged` (tracks, finished) when it shows a sequence |
 | `DopesheetView` | a `QWidget` drawn by the module `dopesheet` | sequence, player, title, minimum height | `keysChanged` (tracks, finished), `playheadMoved` (frame) |
+| `TreeView` | `QTreeWidget` | items (JSON), current item, minimum height | `itemClicked`, `currentItemChanged` (item), `itemExpanded` (item, unfolded) |
+| `TableView` | `QTableWidget` | columns, rows (JSON), current row, sort column and direction, minimum height | `cellChanged` (row, column, text), `currentCellChanged` (row, column), `sortChanged` (column, from the highest) |
 | `Sequence` | the data a `QTimeLine` plays; not drawn | tracks (JSON), frame rate, length | |
 | `Player` | `QTimeLine`; not drawn | sequence, time, playing, loop, speed | `timeChanged` (time), `finished` |
 
@@ -257,7 +259,7 @@ fills it, or *not planned* when no milestone does yet.
 | The viewport's camera | Inside the module `viewport` (*View*, *Reset camera*) | The properties `viewport/camera_position`, `camera_target`, `camera_fov`; the commands `viewport.camera`, `viewport.look_at`, `viewport.frame` | The functions of properties; `call` | Scripts: the commands through `uniwow.call`; the properties: milestones 9 and 10 |
 | Sequences and their playback | `uniwow_api::sequence`; the objects `Sequence` and `Player` handed to the kernel with `Context::adopt_objects`, as the Timeline does | `Sequence`, `Player` | `uniwow::Sequence`, `uniwow::Player`; `Sequence`, `Player` | — milestones 9 and 10 |
 | The dopesheet | The service `dopesheet`; the objects `DopesheetView` and `CurveView`, as the Timeline does | `DopesheetView`; `CurveView` showing a `Sequence` | `uniwow::DopesheetView`; `DopesheetView` | — milestones 9 and 10 |
-| Tree, table, property grid | egui | — step 8.7 | — step 8.7 | — milestones 9 and 10 |
+| Tree, table, property grid | egui | `TreeView`, `TableView`, with `set_cell`, `insert_rows`, `remove_rows`; the property grid: — step 8.7 | `uniwow::TreeView`, `uniwow::TableView`; `TreeView`, `TableView`; the property grid: — step 8.7 | — milestones 9 and 10 |
 | Drawing in the 3D view | The service `viewport` and its layers | — not planned (an other 3D access of step 8.3) | — | — |
 | Unsaved changes, asked about when the editor closes | `Module::unsaved`, `save_unsaved` | — not planned | — | — |
 | Menu items | `Registrar::menu_item`, `Module::on_menu` | — not planned | — | — |
@@ -1480,6 +1482,33 @@ As built, second part (8.6b), the Timeline a client:
 - The rows of a tree or a table are given as JSON (`ITEMS`, `ROWS`), each with an id the signals
   give back.
 - Sample: a C# panel with a table of 100,000 rows, a tree, and a property grid of the cube.
+
+Built in two parts, each reviewed: the tree and the table, then the property grid.
+
+As built, first part (8.7a), trees and tables:
+
+- `uniwow.h` goes to version 5: `set_cell`, `insert_rows` and `remove_rows` at the end of the
+  table of functions. `ITEMS`, `COLUMNS` and `ROWS` are JSON; the ids of items and rows are whole
+  numbers from 1 to 2^53, each of its own, so that every language holds them exactly; a tree holds
+  1,000,000 items over 64 levels at most, a table 1,000,000 rows and 1,000 columns at most. A cell
+  given as a number is taken as its text.
+- The current item or row (`CURRENT_ITEM`) is one the view holds, 0 for none; an item or a row
+  removed is no longer current.
+- A click on a header sorts by its column from the lowest, a second click from the highest, and so
+  on (`SORT_COLUMN`, `SORT_DESCENDING`, `sortChanged`); the module sets them too, -1 for its own
+  order, which the table keeps: `ROWS`, and the place `insert_rows` takes, are in the module's
+  order. Cells sort as numbers first, by value, then as texts, ignoring their case, rows of equal
+  cells keeping the module's order; a cell changed in the column sorted by sorts the rows again.
+- A click makes a cell current, a double click edits it in place: Enter or leaving the field keeps
+  the text, which the table holds and `cellChanged` gives, Escape drops it; nothing is recorded, as
+  in Qt. The triangle before an item folds or unfolds it, which the tree keeps.
+- Trees and tables draw only the rows in sight. What the user did is applied once the kernel lets
+  go of its copy of the object drawn, so that a table of 100,000 rows is changed in place rather
+  than copied.
+- The SDK has `TreeView` and `TableView` in C++ and C#, a `CellEvent` giving a cell's row, column
+  and text. The C# sample has a panel *Data*: a table of 100,000 rows (Id, Name, Value), a button
+  inserting a row at the top and one removing the current row, a tree, and the last signal received
+  above them.
 
 Choices confirmed by the review:
 
