@@ -629,23 +629,26 @@ mod tests {
         // What each thread's requests were, in the order served: B, its ten numbers, E, B…
         let mut served: std::collections::HashMap<std::thread::ThreadId, Vec<String>> = Default::default();
         let mut random = Random::new(99);
-        while workers.iter().any(|worker| !worker.is_finished()) || !receiver_empty(&receiver) {
+        let mut handle = |request: Request| match request {
+            Request::Call {
+                thread,
+                arguments,
+                reply: ReplyTo::Thread(reply),
+                ..
+            } => {
+                served.entry(thread).or_default().push(arguments["n"].to_string());
+                let _ = reply.send(Ok(arguments));
+            }
+            Request::BeginGroup { thread, .. } => served.entry(thread).or_default().push("B".to_owned()),
+            Request::EndGroup { thread, .. } => served.entry(thread).or_default().push("E".to_owned()),
+            _ => {}
+        };
+        while workers.iter().any(|worker| !worker.is_finished()) {
             let budget = Duration::from_micros(random.below(2_000));
-            serve(&receiver, budget, Duration::from_micros(100), |request| match request {
-                Request::Call {
-                    thread,
-                    arguments,
-                    reply: ReplyTo::Thread(reply),
-                    ..
-                } => {
-                    served.entry(thread).or_default().push(arguments["n"].to_string());
-                    let _ = reply.send(Ok(arguments));
-                }
-                Request::BeginGroup { thread, .. } => served.entry(thread).or_default().push("B".to_owned()),
-                Request::EndGroup { thread, .. } => served.entry(thread).or_default().push("E".to_owned()),
-                _ => {}
-            });
+            serve(&receiver, budget, Duration::from_micros(100), &mut handle);
         }
+        // What the threads sent before ending, the last EndGroup among them.
+        while serve(&receiver, Duration::from_secs(1), Duration::ZERO, &mut handle) {}
         for worker in workers {
             worker.join().unwrap();
         }
@@ -666,10 +669,6 @@ mod tests {
         for sequence in served.values() {
             assert_eq!(sequence, &expected);
         }
-    }
-
-    fn receiver_empty(receiver: &std::sync::mpsc::Receiver<Request>) -> bool {
-        matches!(receiver.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty))
     }
 
     #[test]
