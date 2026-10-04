@@ -884,6 +884,43 @@ As built:
 - **Limits**: unsaved changes are lost when the editor closes, without a question; the playhead
   moves and the values are written only while the *Timeline* panel is shown.
 
+Complement asked before validation (proposed): changes that would be lost are asked about in a
+modal window, built with the editor's Qt by a module of the interface.
+
+- **`Dialog` in the Qt of the core**, as `QDialog`, for every language: a floating window, modal:
+  while it is shown, the rest of the editor takes neither clicks nor shortcuts (Ctrl+Z included).
+  It has a title and holds one layout; it is created hidden, shown and hidden by its module
+  (`show`, `hide`). Its signal `rejected` tells that the user closed it, with Escape or its close
+  button, which hides it. `uniwow.h` keeps version 3: it gains the kind `UNIWOW_DIALOG` and the
+  signal `UNIWOW_SIGNAL_REJECTED`; `uniwow.hpp` and `UniWoW.cs` gain the class `Dialog`.
+- **Unsaved changes, a contract of the core**: a Rust module tells which of its documents have
+  unsaved changes and saves them on request (compiled, Lua and Python modules in a later
+  milestone). When the editor is closed while a module has some, and the module of the question
+  is running, the editor stays open until the user answers: *Save* has each module save, then
+  closes, unless a save fails, which is shown; *Don't save* closes; *Cancel* keeps the editor open.
+  Without that module, the editor closes without a question and the changes are lost.
+- **`modules/UI/`**: the modules of the interface, now and to come, in `modules/UI/<id>/` in the
+  repository and in `modules\UI\<id>\` beside the executable, loaded by the kernel as the others.
+  An id stays unique across the folders.
+- **Module `unsaved-changes`** in `modules/UI/unsaved-changes/` (Rust), built with the Qt objects
+  of the core: the command `ui.ask_unsaved` shows the modal window *Unsaved changes*, which lists
+  the documents with *Save*, *Don't save* and *Cancel* (Escape being *Cancel*), then publishes the
+  answer as the event `ui.unsaved_answered`, with the question it answers.
+- **Timeline**: changing sequence with unsaved changes asks through `ui.ask_unsaved`, and changes
+  without asking when that command does not exist; the question inside the panel goes. Its
+  unsaved documents are its sequences with unsaved changes.
+
+Acceptance of the complement:
+
+| Check | Expected result |
+|---|---|
+| Change sequence with unsaved changes | The modal window lists the sequence; nothing else in the editor answers until it is closed; *Save*, *Don't save* and *Cancel* do what they say |
+| Close the editor with unsaved changes | The same window: *Save* saves then closes, *Don't save* closes, *Cancel* keeps the editor open |
+| Escape in the window | As *Cancel* |
+| Ctrl+Z while the window is shown | Nothing is undone |
+| Remove `modules\UI\unsaved-changes`, restart, close with unsaved changes | The editor closes without a question |
+| Tests, `cargo xtask check`, CI | Green |
+
 ### Milestone 7: the Timeline in Montage mode (outline)
 
 Sequences of tracks holding clips; a clip moved along its track or to another one, trimmed at
