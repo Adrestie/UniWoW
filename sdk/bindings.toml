@@ -123,6 +123,6 @@ entries = [
     [17, "Wheel", "WHEEL", "paint area: x, y, dx, dy"],
     [18, "Rejected", "REJECTED", "dialog: the user closed it, which hid it"],
     [19, "CurvesChanged", "CURVES_CHANGED", "curve view: text, the curves; boolean, whether the change is done"],
-    [20, "TimeChanged", "TIME_CHANGED", "player, as it plays: number, the time in frames"],
+    [20, "TimeChanged", "TIME_CHANGED", "player, as it plays: number, the time in frames; its slot records nothing and Undo does not wait for it"],
     [21, "Finished", "FINISHED", "player: it reached the end without LOOP and stopped"],
 ]

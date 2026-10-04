@@ -106,16 +106,26 @@ impl Harness {
     /// Moves the players on to `at`, then waits for the writes on `thread`; returns whether one
     /// plays on.
     fn play_at(&mut self, at: Instant, thread: &'static capi::ModuleContext) -> bool {
+        let playing = self.tick(at);
+        Self::wait_for(thread);
+        playing
+    }
+
+    /// Moves the players on to `at`.
+    fn tick(&mut self, at: Instant) -> bool {
         let stores = self.shell.adopted_stores();
-        let playing = self.shell.players.tick(&stores, at);
-        // The module's thread alone: a frame would move the players on by the real time.
+        self.shell.players.tick(&stores, at)
+    }
+
+    /// Waits for the jobs posted so far on `thread`, without a frame: a frame would move the
+    /// players on by the real time.
+    fn wait_for(thread: &'static capi::ModuleContext) {
         let (done, ran) = std::sync::mpsc::channel();
         ui::lock(&thread.ui).post_job(Box::new(move || {
             let _ = done.send(());
         }));
         ran.recv_timeout(Duration::from_secs(10))
             .expect("the module's thread runs");
-        playing
     }
 }
 
@@ -1079,4 +1089,140 @@ fn the_objects_a_rust_module_adopts_play_and_record_as_a_compiled_module_s() {
     harness.play_at(start + Duration::from_secs(2), thread);
     assert_eq!(ui::lock(&objects).numbers(player, Property::Time).unwrap(), vec![60.0]);
     assert_eq!(capi::testing::level(thread).0, 5.0, "the value at frame 60 of 120");
+}
+
+/// A player playing, among the objects of `module`, a sequence of 120 frames with `tracks`.
+fn playing(module: &capi::ModuleContext, tracks: &str) -> u64 {
+    let mut objects = ui::lock(&module.ui);
+    let sequence = objects.create(Kind::Sequence, None).unwrap();
+    objects.set_numbers(sequence, Property::Length, &[120.0]).unwrap();
+    objects.set_text(sequence, Property::Tracks, tracks).unwrap();
+    let player = objects.create(Kind::Player, None).unwrap();
+    objects
+        .set_numbers(player, Property::Sequence, &[sequence as f64])
+        .unwrap();
+    objects.set_numbers(player, Property::Playing, &[1.0]).unwrap();
+    player
+}
+
+/// A track on `property`, of `kind`, rising from 0 to 10 over 120 frames.
+fn rising(property: &str, kind: &str) -> String {
+    let curves: Vec<Value> = (0..uniwow_api::PropertyKind::from_name(kind).unwrap().components())
+        .map(|_| json!({ "keys": [{ "time": 0, "value": 0 }, { "time": 120, "value": 10 }] }))
+        .collect();
+    json!([{ "property": property, "kind": kind, "curves": curves }]).to_string()
+}
+
+#[test]
+fn undo_stays_available_while_a_player_whose_time_a_slot_follows_plays() {
+    let native = CompiledModule::started(capi::testing::native("native"));
+    let mut harness = Harness::with_slots(vec![Slot::compiled("native", native)]);
+    let thread = harness.shell.slots[0].compiled.expect("compiled");
+    let player = playing(thread, &rising("native/level", "number"));
+    // A slow slot, as a module showing the time in its panel.
+    ui::lock(&thread.ui)
+        .connect(
+            player,
+            Signal::TimeChanged,
+            Arc::new(|_: &SignalData| std::thread::sleep(Duration::from_millis(20))),
+        )
+        .unwrap();
+    let start = Instant::now();
+    for frame in 0..10 {
+        harness.tick(start + Duration::from_millis(33 * frame));
+        assert_eq!(harness.shell.blocking_undo(), None, "frame {frame}");
+    }
+    Harness::wait_for(thread);
+}
+
+#[test]
+fn one_time_changed_at_most_waits_per_player_with_the_last_time() {
+    let native = CompiledModule::started(capi::testing::native("native"));
+    let mut harness = Harness::with_slots(vec![Slot::compiled("native", native)]);
+    let thread = harness.shell.slots[0].compiled.expect("compiled");
+    // Two players, one animating a property of the module, whose writes post jobs in between.
+    let players = [
+        playing(thread, &rising("native/level", "number")),
+        playing(thread, &rising("native/free", "number")),
+    ];
+    let seen: Arc<Mutex<Vec<(u64, f64)>>> = Arc::default();
+    for player in players {
+        let seen = seen.clone();
+        ui::lock(&thread.ui)
+            .connect(
+                player,
+                Signal::TimeChanged,
+                Arc::new(move |data: &SignalData| lock(&seen).push((data.sender, data.number))),
+            )
+            .unwrap();
+    }
+    // The module's thread busy for 20 frames.
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    ui::lock(&thread.ui).post_job(Box::new(move || {
+        let _ = gate.recv();
+    }));
+    let start = Instant::now();
+    for frame in 0..20 {
+        harness.tick(start + Duration::from_secs_f64(f64::from(frame) / 30.0));
+    }
+    release.send(()).unwrap();
+    Harness::wait_for(thread);
+    let seen = lock(&seen);
+    for player in players {
+        let times: Vec<f64> = seen
+            .iter()
+            .filter(|(sender, _)| *sender == player)
+            .map(|(_, time)| *time)
+            .collect();
+        let last = ui::lock(&thread.ui).numbers(player, Property::Time).unwrap()[0];
+        assert_eq!(times, vec![last], "player {player}");
+    }
+}
+
+#[test]
+fn a_change_recorded_in_a_slot_of_time_changed_is_refused() {
+    let native = CompiledModule::started(capi::testing::native("native"));
+    let mut harness = Harness::with_slots(vec![Slot::compiled("native", native)]);
+    let thread = harness.shell.slots[0].compiled.expect("compiled");
+    let player = playing(thread, &rising("native/level", "number"));
+    let status = Arc::new(std::sync::atomic::AtomicI32::new(-1));
+    let answered = status.clone();
+    ui::lock(&thread.ui)
+        .connect(
+            player,
+            Signal::TimeChanged,
+            Arc::new(move |_: &SignalData| {
+                answered.store(
+                    capi::testing::record(thread, "in a slot", 1),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+            }),
+        )
+        .unwrap();
+    let start = Instant::now();
+    harness.play_at(start, thread);
+    harness.play_at(start + Duration::from_millis(100), thread);
+    assert!(status.load(std::sync::atomic::Ordering::SeqCst) > 0, "refused");
+    harness.frame(RawInput::default());
+    assert_eq!(harness.shell.history.undo_label().as_deref(), Some("edit a sequence"));
+}
+
+#[test]
+fn a_track_no_property_can_take_is_told_once_per_player() {
+    let native = CompiledModule::started(capi::testing::native("native"));
+    let mut harness = Harness::with_slots(vec![Slot::compiled("native", native)]);
+    let thread = harness.shell.slots[0].compiled.expect("compiled");
+    let mut tracks: Vec<Value> = uniwow_api::serde_json::from_str(&rising("nobody/thing", "number")).unwrap();
+    // A vector on a number.
+    tracks.extend(uniwow_api::serde_json::from_str::<Vec<Value>>(&rising("native/level", "vector")).unwrap());
+    let player = playing(thread, &Value::Array(tracks).to_string());
+    let start = Instant::now();
+    for frame in 0..3 {
+        harness.play_at(start + Duration::from_millis(100 * frame), thread);
+    }
+    assert_eq!(
+        harness.shell.players.warned("native", player),
+        vec!["native/level".to_owned(), "nobody/thing".to_owned()]
+    );
+    assert_eq!(capi::testing::level(thread).1, 0, "nothing written");
 }

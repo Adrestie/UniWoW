@@ -233,7 +233,8 @@ public enum SignalId : uint
     Wheel = 17,              // paint area: x, y, dx, dy
     Rejected = 18,           // dialog: the user closed it, which hid it
     CurvesChanged = 19,      // curve view: text, the curves; boolean, whether the change is done
-    TimeChanged = 20,        // player, as it plays: number, the time in frames
+    TimeChanged = 20,        // player, as it plays: number, the time in frames; its slot records nothing and Undo does
+                             // not wait for it
     Finished = 21,           // player: it reached the end without LOOP and stopped
 }
 // </generated signal>
@@ -987,7 +988,8 @@ public class Sequence() : UiObject(Make(Kind.Sequence))
 
 /// <summary>Plays a sequence, as QTimeLine: the editor moves it on at each frame and writes the
 /// value of each track at its time into its property. TimeChanged gives the time in frames as it
-/// plays; Finished comes at the end, without loop.</summary>
+/// plays; its slot records nothing (RecordChange and the undo groups are refused there), so that
+/// Undo stays available while it plays. Finished comes at the end, without loop.</summary>
 public class Player : UiObject
 {
     public Player() : base(Make(Kind.Player))

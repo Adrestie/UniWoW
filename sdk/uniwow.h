@@ -134,7 +134,8 @@ enum {
     UNIWOW_SIGNAL_WHEEL = 17,                /* paint area: x, y, dx, dy */
     UNIWOW_SIGNAL_REJECTED = 18,             /* dialog: the user closed it, which hid it */
     UNIWOW_SIGNAL_CURVES_CHANGED = 19,       /* curve view: text, the curves; boolean, whether the change is done */
-    UNIWOW_SIGNAL_TIME_CHANGED = 20,         /* player, as it plays: number, the time in frames */
+    UNIWOW_SIGNAL_TIME_CHANGED = 20,         /* player, as it plays: number, the time in frames; its slot records
+                                                nothing and Undo does not wait for it */
     UNIWOW_SIGNAL_FINISHED = 21              /* player: it reached the end without LOOP and stopped */
 };
 /* </generated signal> */

@@ -213,8 +213,8 @@ within bounds), selectable and selected or not. Colours are `0xRRGGBBAA`, sizes 
   and one redoing it. Undo and Redo hand the matching value to the function the module declared,
   on its thread; when that function fails, the module fails and its changes leave the history.
   While a compiled module's thread still has signals, changes or commands to handle, Undo and
-  Redo are refused with the reason; the writes of its properties, which record nothing, do not
-  count. One job running for more than 3 seconds shows the module as not responding in the Modules
+  Redo are refused with the reason; the writes of its properties and the `timeChanged` of its
+  players, which record nothing, do not count. One job running for more than 3 seconds shows the module as not responding in the Modules
   panel (a write only when other work waits behind it), where it can be disabled: its changes leave the history and
   Undo comes back. The Commands panel never waits for an answer: another call replaces the one
   awaited, or the wait is given up.
@@ -1244,7 +1244,9 @@ table up to date, and its review checks it.
   - A write records nothing: it neither blocks Undo nor counts as the module's work, and
     `record_change`, `begin_group` and `end_group` are refused while the write function runs (*a
     property's write records nothing: the kernel records a value changed by hand*). Undo, which does
-    not wait for writes, would otherwise cross a change recorded there.
+    not wait for writes, would otherwise cross a change recorded there. Since step 8.4, the module's
+    thread marks every job that records nothing, the slots of `timeChanged` as well (*nothing is
+    recorded in a property's write or a player's timeChanged, which Undo does not wait for*).
   - `set_property` refuses a count that is not the kind's, and numbers that are not finite.
   - C++ also has `describeProperties(info)`, `readProperty` and `writeProperty`, and
     `Property::set`; C# also has `Editor.SetProperty`.
@@ -1319,12 +1321,19 @@ table up to date, and its review checks it.
     from the end of the sequence starts from 0.
   - The kernel moves on the players of every module whose objects it adopted: a compiled module's
     when it starts, a Rust module's through `Context::adopt_objects`. The first frame a player plays
-    in counts no time, so that a player started while the editor is idle does not jump. A
-    `timeChanged` still waiting for the module's thread is replaced by the next one, as a mouse move
-    is.
+    in counts no time, so that a player started while the editor is idle does not jump, and a player
+    at speed 0 asks for no frame.
+  - `timeChanged` records nothing: it neither blocks Undo nor shows the module busy, and
+    `record_change`, the undo groups and the changes of tracks are refused in its slots, as in a
+    property's write. While the `timeChanged` of a player still waits for the module's thread, the
+    next one only changes its time, whatever was posted since: one at most waits per player.
+    `finished` is counted, as the other signals are. The review of this step found `timeChanged`
+    counted, which greyed out Undo while a player played, and merged only when nothing else was
+    posted in between.
   - The values are written whenever the player's time changes, and also when its sequence changes:
     the values at the playhead follow the keys, as in the Timeline. Only the values that changed
-    since the player last wrote are written.
+    since the player last wrote are written. A track whose property no running module declares, or
+    of another kind, is told once per player in the log.
   - Each change of `TRACKS` is one undo entry, *edit a sequence*, owned by the module and in its
     open group; Undo and Redo set the tracks back without recording. Tracks set while the module
     starts, before the editor is ready, and tracks unchanged, are not recorded. While a write

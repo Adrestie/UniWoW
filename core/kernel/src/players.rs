@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use uniwow_api::ui::{self, Handle, SharedUi};
-use uniwow_api::{Editor, PropertyValue};
+use uniwow_api::{Editor, PropertyValue, log};
 
 /// The objects of one module, and the module's `Editor`, which writes their values.
 pub struct Store {
@@ -21,6 +21,8 @@ struct Written {
     /// Its time, its sequence and the version of that sequence.
     at: Option<(f64, Handle, u64)>,
     values: HashMap<String, PropertyValue>,
+    /// The properties it could not write, told once each.
+    warned: HashSet<String>,
 }
 
 #[derive(Default)]
@@ -64,9 +66,19 @@ impl Players {
                     if written.values.get(&track.property) == Some(&value) {
                         continue;
                     }
-                    // A property no running module declares has nothing to take the value.
-                    if store.editor.write_property(&track.property, value).is_ok() {
-                        written.values.insert(track.property.clone(), value);
+                    match store.editor.write_property(&track.property, value) {
+                        Ok(()) => {
+                            written.values.insert(track.property.clone(), value);
+                        }
+                        // A property no running module declares, or of another kind, is told
+                        // once to the module playing it.
+                        Err(error) if written.warned.insert(track.property.clone()) => log::warn!(
+                            "module '{}': player {} cannot animate '{}': {error}",
+                            store.owner,
+                            frame.player,
+                            track.property
+                        ),
+                        Err(_) => {}
                     }
                 }
             }
@@ -74,5 +86,17 @@ impl Players {
         self.written.retain(|key, _| seen.contains(key));
         self.last = playing.then_some(now);
         playing
+    }
+
+    /// The properties a player was told it could not write.
+    #[cfg(test)]
+    pub fn warned(&self, owner: &str, player: Handle) -> Vec<String> {
+        let mut warned: Vec<String> = self
+            .written
+            .get(&(owner.to_owned(), player))
+            .map(|written| written.warned.iter().cloned().collect())
+            .unwrap_or_default();
+        warned.sort();
+        warned
     }
 }

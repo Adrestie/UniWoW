@@ -168,8 +168,8 @@ impl Host for KernelHost {
         self.adopted.push((owner.to_owned(), Arc::downgrade(objects)));
         let editor = self.editor(owner);
         ui::lock(objects).set_recorder(Arc::new(move |label, change| {
-            // Undo does not wait for a property's write: nothing may be recorded there.
-            if let Some(reason) = crate::capi::writing() {
+            // Undo does not wait for a property's write nor a player's timeChanged.
+            if let Some(reason) = crate::capi::unrecorded() {
                 return Err(reason.to_owned());
             }
             editor.record_change(label, change)

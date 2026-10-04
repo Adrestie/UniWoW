@@ -6,7 +6,7 @@
 
 mod painter;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 pub use painter::{MAX_TEXT, PaintCommand};
@@ -291,6 +291,11 @@ pub struct Ui {
     /// The last job posted, when it is a mouse move or a curves change still waiting: the same
     /// signal of the same object sent next replaces its data instead of queuing behind it.
     waiting: Option<(Handle, u32, Waiting)>,
+    /// The `timeChanged` of each player last posted: while it waits, the next one replaces its
+    /// time, whatever was posted since.
+    times: HashMap<Handle, Waiting>,
+    /// The players, which the kernel moves on at each frame.
+    players: BTreeSet<Handle>,
     /// Changed at each change of a scene's set of items or their order, by scene.
     structure: HashMap<Handle, u64>,
     post: Post,
@@ -360,6 +365,8 @@ impl Ui {
                 painting: HashMap::new(),
                 in_flight: HashMap::new(),
                 waiting: None,
+                times: HashMap::new(),
+                players: BTreeSet::new(),
                 structure: HashMap::new(),
                 post,
                 uncounted: None,
@@ -445,6 +452,9 @@ impl Ui {
         // A dialog shows when its module asks for it.
         object.visible = kind != Kind::Dialog;
         let handle = self.insert(object);
+        if kind == Kind::Player {
+            self.players.insert(handle);
+        }
         if let Some(parent) = parent {
             self.get_mut(parent)?.children.push(handle);
             self.changed_structure(parent);
@@ -471,6 +481,8 @@ impl Ui {
             }
             self.connections.retain(|c| c.sender != next);
             self.structure.remove(&next);
+            self.times.remove(&next);
+            self.players.remove(&next);
         }
         // Views showing a destroyed scene show nothing; players of a destroyed sequence play
         // nothing.
@@ -841,16 +853,10 @@ impl Ui {
 
     /// Moves the players that play on by `seconds`, sending `timeChanged` and, at the end of a
     /// sequence played without loop, `finished`. Returns each player that has a sequence, with its
-    /// time, and whether one plays on.
+    /// time, and whether one moves on.
     pub fn advance_players(&mut self, seconds: f64) -> (Vec<PlayerFrame>, bool) {
-        let mut players: Vec<Handle> = self
-            .objects
-            .iter()
-            .filter(|(_, object)| object.kind == Kind::Player)
-            .map(|(handle, _)| *handle)
-            .collect();
-        players.sort_unstable();
         let (mut frames, mut signals, mut playing) = (Vec::new(), Vec::new(), false);
+        let players: Vec<Handle> = self.players.iter().copied().collect();
         for player in players {
             let Some((sequence, generation, data)) = self.objects[&player].plays.and_then(|sequence| {
                 let object = self.objects.get(&sequence)?;
@@ -874,10 +880,11 @@ impl Ui {
                     object.time = time;
                     signals.push((player, Signal::TimeChanged, time));
                 }
-                if object.playing {
-                    playing = true;
-                } else {
+                if !object.playing {
                     signals.push((player, Signal::Finished, time));
+                } else if object.speed > 0.0 {
+                    // At speed 0 nothing moves until the speed changes, which wakes the interface.
+                    playing = true;
                 }
             } else {
                 // A sequence made shorter.
@@ -892,14 +899,50 @@ impl Ui {
             });
         }
         for (sender, signal, time) in signals {
-            self.emit(SignalData {
-                sender,
-                signal: signal as u32,
-                number: time,
-                ..Default::default()
-            });
+            if signal == Signal::TimeChanged {
+                self.emit_time(sender, time);
+            } else {
+                self.emit(SignalData {
+                    sender,
+                    signal: signal as u32,
+                    number: time,
+                    ..Default::default()
+                });
+            }
         }
         (frames, playing)
+    }
+
+    /// Sends a player's `timeChanged` as a job that records nothing: it neither blocks Undo nor
+    /// counts as the module's work. While the one sent before still waits, it takes the new time.
+    fn emit_time(&mut self, player: Handle, time: f64) {
+        let data = SignalData {
+            sender: player,
+            signal: Signal::TimeChanged as u32,
+            number: time,
+            ..Default::default()
+        };
+        if let Some(waiting) = self.times.get(&player) {
+            let mut waiting = waiting.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(pending) = waiting.as_mut() {
+                *pending = data;
+                return;
+            }
+        }
+        let slots = self.slots(player, data.signal);
+        if slots.is_empty() {
+            return;
+        }
+        let this = self.this.clone();
+        let waiting: Waiting = Arc::new(Mutex::new(Some(data)));
+        let taken = waiting.clone();
+        self.post_uncounted_job(Box::new(move || {
+            let data = taken.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(data) = data {
+                deliver(&this, slots, &data);
+            }
+        }));
+        self.times.insert(player, waiting);
     }
 
     /// Adds an entry to a combo box.
@@ -1006,13 +1049,11 @@ impl Ui {
         (self.post)(job);
     }
 
-    /// Sends a signal to the slots connected to it, on the module's thread. A mouse move, a curves
-    /// change still under way, or a player's time, replaces the same one of the same object still
-    /// waiting.
+    /// Sends a signal to the slots connected to it, on the module's thread. A mouse move, or a
+    /// curves change still under way, replaces the same one of the same object still waiting.
     pub fn emit(&mut self, data: SignalData) {
-        let mergeable = data.signal == Signal::MouseMove as u32
-            || data.signal == Signal::TimeChanged as u32
-            || (data.signal == Signal::CurvesChanged as u32 && !data.boolean);
+        let mergeable =
+            data.signal == Signal::MouseMove as u32 || (data.signal == Signal::CurvesChanged as u32 && !data.boolean);
         let (sender, signal) = (data.sender, data.signal);
         if mergeable
             && let Some((waiting_sender, waiting_signal, waiting)) = &self.waiting
@@ -1559,6 +1600,9 @@ mod tests {
         );
         let (frames, playing) = store.advance_players(2.5);
         assert!(playing && frames[0].time == 15.0, "looped: {}", frames[0].time);
+        store.set_numbers(player, Property::Speed, &[0.0]).unwrap();
+        let (frames, playing) = store.advance_players(1.0);
+        assert!(!playing && frames[0].time == 15.0, "at speed 0 it asks for no frame");
     }
 
     #[test]

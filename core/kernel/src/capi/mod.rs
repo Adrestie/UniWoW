@@ -4,8 +4,7 @@
 mod objects;
 mod properties;
 
-pub use properties::writing;
-
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -208,6 +207,36 @@ impl Activity {
 
 type Job = Box<dyn FnOnce() + Send>;
 
+thread_local! {
+    /// Set while a module's thread runs a job that records nothing: a property's write, a player's
+    /// `timeChanged`. Undo does not wait for those.
+    static UNRECORDED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Why a module may not record a change now: a job runs that Undo does not wait for, which would
+/// otherwise cross the change.
+pub fn unrecorded() -> Option<&'static str> {
+    UNRECORDED
+        .get()
+        .then_some("nothing is recorded in a property's write or a player's timeChanged, which Undo does not wait for")
+}
+
+/// Marks this thread as running a job that records nothing until dropped, by a return or an unwind.
+struct Unrecorded;
+
+impl Unrecorded {
+    fn start() -> Self {
+        UNRECORDED.set(true);
+        Self
+    }
+}
+
+impl Drop for Unrecorded {
+    fn drop(&mut self) {
+        UNRECORDED.set(false);
+    }
+}
+
 /// The thread a module's signals, paintings, undo values and property writes run on, in order.
 /// Returns where to post counted jobs, where to post those that record nothing, and its activity.
 fn module_thread(id: &str) -> (Post, Post, Arc<Activity>) {
@@ -220,9 +249,11 @@ fn module_thread(id: &str) -> (Post, Post, Arc<Activity>) {
         .spawn(move || {
             for (job, counted) in receiver {
                 *worker.running.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), counted));
+                let unrecorded = (!counted).then(Unrecorded::start);
                 if catch_unwind(AssertUnwindSafe(job)).is_err() {
                     log::error!("module '{name}': a call on its thread panicked in the editor");
                 }
+                drop(unrecorded);
                 *worker.running.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 if counted {
                     worker.pending.fetch_sub(1, Ordering::Release);
@@ -417,7 +448,7 @@ extern "C" fn api_record_change(
     guarded(1, || {
         let module = module(context);
         let result = (|| {
-            if let Some(reason) = properties::writing() {
+            if let Some(reason) = unrecorded() {
                 return Err(reason.to_owned());
             }
             if module.apply.get().is_none() {
@@ -634,7 +665,7 @@ extern "C" fn api_log(context: *mut c_void, level: i32, message: *const c_char) 
 
 extern "C" fn api_begin_group(context: *mut c_void, label: *const c_char) {
     guarded((), || {
-        if let Some(reason) = properties::writing() {
+        if let Some(reason) = unrecorded() {
             module(context).refuse("begin_group", reason);
             return;
         }
@@ -646,7 +677,7 @@ extern "C" fn api_begin_group(context: *mut c_void, label: *const c_char) {
 
 extern "C" fn api_end_group(context: *mut c_void) {
     guarded((), || {
-        if let Some(reason) = properties::writing() {
+        if let Some(reason) = unrecorded() {
             module(context).refuse("end_group", reason);
             return;
         }

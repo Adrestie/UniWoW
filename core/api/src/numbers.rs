@@ -152,7 +152,8 @@ numbered!(
         Rejected = 18,
         /// curve view: text, the curves; boolean, whether the change is done
         CurvesChanged = 19,
-        /// player, as it plays: number, the time in frames
+        /// player, as it plays: number, the time in frames; its slot records nothing and Undo does
+        /// not wait for it
         TimeChanged = 20,
         /// player: it reached the end without LOOP and stopped
         Finished = 21,

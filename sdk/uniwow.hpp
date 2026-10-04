@@ -537,8 +537,9 @@ class Sequence : public Object {
 };
 
 // Plays a sequence, as QTimeLine: the editor moves it on at each frame and writes the value of
-// each track at its time into its property. timeChanged gives the time in frames as it plays;
-// finished comes at the end, without loop.
+// each track at its time into its property. timeChanged gives the time in frames as it plays; its
+// slot records nothing (recordChange and the undo groups are refused there), so that Undo stays
+// available while it plays. finished comes at the end, without loop.
 class Player : public Object {
   public:
     Player() : Object(make(UNIWOW_PLAYER)) {}
