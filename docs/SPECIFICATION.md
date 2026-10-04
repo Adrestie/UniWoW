@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 4 built and validated; milestone 5 validated, in progress; milestones 6 to 9 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 4 built and validated; milestone 5 built, awaiting validation; milestones 6 to 9 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -143,6 +143,58 @@ Rules:
 | F4 | A missing required service: the module is not loaded and the reason is shown. A missing used service: the module loads without the parts that need it. A module that fails withdraws its services; requirements are checked again just before each `init`, so a module whose provider failed meanwhile is not initialised. |
 | F5 | A module that runs code on behalf of another, such as the viewport drawing a layer, catches its failures and reports the culprit with `Context::report_failure`. The kernel disables the culprit as if it had panicked, naming the reporter. |
 | F6 | Every action a module offers to others is a named command. The kernel keeps their catalogue and routes the calls; the same catalogue serves every module and script (S1). A Rust module declares its commands itself; those of compiled, Lua and Python modules are declared on their behalf, by the kernel or by the module of their language: they are delegated. Once every module has registered, a name declared twice keeps the command declared directly over a delegated one, and the first registered between two of the same kind; each one set aside is logged with the one that wins. |
+
+### Interface objects
+
+The panels of compiled, Lua and Python modules, written once for every language. In C they are the
+typed functions of `uniwow.h`, which numbers the objects, properties and signals below; C++ has the
+classes of `sdk/uniwow.hpp` (`uniwow::PushButton`, `button.clicked.connect(...)`), C# those of
+`sdk/UniWoW.cs` with the names of C# (`button.Clicked.Connect(...)`, `UiObject` for `QObject`); Lua
+and Python receive theirs in milestones 8 and 9.
+
+| Object | As in Qt | Properties | Signals |
+|---|---|---|---|
+| `Panel` | a dock widget | the one layout it holds | |
+| `Label` | `QLabel` | text | |
+| `PushButton` | `QPushButton` | text | `clicked` |
+| `CheckBox` | `QCheckBox` | text, checked | `toggled` (checked) |
+| `Slider` | `QSlider` | value, minimum, maximum, step | `valueChanged`, `sliderPressed`, `sliderReleased` (value) |
+| `SpinBox` | `QDoubleSpinBox` | value, minimum, maximum, step, decimals | `valueChanged`, `editingFinished` (value) |
+| `LineEdit` | `QLineEdit` | text, placeholder | `textChanged`, `editingFinished` (text) |
+| `ComboBox` | `QComboBox` | entries, current index, count | `currentIndexChanged` (index) |
+| `Separator` | a line | | |
+| `GroupBox` | `QGroupBox` | title, the one layout it holds | |
+| `VBoxLayout`, `HBoxLayout`, `GridLayout` | the same | children; row, column and spans in a grid | |
+| `GraphicsView` | `QGraphicsView` | scene, zoom, centre, minimum height | |
+| `GraphicsScene` | `QGraphicsScene` | items | `itemPressed`, `itemMoved`, `itemDoubleClicked` (item, x, y, dx, dy, button, keys), `selectionChanged` |
+| `RectItem`, `EllipseItem` | `QGraphicsRectItem`, `QGraphicsEllipseItem` | rectangle; corner radius of a rectangle | |
+| `LineItem` | `QGraphicsLineItem` | line | |
+| `TextItem` | `QGraphicsSimpleTextItem` | text, font size, colour | |
+| `ItemGroup` | `QGraphicsItemGroup` | items | |
+| `PaintArea` | a `QWidget` and its `paintEvent` | minimum height | `paint` (painter, width, height), `mousePress`, `mouseMove`, `mouseRelease`, `wheel` (x, y, dx, dy, button, keys) |
+
+Every widget is enabled or not, visible or not, and has a tooltip. Every item has a position in its
+parent, a pen, a brush, a stacking order, a tooltip, and is visible, movable (along x, y or both,
+within bounds), selectable and selected or not. Colours are `0xRRGGBBAA`, sizes are in points.
+
+- **Handles**: an object is a number, 0 being none. A module creates its objects, except its
+  panels, which it declares when it starts and finds by their id; destroying an object destroys
+  its children. Every function can be called from any thread, and a change shows at the next frame.
+- **Signals** tell what the user did, never a change the module made. A widget shows what the user
+  did at once, then tells the module. The functions connected to a signal run in order on the
+  module's own thread, never on the interface thread; one that takes long only delays the next.
+- **Layouts**: in a box layout, a graphics view, a painting area, or a layout or group box holding
+  one, share the room the other children leave; the others take their own size.
+- **Graphics scene**: an item's position is relative to its parent. A movable item follows the
+  pointer without waiting for the module, which learns where it was dropped and how far it moved.
+  Items are drawn by stacking order, then in the order they were created; texts above the shapes.
+  The view scrolls with the middle or right button and zooms with the wheel, outside the history.
+- **Painting**: a painting area asks its module to paint when it is shown, resized, or after
+  `update()`. The module paints in points from the top left corner of the area, a text placed by its
+  top left corner; the picture stays until the next painting.
+- **Undo**: a module records a change it has made with a label and two JSON values, one undoing it
+  and one redoing it. Undo and Redo hand the matching value to the function the module declared,
+  on its thread; when that function fails, the module fails and its changes leave the history.
 
 ---
 
@@ -365,13 +417,13 @@ Rules:
 | S1 | One generic interface, the same for every language: list the named commands with their descriptions and schemas, call one by name, publish and receive events, read and write settings, log, and, for modules, offer commands, build panels of interface objects and record undoable changes. Commands, events and settings carry their values as JSON; the interface objects are reached through typed functions (handles, texts, numbers). It is defined once, independently of any language, and also offered as a C interface (`extern "C"` functions taking and returning UTF-8 JSON, header `uniwow.h`), so that compiled code reaches the same commands without depending on the Rust ABI. The Lua and Python `uniwow` modules only translate their values to and from JSON on top of this interface: they add no command of their own, so every language always has the same access. Each language has classes over the interface objects, named as in Qt. |
 | S2 | Named commands (F6) must exist in the kernel first: they are what scripts and compiled modules mostly call. |
 | S3 | Scripts never run on the interface thread (T6). A call that changes a module's state is applied on the interface thread at the next frame; a call to a command running on the calling thread answers at once (T4). A running script can be stopped. |
-| S4 | Every change one run of a script makes forms a single undo entry. The kernel learns to group commands. A group belongs to one caller on one thread and can be nested; it closes at its outermost end, when the job that opened it ends, when its module fails, or from the Edit menu. While an open group already holds a change, Undo and Redo are refused, greyed with the reason; a group that changed nothing yet, such as a script waiting for events, blocks nothing. Changes made by hand meanwhile enter the history on their own: when they touch what the script changes, their order relative to the group can be imprecise, and so is the undo order of two runs in parallel that change the same thing. Indirect changes are not grouped: a command triggered by an event a script publishes is applied when the event is delivered, outside the group. |
+| S4 | Every change one run of a script makes forms a single undo entry. The kernel learns to group commands. A group belongs to one caller on one thread and can be nested; a command delegated to another module runs inside its caller's group, as a change made on a thread where its caller has no group open enters the group opened last on that thread. A group closes at its outermost end, when the job that opened it ends, when its module fails, or from the Edit menu. While an open group already holds a change, Undo and Redo are refused, greyed with the reason; a group that changed nothing yet, such as a script waiting for events, blocks nothing. Changes made by hand meanwhile enter the history on their own: when they touch what the script changes, their order relative to the group can be imprecise, and so is the undo order of two runs in parallel that change the same thing. Indirect changes are not grouped: a command triggered by an event a script publishes is applied when the event is delivered, outside the group. |
 | S5 | A Lua or Python error is shown in the console with its line; it does not make the module fail. |
 | S6 | Compiled code runs inside the editor and can end its process: a crash there is not an error that can be caught. Lua scripts cannot load C modules, nor precompiled Lua chunks, which the bytecode checks of Lua 5.1 cannot keep from corrupting the memory: `string.dump` is removed, and every way of loading Lua code (scripts, console, `load`, `loadstring`, `loadfile`, `dofile`, `require`) accepts source text only. The compiled packages a Python script imports and the compiled modules carry this risk, which is accepted. |
 | S7 | Scripts and compiled modules have full access to the machine, like editor scripts in Unity: one received from someone else is checked before it is used. |
 | S8 | Each language stays optional: without `scripting-python.dll`, or without the Python files, the editor starts with Lua only, and the other way round. In particular the runtime must not require the Python DLL to start. |
 | S9 | One interpreter per language. Scripts are stored by language and version, then by tool: `scripts\lua-5.1\<tool>\<script>.lua`, `scripts\python-3.xx\<tool>\<script>.py`, the Python version being the one shipped. A script may also sit directly in the folder of its language. A script loads the other files of its tool. Every module has its folder in `modules\` (section 3). |
-| S10 | A compiled module is a folder `modules\<id>\` with its manifest and a DLL exporting one C entry point. It receives the table of functions of the C interface and returns its description (name, version, the version of `uniwow.h` it was built with) and the named commands it offers, implemented in its own language with the same JSON form. They join the catalogue as delegated commands (F6): a Rust module's command of the same name keeps its name, and the Modules panel shows the compiled module's one as refused. |
+| S10 | A compiled module is a folder `modules\<id>\` with its manifest and a DLL exporting one C entry point. It receives the table of functions of the C interface and returns its description (name, version, the version of `uniwow.h` it was built with), the named commands it offers, implemented in its own language with the same JSON form, the panels it fills with interface objects, and the function that applies its undo and redo values. They join the catalogue as delegated commands (F6): a Rust module's command of the same name keeps its name, and the Modules panel shows the compiled module's one as refused. |
 
 Risks to verify first, before any other work on scripting: the runtime's exported symbol count with PyO3 and mlua inside it; starting the editor without the Python DLL while PyO3 is part of the runtime (delayed loading); the embeddable Python distribution beside the executable; a C++ module and a C# NativeAOT module calling the C interface from several threads. Verified for milestone 4: see section 9.
 
@@ -390,11 +442,12 @@ E:\WoW-editor
   examples/modules/<id>/  sample modules in C++, C#, Lua and Python, built and installed by
                         `cargo xtask build` as their author would
   sdk/uniwow.h          the C interface of compiled modules (S1)
+  sdk/uniwow.hpp, sdk/UniWoW.cs  its classes for C++ and C#
   scripts/<language>-<version>/<tool>/  sample scripts, copied beside the executable
   client-bridge/        C++ (WXL SDK), own build
   xtask/
   docs/
-  .github/workflows/    CI on Windows: fmt, clippy -D warnings, cargo test, xtask build and check
+  .github/workflows/    CI on Windows with .NET 10: fmt, clippy -D warnings, cargo test, xtask build and check
 ```
 
 ---
@@ -626,7 +679,7 @@ As built:
   folder as a group that opens and closes; `require` looks in the script's tool folder first, then
   in the language folder.
 
-### Milestone 5: panels and undo for compiled modules (validated, in progress)
+### Milestone 5: panels and undo for compiled modules (built, awaiting validation)
 
 An interface API modelled on Qt, defined once in the core for every module that is not written in
 Rust, offered here to compiled modules with classes for C++ and C#; Lua and Python modules receive
@@ -712,6 +765,35 @@ Acceptance:
 | A module failing to apply an undo value | It fails, its changes leave the history, its panel says so; the rest runs |
 | Remove `modules\sample-scene\`, start | The editor starts without it; its panel is gone |
 | Tests, `cargo xtask check`, CI with the C# module built | Green |
+
+As built:
+
+- **Objects and panels** as in section 3. A module's objects are kept in the runtime
+  (`uniwow_api::ui`) and drawn by the kernel in the module's panels. The scene is drawn by the GPU
+  into a texture of its own, its colours taken as given (no conversion to linear light); each
+  item keeps its mesh until it changes. The slider shows no number beside it, as `QSlider`; the
+  spans of a grid layout are kept but not drawn yet.
+- **Signals**: `sliderReleased` is also sent after a click or a key on the slider, so that the
+  module always learns the final value. A double click on a card of `sample-scene` paints the cube
+  (a click selects the card and starts dragging it).
+- **Undo groups (S4)**: a change recorded by a command delegated to another module, such as
+  `scene.add_card` called by a Lua script, enters the script's group.
+- **C#**: `sdk/UniWoW.cs` is compiled into the module; `sample-csharp` also has two trial
+  controls for the acceptance, *Fail to apply undo and redo* and *Wait 2 seconds*. `cargo xtask
+  build` publishes it when `dotnet --list-sdks` lists a 10.x SDK, and otherwise says that it is left
+  out; the CI checks that its DLL was built.
+- **Lua**: `scripts\lua-5.1\samples\cards.lua` adds three cards to the board, as one undo entry.
+- **Measured** on the development machine, editor built with the debug profile (optimised), screen
+  at 60 Hz:
+
+  | Board | Interface work per frame | Frames |
+  |---|---|---|
+  | 6 cards, dragging one | 0.4 ms | 60 per second |
+  | 10,006 cards (30,018 objects), dragging one | 4.5 ms | 60 per second |
+  | 10,006 cards, zooming | 4.3 to 4.9 ms | 51 to 60 per second |
+
+  `scene.fill` with 10,000 cards took 0.66 s; the first frame after it, which builds the meshes,
+  88 ms.
 
 ### Milestone 6: animatable properties and the Timeline in Montage mode (outline)
 
