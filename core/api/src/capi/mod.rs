@@ -573,11 +573,15 @@ extern "C" fn api_end_group(context: *mut c_void) {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::{c_char, c_void};
+    use std::ffi::{CStr, c_char, c_void};
+    use std::sync::atomic::{AtomicPtr, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
-    use serde_json::json;
+    use serde_json::{Value, json};
 
-    use super::{API_VERSION, Api, CommandEntry, ModuleInfo, Reply, start};
+    use super::{API_VERSION, Api, CommandEntry, ModuleInfo, PanelEntry, Reply, start};
+    use crate::{AppliedChange, CommandInfo, DockArea, Editor, EditorBackend, Event};
 
     extern "C-unwind" fn echo(_user: *mut c_void, arguments: *const c_char, reply: Reply, context: *mut c_void) -> i32 {
         reply(context, arguments);
@@ -652,6 +656,171 @@ mod tests {
         assert_eq!(
             started.commands[0].handler.invoke(&json!({ "a": 1 })),
             Ok(json!({ "a": 1 }))
+        );
+    }
+
+    unsafe extern "C-unwind" fn with_panels(
+        _api: *const Api,
+        info: *mut ModuleInfo,
+        _error: Reply,
+        _context: *mut c_void,
+    ) -> i32 {
+        let panels: &'static [PanelEntry] = Box::leak(Box::new([
+            PanelEntry {
+                id: c"board".as_ptr(),
+                title: c"Board".as_ptr(),
+                area: 2,
+            },
+            PanelEntry {
+                id: c"other".as_ptr(),
+                title: std::ptr::null(),
+                area: 9,
+            },
+        ]));
+        fill(info, |info| {
+            info.panels = panels.as_ptr();
+            info.panel_count = 2;
+        })
+    }
+
+    #[test]
+    fn a_module_declares_its_panels() {
+        let started = start(with_panels, "test").expect("starts");
+        let panels: Vec<_> = started
+            .panels
+            .iter()
+            .map(|p| (p.id.as_str(), p.title.as_str(), p.area))
+            .collect();
+        assert_eq!(
+            panels,
+            vec![("board", "Board", DockArea::Left), ("other", "other", DockArea::Center)]
+        );
+    }
+
+    static CHANGES_API: AtomicPtr<Api> = AtomicPtr::new(std::ptr::null_mut());
+    static APPLIED: Mutex<Vec<(String, Option<String>)>> = Mutex::new(Vec::new());
+
+    /// Applies a value on the module's side, refusing `"fail"`.
+    extern "C-unwind" fn apply(_user: *mut c_void, value: *const c_char, error: Reply, context: *mut c_void) -> i32 {
+        // SAFETY: the editor passes a valid text.
+        let value = unsafe { CStr::from_ptr(value) }.to_string_lossy().into_owned();
+        if value == "\"fail\"" {
+            error(context, c"cannot".as_ptr());
+            return 1;
+        }
+        let thread = std::thread::current().name().map(str::to_owned);
+        APPLIED.lock().expect("applied").push((value, thread));
+        0
+    }
+
+    unsafe extern "C-unwind" fn with_changes(
+        api: *const Api,
+        info: *mut ModuleInfo,
+        _error: Reply,
+        _context: *mut c_void,
+    ) -> i32 {
+        CHANGES_API.store(api.cast_mut(), Ordering::SeqCst);
+        fill(info, |info| info.apply_change = Some(apply))
+    }
+
+    /// What a module asks of the editor about its changes.
+    #[derive(Default)]
+    struct Recorder {
+        changes: Mutex<Vec<(String, Box<dyn AppliedChange>)>>,
+        failures: Mutex<Vec<String>>,
+    }
+
+    impl EditorBackend for Recorder {
+        fn commands(&self) -> Vec<CommandInfo> {
+            Vec::new()
+        }
+
+        fn call(&self, _caller: &str, _name: &str, _arguments: Value) -> Result<Value, String> {
+            Err("no commands here".to_owned())
+        }
+
+        fn publish(&self, _source: &str, _topic: &str, _payload: Value) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn subscribe(&self, _caller: &str, _topic: &str) -> Result<u64, String> {
+            Ok(0)
+        }
+
+        fn next_event(&self, _caller: &str, _subscription: u64, _timeout: Duration) -> Result<Option<Event>, String> {
+            Ok(None)
+        }
+
+        fn unsubscribe(&self, _subscription: u64) {}
+
+        fn setting(&self, _caller: &str, _space: &str, _key: &str) -> Result<Option<Value>, String> {
+            Ok(None)
+        }
+
+        fn set_setting(&self, _caller: &str, _space: &str, _key: &str, _value: Value) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn begin_group(&self, _caller: &str, _label: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn end_group(&self, _caller: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn record_change(&self, _caller: &str, label: &str, change: Box<dyn AppliedChange>) -> Result<(), String> {
+            self.changes.lock().expect("changes").push((label.to_owned(), change));
+            Ok(())
+        }
+
+        fn report_failure(&self, _caller: &str, message: &str) {
+            self.failures.lock().expect("failures").push(message.to_owned());
+        }
+    }
+
+    /// Waits at most two seconds for `done`.
+    fn wait_for(done: impl Fn() -> bool) -> bool {
+        let start = Instant::now();
+        while !done() {
+            if start.elapsed() > Duration::from_secs(2) {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        true
+    }
+
+    #[test]
+    fn a_recorded_change_is_applied_on_the_module_thread_and_a_failure_reported() {
+        let started = start(with_changes, "changes").expect("starts");
+        let recorder = Arc::new(Recorder::default());
+        let _ = started.context.editor.set(Editor::new(recorder.clone(), "changes"));
+        // SAFETY: the table lives until the process ends.
+        let api = unsafe { &*CHANGES_API.load(Ordering::SeqCst) };
+        let status = (api.record_change)(
+            api.context,
+            c"set".as_ptr(),
+            c"\"before\"".as_ptr(),
+            c"\"fail\"".as_ptr(),
+        );
+        assert_eq!(status, 0);
+        let (label, mut change) = recorder.changes.lock().expect("changes").pop().expect("recorded");
+        assert_eq!(label, "set");
+
+        change.undo();
+        assert!(wait_for(|| !APPLIED.lock().expect("applied").is_empty()));
+        assert_eq!(
+            APPLIED.lock().expect("applied")[0],
+            ("\"before\"".to_owned(), Some("uniwow module changes".to_owned()))
+        );
+
+        change.redo();
+        assert!(wait_for(|| !recorder.failures.lock().expect("failures").is_empty()));
+        let failure = recorder.failures.lock().expect("failures")[0].clone();
+        assert!(
+            failure.contains("could not apply an undo or redo value: cannot"),
+            "{failure}"
         );
     }
 
