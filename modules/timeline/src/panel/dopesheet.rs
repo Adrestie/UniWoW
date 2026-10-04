@@ -311,15 +311,7 @@ pub(super) fn properties_row(
                 if only.is_some_and(|only| only != number) {
                     continue;
                 }
-                let response = ui.add_sized(
-                    [62.0, ROW - 4.0],
-                    egui::DragValue::new(value)
-                        .speed(speed)
-                        .range(range[0]..=range[1])
-                        .clamp_existing_to_range(false)
-                        .max_decimals(3)
-                        .update_while_editing(false),
-                );
+                let response = number_field(ui, value, range, speed);
                 if response.changed() {
                     edited.push(number);
                 }
@@ -589,4 +581,90 @@ pub(super) fn diamond(painter: &egui::Painter, centre: Pos2, fill: Color32, outl
         centre + Vec2::new(-DIAMOND, 0.0),
     ];
     painter.add(egui::Shape::convex_polygon(points, fill, Stroke::new(1.0, outline)));
+}
+
+/// A number as its field shows it: at most three decimals.
+fn field_text(value: f64) -> String {
+    let text = format!("{value:.3}");
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    if text == "-0" { "0".to_owned() } else { text.to_owned() }
+}
+
+/// The field of a number at the playhead. Its text, typed or not, is kept once the field loses the
+/// keyboard; the text it showed when it took it is no value typed, even rounded or out of range.
+pub(super) fn number_field(ui: &mut egui::Ui, value: &mut f64, range: [f64; 2], speed: f64) -> egui::Response {
+    let shown = field_text(*value);
+    ui.add_sized(
+        [62.0, ROW - 4.0],
+        egui::DragValue::new(value)
+            .speed(speed)
+            .range(range[0]..=range[1])
+            .clamp_existing_to_range(false)
+            .custom_formatter(|number, _| field_text(number))
+            .custom_parser(move |text| {
+                let text = text.trim();
+                if text == shown { None } else { text.parse().ok() }
+            })
+            .update_while_editing(false),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use uniwow_api::egui;
+
+    use super::{field_text, number_field};
+
+    /// A frame drawing a field of `value`, with `events`; returns whether it changed and its place.
+    fn frame(ctx: &egui::Context, value: &mut f64, events: Vec<egui::Event>) -> (bool, egui::Rect) {
+        let mut result = (false, egui::Rect::NOTHING);
+        let input = egui::RawInput {
+            events,
+            ..egui::RawInput::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            let response = number_field(ui, value, [0.0, 1.0], 0.005);
+            result = (response.changed(), response.rect);
+        });
+        output.textures_delta.clear();
+        result
+    }
+
+    fn click(at: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn a_field_taken_then_left_without_typing_changes_nothing() {
+        let ctx = egui::Context::default();
+        let mut value = 1.0487;
+        let (_, rect) = frame(&ctx, &mut value, Vec::new());
+        let at = rect.center();
+        frame(&ctx, &mut value, vec![egui::Event::PointerMoved(at), click(at, true)]);
+        frame(&ctx, &mut value, vec![click(at, false)]);
+        let enter = egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let (changed, _) = frame(&ctx, &mut value, vec![enter]);
+        frame(&ctx, &mut value, Vec::new());
+        assert!(!changed);
+        assert_eq!(value, 1.0487, "neither rounded nor brought back within the range");
+    }
+
+    #[test]
+    fn numbers_are_shown_with_three_decimals_at_most() {
+        assert_eq!(field_text(1.0487), "1.049");
+        assert_eq!(field_text(0.5), "0.5");
+        assert_eq!(field_text(10.0), "10");
+        assert_eq!(field_text(-0.0001), "0");
+    }
 }
