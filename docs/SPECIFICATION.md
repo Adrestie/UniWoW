@@ -531,6 +531,8 @@ E:\WoW-editor
 
 ## 9. Milestones
 
+A milestone is marked done only after its external review; milestones are kept small.
+
 ### Milestone 1: proof of the architecture (done)
 
 Content:
