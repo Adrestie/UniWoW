@@ -3452,6 +3452,7 @@ dependencies = [
  "serde",
  "serde_json",
  "uniwow-lua",
+ "uniwow-server-link",
  "windows",
 ]
 
@@ -3503,6 +3504,13 @@ dependencies = [
 
 [[package]]
 name = "uniwow-module-dopesheet"
+version = "0.1.0"
+dependencies = [
+ "uniwow-api",
+]
+
+[[package]]
+name = "uniwow-module-live-world"
 version = "0.1.0"
 dependencies = [
  "uniwow-api",
@@ -3563,6 +3571,10 @@ version = "0.1.0"
 dependencies = [
  "uniwow-api",
 ]
+
+[[package]]
+name = "uniwow-server-link"
+version = "0.1.0"
 
 [[package]]
 name = "url"

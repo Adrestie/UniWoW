@@ -20,6 +20,8 @@ pub use serde;
 pub use serde_json;
 /// Lua 5.1 (`libs/lua`), part of the runtime.
 pub use uniwow_lua::mlua;
+/// The client of the observer of the server (`libs/server-link`), part of the runtime.
+pub use uniwow_server_link as server_link;
 /// The API of Windows, for what wgpu does not tell, such as the memory of the GPU.
 #[cfg(windows)]
 pub use windows;

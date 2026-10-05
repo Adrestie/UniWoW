@@ -13,6 +13,7 @@ edition = "2024"
 uniwow-api = { path = "core/api" }
 uniwow-kernel = { path = "core/kernel" }
 uniwow-lua = { path = "libs/lua" }
+uniwow-server-link = { path = "libs/server-link" }
 eframe = "0.36"
 egui_dock = { version = "0.21", features = ["serde"] }
 glam = "0.30"

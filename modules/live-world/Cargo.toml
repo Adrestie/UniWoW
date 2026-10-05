@@ -1,0 +1,19 @@
+[package]
+name = "uniwow-module-live-world"
+description = "The world as it runs on the server: its creatures, game objects and players around the camera, from the observer mod-uniwow-observer"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+uniwow-api.workspace = true
+
+[package.metadata.uniwow]
+id = "live-world"
+name = "Live world"
+category = "World"
+# Services the module cannot work without, and services it uses when present.
+requires = []
+uses = []

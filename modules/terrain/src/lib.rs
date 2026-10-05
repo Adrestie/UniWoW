@@ -58,6 +58,7 @@ const REFUSALS: usize = 8;
 
 /// A map that has terrain, as the panel offers it.
 struct MapChoice {
+    id: u32,
     directory: String,
     name: String,
     wdt: Arc<Wdt>,
@@ -71,6 +72,7 @@ fn list_maps(formats: &dyn Formats) -> Result<Vec<MapChoice>, String> {
         .filter_map(|map| {
             let wdt = formats.wdt(&map.directory).ok()?;
             wdt.tiles.iter().any(|tile| *tile).then(|| MapChoice {
+                id: map.id,
                 directory: map.directory.clone(),
                 name: map.name.clone(),
                 wdt,
@@ -110,6 +112,8 @@ struct TerrainModule {
     shared: Option<Arc<Shared>>,
     setup: Option<JobId>,
     scene: Arc<Mutex<Scene>>,
+    /// The map shown, as the command `terrain.map` gives it from any thread.
+    shown_map: Arc<Mutex<serde_json::Value>>,
     maps: Option<Result<Vec<MapChoice>, String>>,
     maps_job: Option<JobId>,
     /// The map shown, by its index in `maps`; the one the settings name, until the maps are listed.
@@ -207,6 +211,7 @@ impl TerrainModule {
         };
         let map = &maps[index];
         ctx.set_setting(MAP, serde_json::json!(map.directory));
+        *lock(&self.shown_map) = serde_json::json!({ "id": map.id, "directory": map.directory, "name": map.name });
         self.shown_at = Some(Instant::now());
         let tiles: Vec<TileId> = (0..4096u32)
             .filter(|i| map.wdt.tiles[*i as usize])
@@ -513,6 +518,17 @@ impl TerrainModule {
 impl Module for TerrainModule {
     fn register(&mut self, reg: &mut Registrar) {
         reg.panel("terrain", "Terrain", DockArea::Right);
+        let shown = self.shown_map.clone();
+        reg.command_on_caller(
+            "terrain.map",
+            "The map the terrain shows: its id in Map.dbc, its folder and its name; null while none is shown.",
+            serde_json::json!({ "type": "object" }),
+            serde_json::json!({
+                "type": ["object", "null"],
+                "properties": { "id": { "type": "integer" }, "directory": { "type": "string" }, "name": { "type": "string" } }
+            }),
+            Arc::new(move |_| Ok(lock(&shown).clone())),
+        );
     }
 
     fn init(&mut self, ctx: &mut Context) {

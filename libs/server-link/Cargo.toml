@@ -1,0 +1,7 @@
+[package]
+name = "uniwow-server-link"
+description = "The client of the observer of the server, mod-uniwow-observer, and a fake observer for tests"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

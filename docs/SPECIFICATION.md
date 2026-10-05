@@ -267,7 +267,7 @@ fills it, or *not planned* when no milestone does yet.
 | Tree, table, property grid | egui; the service `property-grid` | `TreeView`, `TableView`, with `set_cell`, `insert_rows`, `remove_rows`; `PropertyGrid` | `uniwow::TreeView`, `uniwow::TableView`, `uniwow::PropertyGrid`; `TreeView`, `TableView`, `PropertyGrid` | — milestones 10 and 11 |
 | Drawing in the 3D view | The service `viewport`: its layers (`prepare`, a version to keep their bundle, their statistics with `stats`) and its frame signal (`wait_frame`) | — not planned (an other 3D access of step 8.3) | — | — |
 | The client's files, read from its archives, and their formats | The services `vfs` and `formats` of the module `assets` — step 9.1 | — not planned yet | — | — |
-| The live world: entities of the server around a point, their moves | Inside the module `live-world` | — step 9.3 (commands and events) | — step 9.3 | — milestones 10 and 11 |
+| The live world: entities of the server around a point, their moves | The commands `live-world.state` and `live-world.entities`, the event `live-world.changed` (step 9.3b); the client of the observer, `uniwow_api::server_link` | The same commands and event, through `call` and `subscribe` | The same, through `call` and `subscribe` | Lua: the same, through `uniwow.call` and `uniwow.subscribe` (checked in step 9.3b); Python: milestone 11 |
 | Splitting work over the cores, `parallel_for` | `uniwow_api::parallel_for` (step 9.2a) | — not planned; compiled modules run threads of their own (T7) | — | — |
 | Picking in the 3D view, the selection shown in 3D | — designed in milestone 9, not built | — | — | — |
 | The terrain of a map shown in the 3D view, with its horizon | The module `terrain` (steps 9.2c, 9.2e, 9.2f) | — not planned yet | — | — |
@@ -491,7 +491,7 @@ milestone 9 takes up those that concern it.
 | vfs | Client archive chain in the 3.3.5a load order, plus the project's own files on top. Milestone 9 proposes it inside the module `assets` too |
 | gpu | Generic GPU helpers on wgpu (device, shaders, buffers, camera math). Drawing of each kind of object belongs to the module that owns it |
 | db | MySQL access to the AzerothCore databases |
-| server-link | SOAP client, server process control, client of the observer `mod-uniwow-observer` (milestone 9) |
+| server-link | The client of the observer `mod-uniwow-observer` and a fake observer for the tests (step 9.3b); the SOAP client and the control of the server process: later |
 | client-link | Protocol with the WXL client module |
 | ids | Id range allocation per module |
 
@@ -2852,6 +2852,64 @@ The parts:
   instances. A message listing the maps and instances updated in the last seconds (id, instance,
   players), filled in `OnMapUpdate` once a second for each map, would give them. Not needed while
   only the continents are shown in this milestone.
+
+#### Step 9.3b, as built
+
+- `libs/server-link`, the crate `uniwow-server-link`, part of the runtime as `uniwow_api::server_link`
+  (its fingerprint changed once):
+  - `protocol`: the messages of `PROTOCOL.md` both ways, encoded and decoded; a body read within
+    its bounds, so that a message malformed is an error, never a panic, and a count that lies
+    cannot ask for more memory than the body holds;
+  - `Client`: blocking, every wait bounded (the connection, WELCOME, each read); a message cut
+    anywhere is gathered; refused, closed, broken and the errors of the network told apart;
+  - `fake::FakeObserver`: an observer on 127.0.0.1 that welcomes a token, keeps what it receives
+    and sends what a test queues, whole or in pieces; the tests of the client and of `live-world`
+    run against it, in the CI.
+- The module `terrain` gives the map it shows, from any thread: the command `terrain.map` (its id in
+  `Map.dbc`, its folder, its name; null while none is shown).
+- The module `live-world`:
+  - a thread of its own (`Context::spawn_thread`) holds the connection. Every 100 ms it reads the
+    camera (`viewport/camera_position`) and the map of the terrain, and subscribes as `PROTOCOL.md`
+    says: at once on another map, once the centre moved more than an eighth of the radius, twice a
+    second at most; no map, it unsubscribes. A HEARTBEAT every 2 seconds when nothing else went;
+    connected again 2 seconds after a loss, 10 after a refusal;
+  - the snapshot of the entities is shared between threads, an `Arc` replaced whole under a brief
+    lock, each entity shared between snapshots; an entity on a spline stands where the times of
+    its spline say, counted on from when it was received (linearly between its points; the markers
+    of step 9.3c follow the curves of the client);
+  - the states are told apart and shown in its panel, *Live world*: no token; connecting; *server
+    stopped*, when nothing listens on the port of the worldserver (8085) nor of the observer;
+    *observer missing*, when the worldserver listens and the observer does not; refused, with the
+    reason of the observer; broken; connected, with the version of the server, the zone and its
+    entities counted by kind. Its settings: the port of the observer, its token, the port of the
+    worldserver, the radius of the zone (300 yards by default, 10 to 533);
+  - the commands of L4, on the calling thread from the snapshot: `live-world.state` (the
+    connection, its message, the version of the server, the zone, the state of the subscription,
+    the entities counted by kind) and `live-world.entities` (the entities within a radius of a
+    point, the nearest first, of the kinds asked for, at most a limit, around the zone by default;
+    each with its GUID as text, since JSON numbers do not hold 64 bits, its entry, its spawn, its
+    name, its display, its position now, its orientation, its scale, its phase, its pool, its game
+    event and whether it is temporary, dead or moving);
+  - the event of L4, `live-world.changed`, one for each message of the observer that changed
+    something: the map, the instance, the sequence and the GUIDs that appeared, changed and left.
+    The entities going with a connection lost are said to leave.
+  - Read only: nothing is written to the server, nothing goes to the history.
+- Tests: the messages both ways read back as written; a body cut at every byte, too long, of an
+  unknown kind, an entity of an unknown kind, a string not UTF-8, a count of four billion entities,
+  each an error; the client welcomed, subscribing, reading a message cut in pieces of 7 bytes and
+  two messages in one write; a wrong token, a connection closed and a message too long told apart;
+  nothing listening. The world replaced, changed and emptied, each GUID told; the position along a
+  spline, cyclic or not; the rule of subscribing again; the link against the fake observer
+  following the camera and the map, keeping the entities, answering the commands, unsubscribing
+  without a map, connecting again after a loss; no token, a wrong one, a server stopped and an
+  observer missing told apart. Each of 12 changes made on purpose to the protocol, the client, the
+  rule of subscribing again, the world, the commands and the states made a test fail.
+- Accepted on the user's machine, with the worldserver of `E:` started and stopped as for step
+  9.3a, no player connected: the panel connected, *active*, the entities counted; a script of Lua,
+  not kept, put the camera over Orgrimmar: 315 creatures and 226 game objects within 300 yards, the
+  five nearest given by `live-world.entities`; the camera moved 600 yards east, the zone followed
+  (68 entities entered, 541 left); the worldserver stopped, *server stopped* and the entities gone;
+  started with `UniwowObserver.Enable = 0`, *observer missing*.
 
 #### Tests
 
