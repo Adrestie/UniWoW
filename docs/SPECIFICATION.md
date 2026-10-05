@@ -3039,6 +3039,76 @@ Risks, verified at the start of their part: how many M2 of the client the copy r
 how many distinct models and batches a city draws, and the draws it makes (9.4c, 9.4d); whether the
 terrain keeps its behaviour at 64 on the shared budget (9.4a).
 
+Added by the review of the proposal, before 9.4b and 9.4c. The rules below were read in the
+description of the formats (wowdev.wiki, its pages *M2*, *M2/.skin*, *M2/Rendering*, *DB/...*,
+*Character Customization*), in wow.export (MIT, its bundled `app.js`), in AzerothCore at
+bc9198ce7, and checked on the skins and tables of the user's client; WoW Model Viewer and Noggit
+(GPL) were read for facts only, nothing of their code is taken.
+
+- **Which submeshes (geosets) a display draws**: an M2 holds all its variants, which drawn at once
+  overlap.
+  - A creature: `CreatureDisplayInfo.CreatureGeosetData` (field 14 of 3.3.5a) chooses, when it is
+    not 0, a variant in each of the groups 100 to 800: every submesh 1 to 899 is hidden, then the
+    nibble *n* from the lowest, of value *v*, shows the submesh (*n* + 1) × 100 + *v* (the client's
+    `ApplyMonsterGeosets`, decompiled on wowdev). In the user's client, 39 displays have it, all of
+    `IronDwarf.mdx`, and every submesh they name is in its skin. When it is 0, every submesh is
+    drawn: to check on the models of the client with several submeshes in one group, and with the
+    user in the client.
+  - A character's look (`CreatureDisplayInfoExtra`: race, sex, skin, face, hair style and colour,
+    facial hair, eleven items, flags, baked skin): the hair by `CharHairGeosets` (race, sex,
+    variation = the hair style), its `GeosetID` the submesh of group 0, 0 with `Showscalp` meaning
+    bald; the facial hair by `CharacterFacialHairStyles` (race, sex, variation = the facial hair, no
+    id column in 3.3.5a), its five values the submeshes of the groups 100, 300, 200, 1600 and 1700
+    (group + value, 0 for none), which the user's 20 skins of race and sex confirm for 17 of them
+    where the other orders and the + 1 of some viewers leave submeshes missing; the other groups at
+    their bare variant, the hands (401), the feet (501) and the legs (1301), no sleeves, chest,
+    pants, tabard, belt nor cape (their x01 does not exist, or 1501 would draw a cape). Its items
+    are not drawn in this milestone. Open, to check in 9.4b and with the user: the ears (701 or
+    702), the scalp of a bald look (submesh 1).
+  - Anything else, game objects among them: the submesh 0 and the first variant of each group (an
+    id ending in 01), as wow.export does.
+  - Tested in 9.4b on known models: a human NPC by its look, and a creature with variants
+    (`IronDwarf`), their submeshes chosen as the client's rule says.
+- **The materials 9.4 renders, and what waits for step 9.5**:
+  - each batch of a skin with its texture: the first of its texture unit, and the second where the
+    client combines two, by its shader chosen at load as WotLK does (`shader_id` is 0 on disk and
+    computed from the blending, the environment mapping and the second set of UV, or from the
+    combiner combos when the model's flag 0x08 is set), its eight combiners (opaque, mod, decal,
+    add, mod2x, fade, mod2x without alpha, add without alpha);
+  - the eight blending modes of 3.3.5a: opaque; alpha key, tested at 224/255 of the alpha of the
+    batch in WotLK; alpha; add without alpha; add; mod; mod2x; blend add, each with its blending
+    and whether it writes the depth;
+  - the render flags: unlit (0x01), unfogged (0x02), two-sided (0x04), without depth test (0x08),
+    without depth write (0x10) (warcraft-rs names the last two wrongly: corrected in the copy); the
+    fog of an added batch black, of a mod one white, of a mod2x one grey, mod and mod2x unlit;
+  - the textures wrapped or clamped on each axis by their flags; a texture of type 11 to 13 is the
+    skin of the display (`CreatureDisplayInfo` textures, in the folder of the model);
+  - the colour and transparency of a batch at their value at rest, the first sequence at its
+    start; a batch whose alpha is 0 is not drawn; `CreatureDisplayInfo.CreatureModelAlpha` (field
+    5, 0 to 255) multiplies the alpha of every batch of the display;
+  - with step 9.5: the animations of the textures, of their coordinates, of colours and
+    transparency, and the bones.
+- **Fog and light, the view's**: the colour and distances of the fog and the sun (direction,
+  colour, ambient), constants of the terrain's layer today, become the view's: `View` gives them to
+  every layer, the terrain and the models alike, so that a model far away fades into the same fog
+  as the ground. The terrain sets the distances of the fog from its reach, as it does now; step 9.7
+  sets the colours and the sun from `Light.dbc`, in the same place.
+- **Instances that move**: the service `models` takes the transforms of a module's instances by a
+  slice at a time, once a frame from the thread of the module (the thread animating `live-world`),
+  and writes the buffers of the instances from that thread, as the markers are written: no call
+  nor lock for each instance and each frame.
+- **The scale**: an instance is drawn at the scale the server sends (`OBJECT_FIELD_SCALE_X`), times
+  `CreatureDisplayInfo.CreatureModelScale` (field 4), times `CreatureModelData.ModelScale` (field
+  4) for a creature. The server's scale never includes that of the display: AzerothCore sets it
+  from `creature_template_model.DisplayScale` (`ObjectMgr.cpp:717-751`, `Unit.cpp:13166-13174`),
+  a game object's from `gameobject_template.size`, and uses the same product for the size of a
+  creature's collision (`Unit.cpp:17136`, `17174`); wowdev says the scales stack by multiplying.
+  1,328 of the 1,331 models of the client have a model scale of 1. Checked in 9.4d on two or three
+  creatures whose size in the client is known.
+- **The modern models**: two in the user's client; the user prepares models of retail exported with
+  wow.export (a creature, a humanoid NPC, an object, a model of many textures): where they are is
+  asked at the start of 9.4b, and they are checked there.
+
 #### Step 9.4a, as built
 
 - `uniwow_api::viewport` holds the budget shared by the view:
