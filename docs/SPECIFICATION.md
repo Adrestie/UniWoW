@@ -3581,6 +3581,19 @@ Added by the review of the proposal, before the service is written:
   animations; the textures of items (`ItemDisplayInfo`); the logic of `sub_876530`, which Wowser
   leaves to do (a shader thrown back to the table), not taken.
 
+#### Step 9.4c2, after its review
+
+- **The axes of the camera given by the view**: `View::view`, the view alone (from the world to
+  the camera), whose first three rows are the axes across, up and back; `models` reads them there.
+  They were taken from the rows of `view_proj`, right only for a symmetric perspective: the fourth
+  row of an orthographic projection, as a view from above for editing will be, is (0, 0, 0, 1),
+  and the axis back came out null. Tested: the same axes under a perspective and an orthographic
+  projection.
+- **Gamma and linear**: the textures are combined in gamma, as WotLK combines them, but the light
+  and the fog are applied in linear, as the terrain applies them since 9.2c, where the client
+  lights in gamma. A slight difference of tint with the client would come from there; to look at
+  again with the lights of the map (9.7).
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

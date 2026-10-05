@@ -213,6 +213,7 @@ fn render(gpu: &egui_wgpu::RenderState, layer: &mut Markers, eye: Vec3, look: Ve
     let view = View {
         view_proj: Mat4::perspective_infinite_reverse_rh(60f32.to_radians(), 1.0, 0.1)
             * Mat4::look_at_rh(eye, look, Vec3::Z),
+        view: Mat4::look_at_rh(eye, look, Vec3::Z),
         eye,
         size: [64, 64],
         time: 0.0,

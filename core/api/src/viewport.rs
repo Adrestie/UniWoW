@@ -226,6 +226,9 @@ pub struct Target {
 #[derive(Clone, Copy, Debug)]
 pub struct View {
     pub view_proj: glam::Mat4,
+    /// The view alone, from the world to the camera: its first three rows are the axes of the
+    /// camera, across, up and back, whatever its projection.
+    pub view: glam::Mat4,
     pub eye: glam::Vec3,
     /// Size of the target in pixels.
     pub size: [u32; 2],

@@ -121,6 +121,7 @@ fn view(shared: &Camera, size: [u32; 2], time: f32, fog: Fog) -> View {
     camera.set_aspect(aspect);
     View {
         view_proj: camera.view_proj(aspect),
+        view: camera.view(),
         eye: camera.eye(),
         size,
         time,

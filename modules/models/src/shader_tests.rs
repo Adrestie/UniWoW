@@ -8,8 +8,9 @@ use uniwow_api::egui_wgpu;
 use uniwow_api::formats::{Batch, FileRef, Material, Model, ModelTexture, ModelTextureSource, Texture, TextureFormat};
 use uniwow_api::glam::{Mat4, Vec2, Vec3};
 use uniwow_api::models::{Geosets, Instance, Look, Models};
+use uniwow_api::viewport::View;
 
-use crate::gpu::Shared;
+use crate::gpu::{Shared, camera_values};
 use crate::layer::{ModelsLayer, Scene};
 use crate::loading::{self, Caches};
 use crate::service::Service;
@@ -407,4 +408,36 @@ fn a_merged_layer_shines_by_the_environment_where_its_texture_lets_it() {
     assert!(near(opaque, [128.0; 3], 3.0), "{opaque:?}");
     let shining = seen(0);
     assert!(near(shining, [64.3; 3], 3.0), "{shining:?}");
+}
+
+#[test]
+fn the_axes_of_the_camera_are_those_of_its_view_whatever_its_projection() {
+    let view = Mat4::look_at_rh(FRONT, AIM, Vec3::Z);
+    let axes = |projection: Mat4| {
+        let values = camera_values(
+            &View {
+                view_proj: projection * view,
+                view,
+                eye: FRONT,
+                size: [32, 32],
+                time: 0.0,
+                fog: Default::default(),
+                sun: Default::default(),
+            },
+            100.0,
+        );
+        [40, 44, 48].map(|at| Vec3::from_slice(&values[at..at + 3]))
+    };
+    // Looking along -X: across +Y, up +Z, back +X, in perspective and orthographic alike.
+    let wanted = [Vec3::Y, Vec3::Z, Vec3::X];
+    for projection in [
+        Mat4::perspective_infinite_reverse_rh(60f32.to_radians(), 1.0, 0.1),
+        Mat4::orthographic_rh(-10.0, 10.0, -10.0, 10.0, 0.1, 100.0),
+    ] {
+        let seen = axes(projection);
+        assert!(
+            seen.iter().zip(wanted).all(|(axis, want)| axis.abs_diff_eq(want, 1e-6)),
+            "{seen:?}"
+        );
+    }
 }

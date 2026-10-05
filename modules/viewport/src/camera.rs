@@ -105,9 +105,13 @@ impl OrbitCamera {
     /// Reverse Z with no far plane: the depth is 1 at the near plane and falls towards 0 at
     /// infinity, so that the whole of a map is seen, with its precision where it is needed.
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
-        let view = Mat4::look_at_rh(self.eye(), self.target, Vec3::Z);
         let proj = Mat4::perspective_infinite_reverse_rh(self.fov.to_radians(), aspect, 0.1);
-        proj * view
+        proj * self.view()
+    }
+
+    /// The view alone, from the world to the camera.
+    pub fn view(&self) -> Mat4 {
+        Mat4::look_at_rh(self.eye(), self.target, Vec3::Z)
     }
 
     /// Turns the eye around the target by a drag of `delta` points.

@@ -163,12 +163,9 @@ pub fn camera_values(view: &View, reach: f32) -> [f32; CAMERA] {
     values[31] = reach;
     values[32..35].copy_from_slice(&view.fog.colour);
     values[36..39].copy_from_slice(&[view.fog.start, view.fog.middle, view.fog.end]);
-    // The rows of the view, from those of the view and its projection: its fourth row is minus
-    // the third of the view, the distance in front of the eye.
-    let row = |index: usize| view.view_proj.row(index).truncate().normalize_or_zero();
-    values[40..43].copy_from_slice(&row(0).to_array());
-    values[44..47].copy_from_slice(&row(1).to_array());
-    values[48..51].copy_from_slice(&(-row(3)).to_array());
+    for (at, row) in [40, 44, 48].into_iter().zip(0..3) {
+        values[at..at + 3].copy_from_slice(&view.view.row(row).truncate().normalize_or_zero().to_array());
+    }
     values
 }
 

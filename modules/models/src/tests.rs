@@ -695,6 +695,7 @@ pub fn render(bench: &mut Bench, eye: Vec3, look: Vec3) -> Vec<u8> {
     let view = View {
         view_proj: Mat4::perspective_infinite_reverse_rh(60f32.to_radians(), 1.0, 0.1)
             * Mat4::look_at_rh(eye, look, Vec3::Z),
+        view: Mat4::look_at_rh(eye, look, Vec3::Z),
         eye,
         size: [size, size],
         time: 0.0,
