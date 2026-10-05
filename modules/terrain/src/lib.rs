@@ -13,7 +13,6 @@ pub mod mesh;
 pub mod model;
 #[cfg(test)]
 mod tests;
-mod textures;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -675,7 +674,7 @@ impl Module for TerrainModule {
                 counts.unreadable,
                 counts.no_room,
                 counts.arrays,
-                textures::SLOTS
+                gpu::SLOTS
             ));
         }
         if let Some(limited) = limited {

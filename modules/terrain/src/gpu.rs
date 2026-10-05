@@ -8,6 +8,7 @@ use std::sync::{Arc, OnceLock};
 
 use uniwow_api::bytemuck::Zeroable;
 use uniwow_api::formats::{Formats, Layer, Tile};
+use uniwow_api::texture_arrays::{NONE, Placed, TextureArrays};
 use uniwow_api::viewport::Target;
 use uniwow_api::wgpu::util::DeviceExt;
 use uniwow_api::{bytemuck, egui_wgpu, parallel_for, wgpu};
@@ -16,7 +17,9 @@ use crate::horizon::HorizonVertex;
 use crate::loading::Kind;
 use crate::mesh::{self, CHUNKS, LIGHT_BLEND, LODS, SKIRT_DEPTH, TILE_VERTICES, VERTICES, Vertex};
 use crate::model::{TileId, TileModel, chunk_bounds};
-use crate::textures::{NONE, Placed, SLOTS, TextureArrays};
+
+/// The arrays of textures the shader of the tiles binds at once.
+pub const SLOTS: usize = 12;
 
 const TILES_SHADER: &str = concat!(include_str!("common.wgsl"), include_str!("terrain.wgsl"));
 const HORIZON_SHADER: &str = concat!(include_str!("common.wgsl"), include_str!("horizon.wgsl"));
@@ -273,7 +276,7 @@ impl Shared {
                 dimension: Some(wgpu::TextureViewDimension::D2Array),
                 ..Default::default()
             }),
-            textures: TextureArrays::new(device, &gpu.queue),
+            textures: TextureArrays::new(device, &gpu.queue, "the terrain", SLOTS, true),
         })
     }
 

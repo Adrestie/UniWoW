@@ -1,27 +1,24 @@
-//! The textures of the terrain in arrays, one for each class of texture (format, size and levels),
-//! so that a tile is drawn in one draw whatever textures its chunks have: a texture is a layer of
-//! an array of its class, read once and shared between the tiles. An array grows as textures come,
-//! a layer no tile holds is given to the next texture, and an array that holds none is dropped.
-//! The interface thread never waits for the jobs placing textures: it reads the views of the arrays
-//! as they last published them, their generation, their bytes and their counts, without their lock.
-//! A texture that cannot be read is not read again; one refused for want of room is tried again.
-//! A layer is filled by a copy the job submits, never by `Queue::write_texture`: wgpu-core 30
-//! holds the state of initialisation of the texture written while it takes its trackers, a
-//! submission takes them the other way round, and the frame drawing the array would lock up with
-//! the job writing to it.
+//! Textures in arrays, one for each class of texture (format, size and levels), so that what draws
+//! many textures binds a few arrays and draws them in one draw: a texture is a layer of an array of
+//! its class, read once and shared between those holding it. An array grows as textures come, a
+//! layer nobody holds is given to the next texture, and an array that holds none is dropped. The
+//! arrays are a fixed count of slots, which a shader binds at once. The interface thread never
+//! waits for the jobs placing textures: it reads the views of the arrays as they last published
+//! them, their generation, their bytes and their counts, without their lock. A texture that cannot
+//! be read is not read again; one refused for want of room is tried again. A layer is filled by a
+//! copy the job submits, never by `Queue::write_texture`: wgpu-core 30 holds the state of
+//! initialisation of the texture written while it takes its trackers, a submission takes them the
+//! other way round, and the frame drawing the array would lock up with the job writing to it.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
-use uniwow_api::formats::{FileRef, Formats, Texture, TextureFormat};
-use uniwow_api::wgpu::util::DeviceExt;
-use uniwow_api::{log, wgpu};
+use crate::formats::{FileRef, Formats, Texture, TextureFormat};
+use crate::wgpu::util::DeviceExt;
+use crate::{log, wgpu};
 
-/// The arrays the shader binds at once.
-pub const SLOTS: usize = 12;
-
-/// What a chunk without a layer has in its place: drawn white.
+/// What a texture without a layer has in its place, as a code: drawn white by its shader.
 pub const NONE: u32 = u32::MAX;
 
 /// Where a texture is: the slot of its array and its layer there.
@@ -83,7 +80,7 @@ struct Arrays {
 }
 
 /// The views of the arrays by slot, as last published.
-type Views = Arc<Vec<Option<wgpu::TextureView>>>;
+pub type Views = Arc<Vec<Option<wgpu::TextureView>>>;
 
 /// A texture of the cache, as its last reading left it.
 enum Entry {
@@ -114,18 +111,26 @@ pub struct Counts {
     pub no_room: usize,
     /// The slots holding an array.
     pub arrays: usize,
+    /// The layers of the arrays holding a texture, and all their layers.
+    pub layers: usize,
+    pub capacity: usize,
 }
 
 pub struct TextureArrays {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// Who holds the arrays, for what the log says and the labels of the GPU.
+    owner: &'static str,
+    slots: usize,
+    /// Whether the textures are read as sRGB, made linear by the GPU, or as they are stored.
+    srgb: bool,
     /// Whether the textures stored as BC go to the GPU so.
     block_compression: bool,
     max_layers: u32,
     arrays: Mutex<Arrays>,
     entries: Mutex<HashMap<FileRef, Cell>>,
     /// Published by the jobs at each change of the arrays, under their lock: their views, what they
-    /// take on the GPU, and the count of the changes, after which the bind group of the terrain is
+    /// take on the GPU, and the count of the changes, after which the bind group of their owner is
     /// made again.
     published: Mutex<Views>,
     bytes: AtomicU64,
@@ -134,6 +139,8 @@ pub struct TextureArrays {
     unreadable: AtomicUsize,
     no_room: AtomicUsize,
     arrays_used: AtomicUsize,
+    layers_used: AtomicUsize,
+    capacity: AtomicUsize,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -146,24 +153,35 @@ fn grown(capacity: u32, max: u32) -> u32 {
 }
 
 impl TextureArrays {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+    /// The arrays of `owner`, `slots` of them at most, their textures read as sRGB when `srgb` says.
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, owner: &'static str, slots: usize, srgb: bool) -> Self {
         let mut arrays = Arrays::default();
-        arrays.slots.resize_with(SLOTS, || None);
+        arrays.slots.resize_with(slots, || None);
         Self {
             device: device.clone(),
             queue: queue.clone(),
+            owner,
+            slots,
+            srgb,
             block_compression: device.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
             max_layers: device.limits().max_texture_array_layers,
             arrays: Mutex::new(arrays),
             entries: Mutex::default(),
-            published: Mutex::new(Arc::new(vec![None; SLOTS])),
+            published: Mutex::new(Arc::new(vec![None; slots])),
             bytes: AtomicU64::new(0),
             generation: AtomicU64::new(0),
             placed: AtomicUsize::new(0),
             unreadable: AtomicUsize::new(0),
             no_room: AtomicUsize::new(0),
             arrays_used: AtomicUsize::new(0),
+            layers_used: AtomicUsize::new(0),
+            capacity: AtomicUsize::new(0),
         }
+    }
+
+    /// The slots of the arrays, which a shader binds.
+    pub fn slots(&self) -> usize {
+        self.slots
     }
 
     /// The textures placed, refused and waiting for room, and the slots used, without a lock.
@@ -173,6 +191,8 @@ impl TextureArrays {
             unreadable: self.unreadable.load(Ordering::Acquire),
             no_room: self.no_room.load(Ordering::Acquire),
             arrays: self.arrays_used.load(Ordering::Acquire),
+            layers: self.layers_used.load(Ordering::Acquire),
+            capacity: self.capacity.load(Ordering::Acquire),
         }
     }
 
@@ -193,6 +213,8 @@ impl TextureArrays {
         self.bytes.store(bytes, Ordering::Release);
         self.arrays_used
             .store(arrays.slots.iter().flatten().count(), Ordering::Release);
+        let capacity = arrays.slots.iter().flatten().map(|array| array.used.len()).sum();
+        self.capacity.store(capacity, Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
@@ -227,14 +249,14 @@ impl TextureArrays {
                 Some(placed)
             }
             Err(Failure::Unreadable(reason)) => {
-                log::warn!("a texture of the terrain is left out: {reason}");
+                log::warn!("a texture of {} is left out: {reason}", self.owner);
                 *entry = Entry::Unreadable;
                 self.unreadable.fetch_add(1, Ordering::AcqRel);
                 None
             }
             Err(Failure::NoRoom(reason)) => {
                 if !waited {
-                    log::warn!("a texture of the terrain waits for room: {reason}");
+                    log::warn!("a texture of {} waits for room: {reason}", self.owner);
                     self.no_room.fetch_add(1, Ordering::AcqRel);
                 }
                 *entry = Entry::NoRoom;
@@ -260,11 +282,15 @@ impl TextureArrays {
     /// Writes `texture` to a free layer of an array of its class, growing one or making one when
     /// none is free: its levels copied from a buffer of their own, in a submission of its own.
     pub fn place(&self, texture: &Texture) -> Result<Placed, String> {
-        let format = match texture.format {
-            TextureFormat::Rgba8 => wgpu::TextureFormat::Rgba8UnormSrgb,
-            TextureFormat::Bc1 => wgpu::TextureFormat::Bc1RgbaUnormSrgb,
-            TextureFormat::Bc2 => wgpu::TextureFormat::Bc2RgbaUnormSrgb,
-            TextureFormat::Bc3 => wgpu::TextureFormat::Bc3RgbaUnormSrgb,
+        let format = match (texture.format, self.srgb) {
+            (TextureFormat::Rgba8, true) => wgpu::TextureFormat::Rgba8UnormSrgb,
+            (TextureFormat::Bc1, true) => wgpu::TextureFormat::Bc1RgbaUnormSrgb,
+            (TextureFormat::Bc2, true) => wgpu::TextureFormat::Bc2RgbaUnormSrgb,
+            (TextureFormat::Bc3, true) => wgpu::TextureFormat::Bc3RgbaUnormSrgb,
+            (TextureFormat::Rgba8, false) => wgpu::TextureFormat::Rgba8Unorm,
+            (TextureFormat::Bc1, false) => wgpu::TextureFormat::Bc1RgbaUnorm,
+            (TextureFormat::Bc2, false) => wgpu::TextureFormat::Bc2RgbaUnorm,
+            (TextureFormat::Bc3, false) => wgpu::TextureFormat::Bc3RgbaUnorm,
         };
         // The levels of BC at least 4 texels wide and high.
         let levels = match texture.format {
@@ -294,20 +320,20 @@ impl TextureArrays {
             }
         }
         let source = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("terrain texture placed"),
+            label: Some(self.owner),
             contents: &bytes,
             usage: wgpu::BufferUsages::COPY_SRC,
         });
         let mut arrays = lock(&self.arrays);
         let (slot, layer) = self.free_layer(&mut arrays, class).ok_or_else(|| {
             format!(
-                "{SLOTS} arrays of textures are full, the last of {}×{} {format:?}",
-                class.width, class.height
+                "{} arrays of textures are full, the last of {}×{} {format:?}",
+                self.slots, class.width, class.height
             )
         })?;
         let array = arrays.slots[slot].as_ref().expect("the layer is in an array");
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("terrain texture placed"),
+            label: Some(self.owner),
         });
         for (level, (offset, stride, rows)) in copies.into_iter().enumerate() {
             encoder.copy_buffer_to_texture(
@@ -348,6 +374,7 @@ impl TextureArrays {
                 && let Some(layer) = array.used.iter().position(|used| !used)
             {
                 array.used[layer] = true;
+                self.layers_used.fetch_add(1, Ordering::AcqRel);
                 return Some((slot, layer as u32));
             }
         }
@@ -372,13 +399,14 @@ impl TextureArrays {
         let array = arrays.slots[slot].as_mut().expect("made above");
         let layer = array.used.iter().position(|used| !used).expect("a layer was added");
         array.used[layer] = true;
+        self.layers_used.fetch_add(1, Ordering::AcqRel);
         Some((slot, layer as u32))
     }
 
     /// An array of `class` with `capacity` layers, those of `from` copied into it.
     fn create(&self, class: Class, capacity: u32, from: Option<&Array>) -> Array {
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("terrain textures"),
+            label: Some(self.owner),
             size: wgpu::Extent3d {
                 width: class.width,
                 height: class.height,
@@ -394,7 +422,7 @@ impl TextureArrays {
         let mut used = vec![false; capacity as usize];
         if let Some(from) = from {
             let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("terrain textures grown"),
+                label: Some(self.owner),
             });
             for level in 0..class.levels {
                 encoder.copy_texture_to_texture(
@@ -437,12 +465,12 @@ impl TextureArrays {
         self.create(old.class, capacity, Some(&old))
     }
 
-    /// Forgets the textures no tile holds any more, their layers given back, and drops the arrays
+    /// Forgets the textures nobody holds any more, their layers given back, and drops the arrays
     /// that hold none. It waits for the jobs placing textures: a job of its own runs it.
     pub fn purge(&self) {
         let mut freed = Vec::new();
         lock(&self.entries).retain(|_, cell| {
-            // Neither a tile nor a job asking for it holds it; one being read is kept.
+            // Neither a holder nor a job asking for it holds it; one being read is kept.
             if Arc::strong_count(cell) > 1 {
                 return true;
             }
@@ -461,6 +489,7 @@ impl TextureArrays {
             }
         });
         self.placed.fetch_sub(freed.len(), Ordering::AcqRel);
+        self.layers_used.fetch_sub(freed.len(), Ordering::AcqRel);
         let mut arrays = lock(&self.arrays);
         for (slot, layer) in freed {
             if let Some(array) = arrays.slots[slot as usize].as_mut() {
@@ -485,7 +514,7 @@ impl TextureArrays {
     }
 
     /// The generation of the arrays and the view of each slot, as last published, for the bind
-    /// group of the terrain.
+    /// group of their owner.
     pub fn views(&self) -> (u64, Views) {
         let generation = self.generation();
         (generation, lock(&self.published).clone())
@@ -496,8 +525,7 @@ impl TextureArrays {
         self.generation.load(Ordering::Acquire)
     }
 
-    /// The texture of an array and how many layers it has, by its slot, for the tests.
-    #[cfg(test)]
+    /// The texture of an array and how many layers it has, by its slot, for the tests of the owners.
     pub fn array(&self, slot: u32) -> Option<(wgpu::Texture, usize)> {
         let arrays = lock(&self.arrays);
         let array = arrays.slots[slot as usize].as_ref()?;

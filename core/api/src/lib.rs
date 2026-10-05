@@ -64,6 +64,7 @@ pub mod property_grid;
 mod registrar;
 pub mod sequence;
 mod service;
+pub mod texture_arrays;
 pub mod ui;
 pub mod vfs;
 pub mod viewport;

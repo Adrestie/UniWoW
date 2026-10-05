@@ -238,6 +238,16 @@ pub struct View {
     pub sun: Sun,
 }
 
+/// How a layer draws: in a render bundle of its own, which the viewport records and keeps by its
+/// version, or in the pass of the view itself at each frame, for what a bundle cannot record, such
+/// as `RenderPass::multi_draw_indexed_indirect`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Drawing {
+    #[default]
+    Bundle,
+    Pass,
+}
+
 /// Drawn on the interface thread, but may be created on any thread.
 pub trait Layer: Send {
     /// Writes what the layer draws with the view of this frame, such as its buffers of camera and
@@ -246,6 +256,20 @@ pub trait Layer: Send {
     /// module reported. Nothing by default.
     fn prepare(&mut self, gpu: &egui_wgpu::RenderState, view: &View) {
         let _ = (gpu, view);
+    }
+
+    /// Records what the layer computes on the GPU for this frame, such as the compute passes choosing
+    /// what it draws, into an encoder of its own, submitted before the pass of the view. It runs at
+    /// each frame after `prepare`, inside a validation error scope, which the encoder is finished
+    /// in: a layer that panics or fails here is removed and its module reported. Nothing by default.
+    fn compute(&mut self, gpu: &egui_wgpu::RenderState, view: &View, encoder: &mut wgpu::CommandEncoder) {
+        let _ = (gpu, view, encoder);
+    }
+
+    /// How the layer draws: by `draw` into its bundle, by default, or by `draw_pass`. Read at each
+    /// frame.
+    fn drawing(&self) -> Drawing {
+        Drawing::Bundle
     }
 
     /// The version of what the layer records: its bundle is kept from frame to frame while the
@@ -258,6 +282,7 @@ pub trait Layer: Send {
 
     /// Records the layer's drawing into its own render bundle, created by the viewport with the
     /// formats and sample count of `target`; create pipelines lazily from `gpu.device` to match.
+    /// Called for a layer drawing in a bundle; nothing by default.
     ///
     /// The viewport validates the bundle on its own: a layer that panics or records an invalid
     /// command is removed and its module reported as failed, without affecting the others.
@@ -267,16 +292,35 @@ pub trait Layer: Send {
         target: &Target,
         view: &View,
         bundle: &mut wgpu::RenderBundleEncoder<'a>,
-    );
+    ) {
+        let _ = (gpu, target, view, bundle);
+    }
+
+    /// Draws the layer in the pass of the view at each frame, for a layer drawing in the pass, in
+    /// the order of the layers, the bundles of the others run between. The pass is in no known
+    /// state: the layer before may have left its own, and running bundles resets it, so the layer
+    /// sets all it draws with (pipeline, bind groups, vertex and index buffers); a bundle never
+    /// sees what it leaves. A layer that panics here is removed and its module reported; a GPU
+    /// error in the pass, which the viewport learns only once the frame is finished, removes every
+    /// layer drawn in the pass that frame. Nothing by default.
+    fn draw_pass(
+        &mut self,
+        gpu: &egui_wgpu::RenderState,
+        target: &Target,
+        view: &View,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        let _ = (gpu, target, view, pass);
+    }
 
     /// What the layer drew with the view of the last frame, for the statistics of the view. Called
-    /// after `prepare` and `draw`; nothing by default.
+    /// after the layer is drawn; nothing by default.
     fn stats(&self) -> LayerStats {
         LayerStats::default()
     }
 
     /// Texts the view writes over its image, each above a point of the world, such as the names of
-    /// what the layer draws; a few dozen at most. Called after `prepare` and `draw`, as `stats` is;
+    /// what the layer draws; a few dozen at most. Called after the layer is drawn, as `stats` is;
     /// none by default.
     fn labels(&self) -> Vec<Label> {
         Vec::new()

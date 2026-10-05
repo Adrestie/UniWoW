@@ -1,6 +1,7 @@
 //! The statistics of the view: the time between frames; what the interface thread spent preparing
-//! the layers, recording their bundles and submitting; what the GPU spent drawing, timed by its
-//! timestamps when the device has them; what the process takes in memory; and what each layer drew.
+//! the layers, recording their bundles and submitting; what the GPU spent on a frame, timed by its
+//! timestamps when the device has them, and on each layer's computing and drawing where it can time
+//! them inside encoders and passes; what the process takes in memory; and what each layer drew.
 //! Averaged over the last second, with the longest, as the view shows them over itself.
 
 use std::collections::VecDeque;
@@ -18,8 +19,9 @@ const WINDOW: Duration = Duration::from_secs(1);
 #[derive(Clone, Debug, Default)]
 pub struct LayerTiming {
     pub owner: String,
+    /// Its preparing, and its recording of what it computes.
     pub prepare: Duration,
-    /// None when its bundle was kept.
+    /// Its recording: of its bundle, none when it was kept, or of its drawing in the pass.
     pub record: Option<Duration>,
     pub stats: LayerStats,
 }
@@ -29,6 +31,14 @@ impl LayerTiming {
     fn interface(&self) -> Duration {
         self.stats.steering + self.prepare + self.record.unwrap_or_default()
     }
+}
+
+/// What the GPU spent on a frame, in milliseconds: on it all, and on each layer timed, its
+/// computing and its drawing.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GpuFrame {
+    pub total: f64,
+    pub layers: Vec<(String, f64, f64)>,
 }
 
 /// A frame of the view.
@@ -45,7 +55,7 @@ pub struct Sample {
 #[derive(Default)]
 pub struct Stats {
     samples: VecDeque<(Instant, Sample)>,
-    gpu: VecDeque<(Instant, f64)>,
+    gpu: VecDeque<(Instant, GpuFrame)>,
 }
 
 /// What the process takes in memory, in bytes: its working set and its private bytes; none where
@@ -105,9 +115,9 @@ impl Stats {
         }
     }
 
-    /// The time the GPU spent on a frame, in milliseconds, known some frames after it.
-    pub fn push_gpu(&mut self, now: Instant, milliseconds: f64) {
-        self.gpu.push_back((now, milliseconds));
+    /// What the GPU spent on a frame, known some frames after it.
+    pub fn push_gpu(&mut self, now: Instant, frame: GpuFrame) {
+        self.gpu.push_back((now, frame));
         while self.gpu.front().is_some_and(|(at, _)| now.duration_since(*at) > WINDOW) {
             self.gpu.pop_front();
         }
@@ -131,7 +141,7 @@ impl Stats {
             "view, interface thread: {all:.2} ms (prepare {prepare:.2}, record {record:.2}, submit {submit:.2}), the longest {longest:.2}"
         ));
         lines.push(if timed {
-            let (gpu, longest) = spread(self.gpu.iter().map(|(_, gpu)| *gpu));
+            let (gpu, longest) = spread(self.gpu.iter().map(|(_, gpu)| gpu.total));
             format!("GPU: {gpu:.2} ms a frame, the longest {longest:.2}")
         } else {
             "GPU: not timed, the device has no timestamps".to_owned()
@@ -179,24 +189,49 @@ impl Stats {
             lines.push(format!(
                 "  interface {interface:.2} ms, the longest {longest:.2}: steering {steering:.2} ({longest_steering:.2}), prepare {prepare:.2} ({longest_prepare:.2}), record {record:.2} ({longest_record:.2})"
             ));
+            let timed = || {
+                self.gpu.iter().filter_map(|(_, frame)| {
+                    frame
+                        .layers
+                        .iter()
+                        .find(|(owner, _, _)| *owner == layer.owner)
+                        .map(|(_, compute, draw)| (*compute, *draw))
+                })
+            };
+            if timed().next().is_some() {
+                let (compute, longest_compute) = spread(timed().map(|(compute, _)| compute));
+                let (draw, longest_draw) = spread(timed().map(|(_, draw)| draw));
+                lines.push(format!(
+                    "  GPU: computing {compute:.2} ms ({longest_compute:.2}), drawing {draw:.2} ({longest_draw:.2})"
+                ));
+            }
         }
         lines.join("\n")
     }
 }
 
-/// A buffer the timestamps of a frame are copied to, and where its reading stands.
+/// A buffer the timestamps of a frame are copied to, where its reading stands, and the layers they
+/// time.
 struct Readback {
     buffer: wgpu::Buffer,
     state: Arc<AtomicU8>,
+    owners: Vec<String>,
 }
 
 const FREE: u8 = 0;
 const IN_FLIGHT: u8 = 1;
 const MAPPED: u8 = 2;
 
-/// Times the pass of the view on the GPU: its timestamps at its start and its end, resolved and
-/// copied to a buffer read back some frames later, without waiting; a frame finding no buffer free
-/// is not timed.
+/// The layers whose computing and drawing a frame times apart, at most.
+pub const TIMED_LAYERS: usize = 16;
+/// The timestamps of a frame: its pass, then four for each layer timed (its computing begun and
+/// ended, its drawing begun and ended).
+const QUERIES: u32 = 2 + 4 * TIMED_LAYERS as u32;
+
+/// Times the frames of the view on the GPU: the pass by its timestamps at its start and its end,
+/// and, where the device writes timestamps inside encoders and passes, each layer's computing and
+/// drawing; resolved and copied to a buffer read back some frames later, without waiting. A frame
+/// finding no buffer free is not timed.
 pub struct GpuTimer {
     set: wgpu::QuerySet,
     resolve: wgpu::Buffer,
@@ -205,23 +240,28 @@ pub struct GpuTimer {
     period: f64,
     /// The buffer of this frame.
     current: Option<usize>,
+    /// Whether the layers are timed apart.
+    inside: bool,
+    /// The layers timed in this frame, in their order.
+    owners: Vec<String>,
 }
 
 impl GpuTimer {
     /// None when the device has no timestamps.
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Self> {
-        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+        let features = device.features();
+        if !features.contains(wgpu::Features::TIMESTAMP_QUERY) {
             return None;
         }
         let set = device.create_query_set(&wgpu::QuerySetDescriptor {
             label: Some("viewport timestamps"),
             ty: wgpu::QueryType::Timestamp,
-            count: 2,
+            count: QUERIES,
         });
         let buffer = |usage| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("viewport timestamps"),
-                size: 16,
+                size: u64::from(QUERIES) * 8,
                 usage,
                 mapped_at_creation: false,
             })
@@ -233,19 +273,29 @@ impl GpuTimer {
                 .map(|_| Readback {
                     buffer: buffer(wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST),
                     state: Arc::new(AtomicU8::new(FREE)),
+                    owners: Vec::new(),
                 })
                 .collect(),
             period: f64::from(queue.get_timestamp_period()),
             current: None,
+            inside: features.contains(
+                wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES,
+            ),
+            owners: Vec::new(),
         })
     }
 
-    /// Where the pass of this frame writes its timestamps, when a buffer is free to read them.
-    pub fn writes(&mut self) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
+    /// Begins the frame: whether a buffer is free to read it.
+    pub fn begin(&mut self) {
+        self.owners.clear();
         self.current = self
             .readbacks
             .iter()
             .position(|readback| readback.state.load(Ordering::Acquire) == FREE);
+    }
+
+    /// Where the pass of this frame writes its timestamps, when the frame is timed.
+    pub fn writes(&self) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
         self.current?;
         Some(wgpu::RenderPassTimestampWrites {
             query_set: &self.set,
@@ -254,11 +304,38 @@ impl GpuTimer {
         })
     }
 
-    /// After the pass: its timestamps copied to the buffer of this frame.
+    /// The number of the layer `owner` among those of this frame timed apart; none when the frame
+    /// or its layers are not timed, or too many are.
+    pub fn layer(&mut self, owner: &str) -> Option<u32> {
+        if self.current.is_none() || !self.inside || self.owners.len() >= TIMED_LAYERS {
+            return None;
+        }
+        self.owners.push(owner.to_owned());
+        Some(self.owners.len() as u32 - 1)
+    }
+
+    /// Writes the beginning or the end of the computing of the layer `layer` into `encoder`.
+    pub fn computing(&self, encoder: &mut wgpu::CommandEncoder, layer: u32, end: bool) {
+        encoder.write_timestamp(&self.set, 2 + 4 * layer + u32::from(end));
+    }
+
+    /// Writes the beginning or the end of the drawing of the layer `layer` into the pass.
+    pub fn drawing(&self, pass: &mut wgpu::RenderPass<'_>, layer: u32, end: bool) {
+        pass.write_timestamp(&self.set, 2 + 4 * layer + 2 + u32::from(end));
+    }
+
+    /// After the pass: the timestamps written copied to the buffer of this frame.
     pub fn resolve(&self, encoder: &mut wgpu::CommandEncoder) {
         if let Some(current) = self.current {
-            encoder.resolve_query_set(&self.set, 0..2, &self.resolve, 0);
-            encoder.copy_buffer_to_buffer(&self.resolve, 0, &self.readbacks[current].buffer, 0, 16);
+            let written = 2 + 4 * self.owners.len() as u32;
+            encoder.resolve_query_set(&self.set, 0..written, &self.resolve, 0);
+            encoder.copy_buffer_to_buffer(
+                &self.resolve,
+                0,
+                &self.readbacks[current].buffer,
+                0,
+                u64::from(written) * 8,
+            );
         }
     }
 
@@ -267,37 +344,47 @@ impl GpuTimer {
         let Some(current) = self.current.take() else {
             return;
         };
-        let state = self.readbacks[current].state.clone();
+        let readback = &mut self.readbacks[current];
+        readback.owners = std::mem::take(&mut self.owners);
+        let state = readback.state.clone();
         state.store(IN_FLIGHT, Ordering::Release);
-        self.readbacks[current]
-            .buffer
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                state.store(if result.is_ok() { MAPPED } else { FREE }, Ordering::Release);
-            });
+        readback.buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+            state.store(if result.is_ok() { MAPPED } else { FREE }, Ordering::Release);
+        });
     }
 
-    /// The times of the frames whose timestamps have come back, in milliseconds, without waiting.
-    pub fn collect(&mut self, device: &wgpu::Device) -> Vec<f64> {
+    /// The frames whose timestamps have come back, without waiting.
+    pub fn collect(&mut self, device: &wgpu::Device) -> Vec<GpuFrame> {
         let _ = device.poll(wgpu::PollType::Poll);
-        let mut times = Vec::new();
-        for readback in &self.readbacks {
+        let mut frames = Vec::new();
+        for readback in &mut self.readbacks {
             if readback.state.load(Ordering::Acquire) != MAPPED {
                 continue;
             }
-            let ticks = readback.buffer.slice(..).get_mapped_range().ok().map(|data| {
-                let mut ticks = [0u64; 2];
-                for (tick, bytes) in ticks.iter_mut().zip(data.as_chunks::<8>().0) {
-                    *tick = u64::from_le_bytes(*bytes);
-                }
-                ticks
+            let ticks: Option<Vec<u64>> = readback.buffer.slice(..).get_mapped_range().ok().map(|data| {
+                data.as_chunks::<8>()
+                    .0
+                    .iter()
+                    .take(2 + 4 * readback.owners.len())
+                    .map(|bytes| u64::from_le_bytes(*bytes))
+                    .collect()
             });
             readback.buffer.unmap();
             readback.state.store(FREE, Ordering::Release);
-            if let Some([start, end]) = ticks {
-                times.push(end.saturating_sub(start) as f64 * self.period / 1e6);
-            }
+            let Some(ticks) = ticks else {
+                continue;
+            };
+            let span = |start: usize| ticks[start + 1].saturating_sub(ticks[start]) as f64 * self.period / 1e6;
+            frames.push(GpuFrame {
+                total: span(0),
+                layers: readback
+                    .owners
+                    .iter()
+                    .enumerate()
+                    .map(|(layer, owner)| (owner.clone(), span(2 + 4 * layer), span(4 + 4 * layer)))
+                    .collect(),
+            });
         }
-        times
+        frames
     }
 }

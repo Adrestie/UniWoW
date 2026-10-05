@@ -11,12 +11,12 @@ use uniwow_api::glam::{Mat4, Vec3, Vec4};
 use uniwow_api::viewport::{Layer, LayerStats, Target, View};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
+use crate::gpu::SLOTS;
 use crate::gpu::{CAMERA, Shared, TileGpu};
 use crate::horizon::{self, HorizonGpu};
 use crate::loading::Kind;
 use crate::mesh;
 use crate::model::{TILE, TileId};
-use crate::textures::SLOTS;
 
 /// What the module hands to its layer: the tiles, the horizon and the map shown, and what its
 /// statistics say.

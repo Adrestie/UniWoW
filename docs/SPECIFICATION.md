@@ -3878,6 +3878,57 @@ submit.
   drawn in a bundle never sees the state a layer drawn in the pass left. Tested with a layer of
   each kind, in both orders.
 
+#### Step 9.4e1, as built
+
+- **`Layer`** (`core/api`, `viewport`): `Drawing` (`Bundle` by default, `Pass`); `compute(gpu,
+  view, encoder)`, nothing by default; `drawing()`, read at each frame; `draw_pass(gpu, target,
+  view, pass)`, nothing by default; `draw` now nothing by default too, for a layer drawn in the
+  pass. Their documentation says what the state of the pass is when `draw_pass` begins.
+- **A frame of the view** (`draw_frame`), in three times: each layer prepared, then its computing
+  recorded into an encoder of its own, finished inside its scope of validation (a panic, invalid
+  commands or a GPU error there remove that layer alone), then its bundle kept or recorded, or none
+  for a layer drawn in the pass; then the pass: the grid, then the layers in their order, a bundle
+  run or `draw_pass` called; then each layer's statistics and labels. Everything is submitted in
+  one call, the encoders of the computing first. A GPU error in the pass is known only when its
+  encoder is finished: it removes the layers drawn in the pass that frame, and the frame is not
+  drawn (the computing is submitted all the same). The time of recording a layer drawn in the pass
+  is its recording, at each frame; the submitting of the view leaves it out.
+- **The GPU timed for each layer** (`stats.rs`): 2 timestamps for the pass and 4 for each of the
+  first 16 layers (its computing begun and ended in its encoder, its drawing begun and ended in the
+  pass, a bundle as a layer drawn in the pass), where the device offers timestamps inside encoders
+  and passes; resolved with the frame, read back some frames later. The statistics give for each
+  layer `GPU: computing x ms (longest), drawing y (longest)`. A frame whose pass failed is not
+  timed.
+- **The device** (`kernel`): asks, when the adapter offers them, for the timestamps inside encoders
+  and passes, `INDIRECT_FIRST_INSTANCE` and `MULTI_DRAW_INDIRECT_COUNT`, and for up to 128 sampled
+  textures a stage (16 by default).
+- **The arrays of textures** (`uniwow_api::texture_arrays`): those of the terrain moved and
+  generalised: their owner (for the log and the labels of the GPU), their count of slots, and
+  whether the textures are read as sRGB are given to `TextureArrays::new`; the counts give the
+  layers holding a texture and all the layers of the arrays (their capacity), counted where a layer
+  is taken and given back. The terrain keeps its 12 slots, read as sRGB, and its tests.
+  - Against the proposal, the class stays (format, size, levels): by format and size alone,
+    Dalaran has 34 classes instead of 36 and Orgrimmar 25 as before, which does not pay for a
+    level of detail held by the gradients in every shader reading the arrays.
+- **Tests**: in `viewport`, on the software adapter: layers drawn in the pass and in bundles in
+  their order, each with its own state, in three orders (the pass then a bundle, a bundle then the
+  pass, the pass, a bundle and the pass again), the pixel read back; what a layer computes drawn
+  in the same frame; a layer failing in each of four ways (a panic or a GPU error while computing,
+  a panic or a GPU error in the pass) removed and reported alone, the next frame drawn; the GPU
+  timed for each layer, computing and drawing, in their order; the statistics of a layer timed.
+  In `kernel`, the features and the textures asked and the device made with them. In `terrain`,
+  its tests through the arrays of `core/api`, the layers and the capacity counted, taken in a new
+  array or in one holding the class, and given back. Each of 11 changes made on purpose to the
+  frame of the view, its timing of the GPU, the device and the arrays made a test fail.
+- **Accepted on the user's machine** (RTX 3080 Ti), the worldserver of `E:` running, observed only,
+  over Orgrimmar with the script of 9.4d (still 25 seconds, then flying): the terrain, the models
+  and the markers drawn as in 9.4d; the view on the interface thread 0.59 ms still (submitting
+  0.44), 0.64 to 0.70 flying, 1.63 at most; the models 707 draws still, 542 to 844 flying; the GPU
+  timed for each layer for the first time: the models drawing 0.69 ms still (0.75 at most), 0.37
+  to 0.54 flying; the terrain 1.16 ms still, 0.66 to 1.04 flying, 1.58 at most; the other layers
+  under 0.02 ms; nothing computed yet. The same as 9.4d (0.51 to 0.74 ms): nothing lost by the
+  new frame.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

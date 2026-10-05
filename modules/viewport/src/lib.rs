@@ -22,7 +22,9 @@ use std::time::{Duration, Instant};
 use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::hotkey::{Hotkey, HotkeyKind, Keys};
 use uniwow_api::serde_json::{Value, json};
-use uniwow_api::viewport::{self, Allowance, Demand, Fog, Frame, Label, Layer, MAX_FRAME_WAIT, Sun, Target, View};
+use uniwow_api::viewport::{
+    self, Allowance, Demand, Drawing, Fog, Frame, Label, Layer, MAX_FRAME_WAIT, Sun, Target, View,
+};
 use uniwow_api::{
     Context, DockArea, Event, MODULE_FAILED_TOPIC, Module, PropertyKind, PropertyValue, Registrar, egui, egui_wgpu,
     wgpu,
@@ -711,57 +713,28 @@ impl ViewportModule {
             self.device = Some(gpu.device.clone());
             self.timer = GpuTimer::new(&gpu.device, &gpu.queue);
         }
-        let (bundles, failures, layers, labels) = draw_layers(&self.layers, gpu, &view, new_device);
-        self.labels = (view.view_proj, labels);
-        for (owner, message) in failures {
-            ctx.report_failure(&owner, &message);
-        }
         let targets = self.targets.as_ref().expect("created before rendering");
         let grid = self.grid.get_or_insert_with(|| Grid::new(&gpu.device, &TARGET));
         grid.update(&gpu.queue, &view);
-
-        let submitting = Instant::now();
-        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("viewport"),
-        });
-        {
-            let timestamp_writes = self.timer.as_mut().and_then(GpuTimer::writes);
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("viewport"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &targets.msaa,
-                    depth_slice: None,
-                    resolve_target: Some(&targets.resolved),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(BACKGROUND),
-                        store: wgpu::StoreOp::Discard,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &targets.depth,
-                    depth_ops: Some(wgpu::Operations {
-                        // Reverse Z: infinity is 0.
-                        load: wgpu::LoadOp::Clear(0.0),
-                        store: wgpu::StoreOp::Discard,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            grid.draw(&mut pass);
-            pass.execute_bundles(bundles.iter());
+        let pass = PassTargets {
+            colour: &targets.msaa,
+            resolve: Some(&targets.resolved),
+            depth: &targets.depth,
+        };
+        let drawn = draw_frame(
+            &self.layers,
+            gpu,
+            &view,
+            new_device,
+            &pass,
+            Some(grid),
+            self.timer.as_mut(),
+        );
+        self.labels = (view.view_proj, drawn.labels);
+        for (owner, message) in drawn.failures {
+            ctx.report_failure(&owner, &message);
         }
-        if let Some(timer) = &self.timer {
-            timer.resolve(&mut encoder);
-        }
-        gpu.queue.submit([encoder.finish()]);
-        if let Some(timer) = &mut self.timer {
-            timer.submitted();
-        }
-        let submit = submitting.elapsed();
-        self.sample(gpu, layers, submit);
+        self.sample(gpu, drawn.timings, drawn.submit);
         self.signal_frame(view.time);
     }
 
@@ -783,8 +756,8 @@ impl ViewportModule {
         };
         self.stats.push(now, sample);
         if let Some(timer) = &mut self.timer {
-            for milliseconds in timer.collect(&gpu.device) {
-                self.stats.push_gpu(now, milliseconds);
+            for frame in timer.collect(&gpu.device) {
+                self.stats.push_gpu(now, frame);
             }
         }
     }
@@ -811,14 +784,32 @@ impl ViewportModule {
     }
 }
 
-/// The bundles to draw, the layers that panicked or failed, with why, and what each layer cost and
-/// drew.
-type Drawn = (
-    Vec<wgpu::RenderBundle>,
-    Vec<(String, String)>,
-    Vec<LayerTiming>,
-    Vec<Label>,
-);
+/// What a frame drew: the layers that panicked or failed, with why; what each layer cost and drew;
+/// what they write over the view; and the time of recording the pass and submitting, the drawing of
+/// the layers in it left out.
+struct Drawn {
+    failures: Vec<(String, String)>,
+    timings: Vec<LayerTiming>,
+    labels: Vec<Label>,
+    submit: Duration,
+}
+
+/// The textures the pass of a frame draws into.
+struct PassTargets<'a> {
+    colour: &'a wgpu::TextureView,
+    resolve: Option<&'a wgpu::TextureView>,
+    depth: &'a wgpu::TextureView,
+}
+
+/// What a layer gives its frame: its bundle, or none for its drawing in the pass; what it computes;
+/// its number among the layers timed on the GPU; and what it cost.
+struct Prepared {
+    bundle: Option<wgpu::RenderBundle>,
+    computed: Option<wgpu::CommandBuffer>,
+    timed: Option<u32>,
+    prepare: Duration,
+    record: Option<Duration>,
+}
 
 /// Where `position` of the world falls in `rect` through `view_proj`; none behind the eye or out
 /// of the view.
@@ -837,10 +828,19 @@ fn project(view_proj: &Mat4, rect: egui::Rect, position: Vec3) -> Option<egui::P
     ))
 }
 
-/// Prepares each layer with the view of this frame, then records it into its own render bundle,
-/// or keeps the bundle of its version unless the device is `new_device`. The layers that panicked
-/// or failed are removed.
-fn draw_layers(layers: &Layers, gpu: &egui_wgpu::RenderState, view: &View, new_device: bool) -> Drawn {
+/// Draws a frame: each layer prepared, its computing recorded into an encoder of its own and its
+/// bundle recorded, or kept for its version unless the device is `new_device`; then the pass into
+/// `targets`: `grid`, then the layers in their order, their bundles run or their drawing recorded
+/// in it; everything submitted, the computing first. The layers that panicked or failed are removed.
+fn draw_frame(
+    layers: &Layers,
+    gpu: &egui_wgpu::RenderState,
+    view: &View,
+    new_device: bool,
+    targets: &PassTargets,
+    grid: Option<&Grid>,
+    mut timer: Option<&mut GpuTimer>,
+) -> Drawn {
     // Layers may be added or removed meanwhile, by a layer or by another thread: take the list
     // out, then put it back in front, without the layers removed in between.
     let mut entries = {
@@ -848,17 +848,139 @@ fn draw_layers(layers: &Layers, gpu: &egui_wgpu::RenderState, view: &View, new_d
         list.drawing = true;
         std::mem::take(&mut list.layers)
     };
-    let mut bundles = Vec::new();
+    if let Some(timer) = timer.as_deref_mut() {
+        timer.begin();
+    }
     let mut failures = Vec::new();
-    let mut timings = Vec::new();
-    let mut labels = Vec::new();
+    let mut prepared = Vec::with_capacity(entries.len());
     entries.retain_mut(|entry| {
         if new_device {
             entry.kept = None;
         }
-        match draw_layer(entry, gpu, view) {
-            Ok((bundle, timing, mut written)) => {
-                bundles.push(bundle);
+        match prepare_layer(entry, gpu, view, timer.as_deref_mut()) {
+            Ok(layer) => {
+                prepared.push(layer);
+                true
+            }
+            Err(message) => {
+                failures.push((entry.owner.clone(), message));
+                false
+            }
+        }
+    });
+
+    let submitting = Instant::now();
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("viewport"),
+    });
+    let mut panicked: Vec<Option<String>> = vec![None; entries.len()];
+    let mut drawing_in_pass = Duration::ZERO;
+    {
+        let timestamp_writes = timer.as_deref().and_then(GpuTimer::writes);
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("viewport"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: targets.colour,
+                depth_slice: None,
+                resolve_target: targets.resolve,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(BACKGROUND),
+                    store: if targets.resolve.is_some() {
+                        wgpu::StoreOp::Discard
+                    } else {
+                        wgpu::StoreOp::Store
+                    },
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: targets.depth,
+                depth_ops: Some(wgpu::Operations {
+                    // Reverse Z: infinity is 0.
+                    load: wgpu::LoadOp::Clear(0.0),
+                    store: wgpu::StoreOp::Discard,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        if let Some(grid) = grid {
+            grid.draw(&mut pass);
+        }
+        for ((entry, layer), panic) in entries.iter_mut().zip(&mut prepared).zip(&mut panicked) {
+            if let (Some(timer), Some(timed)) = (timer.as_deref(), layer.timed) {
+                timer.drawing(&mut pass, timed, false);
+            }
+            match &layer.bundle {
+                Some(bundle) => pass.execute_bundles([bundle]),
+                None => {
+                    let started = Instant::now();
+                    let drawn = catch_unwind(AssertUnwindSafe(|| {
+                        entry.layer.draw_pass(gpu, &TARGET, view, &mut pass);
+                    }));
+                    let took = started.elapsed();
+                    drawing_in_pass += took;
+                    layer.record = Some(took);
+                    if let Err(payload) = drawn {
+                        *panic = Some(format!(
+                            "its viewport layer panicked drawing in the pass: {}",
+                            panic_text(payload)
+                        ));
+                    }
+                }
+            }
+            if let (Some(timer), Some(timed)) = (timer.as_deref(), layer.timed) {
+                timer.drawing(&mut pass, timed, true);
+            }
+        }
+    }
+    if let Some(timer) = timer.as_deref() {
+        timer.resolve(&mut encoder);
+    }
+    // A GPU error in the pass is learnt here only: it is put on the layers drawn in it.
+    let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let finished = catch_unwind(AssertUnwindSafe(move || encoder.finish()));
+    let error = resolved(scope.pop()).flatten();
+    let failed_pass = match (&finished, error) {
+        (Err(payload), _) => Some(format!(
+            "the pass it drew in panicked once finished: {}",
+            panic_text_ref(payload)
+        )),
+        (Ok(_), Some(error)) => Some(format!("a GPU error in the pass it drew in: {error}")),
+        (Ok(_), None) => None,
+    };
+    let computed: Vec<wgpu::CommandBuffer> = prepared.iter_mut().filter_map(|layer| layer.computed.take()).collect();
+    match finished.ok().filter(|_| failed_pass.is_none()) {
+        Some(frame) => {
+            gpu.queue.submit(computed.into_iter().chain([frame]));
+            if let Some(timer) = timer {
+                timer.submitted();
+            }
+        }
+        None => {
+            gpu.queue.submit(computed);
+            // Not timed: what its timestamps would read was not submitted.
+            if let Some(timer) = timer {
+                timer.begin();
+            }
+        }
+    }
+    let submit = submitting.elapsed().saturating_sub(drawing_in_pass);
+
+    let mut timings = Vec::with_capacity(entries.len());
+    let mut labels = Vec::new();
+    let mut index = 0;
+    entries.retain_mut(|entry| {
+        let (layer, panic) = (&prepared[index], panicked[index].take());
+        index += 1;
+        let failure = panic.or_else(|| failed_pass.clone().filter(|_| layer.bundle.is_none()));
+        if let Some(message) = failure {
+            failures.push((entry.owner.clone(), message));
+            return false;
+        }
+        match observe(entry, layer) {
+            Ok((timing, mut written)) => {
                 timings.push(timing);
                 labels.append(&mut written);
                 true
@@ -875,25 +997,31 @@ fn draw_layers(layers: &Layers, gpu: &egui_wgpu::RenderState, view: &View, new_d
     entries.retain(|entry| !removed.contains(&entry.owner));
     entries.append(&mut list.layers);
     list.layers = entries;
-    (bundles, failures, timings, labels)
+    Drawn {
+        failures,
+        timings,
+        labels,
+        submit,
+    }
 }
 
-/// Prepares one layer, then gives the bundle kept for its version, or records it, each inside a
-/// validation error scope; with what it cost and drew, and what it writes over the view.
-fn draw_layer(
+/// Prepares one layer and records its computing, then gives the bundle kept for its version, or
+/// records it, each inside a validation error scope; or, for a layer drawn in the pass, no bundle.
+fn prepare_layer(
     entry: &mut Entry,
     gpu: &egui_wgpu::RenderState,
     view: &View,
-) -> Result<(wgpu::RenderBundle, LayerTiming, Vec<Label>), String> {
+    timer: Option<&mut GpuTimer>,
+) -> Result<Prepared, String> {
     let started = Instant::now();
     let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
     let layer = entry.layer.as_mut();
     let prepared = catch_unwind(AssertUnwindSafe(|| {
         layer.prepare(gpu, view);
-        layer.version()
+        (layer.version(), layer.drawing())
     }));
     let error = resolved(scope.pop()).flatten();
-    let version = match (prepared, error) {
+    let (version, drawing) = match (prepared, error) {
         (Err(payload), _) => {
             return Err(format!(
                 "its viewport layer panicked while preparing: {}",
@@ -905,9 +1033,20 @@ fn draw_layer(
                 "its viewport layer caused a GPU error while preparing: {error}"
             ));
         }
-        (Ok(version), None) => version,
+        (Ok(prepared), None) => prepared,
     };
+    let (computed, timed) = compute(entry, gpu, view, timer)?;
     let prepare = started.elapsed();
+    if drawing == Drawing::Pass {
+        entry.kept = None;
+        return Ok(Prepared {
+            bundle: None,
+            computed: Some(computed),
+            timed,
+            prepare,
+            record: None,
+        });
+    }
     let (bundle, record) = match (version, &entry.kept) {
         (Some(version), Some((kept, bundle))) if *kept == version => (bundle.clone(), None),
         _ => {
@@ -917,22 +1056,76 @@ fn draw_layer(
             (bundle, Some(recording.elapsed()))
         }
     };
-    let layer = entry.layer.as_ref();
-    let stats = catch_unwind(AssertUnwindSafe(|| layer.stats())).map_err(|payload| {
+    Ok(Prepared {
+        bundle: Some(bundle),
+        computed: Some(computed),
+        timed,
+        prepare,
+        record,
+    })
+}
+
+/// The computing of a layer, recorded into an encoder of its own between its timestamps when the
+/// frame times it apart, and finished inside a validation error scope; with its number among the
+/// layers timed.
+fn compute(
+    entry: &mut Entry,
+    gpu: &egui_wgpu::RenderState,
+    view: &View,
+    timer: Option<&mut GpuTimer>,
+) -> Result<(wgpu::CommandBuffer, Option<u32>), String> {
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some(&entry.owner),
+    });
+    let timed = timer.and_then(|timer| timer.layer(&entry.owner).map(|number| (timer, number)));
+    if let Some((timer, number)) = &timed {
+        timer.computing(&mut encoder, *number, false);
+    }
+    let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let layer = entry.layer.as_mut();
+    let recorded = catch_unwind(AssertUnwindSafe(|| layer.compute(gpu, view, &mut encoder)));
+    let number = timed.map(|(timer, number)| {
+        timer.computing(&mut encoder, number, true);
+        number
+    });
+    let finished = catch_unwind(AssertUnwindSafe(move || encoder.finish()));
+    let error = resolved(scope.pop()).flatten();
+    match (recorded, finished, error) {
+        (Err(payload), _, _) => Err(format!(
+            "its viewport layer panicked while computing: {}",
+            panic_text(payload)
+        )),
+        (Ok(()), Err(payload), _) => Err(format!(
+            "its viewport layer recorded invalid GPU commands while computing: {}",
+            panic_text(payload)
+        )),
+        (Ok(()), Ok(_), Some(error)) => Err(format!(
+            "its viewport layer caused a GPU error while computing: {error}"
+        )),
+        (Ok(()), Ok(buffer), None) => Ok((buffer, number)),
+    }
+}
+
+/// What a layer drew and writes over the view, once drawn, with what it cost.
+fn observe(entry: &Entry, layer: &Prepared) -> Result<(LayerTiming, Vec<Label>), String> {
+    let drawn = entry.layer.as_ref();
+    let stats = catch_unwind(AssertUnwindSafe(|| drawn.stats())).map_err(|payload| {
         format!(
             "its viewport layer panicked giving its statistics: {}",
             panic_text(payload)
         )
     })?;
-    let labels = catch_unwind(AssertUnwindSafe(|| layer.labels()))
+    let labels = catch_unwind(AssertUnwindSafe(|| drawn.labels()))
         .map_err(|payload| format!("its viewport layer panicked giving its labels: {}", panic_text(payload)))?;
-    let timing = LayerTiming {
-        owner: entry.owner.clone(),
-        prepare,
-        record,
-        stats,
-    };
-    Ok((bundle, timing, labels))
+    Ok((
+        LayerTiming {
+            owner: entry.owner.clone(),
+            prepare: layer.prepare,
+            record: layer.record,
+            stats,
+        },
+        labels,
+    ))
 }
 
 /// Records `layer` into its own render bundle, inside a validation error scope.
@@ -988,6 +1181,10 @@ fn resolved<F: Future>(future: F) -> Option<F::Output> {
 }
 
 fn panic_text(payload: Box<dyn Any + Send>) -> String {
+    panic_text_ref(&payload)
+}
+
+fn panic_text_ref(payload: &Box<dyn Any + Send>) -> String {
     payload
         .downcast_ref::<&str>()
         .map(|s| s.to_string())
@@ -1004,21 +1201,22 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use uniwow_api::serde_json::json;
-    use uniwow_api::viewport::{self, Allowance, Frame, Label, Layer, LayerStats, Target, View};
+    use uniwow_api::viewport::{self, Allowance, Drawing, Frame, Label, Layer, LayerStats, Target, View};
     use uniwow_api::{egui, egui_wgpu, wgpu};
 
     use uniwow_api::egui::{Event, Key, Modifiers, PointerButton, Pos2, vec2};
     use uniwow_api::glam::Vec3;
     use uniwow_api::hotkey::Keys;
 
-    use super::stats::{GpuTimer, LayerTiming, Sample, Stats};
+    use super::stats::{GpuFrame, GpuTimer, LayerTiming, Sample, Stats};
     use super::{
-        Camera, CameraKeys, Entry, FrameSignal, Layers, ViewportModule, camera, draw_layers, frame, lock, look_at,
-        project, resolved, view,
+        Camera, CameraKeys, Drawn, Entry, FrameSignal, Layers, PassTargets, TARGET, ViewportModule, camera, draw_frame,
+        frame, lock, look_at, project, resolved, view,
     };
 
-    /// A device of the software adapter of the system, with timestamps when it offers them, as the
-    /// editor asks for them; or none where there is no such adapter.
+    /// A device of the software adapter of the system, with timestamps, inside encoders and passes
+    /// too, when it offers them, as the editor asks for them; or none where there is no such
+    /// adapter.
     fn gpu() -> Option<egui_wgpu::RenderState> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = resolved(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -1027,7 +1225,10 @@ mod tests {
         }))?
         .ok()?;
         let (device, queue) = resolved(adapter.request_device(&wgpu::DeviceDescriptor {
-            required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+            required_features: adapter.features()
+                & (wgpu::Features::TIMESTAMP_QUERY
+                    | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
+                    | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES),
             ..Default::default()
         }))?
         .ok()?;
@@ -1118,11 +1319,17 @@ mod tests {
         add(&layers, "terrain", &kept, false);
         add(&layers, "cube", &every, false);
         let view = view(&Camera::default(), [64, 64], 0.0, viewport::Fog::default());
+        let targets = Targets::new(&gpu);
         let frames = |new_device| {
-            let (bundles, failures, timings, labels) = draw_layers(&layers, &gpu, &view, new_device);
+            let Drawn {
+                failures,
+                timings,
+                labels,
+                ..
+            } = targets.draw(&layers, &gpu, &view, new_device, None);
             assert!(failures.is_empty(), "{failures:?}");
-            assert_eq!(timings.len(), bundles.len(), "what each layer cost and drew");
-            assert_eq!(labels.len(), bundles.len(), "what each layer writes over the view");
+            assert_eq!(timings.len(), 2, "what each layer cost and drew");
+            assert_eq!(labels.len(), 2, "what each layer writes over the view");
             assert!(labels.iter().all(|label| label.text.starts_with("prepared ")));
             timings
         };
@@ -1154,8 +1361,8 @@ mod tests {
         assert_eq!(count(&kept), (6, 3));
 
         add(&layers, "faulty", &Counts::default(), true);
-        let (bundles, failures, _, _) = draw_layers(&layers, &gpu, &view, false);
-        assert_eq!(bundles.len(), 2);
+        let Drawn { failures, timings, .. } = targets.draw(&layers, &gpu, &view, false, None);
+        assert_eq!(timings.len(), 2);
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].0, "faulty");
         assert!(failures[0].1.contains("panicked while preparing"), "{}", failures[0].1);
@@ -1518,7 +1725,7 @@ mod tests {
     }
 
     #[test]
-    fn the_gpu_is_timed_by_its_timestamps_without_waiting_when_the_device_has_them() {
+    fn the_gpu_is_timed_by_its_timestamps_without_waiting_each_layer_apart_when_the_device_can() {
         let Some(gpu) = gpu() else {
             eprintln!("skipped: no software adapter for a device");
             return;
@@ -1528,55 +1735,444 @@ mod tests {
             eprintln!("skipped: the device has no timestamps");
             return;
         };
-        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: None,
-            size: wgpu::Extent3d {
-                width: 8,
-                height: 8,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let view = target.create_view(&Default::default());
-        let mut times = Vec::new();
+        let layers = Layers::default();
+        put(
+            &layers,
+            "computing",
+            Painter::new(Drawing::Pass, [0.0, 1.0, 0.0, 1.0]).computing(),
+        );
+        add(&layers, "bundled", &Counts::default(), false);
+        let targets = Targets::new(&gpu);
+        let view = view(&Camera::default(), [8, 8], 0.0, viewport::Fog::default());
+        let mut frames: Vec<GpuFrame> = Vec::new();
         for _ in 0..6 {
-            let mut encoder = gpu.device.create_command_encoder(&Default::default());
-            {
-                let timestamp_writes = timer.writes();
-                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: None,
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-            }
-            timer.resolve(&mut encoder);
-            gpu.queue.submit([encoder.finish()]);
-            timer.submitted();
-            times.extend(timer.collect(&gpu.device));
+            let drawn = targets.draw(&layers, &gpu, &view, false, Some(&mut timer));
+            assert!(drawn.failures.is_empty(), "{:?}", drawn.failures);
+            frames.extend(timer.collect(&gpu.device));
         }
         gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        times.extend(timer.collect(&gpu.device));
+        frames.extend(timer.collect(&gpu.device));
         assert!(
-            times.len() >= 4,
-            "{times:?}: the frames finding a buffer free are timed"
+            frames.len() >= 4,
+            "{frames:?}: the frames finding a buffer free are timed"
         );
-        assert!(times.iter().all(|time| (0.0..1000.0).contains(time)), "{times:?}");
+        assert!(
+            frames.iter().all(|frame| (0.0..1000.0).contains(&frame.total)),
+            "{frames:?}"
+        );
+        let inside = wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
+        if gpu.device.features().contains(inside) {
+            for frame in &frames {
+                let owners: Vec<&str> = frame.layers.iter().map(|(owner, _, _)| owner.as_str()).collect();
+                assert_eq!(owners, ["computing", "bundled"], "each layer timed, in its order");
+                assert!(
+                    frame
+                        .layers
+                        .iter()
+                        .all(|(_, compute, draw)| (0.0..1000.0).contains(compute) && (0.0..1000.0).contains(draw))
+                );
+            }
+        }
+    }
+
+    /// A full screen of `colour`, drawn without depth by a pipeline of the view's target; the
+    /// colour read from a storage buffer its computing writes, for a layer that computes.
+    const PAINT: &str = r#"
+@group(0) @binding(0) var<storage, read> colour: vec4<f32>;
+
+@vertex
+fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    let corner = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));
+    return vec4<f32>(corner * 2.0 - 1.0, 0.5, 1.0);
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    return colour;
+}
+
+@group(0) @binding(0) var<storage, read_write> written: vec4<f32>;
+
+@compute @workgroup_size(1)
+fn cs_main() {
+    written = vec4<f32>(0.0, 0.0, 1.0, 1.0);
+}
+"#;
+
+    /// What a test layer painting the view does wrong, on purpose.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Fault {
+        None,
+        PanicComputing,
+        ErrorComputing,
+        PanicDrawing,
+        ErrorDrawing,
+    }
+
+    /// A layer painting the whole view with one colour, in a bundle or in the pass; or with the colour
+    /// its computing writes, in the same frame.
+    struct Painter {
+        drawing: Drawing,
+        colour: [f32; 4],
+        computes: bool,
+        fault: Fault,
+        made: Option<(
+            wgpu::RenderPipeline,
+            wgpu::BindGroup,
+            wgpu::ComputePipeline,
+            wgpu::BindGroup,
+            wgpu::Buffer,
+        )>,
+    }
+
+    impl Painter {
+        fn new(drawing: Drawing, colour: [f32; 4]) -> Self {
+            Self {
+                drawing,
+                colour,
+                computes: false,
+                fault: Fault::None,
+                made: None,
+            }
+        }
+
+        fn computing(mut self) -> Self {
+            self.computes = true;
+            self
+        }
+
+        fn faulty(mut self, fault: Fault) -> Self {
+            self.fault = fault;
+            self
+        }
+
+        fn made(
+            &mut self,
+            gpu: &egui_wgpu::RenderState,
+        ) -> &(
+            wgpu::RenderPipeline,
+            wgpu::BindGroup,
+            wgpu::ComputePipeline,
+            wgpu::BindGroup,
+            wgpu::Buffer,
+        ) {
+            let colour = self.colour;
+            self.made.get_or_insert_with(|| {
+                let device = &gpu.device;
+                let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: None,
+                    source: wgpu::ShaderSource::Wgsl(PAINT.into()),
+                });
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size: 16,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                gpu.queue
+                    .write_buffer(&buffer, 0, uniwow_api::bytemuck::cast_slice(&colour));
+                let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: None,
+                    layout: None,
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    primitive: Default::default(),
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: TARGET.depth_format,
+                        depth_write_enabled: Some(false),
+                        depth_compare: Some(wgpu::CompareFunction::Always),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: wgpu::MultisampleState {
+                        count: TARGET.sample_count,
+                        ..Default::default()
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(TARGET.color_format.into())],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                });
+                let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &pipeline.get_bind_group_layout(0),
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    }],
+                });
+                let compute = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: None,
+                    layout: None,
+                    module: &shader,
+                    entry_point: Some("cs_main"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+                let written = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &compute.get_bind_group_layout(0),
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    }],
+                });
+                (pipeline, group, compute, written, buffer)
+            })
+        }
+    }
+
+    impl Layer for Painter {
+        fn compute(&mut self, gpu: &egui_wgpu::RenderState, _view: &View, encoder: &mut wgpu::CommandEncoder) {
+            assert!(self.fault != Fault::PanicComputing, "its choice could not be made");
+            let (fault, computes) = (self.fault, self.computes);
+            let (_, _, compute, written, buffer) = self.made(gpu);
+            if fault == Fault::ErrorComputing {
+                // Not a multiple of 4: refused.
+                encoder.clear_buffer(buffer, 1, None);
+            }
+            if computes {
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_pipeline(compute);
+                pass.set_bind_group(0, written, &[]);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+        }
+
+        fn drawing(&self) -> Drawing {
+            self.drawing
+        }
+
+        fn draw<'a>(
+            &'a mut self,
+            gpu: &egui_wgpu::RenderState,
+            _target: &Target,
+            _view: &View,
+            bundle: &mut wgpu::RenderBundleEncoder<'a>,
+        ) {
+            let (pipeline, group, ..) = self.made(gpu);
+            bundle.set_pipeline(pipeline);
+            bundle.set_bind_group(0, group, &[]);
+            bundle.draw(0..3, 0..1);
+        }
+
+        fn draw_pass(
+            &mut self,
+            gpu: &egui_wgpu::RenderState,
+            _target: &Target,
+            _view: &View,
+            pass: &mut wgpu::RenderPass<'_>,
+        ) {
+            assert!(self.fault != Fault::PanicDrawing, "its draws could not be made");
+            let fault = self.fault;
+            let (pipeline, group, ..) = self.made(gpu);
+            if fault == Fault::ErrorDrawing {
+                // No pipeline set: refused.
+                pass.draw(0..3, 0..1);
+                return;
+            }
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+    }
+
+    fn put(layers: &Layers, owner: &str, layer: Painter) {
+        lock(layers).layers.push(Entry {
+            owner: owner.to_owned(),
+            layer: Box::new(layer),
+            kept: None,
+        });
+    }
+
+    /// The textures of the view, 8 × 8, multisampled as the view's, resolved to a texture read back.
+    struct Targets {
+        colour: wgpu::TextureView,
+        resolved: wgpu::Texture,
+        resolve: wgpu::TextureView,
+        depth: wgpu::TextureView,
+    }
+
+    impl Targets {
+        fn new(gpu: &egui_wgpu::RenderState) -> Self {
+            let texture = |format, samples, usage| {
+                gpu.device.create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size: wgpu::Extent3d {
+                        width: 8,
+                        height: 8,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: samples,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage,
+                    view_formats: &[],
+                })
+            };
+            let resolved = texture(
+                TARGET.color_format,
+                1,
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            );
+            Self {
+                colour: texture(
+                    TARGET.color_format,
+                    TARGET.sample_count,
+                    wgpu::TextureUsages::RENDER_ATTACHMENT,
+                )
+                .create_view(&Default::default()),
+                resolve: resolved.create_view(&Default::default()),
+                resolved,
+                depth: texture(
+                    TARGET.depth_format,
+                    TARGET.sample_count,
+                    wgpu::TextureUsages::RENDER_ATTACHMENT,
+                )
+                .create_view(&Default::default()),
+            }
+        }
+
+        fn draw(
+            &self,
+            layers: &Layers,
+            gpu: &egui_wgpu::RenderState,
+            view: &View,
+            new_device: bool,
+            timer: Option<&mut GpuTimer>,
+        ) -> Drawn {
+            let targets = PassTargets {
+                colour: &self.colour,
+                resolve: Some(&self.resolve),
+                depth: &self.depth,
+            };
+            draw_frame(layers, gpu, view, new_device, &targets, None, timer)
+        }
+
+        /// The pixel at the middle of the image resolved, RGBA.
+        fn middle(&self, gpu: &egui_wgpu::RenderState) -> [u8; 4] {
+            let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: 256 * 8,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            encoder.copy_texture_to_buffer(
+                self.resolved.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(8),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: 8,
+                    height: 8,
+                    depth_or_array_layers: 1,
+                },
+            );
+            gpu.queue.submit([encoder.finish()]);
+            buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+            gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let data = buffer.slice(..).get_mapped_range().expect("mapped").to_vec();
+            let at = 4 * 256 + 4 * 4;
+            [data[at], data[at + 1], data[at + 2], data[at + 3]]
+        }
+    }
+
+    const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+    const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+
+    #[test]
+    fn layers_drawn_in_the_pass_and_in_bundles_are_drawn_in_their_order_each_with_its_own_state() {
+        let Some(gpu) = gpu() else {
+            eprintln!("skipped: no software adapter for a device");
+            return;
+        };
+        let view = view(&Camera::default(), [8, 8], 0.0, viewport::Fog::default());
+        let targets = Targets::new(&gpu);
+        // The last drawn covers the view: a bundle after the pass, then the pass after a bundle,
+        // then a pass after another pass and a bundle.
+        for (order, wanted) in [
+            (vec![(Drawing::Pass, GREEN), (Drawing::Bundle, RED)], [255, 0, 0, 255]),
+            (vec![(Drawing::Bundle, RED), (Drawing::Pass, GREEN)], [0, 255, 0, 255]),
+            (
+                vec![(Drawing::Pass, RED), (Drawing::Bundle, GREEN), (Drawing::Pass, RED)],
+                [255, 0, 0, 255],
+            ),
+        ] {
+            let layers = Layers::default();
+            for (number, (drawing, colour)) in order.iter().enumerate() {
+                put(&layers, &format!("layer {number}"), Painter::new(*drawing, *colour));
+            }
+            for _ in 0..2 {
+                let drawn = targets.draw(&layers, &gpu, &view, false, None);
+                assert!(drawn.failures.is_empty(), "{:?}", drawn.failures);
+                assert_eq!(targets.middle(&gpu), wanted);
+                assert_eq!(drawn.timings.len(), order.len());
+                for (timing, (drawing, _)) in drawn.timings.iter().zip(&order) {
+                    if *drawing == Drawing::Pass {
+                        assert!(timing.record.is_some(), "drawn in the pass at each frame");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn what_a_layer_computes_is_drawn_in_the_same_frame() {
+        let Some(gpu) = gpu() else {
+            eprintln!("skipped: no software adapter for a device");
+            return;
+        };
+        let view = view(&Camera::default(), [8, 8], 0.0, viewport::Fog::default());
+        let targets = Targets::new(&gpu);
+        let layers = Layers::default();
+        put(&layers, "chosen", Painter::new(Drawing::Pass, RED).computing());
+        let drawn = targets.draw(&layers, &gpu, &view, false, None);
+        assert!(drawn.failures.is_empty(), "{:?}", drawn.failures);
+        assert_eq!(targets.middle(&gpu), [0, 0, 255, 255], "the blue its computing wrote");
+    }
+
+    #[test]
+    fn a_layer_failing_to_compute_or_to_draw_in_the_pass_is_removed_and_reported() {
+        let Some(gpu) = gpu() else {
+            eprintln!("skipped: no software adapter for a device");
+            return;
+        };
+        let view = view(&Camera::default(), [8, 8], 0.0, viewport::Fog::default());
+        let targets = Targets::new(&gpu);
+        for (fault, said) in [
+            (Fault::PanicComputing, "panicked while computing"),
+            (Fault::ErrorComputing, "caused a GPU error while computing"),
+            (Fault::PanicDrawing, "panicked drawing in the pass"),
+            (Fault::ErrorDrawing, "a GPU error in the pass it drew in"),
+        ] {
+            let layers = Layers::default();
+            put(&layers, "kept", Painter::new(Drawing::Bundle, GREEN));
+            put(&layers, "faulty", Painter::new(Drawing::Pass, RED).faulty(fault));
+            let drawn = targets.draw(&layers, &gpu, &view, false, None);
+            assert_eq!(drawn.failures.len(), 1, "{:?}", drawn.failures);
+            assert_eq!(drawn.failures[0].0, "faulty");
+            assert!(drawn.failures[0].1.contains(said), "{}", drawn.failures[0].1);
+            let owners: Vec<String> = lock(&layers).layers.iter().map(|entry| entry.owner.clone()).collect();
+            assert_eq!(owners, ["kept"], "the faulty layer removed, the other kept");
+            let drawn = targets.draw(&layers, &gpu, &view, false, None);
+            assert!(drawn.failures.is_empty(), "{:?}", drawn.failures);
+            assert_eq!(targets.middle(&gpu), [0, 255, 0, 255], "the next frame drawn");
+        }
     }
 
     #[test]
@@ -1605,11 +2201,21 @@ mod tests {
             };
             stats.push(start + Duration::from_millis(frame * 20), sample);
         }
-        stats.push_gpu(start, 3.0);
+        stats.push_gpu(
+            start,
+            GpuFrame {
+                total: 3.0,
+                layers: vec![("terrain".to_owned(), 0.25, 1.5)],
+            },
+        );
         let text = stats.text(true, None, &Allowance::default());
         assert!(text.starts_with("48 fps: a frame 20.7 ms, the longest 40.0"), "{text}");
         assert!(text.contains("view, interface thread: 2.00 ms"), "{text}");
         assert!(text.contains("GPU: 3.00 ms"), "{text}");
+        assert!(
+            text.contains("  GPU: computing 0.25 ms (0.25), drawing 1.50 (1.50)"),
+            "{text}"
+        );
         assert!(
             text.contains("terrain: 87 draws, 2.15 M triangles, 300 MB, 85 tiles"),
             "{text}"

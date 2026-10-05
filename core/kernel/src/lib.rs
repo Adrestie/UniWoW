@@ -51,19 +51,34 @@ pub fn run() -> eframe::Result {
 type DeviceDescriptor = Arc<dyn Fn(&wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> + Send + Sync>;
 
 /// What the device asks for beyond egui-wgpu, when the adapter offers it: the block compressions
-/// of the textures of WoW (BC1 to BC3), which then go to the GPU as they are stored, and the
-/// timestamps the statistics of the view time the GPU with.
-const WANTED: wgpu::Features = wgpu::Features::TEXTURE_COMPRESSION_BC.union(wgpu::Features::TIMESTAMP_QUERY);
+/// of the textures of WoW (BC1 to BC3), which then go to the GPU as they are stored; the
+/// timestamps the statistics of the view time the GPU with, inside encoders and passes for each
+/// layer apart; the first instance of an indirect draw, and the count of a multi-draw read from a
+/// buffer, for the layers whose draws the GPU chooses.
+const WANTED: wgpu::Features = wgpu::Features::TEXTURE_COMPRESSION_BC
+    .union(wgpu::Features::TIMESTAMP_QUERY)
+    .union(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS)
+    .union(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES)
+    .union(wgpu::Features::INDIRECT_FIRST_INSTANCE)
+    .union(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT);
 
-/// The device as `default` asks for it, with what `WANTED` names when the adapter offers it, and
-/// as many layers in an array of textures as the adapter takes: the terrain keeps its textures in
-/// arrays, 256 layers each by default.
+/// The sampled textures a stage of a shader may bind, at most this many where the adapter takes
+/// them: the models read their arrays of textures by 64 slots.
+const SAMPLED_TEXTURES: u32 = 128;
+
+/// The device as `default` asks for it, with what `WANTED` names when the adapter offers it; as
+/// many layers in an array of textures as the adapter takes (the terrain keeps its textures in
+/// arrays, 256 layers each by default); and up to `SAMPLED_TEXTURES` textures a stage.
 fn with_features(default: DeviceDescriptor) -> DeviceDescriptor {
     Arc::new(move |adapter| {
         let mut descriptor = default(adapter);
         descriptor.required_features |= adapter.features() & WANTED;
-        let layers = &mut descriptor.required_limits.max_texture_array_layers;
-        *layers = (*layers).max(adapter.limits().max_texture_array_layers);
+        let offered = adapter.limits();
+        let limits = &mut descriptor.required_limits;
+        limits.max_texture_array_layers = limits.max_texture_array_layers.max(offered.max_texture_array_layers);
+        limits.max_sampled_textures_per_shader_stage = limits
+            .max_sampled_textures_per_shader_stage
+            .max(offered.max_sampled_textures_per_shader_stage.min(SAMPLED_TEXTURES));
         descriptor
     })
 }
@@ -76,7 +91,7 @@ mod tests {
 
     use uniwow_api::wgpu;
 
-    use super::{WANTED, with_features};
+    use super::{SAMPLED_TEXTURES, WANTED, with_features};
 
     fn resolved<F: Future>(future: F) -> Option<F::Output> {
         match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
@@ -86,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn the_device_asks_for_block_compression_timestamps_and_the_layers_the_adapter_offers() {
+    fn the_device_asks_for_the_features_the_layers_and_the_textures_the_adapter_offers() {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let Some(Ok(adapter)) = resolved(instance.request_adapter(&wgpu::RequestAdapterOptions {
             force_fallback_adapter: true,
@@ -107,6 +122,19 @@ mod tests {
         assert_eq!(
             descriptor.required_limits.max_texture_array_layers,
             adapter.limits().max_texture_array_layers
+        );
+        assert_eq!(
+            descriptor.required_limits.max_sampled_textures_per_shader_stage,
+            adapter
+                .limits()
+                .max_sampled_textures_per_shader_stage
+                .min(SAMPLED_TEXTURES)
+        );
+        // The device made as asked.
+        let made = resolved(adapter.request_device(&descriptor));
+        assert!(
+            made.is_some_and(|made| made.is_ok()),
+            "the adapter gives what is asked of it"
         );
         assert_eq!(descriptor.label, Some("default"), "the rest as by default");
         eprintln!(

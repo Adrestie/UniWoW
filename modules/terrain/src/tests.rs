@@ -21,7 +21,9 @@ use crate::layer::{Scene, TerrainLayer, in_sight, tiles_away};
 use crate::loading::{self, Costs, Held, Inputs, Kind, Plan};
 use crate::mesh::{self, CHUNKS, LODS, SKIRT_DEPTH, TILE_VERTICES, VERTICES, Vertex};
 use crate::model::{CHUNK, ORIGIN, STEP, TILE, TileId, TileModel, chunk_bounds};
-use crate::textures::{Counts, NONE, SLOTS};
+use uniwow_api::texture_arrays::{Counts, NONE};
+
+use crate::gpu::SLOTS;
 
 /// A chunk the tests make: its index, a position that may be wrong, its holes, three layers, the
 /// third naming a texture the tile does not have.
@@ -1319,11 +1321,14 @@ fn a_texture_refused_for_want_of_room_is_placed_once_room_is_made_and_one_unread
     let mut held: Vec<_> = (1..=SLOTS as u32)
         .map(|n| shared.textures.get(&formats, &file(4 * n)).unwrap())
         .collect();
+    // An array made holds 4 layers.
     let full = Counts {
         placed: SLOTS,
         unreadable: 0,
         no_room: 0,
         arrays: SLOTS,
+        layers: SLOTS,
+        capacity: 4 * SLOTS,
     };
     assert_eq!(shared.textures.counts(), full, "a class each");
     let other = file(4 * (SLOTS as u32 + 1));
@@ -1331,12 +1336,23 @@ fn a_texture_refused_for_want_of_room_is_placed_once_room_is_made_and_one_unread
     assert_eq!(shared.textures.counts().no_room, 1);
     held.remove(0);
     shared.textures.purge();
-    assert_eq!(shared.textures.counts().arrays, SLOTS - 1, "its array dropped");
+    let purged = shared.textures.counts();
+    assert_eq!(purged.arrays, SLOTS - 1, "its array dropped");
+    assert_eq!(
+        (purged.layers, purged.capacity),
+        (SLOTS - 1, 4 * (SLOTS - 1)),
+        "its layer given back"
+    );
     assert!(
         shared.textures.get(&formats, &other).is_some(),
         "tried again once room is made"
     );
     assert_eq!(shared.textures.counts(), full);
+    // Another texture of a class held: a free layer of its array taken, none made.
+    let again = shared.textures.get(&formats, &FileRef::Path("size08.blp".to_owned()));
+    assert!(again.is_some());
+    let counts = shared.textures.counts();
+    assert_eq!((counts.layers, counts.capacity), (SLOTS + 1, 4 * SLOTS));
 
     let missing = FileRef::Path("missing.blp".to_owned());
     assert!(shared.textures.get(&formats, &missing).is_none());
