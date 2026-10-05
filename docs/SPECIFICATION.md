@@ -3272,6 +3272,92 @@ bc9198ce7, and checked on the skins and tables of the user's client; WoW Model V
     Goldshire, an iron dwarf): the code reads group + value meanwhile, which the files of 3.3.5a
     confirm; the other reading is one line of `look_geosets`. The result is written here then.
 
+#### Step 9.4c, proposed
+
+What is there: `formats` gives a model at rest whose readers index without a check (step 9.4b),
+the tables of the displays, and the rules of the submeshes; the view has its shared budget (9.4a),
+its frame signal and its bundles kept (9.2a); `live-world` writes its markers from its own thread
+at the frame signal (9.3c). Nothing draws a model yet, and nothing can show one display alone,
+which the captures of the user need to settle the facial hair (*Step 9.4b, after its review*).
+
+In two parts, each reviewed before the next:
+
+- **9.4c1, the models drawn**, everything below but the combination of two textures.
+- **9.4c2, the second texture**: the combiners of WotLK (the shader chosen at load from the
+  blending, the coordinates and the combiner combos, as `sub_836980` and `sub_837680` do), the
+  environment mapping, and the second set of coordinates; checked on the models of the client that
+  use them (`FrostLord`, the weapons of Drak'Tharon, the falls of Coilfang) against captures.
+
+**The service `models`**, in `core/api` (`uniwow_api::models`), shared between threads (T3):
+
+- `Look`: a model by its file, the textures its display fills (a kind, 11 to 13 for a creature or
+  1 for a character's baked skin, and a file), and the submeshes it shows: all, the default ones,
+  a creature's variants (`CreatureGeosetData`), or a character's hair and facial hair (the
+  numbers of `CharHairGeosets` and `CharacterFacialHairStyles`), so that a look is plain data,
+  compared and hashed.
+- `look(look) -> LookId`, from any thread: the same look the same id; nothing is loaded until an
+  instance of it is placed.
+- `display(id) -> (Look, scale)`, from a job: the look of a creature's display and the scale of its
+  display and its model (`CreatureDisplayInfo`, `CreatureModelData`); for a display with a
+  character's look (`CreatureDisplayInfoExtra`), the model of its race and sex (`ChrRaces`, its
+  male and female displays), its baked skin (`Textures\BakedNpcTextures\`), its hair and facial
+  hair. Its equipment is not drawn in this milestone. Step 9.4d gives the live world by it.
+- `place(owner, instances)`: the whole set of `owner`'s instances for the next frame, each a look,
+  a transform (scale included) and an alpha, from the thread of the module at the frame signal, as
+  the markers are written: the service groups them by look and by tile, writes their buffer from
+  that thread, and hands the groups to the layer under a brief lock; no call nor lock for each
+  instance. `clear(owner)`; the instances of a module that fails are cleared, as the viewport
+  removes its layers.
+- `state(look)`: waiting, loading, drawn, or refused with why, so that 9.4d keeps a marker for
+  what has no model.
+
+**Loading**, by jobs of the pool, steered on the interface thread at each frame as the terrain is:
+
+- A model is read once whoever asks, a load in flight shared; its skins built (a vertex buffer for
+  the model, an index buffer for each skin, 16 bits when its vertices fit), its textures decoded
+  through a cache shared between threads by file, a load in flight shared, those of 2048 texels
+  and more reduced as the terrain does; all created and uploaded by the job (T5), the textures by
+  copies the job submits (the rule of step 9.2f). The submeshes a look shows are chosen in the
+  job, so that a look's batches are only those drawn.
+- Wanted by the distance of the nearest group of its instances, at most *cores − 1* loads at once,
+  paused while the view is not drawn; on the shared budget as *GPU memory* says, a look counted in
+  the band of the nearest point of its groups' bounds (rule of step 9.4a); released beyond the
+  distance kept, the farthest first, its textures when their last holder goes.
+
+**Drawing**, the layer of the module, its bundle kept while what it draws stays:
+
+- A group is drawn when in sight (its bounds, from its instances and the model's radius), at the
+  skin its distance chooses, a level changing only past its limit by a margin, as the terrain's
+  tiles; an instance only up to a distance by its size (its radius times its scale), the
+  distance of the view scaling them all: the vertex shader drops those beyond, so that the
+  bundle does not follow each instance. A draw per group and batch, all the group's instances.
+- The materials of step 9.4 (*The materials 9.4 renders*): the first texture of each batch,
+  wrapped or clamped by its flags; the eight blending modes, the alpha key at 224/255; the render
+  flags unlit, unfogged, two-sided, without depth test, without depth write; the colour and
+  transparency at rest, the weight at rest, the alpha of the display; a batch of alpha 0 not
+  drawn. Opaque and alpha-keyed batches first, then the blended ones by group, the farthest first,
+  and within a model by the priority and layer of its batches.
+- **Fog and light, the view's**: `View` gains the fog (its colour, the distance it starts and the
+  one it covers all) and the sun (its direction, colour and ambient); the viewport holds them, the
+  terrain sets the distances from its reach (`Viewport::set_fog`), and both layers read them:
+  the constants of the terrain move to the viewport, the terrain drawing as before.
+- The statistics of the view: draws, triangles, looks drawn, loading, refused and their MB,
+  instances and groups in sight, levels used.
+
+**The preview**, for the acceptance and the captures: the panel of `models` takes a display id,
+shows it before the camera, its look and scale as `display` gives them, and clears it; the command
+`models.preview` does the same for a script, with a count to place a grid of that many for the
+measures. Its owner is `models` itself.
+
+**Accepted on the user's machine** (9.4c1): Marshal Dughan (display 1985) and an iron dwarf
+previewed beside the user's captures in the client, the facial hair settled then; a grid of 1,000
+of a creature, the frames a second, the draws and the interface thread; the terrain looking as
+before under the view's fog. **Tests**: the grouping of instances by look and tile, the levels
+and their margin, the reach by size, the order of the batches, the materials' states, the looks
+of displays (a creature, a character, a variant), the cache of textures shared, a load in flight
+shared, a module's instances cleared when it fails; on the software adapter, models drawn and read
+back as the markers were.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

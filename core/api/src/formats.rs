@@ -66,7 +66,7 @@ pub struct CreatureLook {
     /// wrists, gloves, tabard, cape.
     pub items: [u32; 11],
     pub flags: u32,
-    /// Its skin baked into one texture, by name without folder nor extension.
+    /// Its skin baked into one texture: its file name, in `Textures\BakedNpcTextures`.
     pub baked: String,
 }
 
