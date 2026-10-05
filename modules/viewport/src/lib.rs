@@ -461,7 +461,7 @@ impl Module for ViewportModule {
         if self.show_stats {
             let colour = egui::Color32::from_gray(225);
             let painter = ui.painter_at(rect);
-            let text = self.stats.text(self.timer.is_some());
+            let text = self.stats.text(self.timer.is_some(), stats::process_memory());
             let galley = painter.layout_no_wrap(text, egui::FontId::monospace(11.0), colour);
             let at = rect.left_top() + egui::vec2(8.0, 8.0);
             let back = egui::Rect::from_min_size(at, galley.size()).expand(4.0);
@@ -1370,7 +1370,7 @@ mod tests {
             stats.push(start + Duration::from_millis(frame * 20), sample);
         }
         stats.push_gpu(start, 3.0);
-        let text = stats.text(true);
+        let text = stats.text(true, None);
         assert!(text.starts_with("48 fps: a frame 20.7 ms, the longest 40.0"), "{text}");
         assert!(text.contains("view, interface thread: 2.00 ms"), "{text}");
         assert!(text.contains("GPU: 3.00 ms"), "{text}");
@@ -1384,7 +1384,11 @@ mod tests {
             ),
             "{text}"
         );
-        assert!(stats.text(false).contains("not timed"));
+        assert!(stats.text(false, None).contains("not timed"));
+        let memory = stats.text(true, Some((300 << 20, 200 << 20)));
+        assert!(memory.contains("process: 300 MB in memory, 200 MB private"), "{memory}");
+        let (working, private) = super::stats::process_memory().expect("Windows tells it");
+        assert!(working > 1 << 20 && private > 1 << 20);
 
         // A second later, the frames before are no longer counted.
         let later = Sample {
@@ -1392,6 +1396,10 @@ mod tests {
             ..Sample::default()
         };
         stats.push(start + Duration::from_secs(3), later);
-        assert!(stats.text(true).starts_with("100 fps"), "{}", stats.text(true));
+        assert!(
+            stats.text(true, None).starts_with("100 fps"),
+            "{}",
+            stats.text(true, None)
+        );
     }
 }

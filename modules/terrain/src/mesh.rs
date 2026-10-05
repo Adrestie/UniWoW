@@ -1,6 +1,7 @@
 //! The mesh of a tile, built from the model alone, so that a chunk changed is built again by
 //! itself: the 145 vertices of each chunk, the skirts under the sides of the tile, the triangles of
-//! each level of detail, those of its holes left out, and the texels of blending of each chunk.
+//! each level of detail, those of its holes left out, and the texels of blending of each chunk; and
+//! for a light tile, only the vertices of its coarsest level and its blending reduced.
 
 use std::ops::Range;
 
@@ -161,24 +162,64 @@ fn skirt_triangles(lod: usize, side: usize, at: usize, base: u16, indices: &mut 
     }
 }
 
+/// The triangles of a tile at the level `lod`, with its skirts, added to `indices`.
+fn lod_indices(tile: &Tile, lod: usize, indices: &mut Vec<u16>) {
+    for (place, chunk) in tile.chunks.iter().enumerate() {
+        let base = (place * VERTICES) as u16;
+        surface(lod, base, chunk.holes, indices);
+        for side in 0..SIDES {
+            if let Some(at) = along(side, chunk.index) {
+                skirt_triangles(lod, side, at, base, indices);
+            }
+        }
+    }
+}
+
 /// The triangles of a tile, the levels of detail one after the other, each with its skirts, and
 /// the range of each.
 pub fn indices(tile: &Tile) -> (Vec<u16>, [Range<u32>; LODS]) {
     let mut indices = Vec::new();
     let ranges = std::array::from_fn(|lod| {
         let start = indices.len() as u32;
-        for (place, chunk) in tile.chunks.iter().enumerate() {
-            let base = (place * VERTICES) as u16;
-            surface(lod, base, chunk.holes, &mut indices);
-            for side in 0..SIDES {
-                if let Some(at) = along(side, chunk.index) {
-                    skirt_triangles(lod, side, at, base, &mut indices);
-                }
-            }
-        }
+        lod_indices(tile, lod, &mut indices);
         start..indices.len() as u32
     });
     (indices, ranges)
+}
+
+/// Every vertex of the tile `tile` at `id`, those of the skirts after those of the chunks.
+pub fn tile_vertices(id: TileId, tile: &Tile) -> Vec<Vertex> {
+    let mut all: Vec<Vertex> = tile
+        .chunks
+        .iter()
+        .enumerate()
+        .flat_map(|(place, chunk)| vertices(id, place, chunk))
+        .collect();
+    all.resize(TILE_VERTICES, Vertex::zeroed());
+    for (place, chunk) in tile.chunks.iter().enumerate() {
+        for (first, skirt) in skirt(id, place, chunk) {
+            all[first..first + skirt.len()].copy_from_slice(&skirt);
+        }
+    }
+    all
+}
+
+/// The mesh of a light tile: its coarsest level only, with the vertices it uses, numbered again.
+pub fn light(id: TileId, tile: &Tile) -> (Vec<Vertex>, Vec<u16>) {
+    let all = tile_vertices(id, tile);
+    let mut indices = Vec::new();
+    lod_indices(tile, LODS - 1, &mut indices);
+    let mut renumbered = vec![u16::MAX; all.len()];
+    let mut kept = Vec::new();
+    for index in &mut indices {
+        let old = usize::from(*index);
+        if renumbered[old] == u16::MAX {
+            renumbered[old] = kept.len() as u16;
+            kept.push(all[old]);
+        }
+        *index = renumbered[old];
+    }
+    (kept, indices)
 }
 
 /// The level of detail of a tile whose nearest point is `distance` tiles away, `previous` its level
@@ -193,6 +234,29 @@ pub fn lod(distance: f32, previous: Option<usize>) -> usize {
         Some(previous) if plain < previous && distance > LIMITS[plain] - MARGIN => plain + 1,
         _ => plain,
     }
+}
+
+/// The side of the texels of blending of a chunk of a light tile, from those of its 64.
+pub const LIGHT_BLEND: usize = 16;
+
+/// The texels of blending of a chunk of a light tile, `LIGHT_BLEND` a side: each the mean of a square
+/// of those of `blend`.
+pub fn light_blend(chunk: &Chunk) -> Vec<u8> {
+    let full = blend(chunk);
+    let step = 64 / LIGHT_BLEND;
+    let mut texels = vec![0u8; LIGHT_BLEND * LIGHT_BLEND * 4];
+    for row in 0..LIGHT_BLEND {
+        for column in 0..LIGHT_BLEND {
+            for channel in 0..4 {
+                let sum: usize = (0..step)
+                    .flat_map(|r| (0..step).map(move |c| ((row * step + r) * 64 + column * step + c) * 4 + channel))
+                    .map(|at| usize::from(full[at]))
+                    .sum();
+                texels[(row * LIGHT_BLEND + column) * 4 + channel] = (sum / (step * step)) as u8;
+            }
+        }
+    }
+    texels
 }
 
 /// The texels of blending of a chunk, 64 × 64, row by row: the alpha maps of its layers after the

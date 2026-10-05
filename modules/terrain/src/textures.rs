@@ -3,13 +3,19 @@
 //! an array of its class, read once and shared between the tiles. An array grows as textures come,
 //! a layer no tile holds is given to the next texture, and an array that holds none is dropped.
 //! The interface thread never waits for the jobs placing textures: it reads the views of the arrays
-//! as they last published them, their generation and their bytes, without their lock.
+//! as they last published them, their generation, their bytes and their counts, without their lock.
+//! A texture that cannot be read is not read again; one refused for want of room is tried again.
+//! A layer is filled by a copy the job submits, never by `Queue::write_texture`: wgpu-core 30
+//! holds the state of initialisation of the texture written while it takes its trackers, a
+//! submission takes them the other way round, and the frame drawing the array would lock up with
+//! the job writing to it.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 use uniwow_api::formats::{FileRef, Formats, Texture, TextureFormat};
+use uniwow_api::wgpu::util::DeviceExt;
 use uniwow_api::{log, wgpu};
 
 /// The arrays the shader binds at once.
@@ -79,8 +85,36 @@ struct Arrays {
 /// The views of the arrays by slot, as last published.
 type Views = Arc<Vec<Option<wgpu::TextureView>>>;
 
-/// A texture of the cache: placed once, none when it cannot be.
-type Cell = Arc<OnceLock<Option<Arc<Placed>>>>;
+/// A texture of the cache, as its last reading left it.
+enum Entry {
+    Unread,
+    Placed(Arc<Placed>),
+    /// It could not be read: not read again.
+    Unreadable,
+    /// Every slot held a full array: tried again when asked again.
+    NoRoom,
+}
+
+/// A texture of the cache; the job reading it holds its lock, the others asking wait for it.
+type Cell = Arc<Mutex<Entry>>;
+
+/// Why a texture is not placed.
+enum Failure {
+    Unreadable(String),
+    NoRoom(String),
+}
+
+/// The textures of the arrays, as the statistics give them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub placed: usize,
+    /// Those that could not be read.
+    pub unreadable: usize,
+    /// Those refused for want of room, until room is made.
+    pub no_room: usize,
+    /// The slots holding an array.
+    pub arrays: usize,
+}
 
 pub struct TextureArrays {
     device: wgpu::Device,
@@ -96,6 +130,10 @@ pub struct TextureArrays {
     published: Mutex<Views>,
     bytes: AtomicU64,
     generation: AtomicU64,
+    placed: AtomicUsize,
+    unreadable: AtomicUsize,
+    no_room: AtomicUsize,
+    arrays_used: AtomicUsize,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -121,6 +159,20 @@ impl TextureArrays {
             published: Mutex::new(Arc::new(vec![None; SLOTS])),
             bytes: AtomicU64::new(0),
             generation: AtomicU64::new(0),
+            placed: AtomicUsize::new(0),
+            unreadable: AtomicUsize::new(0),
+            no_room: AtomicUsize::new(0),
+            arrays_used: AtomicUsize::new(0),
+        }
+    }
+
+    /// The textures placed, refused and waiting for room, and the slots used, without a lock.
+    pub fn counts(&self) -> Counts {
+        Counts {
+            placed: self.placed.load(Ordering::Acquire),
+            unreadable: self.unreadable.load(Ordering::Acquire),
+            no_room: self.no_room.load(Ordering::Acquire),
+            arrays: self.arrays_used.load(Ordering::Acquire),
         }
     }
 
@@ -139,6 +191,8 @@ impl TextureArrays {
             .sum();
         *lock(&self.published) = Arc::new(views);
         self.bytes.store(bytes, Ordering::Release);
+        self.arrays_used
+            .store(arrays.slots.iter().flatten().count(), Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
@@ -146,44 +200,65 @@ impl TextureArrays {
         self.block_compression
     }
 
-    /// The texture `file`, placed in an array; none when it cannot be read or placed, which is said
-    /// once in the log. The first job asking reads it, the others asking meanwhile wait for it.
+    /// The texture `file`, placed in an array; none when it cannot be read, or placed for want of
+    /// room, which is said in the log the first time. The first job asking reads it, the others
+    /// asking meanwhile wait for it; one refused for want of room is read again when asked again.
     pub fn get(&self, formats: &dyn Formats, file: &FileRef) -> Option<Arc<Placed>> {
-        let cell = {
-            let mut entries = lock(&self.entries);
-            let cell = entries.entry(file.clone()).or_default();
-            // Held before the lock is given back, so that a purge does not free it meanwhile.
-            if let Some(placed) = cell.get() {
-                return placed.clone();
+        // The cell is held from the lock of the cache on, so that a purge leaves it meanwhile.
+        let cell = lock(&self.entries)
+            .entry(file.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(Entry::Unread)))
+            .clone();
+        let mut entry = lock(&cell);
+        match &*entry {
+            Entry::Placed(placed) => return Some(placed.clone()),
+            Entry::Unreadable => return None,
+            Entry::Unread | Entry::NoRoom => {}
+        }
+        let waited = matches!(*entry, Entry::NoRoom);
+        match self.load(formats, file) {
+            Ok(placed) => {
+                let placed = Arc::new(placed);
+                *entry = Entry::Placed(placed.clone());
+                self.placed.fetch_add(1, Ordering::AcqRel);
+                if waited {
+                    self.no_room.fetch_sub(1, Ordering::AcqRel);
+                }
+                Some(placed)
             }
-            cell.clone()
-        };
-        cell.get_or_init(|| match self.load(formats, file) {
-            Ok(placed) => Some(Arc::new(placed)),
-            Err(reason) => {
+            Err(Failure::Unreadable(reason)) => {
                 log::warn!("a texture of the terrain is left out: {reason}");
+                *entry = Entry::Unreadable;
+                self.unreadable.fetch_add(1, Ordering::AcqRel);
                 None
             }
-        })
-        .clone()
+            Err(Failure::NoRoom(reason)) => {
+                if !waited {
+                    log::warn!("a texture of the terrain waits for room: {reason}");
+                    self.no_room.fetch_add(1, Ordering::AcqRel);
+                }
+                *entry = Entry::NoRoom;
+                None
+            }
+        }
     }
 
     /// The texture `file` read, as BC when the device takes it and the file stores it so, else as
     /// RGBA, then written to a layer of the array of its class.
-    fn load(&self, formats: &dyn Formats, file: &FileRef) -> Result<Placed, String> {
+    fn load(&self, formats: &dyn Formats, file: &FileRef) -> Result<Placed, Failure> {
         let mut texture = if self.block_compression {
-            formats.texture(file)?
+            formats.texture(file).map_err(Failure::Unreadable)?
         } else {
-            formats.texture_rgba(file)?
+            formats.texture_rgba(file).map_err(Failure::Unreadable)?
         };
         if texture.format != TextureFormat::Rgba8 && (texture.width % 4 != 0 || texture.height % 4 != 0) {
-            texture = formats.texture_rgba(file)?;
+            texture = formats.texture_rgba(file).map_err(Failure::Unreadable)?;
         }
-        self.place(&texture)
+        self.place(&texture).map_err(Failure::NoRoom)
     }
 
     /// Writes `texture` to a free layer of an array of its class, growing one or making one when
-    /// none is free.
+    /// none is free: its levels copied from a buffer of their own, in a submission of its own.
     pub fn place(&self, texture: &Texture) -> Result<Placed, String> {
         let format = match texture.format {
             TextureFormat::Rgba8 => wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -204,6 +279,25 @@ impl TextureArrays {
             height: texture.height,
             levels: levels as u32,
         };
+        // The rows of each level apart by a multiple of what a copy from a buffer needs.
+        let mut bytes = Vec::new();
+        let mut copies = Vec::with_capacity(levels);
+        for (level, data) in texture.levels.iter().take(levels).enumerate() {
+            let (row, rows) = class.level_layout(level as u32);
+            let stride = row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+            copies.push((bytes.len() as u64, stride, rows));
+            let start = bytes.len();
+            bytes.resize(start + (stride * rows) as usize, 0);
+            for (line, texels) in data.chunks(row as usize).take(rows as usize).enumerate() {
+                let at = start + line * stride as usize;
+                bytes[at..at + texels.len()].copy_from_slice(texels);
+            }
+        }
+        let source = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("terrain texture placed"),
+            contents: &bytes,
+            usage: wgpu::BufferUsages::COPY_SRC,
+        });
         let mut arrays = lock(&self.arrays);
         let (slot, layer) = self.free_layer(&mut arrays, class).ok_or_else(|| {
             format!(
@@ -211,21 +305,25 @@ impl TextureArrays {
                 class.width, class.height
             )
         })?;
-        let array = arrays.slots[slot].as_mut().expect("the layer is in an array");
-        for (level, data) in texture.levels.iter().take(levels).enumerate() {
-            let (row, rows) = class.level_layout(level as u32);
-            self.queue.write_texture(
+        let array = arrays.slots[slot].as_ref().expect("the layer is in an array");
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("terrain texture placed"),
+        });
+        for (level, (offset, stride, rows)) in copies.into_iter().enumerate() {
+            encoder.copy_buffer_to_texture(
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &source,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset,
+                        bytes_per_row: Some(stride),
+                        rows_per_image: Some(rows),
+                    },
+                },
                 wgpu::TexelCopyTextureInfo {
                     texture: &array.texture,
                     mip_level: level as u32,
                     origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
                     aspect: wgpu::TextureAspect::All,
-                },
-                data,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(row),
-                    rows_per_image: Some(rows),
                 },
                 wgpu::Extent3d {
                     width: (class.width >> level).max(1),
@@ -234,6 +332,8 @@ impl TextureArrays {
                 },
             );
         }
+        // Under the lock of the arrays: before any copy of this array into a grown one.
+        self.queue.submit([encoder.finish()]);
         Ok(Placed {
             slot: slot as u32,
             layer,
@@ -317,7 +417,7 @@ impl TextureArrays {
                     },
                 );
             }
-            // After the writes to the old array queued so far, which a submission sends first.
+            // After the copies to the old array, each submitted under the same lock.
             self.queue.submit([encoder.finish()]);
             used[..from.used.len()].copy_from_slice(&from.used);
         }
@@ -341,15 +441,26 @@ impl TextureArrays {
     /// that hold none. It waits for the jobs placing textures: a job of its own runs it.
     pub fn purge(&self) {
         let mut freed = Vec::new();
-        lock(&self.entries).retain(|_, cell| match cell.get() {
-            // Neither a tile nor a job asking for it holds it.
-            Some(Some(placed)) if Arc::strong_count(placed) == 1 && Arc::strong_count(cell) == 1 => {
-                freed.push((placed.slot, placed.layer));
-                false
+        lock(&self.entries).retain(|_, cell| {
+            // Neither a tile nor a job asking for it holds it; one being read is kept.
+            if Arc::strong_count(cell) > 1 {
+                return true;
             }
-            // A texture being read, or one that could not be: kept, not to be read again.
-            _ => true,
+            let entry = match cell.try_lock() {
+                Ok(entry) => entry,
+                Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                Err(TryLockError::WouldBlock) => return true,
+            };
+            match &*entry {
+                Entry::Placed(placed) if Arc::strong_count(placed) == 1 => {
+                    freed.push((placed.slot, placed.layer));
+                    false
+                }
+                // One that could not be read, or waits for room: kept.
+                _ => true,
+            }
         });
+        self.placed.fetch_sub(freed.len(), Ordering::AcqRel);
         let mut arrays = lock(&self.arrays);
         for (slot, layer) in freed {
             if let Some(array) = arrays.slots[slot as usize].as_mut() {

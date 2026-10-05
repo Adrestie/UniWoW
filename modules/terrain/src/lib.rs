@@ -1,9 +1,9 @@
 //! The terrain of a map: its tiles loaded around the camera of the 3D view by jobs of the pool, in
-//! the order of `loading`; kept in a model chunk by chunk, as they will be edited; uploaded to the
-//! GPU by those jobs; handed to the drawing within a time each frame; released beyond the GPU
-//! budget of its settings; drawn a draw each by its layer, at a level of detail by their distance,
-//! with the horizon of the map beyond them and a fog. Its panel chooses the map. Nothing is
-//! changed: no undo entry, no file written.
+//! the order of `loading`, as many as the GPU budget of its settings holds: full near the camera,
+//! kept in a model chunk by chunk as they will be edited, light beyond; uploaded to the GPU by those
+//! jobs; handed to the drawing within a time each frame; drawn a draw each by its layer, at a level
+//! of detail by their distance, with the horizon of the map beyond them and a fog. Its panel
+//! chooses the map. Nothing is changed: no undo entry, no file written.
 
 pub mod gpu;
 mod horizon;
@@ -28,7 +28,7 @@ use uniwow_api::{
 use gpu::{Shared, TileGpu};
 use horizon::HorizonGpu;
 use layer::{Scene, TerrainLayer, lock};
-use loading::Kept;
+use loading::{Held, Inputs, Kind};
 use model::{TILE, TileId, TileModel};
 
 /// The settings: the map shown, how far around the camera tiles load, and the GPU budget.
@@ -79,19 +79,27 @@ fn list_maps(formats: &dyn Formats) -> Result<Vec<MapChoice>, String> {
         .collect())
 }
 
-/// A tile loaded by a job: its model and its resources on the GPU; none when cancelled.
-type Loaded = Result<Option<(TileModel, TileGpu)>, String>;
+/// A tile loaded by a job: its model for a full one, and its resources on the GPU; none when
+/// cancelled.
+type Loaded = Result<Option<(Option<TileModel>, TileGpu)>, String>;
 
-/// Reads the tile `tile` of the map `directory` into its model, then builds its resources.
-fn load(formats: &dyn Formats, shared: &Shared, directory: &str, tile: TileId, job: &JobContext) -> Loaded {
+/// Reads the tile `tile` of the map `directory`, then builds its resources as `kind` says, a full
+/// tile keeping its model.
+fn load(formats: &dyn Formats, shared: &Shared, directory: &str, tile: TileId, kind: Kind, job: &JobContext) -> Loaded {
     let read = formats
         .tile(directory, tile.x, tile.y)?
         .ok_or_else(|| "named by its WDT, but not read".to_owned())?;
     if job.is_cancelled() {
         return Ok(None);
     }
-    let model = TileModel::new(tile, read);
-    Ok(gpu::build_tile(shared, formats, &model, &|| job.is_cancelled())?.map(|gpu| (model, gpu)))
+    let cancelled = || job.is_cancelled();
+    match kind {
+        Kind::Full => {
+            let model = TileModel::new(tile, read);
+            Ok(gpu::build_tile(shared, formats, &model, &cancelled)?.map(|gpu| (Some(model), gpu)))
+        }
+        Kind::Light => Ok(gpu::build_light(shared, formats, tile, &read, &cancelled)?.map(|gpu| (None, gpu))),
+    }
 }
 
 #[derive(Default)]
@@ -109,10 +117,12 @@ struct TerrainModule {
     remembered: Option<String>,
     /// Counts the maps shown, so that a load for a map left behind is dropped.
     showing: u64,
+    /// The models of the full tiles.
     models: HashMap<TileId, TileModel>,
-    loading: HashMap<TileId, JobId>,
-    jobs: HashMap<JobId, (u64, TileId)>,
-    ready: VecDeque<(TileModel, TileGpu)>,
+    /// The loads running, by tile, with their job and the kind each loads.
+    loading: HashMap<TileId, (JobId, Kind)>,
+    jobs: HashMap<JobId, (u64, TileId, Kind)>,
+    ready: VecDeque<(Option<TileModel>, TileGpu)>,
     refused: HashSet<TileId>,
     refusals: VecDeque<String>,
     /// The job building the horizon, and the map shown it is for, by `showing`.
@@ -122,6 +132,30 @@ struct TerrainModule {
     frame: u64,
     distance: u32,
     budget_mb: u64,
+    /// When the map shown was chosen, until all the tiles within reach are loaded; then what that
+    /// took and how many they are.
+    shown_at: Option<Instant>,
+    loaded_in: Option<(Duration, usize)>,
+    /// What the last plan was made for: none is made again until it changes.
+    planned: Option<PlanKey>,
+    /// What the models of the full tiles take in memory.
+    models_bytes: u64,
+    /// The models given up this frame: thousands of allocations each, freed by a job.
+    dropped: Vec<TileModel>,
+}
+
+/// What a plan of the loads depends on: the camera, by eighths of a tile; the distance and the
+/// budget; and the counts of the changes of the tiles, of their loads and of the textures.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PlanKey {
+    eye: [i32; 2],
+    distance: u32,
+    budget_mb: u64,
+    tiles: u64,
+    loading: usize,
+    ready: usize,
+    refused: usize,
+    textures: u64,
 }
 
 impl TerrainModule {
@@ -132,17 +166,20 @@ impl TerrainModule {
 
     /// Forgets the tiles of the map shown, its loads cancelled.
     fn reset(&mut self, ctx: &mut Context) {
-        for job in self.loading.values() {
+        for (job, _) in self.loading.values() {
             ctx.cancel(*job);
         }
         self.loading.clear();
         self.ready.clear();
-        self.models.clear();
+        self.dropped.extend(self.models.drain().map(|(_, model)| model));
+        self.models_bytes = 0;
+        self.planned = None;
         self.refused.clear();
         self.refusals.clear();
+        self.loaded_in = None;
         let mut scene = lock(&self.scene);
         scene.tiles.clear();
-        scene.seen.clear();
+        scene.limited = None;
         scene.horizon = None;
         scene.map = None;
         scene.generation += 1;
@@ -170,6 +207,7 @@ impl TerrainModule {
         };
         let map = &maps[index];
         ctx.set_setting(MAP, serde_json::json!(map.directory));
+        self.shown_at = Some(Instant::now());
         let tiles: Vec<TileId> = (0..4096u32)
             .filter(|i| map.wdt.tiles[*i as usize])
             .map(|i| TileId { x: i % 64, y: i / 64 })
@@ -204,13 +242,20 @@ impl TerrainModule {
         }
     }
 
-    /// Hands the tiles ready to the drawing, for `HAND_OVER` at most, one at least.
+    /// Hands the tiles ready to the drawing, for `HAND_OVER` at most, one at least: each takes the
+    /// place of the one of the other kind it replaces, a full one bringing its model.
     fn hand_over(&mut self) {
         let start = Instant::now();
-        let mut scene = lock(&self.scene);
+        let shared_scene = self.scene.clone();
+        let mut scene = lock(&shared_scene);
         while let Some((model, gpu)) = self.ready.pop_front() {
-            self.models.insert(model.id, model);
-            scene.tiles.push(Arc::new(gpu));
+            let id = gpu.id;
+            self.keep_model(id, model);
+            let gpu = Arc::new(gpu);
+            match scene.tiles.iter_mut().find(|tile| tile.id == id) {
+                Some(place) => *place = gpu,
+                None => scene.tiles.push(gpu),
+            }
             scene.generation += 1;
             if start.elapsed() >= HAND_OVER {
                 break;
@@ -218,44 +263,70 @@ impl TerrainModule {
         }
     }
 
-    /// The bytes the terrain takes on the GPU: its tiles, those ready, their textures and the horizon.
-    fn used(&self) -> u64 {
-        let scene = lock(&self.scene);
-        let tiles: u64 = scene.tiles.iter().map(|tile| tile.bytes).sum();
-        let horizon = scene.horizon.as_ref().map_or(0, |horizon| horizon.bytes);
-        drop(scene);
-        let ready: u64 = self.ready.iter().map(|(_, gpu)| gpu.bytes).sum();
-        tiles + ready + horizon + self.shared.as_ref().map_or(0, |shared| shared.textures.bytes())
-    }
-
-    /// Releases tiles out of sight while the terrain takes more than its budget.
-    fn keep_to_budget(&mut self, eye: [f32; 2], ctx: &mut Context) {
-        let used = self.used();
-        let budget = self.budget_mb * 1024 * 1024;
-        if used <= budget {
-            return;
-        }
-        let mut scene = lock(&self.scene);
-        let kept: Vec<Kept> = scene
+    /// The tiles held, drawn or ready, with their kind and what they take on the GPU: one ready to
+    /// take the place of another counts both until then.
+    fn held(&self) -> HashMap<TileId, Held> {
+        let changed = |id: &TileId| self.models.get(id).is_some_and(TileModel::changed);
+        let mut held: HashMap<TileId, Held> = lock(&self.scene)
             .tiles
             .iter()
-            .map(|tile| Kept {
-                tile: tile.id,
-                bytes: tile.bytes,
-                seen: scene.seen.get(&tile.id).copied().unwrap_or(0),
+            .map(|tile| {
+                let held = Held {
+                    kind: tile.kind,
+                    bytes: tile.bytes,
+                    changed: changed(&tile.id),
+                };
+                (tile.id, held)
             })
             .collect();
-        let released = loading::release(&kept, scene.frame, eye, used, budget);
+        for (_, gpu) in &self.ready {
+            let before = held.get(&gpu.id).map_or(0, |held| held.bytes);
+            held.insert(
+                gpu.id,
+                Held {
+                    kind: gpu.kind,
+                    bytes: before + gpu.bytes,
+                    changed: changed(&gpu.id),
+                },
+            );
+        }
+        held
+    }
+
+    /// What the terrain takes on the GPU besides its tiles: the arrays of textures and the horizon.
+    fn fixed(&self) -> u64 {
+        let horizon = lock(&self.scene).horizon.as_ref().map_or(0, |horizon| horizon.bytes);
+        horizon + self.shared.as_ref().map_or(0, |shared| shared.textures.bytes())
+    }
+
+    /// Keeps `model` as the model of the tile `id`, or none, counting what the models take.
+    fn keep_model(&mut self, id: TileId, model: Option<TileModel>) {
+        if let Some(model) = &model {
+            self.models_bytes += model.bytes();
+        }
+        let old = match model {
+            Some(model) => self.models.insert(id, model),
+            None => self.models.remove(&id),
+        };
+        if let Some(old) = old {
+            self.models_bytes -= old.bytes();
+            self.dropped.push(old);
+        }
+    }
+
+    /// Releases the tiles `released`, ready or drawn, and their models.
+    fn release(&mut self, released: &[TileId], ctx: &mut Context) {
         if released.is_empty() {
             return;
         }
+        let mut scene = lock(&self.scene);
         scene.tiles.retain(|tile| !released.contains(&tile.id));
         scene.generation += 1;
-        for tile in &released {
-            scene.seen.remove(tile);
-            self.models.remove(tile);
-        }
         drop(scene);
+        self.ready.retain(|(_, gpu)| !released.contains(&gpu.id));
+        for tile in released {
+            self.keep_model(*tile, None);
+        }
         self.purge_textures(ctx);
     }
 
@@ -278,10 +349,21 @@ impl TerrainModule {
     fn steer(&mut self, ctx: &mut Context) {
         let start = Instant::now();
         self.steer_loads(ctx);
-        let used = self.used();
+        if !self.dropped.is_empty() {
+            let dropped = std::mem::take(&mut self.dropped);
+            ctx.spawn("Free the models of the tiles left", move |_| drop(dropped));
+        }
+        let fixed = self.fixed();
+        let ready: u64 = self.ready.iter().map(|(_, gpu)| gpu.bytes).sum();
         let mut scene = lock(&self.scene);
-        scene.reach = (self.distance as f32 + 0.5) * TILE;
+        let used = fixed + ready + scene.tiles.iter().map(|tile| tile.bytes).sum::<u64>();
+        // The fog follows the reach the budget leaves.
+        let reach = scene
+            .limited
+            .map_or(self.distance as f32, |limited| limited.min(self.distance as f32));
+        scene.reach = (reach + 0.5) * TILE;
         scene.bytes = used;
+        scene.models = self.models_bytes;
         scene.steering = start.elapsed();
     }
 
@@ -313,22 +395,6 @@ impl TerrainModule {
             Ok(PropertyValue::Vector([x, y, _])) => [x as f32, y as f32],
             _ => return,
         };
-        let wanted = loading::wanted(&wdt.tiles, eye, self.distance);
-        let loading: HashSet<TileId> = self.loading.keys().copied().collect();
-        let present: HashSet<TileId> = self
-            .models
-            .keys()
-            .copied()
-            .chain(self.ready.iter().map(|(model, _)| model.id))
-            .chain(self.refused.iter().copied())
-            .collect();
-        let workers = std::thread::available_parallelism().map_or(2, |n| n.get());
-        let plan = loading::plan(&wanted, &loading, &present, workers.saturating_sub(1).max(1));
-        for tile in plan.cancel {
-            if let Some(job) = self.loading.remove(&tile) {
-                ctx.cancel(job);
-            }
-        }
         let directory = self
             .maps
             .as_ref()
@@ -338,16 +404,73 @@ impl TerrainModule {
             return;
         };
         self.build_horizon(ctx, &shared, &formats, &directory);
-        for tile in plan.start {
-            let (formats, shared, directory) = (formats.clone(), shared.clone(), directory.clone());
-            let job = ctx.spawn(
-                &format!("Load the tile {} {} of {directory}", tile.x, tile.y),
-                move |job| load(&*formats, &shared, &directory, tile, job),
-            );
-            self.loading.insert(tile, job);
-            self.jobs.insert(job, (self.showing, tile));
+        let key = PlanKey {
+            eye: eye.map(|at| (at / TILE * 8.0).floor() as i32),
+            distance: self.distance,
+            budget_mb: self.budget_mb,
+            tiles: lock(&self.scene).generation,
+            loading: self.loading.len(),
+            ready: self.ready.len(),
+            refused: self.refused.len(),
+            textures: shared.textures.generation(),
+        };
+        if self.planned == Some(key) {
+            return;
         }
-        self.keep_to_budget(eye, ctx);
+        self.planned = Some(key);
+        let wanted = loading::wanted(&wdt.tiles, eye, self.distance);
+        let held = self.held();
+        let fixed = self.fixed();
+        let loading: HashMap<TileId, Kind> = self.loading.iter().map(|(tile, (_, kind))| (*tile, *kind)).collect();
+        let workers = std::thread::available_parallelism().map_or(2, |n| n.get());
+        let plan = loading::plan(&Inputs {
+            wanted: &wanted,
+            held: &held,
+            loading: &loading,
+            refused: &self.refused,
+            used: fixed + held.values().map(|held| held.bytes).sum::<u64>(),
+            fixed,
+            budget: self.budget_mb * 1024 * 1024,
+            costs: loading::costs(&held),
+            slots: workers.saturating_sub(1).max(1),
+        });
+        lock(&self.scene).limited = plan.limited;
+        for tile in &plan.cancel {
+            if let Some((job, _)) = self.loading.remove(tile) {
+                ctx.cancel(job);
+            }
+        }
+        self.release(&plan.release, ctx);
+        for &(tile, kind) in &plan.start {
+            let (formats, shared, directory) = (formats.clone(), shared.clone(), directory.clone());
+            let label = match kind {
+                Kind::Full => format!("Load the tile {} {} of {directory}", tile.x, tile.y),
+                Kind::Light => format!("Load the tile {} {} of {directory}, light", tile.x, tile.y),
+            };
+            let job = ctx.spawn(&label, move |job| load(&*formats, &shared, &directory, tile, kind, job));
+            self.loading.insert(tile, (job, kind));
+            self.jobs.insert(job, (self.showing, tile, kind));
+        }
+        let done = plan.start.is_empty()
+            && plan.limited.is_none()
+            && self.loading.is_empty()
+            && self.ready.is_empty()
+            && wanted.iter().all(|(tile, distance)| {
+                self.refused.contains(tile)
+                    || held
+                        .get(tile)
+                        .is_some_and(|held| held.kind == loading::kind(*distance, Some(held.kind), held.changed))
+            });
+        if done && let Some(shown_at) = self.shown_at.take() {
+            let took = shown_at.elapsed();
+            self.loaded_in = Some((took, wanted.len()));
+            log::info!(
+                "{directory}: the {} tiles within {} tiles loaded in {:.1} s",
+                wanted.len(),
+                self.distance,
+                took.as_secs_f32()
+            );
+        }
     }
 }
 
@@ -383,7 +506,7 @@ impl Module for TerrainModule {
         let target = view.target();
         self.view = Some(view);
         self.setup = Some(ctx.spawn("Build the terrain's pipeline", move |_| {
-            Arc::new(Shared::new(&gpu, &target))
+            Shared::new(&gpu, &target).map(Arc::new)
         }));
     }
 
@@ -429,18 +552,45 @@ impl Module for TerrainModule {
             ui.colored_label(ui.visuals().warn_fg_color, "No 3D view: the terrain is not drawn.");
             return;
         }
-        let used = self.used() as f64 / (1024.0 * 1024.0);
+        let scene = lock(&self.scene);
+        let full = scene.tiles.iter().filter(|tile| tile.kind == Kind::Full).count();
+        let (light, used, limited) = (scene.tiles.len() - full, scene.bytes, scene.limited);
+        drop(scene);
         let textures = match &self.shared {
             Some(shared) if shared.textures.block_compression() => "textures as stored (BC)",
             Some(_) => "textures decoded (RGBA): the device has no BC",
             None => "pipeline being built",
         };
         ui.label(format!(
-            "{} tiles drawn, {} loading; {used:.0} MB of {} MB on the GPU; {textures}",
-            lock(&self.scene).tiles.len(),
+            "{} tiles drawn ({full} full, {light} light), {} loading; {:.0} MB of {} MB on the GPU; {textures}",
+            full + light,
             self.loading.len(),
+            used as f64 / (1024.0 * 1024.0),
             self.budget_mb
         ));
+        if let Some(shared) = &self.shared {
+            let counts = shared.textures.counts();
+            ui.label(format!(
+                "Textures: {} placed, {} unreadable, {} waiting for room; {} of {} arrays",
+                counts.placed,
+                counts.unreadable,
+                counts.no_room,
+                counts.arrays,
+                textures::SLOTS
+            ));
+        }
+        if let Some(limited) = limited {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!("Reach limited by the budget: {limited:.0} tiles"),
+            );
+        }
+        if let Some((took, tiles)) = self.loaded_in {
+            ui.label(format!(
+                "All {tiles} tiles within reach loaded in {:.1} s",
+                took.as_secs_f32()
+            ));
+        }
         ui.horizontal(|ui| {
             ui.label("Distance (tiles)");
             if ui
@@ -471,12 +621,14 @@ impl Module for TerrainModule {
             self.setup = None;
             match outcome {
                 JobOutcome::Panicked(message) => log::error!("the terrain's pipeline could not be built: {message}"),
-                outcome => {
-                    if let Some(shared) = outcome.take::<Arc<Shared>>() {
+                outcome => match outcome.take::<Result<Arc<Shared>, String>>() {
+                    Some(Ok(shared)) => {
                         *lock(&self.incoming) = Some(shared.clone());
                         self.shared = Some(shared);
                     }
-                }
+                    Some(Err(reason)) => log::error!("the terrain is not drawn: {reason}"),
+                    None => {}
+                },
             }
         } else if self.maps_job == Some(job) {
             self.maps_job = None;
@@ -509,8 +661,8 @@ impl Module for TerrainModule {
                 Ok(_) => {}
                 Err(reason) => log::warn!("the horizon of the map is not drawn: {reason}"),
             }
-        } else if let Some((showing, tile)) = self.jobs.remove(&job) {
-            if self.loading.get(&tile) == Some(&job) {
+        } else if let Some((showing, tile, kind)) = self.jobs.remove(&job) {
+            if self.loading.get(&tile) == Some(&(job, kind)) {
                 self.loading.remove(&tile);
             }
             if showing != self.showing {

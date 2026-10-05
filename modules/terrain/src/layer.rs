@@ -1,6 +1,6 @@
-//! The layer of the terrain in the 3D view: the sky in the colour of the fog, the tiles in sight a
-//! draw each at their level of detail, and the horizon in one draw, its tiles drawn in detail left
-//! out. Its bundle is kept while the tiles drawn, their levels and the arrays of textures stay the
+//! The layer of the terrain in the 3D view: the tiles in sight a draw each at their level of detail,
+//! the horizon in one draw, its tiles drawn in detail left out, and last the sky in the colour of the
+//! fog, where nothing was drawn. Its bundle is kept while the tiles drawn, their levels and the arrays of textures stay the
 //! same; the camera, which moves at every frame, is written in `prepare` into its buffer.
 
 use std::collections::HashMap;
@@ -13,32 +13,35 @@ use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
 use crate::gpu::{CAMERA, Shared, TileGpu};
 use crate::horizon::{self, HorizonGpu};
+use crate::loading::Kind;
 use crate::mesh;
 use crate::model::{TILE, TileId};
+use crate::textures::SLOTS;
 
 /// The light of the sun, and the colour of the fog and the sky, until the lights of the map come.
 const SUN: [f32; 3] = [0.4, 0.3, 0.85];
 pub const FOG: [f32; 3] = [0.36, 0.43, 0.52];
 
-/// What the module hands to its layer: the tiles, the horizon and the map shown; and when each tile
-/// was last in sight, which the layer notes for the module.
+/// What the module hands to its layer: the tiles, the horizon and the map shown, and what its
+/// statistics say.
 #[derive(Default)]
 pub struct Scene {
     pub tiles: Vec<Arc<TileGpu>>,
     /// Counts the changes of `tiles` and of `horizon`.
     pub generation: u64,
-    /// The frames the layer prepared, and the last of them each tile was in sight.
-    pub frame: u64,
-    pub seen: HashMap<TileId, u64>,
     pub horizon: Option<Arc<HorizonGpu>>,
     /// The bounds of the map shown on the ground, its lowest corner then its highest; none before a
     /// map is shown.
     pub map: Option<[[f32; 2]; 2]>,
     /// How far around the camera the tiles load, on the ground, in yards.
     pub reach: f32,
-    /// What the module spent steering at the last frame, and what the terrain takes on the GPU.
+    /// When the budget holds fewer tiles than are wanted, the reach it leaves, in tiles.
+    pub limited: Option<f32>,
+    /// What the module spent steering at the last frame, what the terrain takes on the GPU, and
+    /// what the models of its full tiles take in memory.
     pub steering: Duration,
     pub bytes: u64,
+    pub models: u64,
 }
 
 pub fn lock<T>(shared: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -48,12 +51,10 @@ pub fn lock<T>(shared: &Mutex<T>) -> MutexGuard<'_, T> {
 /// Whether the box `bounds` may be in sight through `view_proj`: no side of the view has its
 /// eight corners all beyond it, nor all behind the eye.
 pub fn in_sight(view_proj: Mat4, bounds: [[f32; 3]; 2]) -> bool {
-    let corners: Vec<Vec4> = (0..8)
-        .map(|i| {
-            let pick = |axis: usize| bounds[(i >> axis) & 1][axis];
-            view_proj * Vec4::new(pick(0), pick(1), pick(2), 1.0)
-        })
-        .collect();
+    let corners: [Vec4; 8] = std::array::from_fn(|i| {
+        let pick = |axis: usize| bounds[(i >> axis) & 1][axis];
+        view_proj * Vec4::new(pick(0), pick(1), pick(2), 1.0)
+    });
     let all = |beyond: &dyn Fn(&Vec4) -> bool| corners.iter().all(beyond);
     !(all(&|c| c.w <= 0.0)
         || all(&|c| c.x < -c.w)
@@ -169,9 +170,7 @@ impl Layer for TerrainLayer {
             self.arrays = Some((generation, shared.arrays_group(&views)));
         }
 
-        let mut scene = lock(&self.scene);
-        scene.frame += 1;
-        let frame = scene.frame;
+        let scene = lock(&self.scene);
         let lods = std::mem::take(&mut self.lods);
         self.drawn = scene
             .tiles
@@ -183,7 +182,6 @@ impl Layer for TerrainLayer {
             })
             .collect();
         for (tile, lod) in &self.drawn {
-            scene.seen.insert(tile.id, frame);
             self.lods.insert(tile.id, *lod);
         }
         if self.masked != Some(scene.generation) {
@@ -218,17 +216,29 @@ impl Layer for TerrainLayer {
             .map(|(tile, lod)| u64::from(tile.lods[*lod].len() as u32 / 3))
             .sum();
         let horizon_triangles = self.horizon.as_ref().map_or(0, |horizon| u64::from(horizon.count / 3));
+        let full = scene.tiles.iter().filter(|tile| tile.kind == Kind::Full).count();
+        let textures = shared.textures.counts();
+        let limited = scene.limited.map_or_else(String::new, |reach| {
+            format!("; reach limited by the budget: {reach:.0} tiles")
+        });
         self.stats = LayerStats {
             draws: self.drawn.len() as u64 + u64::from(self.horizon.is_some()) + u64::from(self.sky),
             triangles: tile_triangles + horizon_triangles + u64::from(self.sky),
             bytes: scene.bytes,
             items: format!(
-                "{} tiles of {} loaded, levels {:?}",
+                "{} tiles in sight of {} loaded ({full} full, {} light), levels {:?}\n  models {:.0} MB in memory; textures {} placed, {} unreadable, {} waiting for room, {} of {} arrays{limited}",
                 self.drawn.len(),
                 scene.tiles.len(),
+                scene.tiles.len() - full,
                 (0..mesh::LODS)
                     .map(|level| self.drawn.iter().filter(|(_, lod)| *lod == level).count())
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>(),
+                scene.models as f64 / (1024.0 * 1024.0),
+                textures.placed,
+                textures.unreadable,
+                textures.no_room,
+                textures.arrays,
+                SLOTS
             ),
             steering: scene.steering,
         };
@@ -250,11 +260,6 @@ impl Layer for TerrainLayer {
         else {
             return;
         };
-        if self.sky {
-            bundle.set_pipeline(&shared.sky_pipeline);
-            bundle.set_bind_group(0, camera, &[]);
-            bundle.draw(0..3, 0..1);
-        }
         if !self.drawn.is_empty() {
             bundle.set_pipeline(&shared.pipeline);
             bundle.set_bind_group(0, camera, &[]);
@@ -273,6 +278,12 @@ impl Layer for TerrainLayer {
             bundle.set_vertex_buffer(0, horizon.vertices.slice(..));
             bundle.set_index_buffer(horizon.indices.slice(..), wgpu::IndexFormat::Uint32);
             bundle.draw_indexed(0..horizon.count, 0, 0..1);
+        }
+        // Last, where nothing was drawn: the depth is still at infinity there only.
+        if self.sky {
+            bundle.set_pipeline(&shared.sky_pipeline);
+            bundle.set_bind_group(0, camera, &[]);
+            bundle.draw(0..3, 0..1);
         }
     }
 

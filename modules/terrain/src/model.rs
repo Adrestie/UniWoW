@@ -66,6 +66,28 @@ impl TileModel {
         self.changed.iter().any(|bits| *bits != 0)
     }
 
+    /// What its data takes in memory, its vectors counted by their length.
+    pub fn bytes(&self) -> u64 {
+        let tile = &self.tile;
+        let chunks: usize = tile
+            .chunks
+            .iter()
+            .map(|chunk| {
+                size_of::<Chunk>()
+                    + chunk.heights.len() * 4
+                    + chunk.normals.len() * 3
+                    + chunk.colours.len() * 4
+                    + chunk.layers.len() * size_of::<uniwow_api::formats::Layer>()
+                    + chunk.alphas.iter().map(Vec::len).sum::<usize>()
+                    + chunk.shadow.len()
+                    + (chunk.doodad_refs.len() + chunk.building_refs.len()) * 4
+            })
+            .sum();
+        let placed = tile.doodads.len() * size_of::<uniwow_api::formats::Doodad>()
+            + tile.buildings.len() * size_of::<uniwow_api::formats::Building>();
+        (size_of::<Self>() + chunks + placed) as u64
+    }
+
     pub fn chunk_id(&self, chunk: usize) -> ChunkId {
         ChunkId {
             tile: self.id,

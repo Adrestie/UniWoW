@@ -1,7 +1,7 @@
 //! Tests of the terrain on tiles the tests make, and on the device of the software adapter of the
 //! system when there is one, skipped otherwise.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::pin::pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,10 +18,10 @@ use uniwow_api::{bytemuck, egui, egui_wgpu, wgpu};
 use crate::gpu::{self, Shared};
 use crate::horizon;
 use crate::layer::{Scene, TerrainLayer, in_sight, tiles_away};
-use crate::loading::{self, Kept, Plan};
+use crate::loading::{self, Costs, Held, Inputs, Kind, Plan};
 use crate::mesh::{self, CHUNKS, LODS, SKIRT_DEPTH, TILE_VERTICES, VERTICES, Vertex};
 use crate::model::{CHUNK, ORIGIN, STEP, TILE, TileId, TileModel, chunk_bounds};
-use crate::textures::{NONE, SLOTS};
+use crate::textures::{Counts, NONE, SLOTS};
 
 /// A chunk the tests make: its index, a position that may be wrong, its holes, three layers, the
 /// third naming a texture the tile does not have.
@@ -167,6 +167,44 @@ fn a_level_of_detail_follows_the_distance_and_changes_only_past_a_margin() {
 }
 
 #[test]
+fn a_light_tile_keeps_the_corners_of_its_chunks_and_its_skirts_and_its_blending_reduced() {
+    let mut model = TileModel::new(TileId { x: 32, y: 32 }, tile());
+    // The first alpha map of the chunk 0 grows along its rows, four by four.
+    model.tile.chunks[0].alphas[0] = (0..4096).map(|texel| (texel % 64 * 4) as u8).collect();
+    let (vertices, indices) = mesh::light(model.id, &model.tile);
+    assert_eq!(
+        vertices.len(),
+        256 * 4 + 64 * 2,
+        "the corners of each chunk, those of the skirts"
+    );
+    assert_eq!(
+        indices.len() / 3,
+        256 * 2 + 64 * 2,
+        "two triangles a chunk, two a side of a chunk"
+    );
+    let all = tile_vertices(&model);
+    assert!(
+        vertices.iter().all(|vertex| all.contains(vertex)),
+        "the vertices of the tile"
+    );
+    let [centre_x, centre_y] = model.id.centre();
+    for triangle in indices.as_chunks::<3>().0 {
+        let [a, b, c] = triangle.map(|i| Vec3::from(vertices[usize::from(i)].position));
+        let normal = (b - a).cross(c - a);
+        if normal.z.abs() < 1e-3 {
+            let middle = (a + b + c) / 3.0;
+            assert!(normal.dot(Vec3::new(middle.x - centre_x, middle.y - centre_y, 0.0)) > 0.0);
+        } else {
+            assert!(normal.z > 0.0, "{triangle:?} faces down");
+        }
+    }
+    let reduced = mesh::light_blend(&model.tile.chunks[0]);
+    assert_eq!(reduced.len(), 16 * 16 * 4);
+    assert_eq!(&reduced[..4], &[6, 50, 0, 255], "the mean of 4 × 4 texels");
+    assert_eq!(reduced[4], 22, "the next square of them");
+}
+
+#[test]
 fn the_texels_of_blending_carry_three_alpha_maps_and_the_shadow() {
     let texels = mesh::blend(&chunk([0, 0], [0.0; 3], 0));
     assert_eq!(texels.len(), 64 * 64 * 4);
@@ -193,13 +231,14 @@ fn the_tiles_wanted_are_those_around_the_camera_the_nearest_first() {
         .collect();
     let eye = id(32, 32).centre();
     let wanted = loading::wanted(&tiles(&all), eye, 1);
-    assert_eq!(wanted[0], id(32, 32));
-    let near: HashSet<TileId> = wanted[1..4].iter().copied().collect();
+    assert_eq!(wanted[0], (id(32, 32), 0.0));
+    let near: HashSet<TileId> = wanted[1..4].iter().map(|(tile, _)| *tile).collect();
     assert_eq!(
         near,
         HashSet::from([id(31, 32), id(32, 31), id(32, 33)]),
         "the sides, (33, 32) missing from the WDT"
     );
+    assert!((wanted[1].1 - 1.0).abs() < 1e-4, "a tile away");
     assert_eq!(wanted.len(), 8, "and the four corners");
     assert!(loading::wanted(&tiles(&all), [ORIGIN * 4.0, 0.0], 3).is_empty());
 }
@@ -216,56 +255,263 @@ fn at_the_largest_distance_every_tile_of_a_map_is_wanted_from_its_middle() {
 }
 
 #[test]
-fn the_loads_start_nearest_first_within_their_slots_and_those_left_are_cancelled() {
-    let (a, b, c, d, e) = (id(1, 1), id(2, 2), id(3, 3), id(4, 4), id(5, 5));
-    let plan = loading::plan(&[b, c, d, e, a], &HashSet::from([a]), &HashSet::from([b]), 3);
-    assert_eq!(
-        plan,
-        Plan {
-            start: vec![c, d],
-            cancel: Vec::new(),
+fn a_tile_is_full_near_the_camera_and_changes_kind_only_past_a_margin() {
+    use loading::Kind::{Full, Light};
+    assert_eq!(loading::kind(6.0, None, false), Full);
+    assert_eq!(loading::kind(7.5, None, false), Light);
+    assert_eq!(loading::kind(7.5, Some(Light), false), Light, "light until 7");
+    assert_eq!(loading::kind(7.5, Some(Full), false), Full, "full until 8");
+    assert_eq!(loading::kind(8.1, Some(Full), false), Light);
+    assert_eq!(loading::kind(30.0, Some(Full), true), Full, "a tile changed stays full");
+}
+
+const MB: u64 = 1 << 20;
+
+/// The costs of the planning tests: 6 MB a full tile, 0.25 MB a light one.
+const COSTS: Costs = Costs {
+    full: 6 * MB,
+    light: MB / 4,
+};
+
+/// A world the planning tests run: the tiles held and loading, each load ending at the next frame,
+/// taking what `COSTS` says.
+#[derive(Default)]
+struct World {
+    held: HashMap<TileId, Held>,
+    loading: HashMap<TileId, Kind>,
+    /// What the frames did: their loads started, cancelled and the tiles released.
+    starts: usize,
+    releases: Vec<TileId>,
+}
+
+/// What the textures and the horizon take in the planning tests.
+const FIXED: u64 = 20 * MB;
+
+impl World {
+    fn used(&self) -> u64 {
+        FIXED + self.held.values().map(|held| held.bytes).sum::<u64>()
+    }
+
+    /// A frame: the loads started before end, then the plan for the camera at `eye` wanting the
+    /// tiles within `distance`, with `budget`, is applied. Returns the plan.
+    fn frame(&mut self, tiles: &[bool], eye: [f32; 2], distance: u32, budget: u64) -> Plan {
+        for (tile, kind) in std::mem::take(&mut self.loading) {
+            let bytes = match kind {
+                Kind::Full => COSTS.full,
+                Kind::Light => COSTS.light,
+            };
+            self.held.insert(
+                tile,
+                Held {
+                    kind,
+                    bytes,
+                    changed: false,
+                },
+            );
         }
-    );
-    let plan = loading::plan(&[d, e], &HashSet::from([a, c]), &HashSet::new(), 3);
-    assert_eq!(
-        plan,
-        Plan {
-            start: vec![d, e],
-            cancel: vec![a, c],
-        },
-        "the camera gone, its loads cancelled and their slots free"
-    );
+        let wanted = loading::wanted(tiles, eye, distance);
+        let plan = loading::plan(&Inputs {
+            wanted: &wanted,
+            held: &self.held,
+            loading: &self.loading,
+            refused: &HashSet::new(),
+            used: self.used(),
+            fixed: FIXED,
+            budget,
+            costs: COSTS,
+            slots: 15,
+        });
+        for tile in &plan.cancel {
+            self.loading.remove(tile);
+        }
+        for tile in &plan.release {
+            self.held.remove(tile);
+        }
+        for (tile, kind) in &plan.start {
+            self.loading.insert(*tile, *kind);
+        }
+        self.starts += plan.start.len();
+        self.releases.extend(&plan.release);
+        plan
+    }
+
+    /// What the tiles held and loading take, with what the textures and the horizon take.
+    fn committed(&self) -> u64 {
+        let loading: u64 = self
+            .loading
+            .values()
+            .map(|kind| match kind {
+                Kind::Full => COSTS.full,
+                Kind::Light => COSTS.light,
+            })
+            .sum();
+        self.used() + loading
+    }
 }
 
 #[test]
-fn beyond_the_budget_the_tiles_out_of_sight_are_released_and_loaded_again_in_sight() {
+fn the_loads_start_nearest_first_full_near_and_light_beyond_within_their_slots() {
+    let all = vec![true; 4096];
     let eye = id(32, 32).centre();
-    let kept = |x, seen| Kept {
-        tile: id(32, x),
-        bytes: 100,
-        seen,
+    let wanted = loading::wanted(&all, eye, 10);
+    let (none, no_loads) = (HashMap::new(), HashMap::new());
+    let mut inputs = Inputs {
+        wanted: &wanted,
+        held: &none,
+        loading: &no_loads,
+        refused: &HashSet::new(),
+        used: FIXED,
+        fixed: FIXED,
+        budget: 1 << 40,
+        costs: COSTS,
+        slots: 3,
     };
-    let kept = [kept(33, 5), kept(32, 9), kept(34, 3), kept(30, 3)];
+    let plan = loading::plan(&inputs);
+    assert_eq!(plan.start.len(), 3, "within the slots");
+    assert_eq!(plan.start[0], (id(32, 32), Kind::Full), "the nearest first");
+    assert_eq!(plan.limited, None);
+    inputs.slots = wanted.len();
+    let plan = loading::plan(&inputs);
+    assert_eq!(plan.start.len(), wanted.len());
+    let light = plan.start.iter().filter(|(_, kind)| *kind == Kind::Light).count();
+    let far = wanted
+        .iter()
+        .filter(|(_, distance)| *distance > loading::FULL[0])
+        .count();
+    assert_eq!(light, far, "light beyond 7 tiles");
+
+    // A load for a tile left behind, or of the kind it no longer wants, is cancelled.
+    let loading = HashMap::from([(id(0, 0), Kind::Full), (id(32, 32), Kind::Light)]);
+    inputs.loading = &loading;
+    let plan = loading::plan(&inputs);
+    assert_eq!(plan.cancel, vec![id(0, 0), id(32, 32)]);
+}
+
+#[test]
+fn beyond_the_budget_the_tiles_not_wanted_go_first_then_the_farthest_never_those_the_loads_want() {
+    let all = vec![true; 4096];
+    let eye = id(32, 32).centre();
+    let wanted = loading::wanted(&all, eye, 2);
+    let held_as = |kind, changed| Held {
+        kind,
+        bytes: 6 * MB,
+        changed,
+    };
+    // The nearest, wanted; two wanted beyond what the budget keeps, the second at the edge; one
+    // beyond, not wanted; one changed.
+    let held = HashMap::from([
+        (id(32, 32), held_as(Kind::Full, false)),
+        (id(33, 32), held_as(Kind::Full, false)),
+        (id(34, 32), held_as(Kind::Full, false)),
+        (id(40, 32), held_as(Kind::Full, false)),
+        (id(45, 32), held_as(Kind::Full, true)),
+    ]);
+    let loading = HashMap::new();
+    let used = FIXED + 30 * MB;
+    let inputs = Inputs {
+        wanted: &wanted,
+        held: &held,
+        loading: &loading,
+        refused: &HashSet::new(),
+        used,
+        fixed: FIXED,
+        budget: FIXED + 12 * MB,
+        costs: COSTS,
+        slots: 15,
+    };
+    let plan = loading::plan(&inputs);
+    assert_eq!(
+        plan.release,
+        vec![id(40, 32), id(34, 32), id(33, 32)],
+        "the one not wanted, then the farthest; never the changed one"
+    );
+    assert!(plan.start.is_empty(), "no room to load more");
+    assert_eq!(plan.limited, Some(0.0), "the budget holds only the nearest");
+
+    // A changed tile keeps its room: the load it leaves no room for waits.
+    let wanted = loading::wanted(&all, eye, 0);
+    let held = HashMap::from([(id(45, 32), held_as(Kind::Full, true))]);
+    let plan = loading::plan(&Inputs {
+        wanted: &wanted,
+        held: &held,
+        used: FIXED + 6 * MB,
+        budget: FIXED + 10 * MB,
+        ..inputs
+    });
+    assert_eq!(plan.release, Vec::<TileId>::new());
+    assert!(plan.start.is_empty(), "nothing started beyond the budget");
+}
+
+#[test]
+fn with_a_budget_smaller_than_the_tiles_wanted_the_loads_settle_then_stop_still_turning_or_moving() {
+    let all = vec![true; 4096];
+    let mut eye = id(32, 32).centre();
+    let budget = FIXED + 200 * MB;
+    let mut world = World::default();
+    let mut last_change = 0;
+    for frame in 0..200 {
+        let plan = world.frame(&all, eye, 64, budget);
+        assert!(
+            world.committed() <= budget,
+            "frame {frame}: {} beyond the budget",
+            world.committed()
+        );
+        if !(plan.start.is_empty() && plan.release.is_empty() && plan.cancel.is_empty()) {
+            last_change = frame;
+        }
+    }
+    assert!(last_change < 100, "settled at frame {last_change}");
     assert!(
-        loading::release(&kept, 9, eye, 400, 400).is_empty(),
-        "within the budget"
+        world.frame(&all, eye, 64, budget).limited.is_some(),
+        "the budget holds fewer"
     );
-    assert_eq!(
-        loading::release(&kept, 9, eye, 400, 250),
-        vec![id(32, 30), id(32, 34)],
-        "the longest unseen, the farthest of them first"
-    );
-    assert_eq!(
-        loading::release(&kept, 9, eye, 400, 0),
-        vec![id(32, 30), id(32, 34), id(32, 33)],
-        "the tile in sight kept, even beyond the budget"
-    );
-    let plan = loading::plan(&[id(32, 34)], &HashSet::new(), &HashSet::from([id(32, 32)]), 2);
-    assert_eq!(
-        plan.start,
-        vec![id(32, 34)],
-        "a tile released is loaded again once wanted"
-    );
+    assert!(world.held.len() > 20);
+    assert!(world.releases.is_empty(), "nothing loaded to be released");
+
+    // Turning the camera changes nothing the planning reads; a hundred frames more do nothing.
+    let starts = world.starts;
+    for _ in 0..100 {
+        world.frame(&all, eye, 64, budget);
+    }
+    assert_eq!(world.starts, starts);
+    assert!(world.releases.is_empty());
+
+    // Moving slowly, a tile at the edge is released once at most, never loaded and released again.
+    for _ in 0..300 {
+        eye[0] += TILE / 40.0;
+        world.frame(&all, eye, 64, budget);
+        assert!(world.committed() <= budget);
+    }
+    let mut times: HashMap<TileId, usize> = HashMap::new();
+    for tile in &world.releases {
+        *times.entry(*tile).or_default() += 1;
+    }
+    assert!(!world.releases.is_empty(), "the edge moved");
+    assert!(times.values().all(|count| *count == 1), "{times:?}");
+}
+
+#[test]
+fn the_costs_expected_are_the_means_of_the_tiles_held_or_the_defaults() {
+    let held = HashMap::from([
+        (
+            id(1, 1),
+            Held {
+                kind: Kind::Full,
+                bytes: 4,
+                changed: false,
+            },
+        ),
+        (
+            id(2, 2),
+            Held {
+                kind: Kind::Full,
+                bytes: 8,
+                changed: false,
+            },
+        ),
+    ]);
+    let costs = loading::costs(&held);
+    assert_eq!((costs.full, costs.light), (6, loading::DEFAULT_COSTS.light));
 }
 
 #[test]
@@ -399,6 +645,11 @@ impl Formats for Fake {
             },
             FileRef::Path(path) if path == "red.blp" => plain(4, [255, 0, 0, 255]),
             FileRef::Path(path) if path == "green.blp" => plain(8, [0, 255, 0, 255]),
+            FileRef::Path(path) if path == "missing.blp" => return Err("not in the client".to_owned()),
+            FileRef::Path(path) if path.starts_with("size") => {
+                let side = path.trim_start_matches("size").trim_end_matches(".blp");
+                plain(side.parse().expect("a size"), [9, 9, 9, 255])
+            }
             _ => rgba(),
         })
     }
@@ -520,7 +771,7 @@ fn a_tile_built_by_its_job_is_uploaded_while_no_view_draws_and_a_chunk_rebuilt_a
         eprintln!("skipped: no software adapter for a device");
         return;
     };
-    let shared = Shared::new(&gpu, &TARGET);
+    let shared = Shared::new(&gpu, &TARGET).unwrap();
     let formats = Fake::default();
     let mut model = TileModel::new(id(10, 60), tile());
     let built = gpu::build_tile(&shared, &formats, &model, &|| false).unwrap().unwrap();
@@ -558,7 +809,7 @@ fn the_textures_are_layers_of_arrays_by_class_read_once_for_all_tiles_and_droppe
         eprintln!("skipped: no software adapter for a device");
         return;
     };
-    let shared = Shared::new(&gpu, &TARGET);
+    let shared = Shared::new(&gpu, &TARGET).unwrap();
     let bc = shared.textures.block_compression();
     assert_eq!(
         bc,
@@ -589,7 +840,7 @@ fn the_textures_are_layers_of_arrays_by_class_read_once_for_all_tiles_and_droppe
         .unwrap();
     assert_eq!(a.slot != b.slot, bc);
     assert_eq!(shared.textures.bytes(), if bc { 4 * 8 + 4 * 84 } else { 4 * 84 });
-    let codes = gpu::layer_codes(&model, &[Some(a.clone()), Some(b.clone())]);
+    let codes = gpu::layer_codes(&model.tile, &[Some(a.clone()), Some(b.clone())]);
     assert_eq!(
         codes[0],
         [a.code(), b.code(), NONE, NONE],
@@ -606,7 +857,7 @@ fn an_array_grows_keeping_its_layers_and_the_arrays_end_with_their_slots() {
         eprintln!("skipped: no software adapter for a device");
         return;
     };
-    let shared = Shared::new(&gpu, &TARGET);
+    let shared = Shared::new(&gpu, &TARGET).unwrap();
     let generation = shared.textures.generation();
     let placed: Vec<_> = (0..5u8)
         .map(|n| shared.textures.place(&plain(64, [n * 40, 1, 2, 255])).unwrap())
@@ -769,7 +1020,7 @@ fn a_tile_is_one_draw_its_chunks_textured_from_two_arrays_and_the_horizon_beyond
         sample_count: 1,
         ..TARGET
     };
-    let shared = Arc::new(Shared::new(&gpu, &target));
+    let shared = Arc::new(Shared::new(&gpu, &target).unwrap());
     let formats = Fake::default();
     let model = TileModel::new(id(32, 32), two_textures());
     let tile = Arc::new(gpu::build_tile(&shared, &formats, &model, &|| false).unwrap().unwrap());
@@ -853,7 +1104,7 @@ fn the_bundle_is_recorded_again_when_the_level_of_a_tile_changes_and_kept_otherw
         sample_count: 1,
         ..TARGET
     };
-    let shared = Arc::new(Shared::new(&gpu, &target));
+    let shared = Arc::new(Shared::new(&gpu, &target).unwrap());
     let model = TileModel::new(id(32, 32), two_textures());
     let tile = Arc::new(
         gpu::build_tile(&shared, &Fake::default(), &model, &|| false)
@@ -882,4 +1133,99 @@ fn the_bundle_is_recorded_again_when_the_level_of_a_tile_changes_and_kept_otherw
     let far = version_from(10.0 * TILE);
     assert_ne!(far.0, near.0, "farther, at a coarser level");
     assert!(far.1 < near.1 / 10, "{} triangles, then {}", near.1, far.1);
+}
+
+#[test]
+fn a_light_tile_weighs_a_twentieth_of_a_full_one_and_is_drawn_with_its_textures() {
+    let Some(gpu) = device() else {
+        eprintln!("skipped: no software adapter for a device");
+        return;
+    };
+    let target = Target {
+        sample_count: 1,
+        ..TARGET
+    };
+    let shared = Arc::new(Shared::new(&gpu, &target).unwrap());
+    let formats = Fake::default();
+    let model = TileModel::new(id(32, 32), two_textures());
+    let full = gpu::build_tile(&shared, &formats, &model, &|| false).unwrap().unwrap();
+    let light = gpu::build_light(&shared, &formats, model.id, &model.tile, &|| false)
+        .unwrap()
+        .unwrap();
+    assert_eq!((full.kind, light.kind), (Kind::Full, Kind::Light));
+    assert!(
+        light.bytes * 15 < full.bytes,
+        "{} bytes, against {}",
+        light.bytes,
+        full.bytes
+    );
+    assert!(light.lods.iter().all(|lod| *lod == light.lods[0]), "one level for all");
+    assert_eq!(light.bounds, full.bounds);
+    assert!(
+        gpu::build_light(&shared, &formats, model.id, &model.tile, &|| true)
+            .unwrap()
+            .is_none(),
+        "cancelled"
+    );
+
+    let scene = Arc::new(Mutex::new(Scene {
+        tiles: vec![Arc::new(light)],
+        reach: 100_000.0,
+        ..Scene::default()
+    }));
+    let mut layer = TerrainLayer::new(Arc::new(Mutex::new(Some(shared))), scene);
+    let [x, y] = id(32, 32).centre();
+    let above = render(
+        &gpu,
+        &mut layer,
+        &target,
+        Vec3::new(x + 1.0, y, 250.0),
+        Vec3::new(x, y, 0.0),
+    );
+    let [red, green, ..] = counts(&above);
+    assert!(red > 1200 && green > 1200, "red {red}, green {green}");
+    assert_eq!(layer.stats().triangles, 256 * 2 + 64 * 2);
+}
+
+#[test]
+fn a_texture_refused_for_want_of_room_is_placed_once_room_is_made_and_one_unreadable_never_read_again() {
+    let Some(gpu) = device() else {
+        eprintln!("skipped: no software adapter for a device");
+        return;
+    };
+    let shared = Shared::new(&gpu, &TARGET).unwrap();
+    if !shared.textures.block_compression() {
+        eprintln!("skipped: without BC, every texture of the tests is of one class");
+        return;
+    }
+    let formats = Fake::default();
+    let file = |side: u32| FileRef::Path(format!("size{side}.blp"));
+    let mut held: Vec<_> = (1..=SLOTS as u32)
+        .map(|n| shared.textures.get(&formats, &file(4 * n)).unwrap())
+        .collect();
+    let full = Counts {
+        placed: SLOTS,
+        unreadable: 0,
+        no_room: 0,
+        arrays: SLOTS,
+    };
+    assert_eq!(shared.textures.counts(), full, "a class each");
+    let other = file(4 * (SLOTS as u32 + 1));
+    assert!(shared.textures.get(&formats, &other).is_none(), "every slot full");
+    assert_eq!(shared.textures.counts().no_room, 1);
+    held.remove(0);
+    shared.textures.purge();
+    assert_eq!(shared.textures.counts().arrays, SLOTS - 1, "its array dropped");
+    assert!(
+        shared.textures.get(&formats, &other).is_some(),
+        "tried again once room is made"
+    );
+    assert_eq!(shared.textures.counts(), full);
+
+    let missing = FileRef::Path("missing.blp".to_owned());
+    assert!(shared.textures.get(&formats, &missing).is_none());
+    let reads = formats.stored.load(Ordering::Relaxed);
+    assert!(shared.textures.get(&formats, &missing).is_none());
+    assert_eq!(formats.stored.load(Ordering::Relaxed), reads, "not read again");
+    assert_eq!(shared.textures.counts().unreadable, 1);
 }

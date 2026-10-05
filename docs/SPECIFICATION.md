@@ -270,7 +270,7 @@ fills it, or *not planned* when no milestone does yet.
 | The live world: entities of the server around a point, their moves | Inside the module `live-world` | — step 9.3 (commands and events) | — step 9.3 | — milestones 10 and 11 |
 | Splitting work over the cores, `parallel_for` | `uniwow_api::parallel_for` (step 9.2a) | — not planned; compiled modules run threads of their own (T7) | — | — |
 | Picking in the 3D view, the selection shown in 3D | — designed in milestone 9, not built | — | — | — |
-| The terrain of a map shown in the 3D view, with its horizon | The module `terrain` (steps 9.2c, 9.2e) | — not planned yet | — | — |
+| The terrain of a map shown in the 3D view, with its horizon | The module `terrain` (steps 9.2c, 9.2e, 9.2f) | — not planned yet | — | — |
 | The statistics of the 3D view: the times of the frames, of the interface thread and of the GPU, what each layer drew | `Layer::stats`; shown over the view (step 9.2e) | — not planned yet | — | — |
 | Hotkeys: declared, read, bound to other keys by the user in *Edit > Hotkey* | `Registrar::hotkey`, `Hotkey::pressed`, `held` (step 9.2d) | — not planned yet | — | — |
 | The memory of the GPU the editor draws with | `Context::gpu_memory` (step 9.2d) | — not planned yet | — | — |
@@ -1813,6 +1813,11 @@ chunk made the frames late and a draw per tile left the interface thread nearly 
 - The statistics of the view count their draws, triangles and times, a line per layer, and the
   targets of step 9.2e hold for them: 60 frames a second flying fast, the interface thread under 4
   ms a frame for a layer, a few hundred draws for a layer.
+- No job writes with `Queue::write_texture` to a texture a frame may be drawing, nor submits while
+  holding a lock the interface thread takes: wgpu-core 30 holds the state of initialisation of the
+  texture written while it takes the trackers of the device, a submission takes them the other way
+  round, and the two lock each other (found in step 9.2f). A job fills a shared texture, an array
+  of textures of the models for instance, by a copy from a buffer of its own that it submits.
 
 Additions to the core this milestone needs, specified and reviewed with step 9.2a:
 
@@ -1872,9 +1877,32 @@ When a module fails or the editor closes:
 
 GPU memory:
 
-- A budget, set in the settings, for the textures, models and tiles kept on the GPU; beyond it,
-  what has not been seen for the longest time and is farthest from the camera is released, and
-  loaded again when it comes back in sight.
+- One budget for the whole view, shared by the terrain, the M2 and the WMO (designed with step
+  9.2f, built with 9.4); the terrain keeps its own until then:
+  - **Who decides**: the `viewport` service, on the interface thread, once a frame. The budget is
+    its setting, half the memory of the GPU's own by default, as the terrain's is today; the
+    terrain's `gpu_budget_mb` becomes it.
+  - **What the layers tell it**: at each frame, while steering, each layer that keeps resources on
+    the GPU gives what it takes outside its items (the arrays of textures, the horizon), and the
+    bytes of the items it holds and of those it wants, counted by their distance from the eye in
+    quarters of a tile up to 64 tiles: 256 sums, whatever the number of items, merged in a
+    microsecond. An item whose cost is not known yet counts the mean of those of its kind held, as
+    the terrain's tiles do. The models are counted at the distance their size lets them be drawn
+    from (*Drawing many models* above), so that a small doodad never claims room far away.
+  - **The priority, near first, whatever the layer**: from the bands, the service finds the farthest
+    distance whose items, of every layer, fit 90 % of the budget, where the layers load, and the
+    farthest that fits all of it, where they keep what they hold; between the two, nothing is
+    loaded or released, as the terrain does since step 9.2f. Both are given back to every layer at
+    the next frame, with the reach the budget leaves when it holds fewer than wanted, which the
+    panel of the view and the statistics show.
+  - **How each layer gives memory back**: it starts no load beyond the first distance, nor one
+    that its cost would take beyond the budget; it releases what lies beyond the second, the
+    farthest first, never an item whose model holds changes; its GPU resources go when the last
+    frame using them ends (wgpu keeps them until then), its models in memory are freed by a job;
+    what its items share (the textures of the M2, the layers of the terrain's arrays) goes when its
+    last holder goes, purged by a job.
+  - The interface thread never waits for it: the layers and the service run on that thread, and
+    the jobs only read the distances given.
 - A device lost (driver reset, memory exhausted) stops the drawing of the view with a message; the
   rest of the editor goes on, and the view loads again what it shows once a device is back.
 
@@ -1931,6 +1959,7 @@ Each step is reviewed before the next one; the milestone is delivered once all a
 | 9.2a | The additions to the core: `parallel_for`, bundles kept in the viewport with `prepare`, its frame signal |
 | 9.2 | The terrain model that can be edited (point 1 above), from the ADT of 3.3.5a and the split tiles, loaded in jobs in the order of *Threads*, its uploads submitted by the jobs, the GPU memory budget, drawn chunk by chunk; the free camera |
 | 9.2e | The performance of the terrain, asked by the review of 9.2c and 9.2d: measured first (the statistics of the view); a draw per tile, its textures in arrays; levels of detail by distance; the horizon of the WDL with a fog; the targets measured on the user's machine; what will hold for the doodads and the creatures (*Drawing many models*, below) |
+| 9.2f | The terrain at a distance of 64, asked by the review of 9.2e: the budget kept without loading and releasing in turn; light tiles beyond 7 tiles; the limits of the device; measured on three maps; the budget shared by the view for 9.4 (*GPU memory*, above) |
 | 9.3 | The observer and its threads, on both sides; the entities as markers (a coloured shape and the name) moving in real time; the commands and events of L4 |
 | 9.4 | Still M2 models, of 3.3.5a and modern: from the display id to the model, its skin, its textures and its scale |
 | 9.5 | M2 animations, of 3.3.5a and modern (`.anim` files): *Stand*, *Walk*, *Run* chosen by the movement received, on the animation thread |
@@ -1946,7 +1975,7 @@ Each step is reviewed before the next one; the milestone is delivered once all a
 | The work of the M2 animations (bones, interpolation) | To estimate |
 | Speed of the terrain and the models in a city (the goal to fix), and the cost of rebuilding one terrain chunk alone, for the editing to come | The terrain measured in step 9.2e (below); the models and a chunk rebuilt alone: to measure |
 | Reading the archives from many threads at once: does it scale with the cores, or does the disk or a lock limit it? | Measured in step 9.1: the archives scale with the cores, the allocator of Windows does not beyond 8 threads; `assets` reads economically, which scales to 32 threads (step 9.1) |
-| The time the interface thread spends per frame while flying fast over a city: handing over, culling, recording | The terrain measured in step 9.2e, flying fast over Azeroth: 0.1 ms a frame on average, 0.3 ms at most; the models: to measure |
+| The time the interface thread spends per frame while flying fast over a city: handing over, culling, recording | The terrain measured in step 9.2e, flying fast over Azeroth: 0.1 ms a frame on average, 0.3 ms at most; at a distance of 64 (step 9.2f), 0.4 ms at most on average, 0.73 at most; the models: to measure |
 | The bytes of animation (instances and bones) written to the GPU per frame in a crowded city | To measure |
 | What warcraft-rs reads and writes correctly in 3.3.5a, format by format; what `assets` copies of it, without `rayon` | Reading verified in step 9.1 (below): archives, DBC, WDT, ADT and WMO groups read; M2, skins, WMO roots and BLP have faults to correct in the copy. Writing not verified yet |
 | Which versions of the modern formats the extensions of WarcraftXL load, and where they find the files (their folders, loose files, FileDataIDs and listfile): the editor must read the same files from the same places | Verified in step 9.1 in their sources (below) |
@@ -2475,14 +2504,99 @@ change of the tiles in sight; wgpu's work for each draw, on the interface thread
   editing the terrain, for which a chunk changed writes its vertices, its skirts and its blending,
   and the codes of its textures would be written again.
 
-Where the work of the terrain is done, since step 9.2e:
+Step 9.2f, the terrain at a distance of 64, asked by the review of step 9.2e and of the distance of
+64 (17f6ec0, 38d81dc): beyond its budget the terrain loaded and released the same tiles in turn, and
+all of Kalimdor at 64 did not fit 1.5 GB.
+
+- The budget kept without going back and forth, planned by `loading::plan`, a function of what it
+  reads alone, on the interface thread:
+  - the tiles wanted, the nearest first, each with its kind; the loads fill 90 % of the budget, the
+    tiles held are kept up to all of it: between the two, a tile at the edge is neither loaded nor
+    released;
+  - no load is started that would take the terrain beyond its budget, its cost the mean of the
+    tiles of its kind held, or 6 MB a full tile and 0.3 MB a light one before any;
+  - when what is held, loading and missing goes beyond the budget, released are the tiles no longer
+    wanted, the farthest first; then those the budget no longer keeps; then those beyond the share
+    of the loads. Never a tile the loads want, nor one whose model holds changes;
+  - a tile the budget leaves out is not wanted while the budget stays: the reach left is in the
+    panel, in orange, and in the statistics (*reach limited by the budget: N tiles*), and the fog
+    follows it;
+  - the plan is made again only when what it reads changes: the camera by eighths of a tile, the
+    distance, the budget, the tiles, the loads, the textures. Turning the camera changes none.
+- Light tiles beyond 7 tiles from the camera, full again within 7 once beyond 8: the corners of
+  their chunks only (1,152 vertices and 640 triangles with the skirts), their blending reduced to 16
+  × 16 a chunk by the means of 4 × 4 texels, their textures those of the arrays; built by a job, no
+  model kept: about 0.3 MB, against 6 MB a full tile. A tile changes kind by a job, the old one
+  drawn until the new one is handed over. A tile whose model holds changes stays full. The models
+  of the full tiles are counted in memory, and those left are freed by a job.
+- Each tile goes to the GPU at once: its chunks built over `parallel_for`, then its vertices with
+  their buffer and the 256 layers of its blending in one write, two operations of the queue where
+  there were some 800.
+- A deadlock in wgpu-core 30.0.1, found by the stacks of the threads of the window that stopped
+  responding at start: `Queue::write_texture` holds the state of initialisation of the texture
+  written while it takes the trackers of the device, `Queue::submit` takes them the other way round
+  for the textures its frame draws. A job writing a layer of an array of textures while the
+  interface thread submitted a frame drawing that array locked both, and every job waiting for the
+  arrays behind it: one start in two at a distance of 64 once the tiles loaded faster. A texture is
+  now placed by a copy from a buffer of its own that the job submits, under the lock of the arrays,
+  before any array grows from it; a submission takes the locks in the order of the frames.
+  `write_texture` writes only the blending of a tile no frame draws yet, and `write_chunk` is for
+  the interface thread. The rule for the layers to come is in *Drawing many models*.
+- The limits of the device: the kernel asks for as many layers in an array of textures as the
+  adapter takes (256 by default in wgpu); the terrain is not drawn, the reason in the log, on a
+  device that binds fewer than 13 textures at once (its 12 arrays and the blending). A
+  texture refused for want of room is tried again when a tile asks for it once room is made; the
+  statistics count the textures placed, unreadable and waiting for room, and the arrays used.
+- The statistics of the view show the memory of the process, in memory and private
+  (`GetProcessMemoryInfo`).
+- The sky is drawn last, where neither the tiles nor the horizon drew; the tiles in sight are tested
+  without allocating.
+- Measured on the user's machine as in step 9.2e (its table above, at a distance of 8), at a
+  distance of 64 from the middle of each map, all its tiles loaded: still, then flying at 888 yards
+  a second for 8 seconds, the statistics over the last second of each of three captures:
+
+  | Measured | Kalimdor | Azeroth | Northrend |
+  |---|---|---|---|
+  | Tiles loaded, all of the map, in | 988 (154 to 167 full, 821 to 834 light), 1.1 s | 753 (147 to 163 full, 590 to 606 light), 0.8 s | 1,131 (154 to 167 full, 964 to 977 light), 1.2 s |
+  | Frames a second; the longest frame | 60; 18.5 to 20.4 ms | 60; 18.5 to 20.6 ms | 60; 18.0 to 20.4 ms |
+  | The view on the interface thread | 0.22 to 0.72 ms, 1.01 at most | 0.20 to 0.51 ms, 0.76 at most | 0.24 to 0.46 ms, 1.69 at most |
+  | The terrain on the interface thread | 0.06 to 0.38 ms, 0.72 at most | 0.04 to 0.26 ms, 0.65 at most | 0.06 to 0.30 ms, 0.73 at most |
+  | The GPU a frame | 0.40 to 0.81 ms, 1.46 at most | 0.16 to 1.08 ms, 1.22 at most | 0.34 to 0.94 ms, 1.24 at most |
+  | Draws of the terrain; triangles | 23 to 294; 0.99 to 1.34 M | 24 to 183; 1.05 to 1.16 M | 31 to 113; 1.03 to 1.20 M |
+  | The terrain on the GPU (target: under 1.5 GB) | 1,269 to 1,340 MB | 1,116 to 1,203 MB | 1,328 to 1,400 MB |
+  | The models of the full tiles in memory | 556 to 599 MB | 393 to 493 MB | 325 to 523 MB |
+  | The process, in memory; private | 1,198 to 1,230 MB; 2,826 to 3,119 MB | 1,034 to 1,135 MB; 2,407 to 2,766 MB | 1,014 to 1,208 MB; 2,848 to 3,108 MB |
+  | Textures placed; refused; arrays | 208; none; 9 of 12 | 205; one unreadable, a BLP1 the client does not read either; 9 of 12 | 320; none; 10 of 12 |
+
+  With a budget of 600 MB on Kalimdor at 64: 84 full tiles, 535 MB, the reach limited to 5 tiles;
+  nothing loaded nor released afterwards, still or turning (0.34 s of the processor in 5 s still).
+  18 starts at 64, six on each map, all responding (one in two stopped before the deadlock was
+  avoided).
+- Tests:
+  - the kind of a tile by its distance, changing past its margin, full while changed; the loads
+    started nearest first, full near and light beyond, within their slots, those left cancelled;
+    beyond the budget, the tiles not wanted released first, then the farthest, never those the loads
+    want nor a changed one, no load started beyond it, the reach left told; the costs expected; a
+    world of tiles under a budget smaller than they want, settling, then nothing loaded nor released
+    for a hundred frames still or turning, and no tile released twice moving slowly;
+  - the light mesh, its corners, skirts and blending reduced; on the software adapter, a light tile
+    a fifteenth of a full one at most, drawn with its textures; a texture refused for want of room
+    placed once room is made, one unreadable never read again; the device asking for the layers the
+    adapter takes; the memory of the process in the statistics.
+  Each of 11 changes made on purpose to the planning, the kinds, the costs, the textures waiting for
+  room and the light blending made a test fail. The deadlock has no test: it was checked by the 18
+  starts above.
+- Not in this part: an occlusion on the GPU, kept for the models (*Drawing many models*); the
+  budget shared by the view, designed above and built with 9.4.
+
+Where the work of the terrain is done, since step 9.2f:
 
 | Work | Thread | Lock |
 |---|---|---|
-| Steering the loads, handing over within 2 ms, keeping to the budget | Interface, at each frame (`windows_ui`) | The scene shared with the layer, briefly; never that of the arrays of textures |
-| A tile read, its model, its resources created and uploaded, its textures placed | A job of the pool per tile, its chunks written over `parallel_for` | The arrays of textures, while a texture is written or an array grows; a texture read once (`OnceLock`) |
+| Steering the loads, handing over within 2 ms, keeping to the budget | Interface, at each frame (`windows_ui`), planned again only when what it reads changes | The scene shared with the layer, briefly; never that of the arrays of textures |
+| A tile read, its model, its resources created and uploaded at once, its textures placed; a tile changing kind | A job of the pool per tile, its chunks built over `parallel_for` | The arrays of textures, while a texture is copied in, submitted, or an array grows; a texture read once (`OnceLock`) |
 | The horizon of the map read and built | A job, its tiles over `parallel_for` | None |
-| The textures no tile holds forgotten | A job | The arrays of textures |
+| The textures no tile holds forgotten; the models of the tiles left freed | A job each | The arrays of textures; none |
 | The tiles in sight and their levels, the camera and the bits of the horizon written, the bundle recorded when they change | Interface, the layer's `prepare` and `draw` | The scene, in `prepare`; the views of the arrays as published, briefly |
 
 #### Tests

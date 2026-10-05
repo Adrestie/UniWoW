@@ -20,4 +20,4 @@ miniz_oxide.workspace = true
 rfd.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows = { workspace = true, features = ["Win32_Graphics_Dxgi", "Win32_System_Threading"] }
+windows = { workspace = true, features = ["Win32_Graphics_Dxgi", "Win32_System_ProcessStatus", "Win32_System_Threading"] }

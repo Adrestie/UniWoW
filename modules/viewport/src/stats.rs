@@ -1,7 +1,7 @@
 //! The statistics of the view: the time between frames; what the interface thread spent preparing
 //! the layers, recording their bundles and submitting; what the GPU spent drawing, timed by its
-//! timestamps when the device has them; and what each layer drew. Averaged over the last second,
-//! with the longest, as the view shows them over itself.
+//! timestamps when the device has them; what the process takes in memory; and what each layer drew.
+//! Averaged over the last second, with the longest, as the view shows them over itself.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -48,6 +48,36 @@ pub struct Stats {
     gpu: VecDeque<(Instant, f64)>,
 }
 
+/// What the process takes in memory, in bytes: its working set and its private bytes; none where
+/// the system does not tell it.
+pub fn process_memory() -> Option<(u64, u64)> {
+    #[cfg(windows)]
+    {
+        use uniwow_api::windows::Win32::System::ProcessStatus::{
+            GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+        };
+        use uniwow_api::windows::Win32::System::Threading::GetCurrentProcess;
+        let mut counters = PROCESS_MEMORY_COUNTERS_EX {
+            cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: the pseudo handle of this process, and counters of the size given.
+        unsafe {
+            GetProcessMemoryInfo(
+                GetCurrentProcess(),
+                (&raw mut counters).cast::<PROCESS_MEMORY_COUNTERS>(),
+                counters.cb,
+            )
+        }
+        .ok()?;
+        Some((counters.WorkingSetSize as u64, counters.PrivateUsage as u64))
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 fn ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
@@ -84,8 +114,9 @@ impl Stats {
     }
 
     /// The statistics as the view shows them, a line each: the frames, the interface thread, the
-    /// GPU, then each layer; `timed` says whether the GPU is timed.
-    pub fn text(&self, timed: bool) -> String {
+    /// GPU, the memory of the process, then each layer; `timed` says whether the GPU is timed,
+    /// `memory` what the process takes, its working set and its private bytes.
+    pub fn text(&self, timed: bool, memory: Option<(u64, u64)>) -> String {
         let samples = || self.samples.iter().map(|(_, sample)| sample);
         let (interval, longest) = spread(samples().filter_map(|s| s.interval.map(ms)));
         let mut lines = vec![format!(
@@ -105,6 +136,14 @@ impl Stats {
         } else {
             "GPU: not timed, the device has no timestamps".to_owned()
         });
+        if let Some((working, private)) = memory {
+            let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+            lines.push(format!(
+                "process: {:.0} MB in memory, {:.0} MB private",
+                mb(working),
+                mb(private)
+            ));
+        }
         let Some((_, last)) = self.samples.back() else {
             return lines.join("\n");
         };

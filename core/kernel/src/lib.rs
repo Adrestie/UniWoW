@@ -55,11 +55,15 @@ type DeviceDescriptor = Arc<dyn Fn(&wgpu::Adapter) -> wgpu::DeviceDescriptor<'st
 /// timestamps the statistics of the view time the GPU with.
 const WANTED: wgpu::Features = wgpu::Features::TEXTURE_COMPRESSION_BC.union(wgpu::Features::TIMESTAMP_QUERY);
 
-/// The device as `default` asks for it, with what `WANTED` names when the adapter offers it.
+/// The device as `default` asks for it, with what `WANTED` names when the adapter offers it, and
+/// as many layers in an array of textures as the adapter takes: the terrain keeps its textures in
+/// arrays, 256 layers each by default.
 fn with_features(default: DeviceDescriptor) -> DeviceDescriptor {
     Arc::new(move |adapter| {
         let mut descriptor = default(adapter);
         descriptor.required_features |= adapter.features() & WANTED;
+        let layers = &mut descriptor.required_limits.max_texture_array_layers;
+        *layers = (*layers).max(adapter.limits().max_texture_array_layers);
         descriptor
     })
 }
@@ -82,7 +86,7 @@ mod tests {
     }
 
     #[test]
-    fn the_device_asks_for_block_compression_and_timestamps_when_the_adapter_offers_them() {
+    fn the_device_asks_for_block_compression_timestamps_and_the_layers_the_adapter_offers() {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let Some(Ok(adapter)) = resolved(instance.request_adapter(&wgpu::RequestAdapterOptions {
             force_fallback_adapter: true,
@@ -100,7 +104,15 @@ mod tests {
             let offered = adapter.features().contains(feature);
             assert_eq!(descriptor.required_features.contains(feature), offered, "{feature:?}");
         }
+        assert_eq!(
+            descriptor.required_limits.max_texture_array_layers,
+            adapter.limits().max_texture_array_layers
+        );
         assert_eq!(descriptor.label, Some("default"), "the rest as by default");
-        eprintln!("the software adapter offers {:?}", adapter.features() & WANTED);
+        eprintln!(
+            "the software adapter offers {:?}, {} layers an array",
+            adapter.features() & WANTED,
+            adapter.limits().max_texture_array_layers
+        );
     }
 }
