@@ -29,10 +29,16 @@ not exactly what its kind says closes the connection, nothing more.
 | 3 | UNSUBSCRIBE | none |
 | 4 | HEARTBEAT | none |
 
-HELLO comes first, once. SUBSCRIBE replaces the subscription of the connection; the radius is
-brought within the maximum the observer gives. Any message keeps the connection alive: the
-observer closes one it heard nothing from for the time its WELCOME gives, so that an editor that
-crashed leaves no zone kept alive; the editor sends HEARTBEAT more often than that.
+HELLO comes first, once. The radius of a SUBSCRIBE is brought within the maximum the observer
+gives. A SUBSCRIBE to the map and instance of the subscription already there moves its zone: what
+was sent stays, and the readings that follow send what entered the zone, left it or changed. A
+SUBSCRIBE to another map or instance starts again from nothing. Any message keeps the connection
+alive: the observer closes one it heard nothing from for the time its WELCOME gives, so that an
+editor that crashed leaves no zone kept alive; the editor sends HEARTBEAT more often than that.
+
+A zone that follows a camera is moved once its centre is more than an eighth of its radius away
+from the one sent, twice a second at most. However often it moves, the observer reads it at most
+once in half of its period, the first reading of a new map aside.
 
 ## From the observer
 
@@ -54,11 +60,17 @@ States of STATUS:
 | 1 | active: the zone is read |
 | 2 | no map with that id and instance was updated within 2 seconds: it does not exist, or the instance is gone |
 
-After a SUBSCRIBE: a STATUS 0, then a SNAPSHOT of the whole zone and a STATUS 1 once the map was
-read, then a CHANGES each time a reading differs from the one before. Each reading of the zone
-increases the sequence; a reading that changes nothing sends nothing. The observer reads the zone
-as many times a second as WELCOME says. When more entities than the maximum are in the zone, the
-nearest to the centre are kept.
+After a SUBSCRIBE to a new map or instance: a STATUS 0, then a SNAPSHOT of the whole zone and a
+STATUS 1 once the map was read, then a CHANGES each time a reading differs from the one before.
+After a SUBSCRIBE that moves the zone, CHANGES only. Each reading of the zone increases the
+sequence; a reading that changes nothing sends nothing. The observer reads the zone as many times
+a second as WELCOME says. When more entities than the maximum are in the zone, the nearest to the
+centre are kept.
+
+An entity that follows a spline is sent again only when its spline changes (another id) or a field
+other than its position, orientation and time along the spline changes: the editor places it from
+the points of the spline, their times and the time gone at the reading, counting on from when it
+received it.
 
 ## An entity
 
@@ -78,11 +90,16 @@ nearest to the centre are kept.
 | scale | f32 | |
 | rotation | 4 × f32 | game objects only: the quaternion x, y, z, w |
 | state | u8 | game objects only: its state (0 active, 1 ready, 2 alternative) |
-| path | u8 | points of the spline it follows, 32 at most; 0 when it does not move along one |
-| duration | u32 | when path > 0: the time of the whole spline, in milliseconds |
-| elapsed | u32 | when path > 0: the time already gone along it |
-| points | path × 3 × f32 | when path > 0: the points of the spline, x, y, z each |
+| path | u8 | points of the spline it follows sent, 32 at most; 0 when it does not move along one |
+| spline | u32 | when path > 0: the id of the spline |
+| spline flags | u8 | when path > 0: below |
+| elapsed | u32 | when path > 0: the milliseconds gone along the spline at the reading |
+| points | path × (3 × f32, u32) | when path > 0: x, y, z of each point, and the milliseconds from the start of the spline at which it is reached |
 | name | string | 64 bytes at most |
+
+The points are those the spline goes through, its first to its last: a Catmull-Rom spline has one
+more point at each end, for control only, which is not sent. A spline of more than 32 points is sent
+from the segment it is on, 32 points with their times.
 
 Flags:
 
@@ -94,3 +111,11 @@ Flags:
 | 0x08 | flying |
 | 0x10 | moving along a spline |
 | 0x20 | a game master |
+
+Flags of a spline:
+
+| Bit | Meaning |
+|---|---|
+| 0x01 | Catmull-Rom; linear otherwise |
+| 0x02 | cyclic: it starts again from its first point |
+| 0x04 | falling |

@@ -60,7 +60,7 @@ namespace UniwowObserver
         State _status = State::Waiting;
         bool _snapshot = false;
         uint64 _sequence = 0;
-        // The bytes of each entity last sent, by GUID.
+        // What each entity was last sent as, by GUID, compared without what its spline tells.
         std::unordered_map<uint64, std::vector<uint8>> _sent;
         uint64 _bytes = 0;
     };
@@ -90,6 +90,8 @@ namespace UniwowObserver
         boost::asio::io_context _io;
         boost::asio::ip::tcp::acceptor _acceptor;
         boost::asio::steady_timer _timer;
+        // Waits before accepting again after an error.
+        boost::asio::steady_timer _retry;
         std::thread _thread;
         std::vector<std::shared_ptr<Connection>> _connections;
         uint64 _next = 1;

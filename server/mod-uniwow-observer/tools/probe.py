@@ -3,6 +3,8 @@
 
     probe.py watch --token T --map 1 --x 1629 --y -4373 --radius 200 --seconds 60
         subscribes to a zone, prints what comes each second, then what moved.
+    probe.py move --token T --map 1 --x 1629 --y -4373 --radius 300 --speed 100 --seconds 30
+        moves the zone as a camera flying along x would, subscribing again as PROTOCOL.md says.
     probe.py abuse --token T
         sends what a careful server must survive: messages corrupted, cut short, too long, out of
         order, 100 connections in a row, more connections than allowed, zones that do not exist.
@@ -64,10 +66,10 @@ def entity(body):
         e["rotation"] = body.take("ffff")
         e["state"] = body.take("B")
     count = body.take("B")
-    e["path"] = []
+    e["path"], e["spline"] = [], 0
     if count:
-        e["duration"], e["elapsed"] = body.take("II")
-        e["path"] = [body.take("fff") for _ in range(count)]
+        e["spline"], e["spline_flags"], e["elapsed"] = body.take("IBI")
+        e["path"] = [body.take("fffI") for _ in range(count)]
     e["name"] = body.string()
     return e
 
@@ -136,7 +138,7 @@ def watch(args):
     connection.send(subscribe(args.map, args.instance, args.x, args.y, args.z, args.radius))
     connection.socket.settimeout(1.0)
     entities, first = {}, {}
-    appeared = left = changed = messages = 0
+    appeared = left = changed = messages = splines = 0
     start = last_line = last_beat = time.time()
     while time.time() - start < args.seconds:
         now = time.time()
@@ -162,10 +164,15 @@ def watch(args):
             map_id, instance, sequence, count = body.take("IIQI")
             for _ in range(count):
                 e = entity(body)
-                if e["guid"] not in entities:
+                before = entities.get(e["guid"])
+                if before is None:
                     appeared += 1
                 else:
                     changed += 1
+                    if e["spline"] and e["spline"] != before["spline"]:
+                        splines += 1
+                e["moved"] = bool(before and (before.get("moved") or e["spline"] != before["spline"]
+                                              or math.dist((e["x"], e["y"]), (before["x"], before["y"])) > 1.0))
                 entities[e["guid"]] = e
                 first.setdefault(e["guid"], (e["x"], e["y"], e["z"]))
             for _ in range(body.take("I")):
@@ -179,19 +186,66 @@ def watch(args):
             elapsed = now - start
             moving = sum(1 for e in entities.values() if e["flags"] & 0x10)
             print(f"{elapsed:5.1f} s: {len(entities)} entities, {moving} moving; {appeared} appeared, "
-                  f"{changed} changes, {left} left; {connection.received / elapsed:,.0f} bytes a second")
+                  f"{changed} changes, {splines} splines started, {left} left; "
+                  f"{connection.received / elapsed:,.0f} bytes a second")
             last_line = now
     elapsed = time.time() - start
     by_kind = {}
     for e in entities.values():
         by_kind[KINDS.get(e["kind"], e["kind"])] = by_kind.get(KINDS.get(e["kind"], e["kind"]), 0) + 1
     moved = [e for guid, e in entities.items()
-             if math.dist((e["x"], e["y"], e["z"]), first[guid]) > 1.0]
-    print(f"after {elapsed:.0f} s: {by_kind}; {len(moved)} of them moved more than a yard since first seen; "
-          f"{appeared} appeared, {left} left; {messages} messages, {connection.received / elapsed:,.0f} bytes a second")
+             if e.get("moved") or math.dist((e["x"], e["y"], e["z"]), first[guid]) > 1.0]
+    print(f"after {elapsed:.0f} s: {by_kind}; {len(moved)} of them moved since first seen; {splines} splines "
+          f"started; {appeared} appeared, {left} left; {messages} messages, "
+          f"{connection.received / elapsed:,.0f} bytes a second")
     for e in moved[:args.show]:
         print(f"  moved: {e['name']} (entry {e['entry']}, spawn {e['spawn']})")
     connection.close()
+
+
+def move(args):
+    """The zone moved at `speed` yards a second along x, subscribed again once its centre is an
+    eighth of its radius away from the one sent, twice a second at most."""
+    connection = Connection(args.port)
+    connection.send(hello(args.token))
+    welcome(connection)
+    connection.send(subscribe(args.map, args.instance, args.x, args.y, args.z, args.radius))
+    sent_x, last_sent = args.x, time.time()
+    subscribes, snapshots, changes, entities = 1, 0, 0, {}
+    appeared = left = 0
+    start = time.time()
+    connection.socket.settimeout(0.05)
+    while time.time() - start < args.seconds:
+        now = time.time()
+        x = args.x + args.speed * (now - start)
+        if abs(x - sent_x) > args.radius / 8 and now - last_sent >= 0.5:
+            connection.send(subscribe(args.map, args.instance, x, args.y, args.z, args.radius))
+            sent_x, last_sent, subscribes = x, now, subscribes + 1
+        try:
+            kind, body = connection.read()
+        except socket.timeout:
+            continue
+        if kind == SNAPSHOT:
+            snapshots += 1
+            _, _, _, count = body.take("IIQI")
+            for _ in range(count):
+                e = entity(body)
+                entities[e["guid"]] = e
+        elif kind == CHANGES:
+            changes += 1
+            _, _, _, count = body.take("IIQI")
+            for _ in range(count):
+                e = entity(body)
+                appeared += e["guid"] not in entities
+                entities[e["guid"]] = e
+            for _ in range(body.take("I")):
+                left += entities.pop(body.take("Q"), None) is not None
+    elapsed = time.time() - start
+    print(f"moved {args.speed * elapsed:.0f} yards in {elapsed:.0f} s: {subscribes} SUBSCRIBE, {snapshots} SNAPSHOT, "
+          f"{changes} CHANGES; {appeared} entities entered, {left} left, {len(entities)} in the zone at the end; "
+          f"{connection.received / elapsed:,.0f} bytes a second")
+    connection.close()
+    return 0 if snapshots == 1 else 1
 
 
 def abuse(args):
@@ -300,7 +354,7 @@ def abuse(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["watch", "abuse"])
+    parser.add_argument("command", choices=["watch", "move", "abuse"])
     parser.add_argument("--port", type=int, default=8087)
     parser.add_argument("--token", required=True)
     parser.add_argument("--map", type=int, default=1)
@@ -310,12 +364,15 @@ def main():
     parser.add_argument("--z", type=float, default=30.0)
     parser.add_argument("--radius", type=float, default=200.0)
     parser.add_argument("--seconds", type=float, default=30.0)
+    parser.add_argument("--speed", type=float, default=100.0, help="yards a second, for move")
     parser.add_argument("--show", type=int, default=5, help="entities that moved, listed at the end")
     parser.add_argument("--max-connections", type=int, default=4)
     args = parser.parse_args()
     if args.command == "watch":
         watch(args)
         return 0
+    if args.command == "move":
+        return move(args)
     return abuse(args)
 
 

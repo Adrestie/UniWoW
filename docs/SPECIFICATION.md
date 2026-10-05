@@ -2807,8 +2807,51 @@ The parts:
 - Not checked: a game master in the client (nothing is spawned, nothing can be seen); a respawn
   seen (they run over the whole map every 5 seconds where its grids are loaded, *Step 9.3,
   proposed*). The CI does not build the module.
-- To come with 9.3c, once the editor interpolates: a spline sent when it starts rather than at each
-  reading, which most of the bytes of Elwynn are.
+- After the review of step 9.3a, the protocol changed, still version 1 (no client used it yet):
+  - **The zone follows the camera.** A SUBSCRIBE to the map and instance already subscribed to moves
+    the zone: what was sent and what is kept stay, the grids are loaded when needed, and the next
+    reading sends a CHANGES of what entered, left or changed. Only another map or instance starts
+    again with a SNAPSHOT. However often SUBSCRIBE comes, the zone is read at most once in half a
+    period, the first reading of a new map aside. The rule for the editor, in `PROTOCOL.md`: subscribe
+    again once the centre moved more than an eighth of the radius, twice a second at most.
+  - **A spline is sent when it starts.** An entity gives the id of its spline, Catmull-Rom or linear,
+    cyclic and falling as flags, the time gone along it at the reading, and only the points it goes
+    through, `first()` to `last()`, each with its time from the start (`length(i) - length(first)`,
+    in milliseconds in `Movement::Spline<int32>`); beyond 32 points, a window from the segment it is
+    on (`_currentSplineIdx()`). It is sent again only when its spline changes or another field does:
+    its position, orientation and time along the spline are left out of the comparison, the editor
+    places it from the times.
+  - An error of `accept` that lasts waits 100 ms before the next one.
+- Measured again on the user's server, no player connected:
+
+  | Zone, radius | Sent before | Sent after, once read the first time |
+  |---|---|---|
+  | Elwynn by Goldshire, 400 yards (about 130 creatures moving, 1,250 splines started every 30 seconds) | 156 to 159 KB a second | 6.5 to 6.8 KB a second |
+  | Dalaran, 400 yards | 97 to 103 KB a second | 3.7 KB a second |
+  | Orgrimmar, 300 yards | 37 to 40 KB a second | 1.4 to 1.5 KB a second |
+  | Shattrath, 400 yards | 40 to 45 KB a second | 1.6 to 1.8 KB a second |
+
+  A zone of 300 yards moved at 100 yards a second for 30 seconds over Orgrimmar and Durotar (`probe.py
+  move`, 3,003 yards): 57 SUBSCRIBE, 1 SNAPSHOT, then 148 CHANGES; 383 entities entered and 926 left;
+  3.9 KB a second. Loading the grids it reaches costs up to 55 to 102 ms in the update of its map,
+  as for a player crossing them. The time of reading and keeping in the update of a map is the
+  same as before. The 21 hostile cases passed again, with 1 thread and with 4.
+
+  The update of the world (`server info`, the last 500 updates, three readings 10 seconds apart,
+  each line the mean, then the maximum), the same server with the module off for reference:
+
+  | Threads of the maps | Module off | Module on, the four zones above watched and kept alive |
+  |---|---|---|
+  | 1 | 9 to 10 ms; 20 to 37 ms | 12 to 15 ms; 41 to 117 ms |
+  | 4 | 9 to 10 ms; 17 to 36 ms | 8 to 11 ms; 31 to 44 ms |
+
+  With one thread, four zones of some 1,700 creatures kept alive add 3 to 5 ms to an update of the
+  world on average, and its longest updates; the creatures moving where no player is are most of it,
+  which the module asks for. With four threads, the difference is within what the readings vary.
+- Point to revisit, for the dungeons and battlegrounds: the editor cannot know the ids of the
+  instances. A message listing the maps and instances updated in the last seconds (id, instance,
+  players), filled in `OnMapUpdate` once a second for each map, would give them. Not needed while
+  only the continents are shown in this milestone.
 
 #### Tests
 

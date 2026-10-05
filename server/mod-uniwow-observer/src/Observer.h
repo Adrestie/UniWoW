@@ -56,10 +56,24 @@ namespace UniwowObserver
         FLAG_GAME_MASTER = 0x20,
     };
 
+    enum SplineFlag : uint8
+    {
+        SPLINE_CATMULL_ROM = 0x01,
+        SPLINE_CYCLIC = 0x02,
+        SPLINE_FALLING = 0x04,
+    };
+
     // The points of a spline sent at most.
     constexpr size_t PATH_POINTS = 32;
     // The bytes of a name sent at most.
     constexpr size_t NAME_BYTES = 64;
+
+    // A point of a spline, with the time it is reached at, in milliseconds from its start.
+    struct PathPoint
+    {
+        float x = 0.0f, y = 0.0f, z = 0.0f;
+        uint32 time = 0;
+    };
 
     // An entity as read on the thread of its map: plain values, no pointer into the game.
     struct Record
@@ -76,9 +90,12 @@ namespace UniwowObserver
         float x = 0.0f, y = 0.0f, z = 0.0f, orientation = 0.0f, scale = 1.0f;
         std::array<float, 4> rotation = { 0.0f, 0.0f, 0.0f, 1.0f };
         uint8 state = 0;
-        uint32 duration = 0;
+        // The spline it follows: its id, its flags, the time gone along it at the reading, and the
+        // points it goes through; none when it does not move along one.
+        uint32 spline = 0;
+        uint8 splineFlags = 0;
         uint32 elapsed = 0;
-        std::vector<std::array<float, 3>> path;
+        std::vector<PathPoint> path;
         std::string name;
         // The square of its distance to the centre, on the ground: not sent.
         float distance = 0.0f;
@@ -125,14 +142,17 @@ namespace UniwowObserver
     {
         std::mutex lock;
         Zone zone;
-        // Increased at each change of the zone.
+        // Increased at each change of the zone, moved or not.
         uint64 version = 0;
+        // Increased when its map or instance changes: what was read and kept before is dropped.
+        uint64 generation = 0;
         bool closed = false;
         State state = State::Waiting;
         std::shared_ptr<Reading const> reading;
         uint64 sequence = 0;
-        // The version of the zone the last reading was of, and when it was made.
+        // The zone the last reading was of, and when it was made.
         uint64 readVersion = 0;
+        uint64 readGeneration = 0;
         bool read = false;
         Clock::time_point lastRead;
         // The version of the zone whose grids were loaded.

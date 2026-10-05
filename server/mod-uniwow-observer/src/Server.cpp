@@ -146,8 +146,11 @@ namespace UniwowObserver
             size_t _at = 0;
         };
 
-        std::vector<uint8> Encode(Record const& record)
+        // The bytes of an entity; `compared`, those it is compared by: while it follows a spline, its
+        // position, orientation and time along it are left out, which the spline gives.
+        std::vector<uint8> Encode(Record const& record, bool compared = false)
         {
+            bool const moving = compared && !record.path.empty();
             Writer writer;
             writer.U64(record.guid);
             writer.U8(uint8(record.kind));
@@ -158,10 +161,10 @@ namespace UniwowObserver
             writer.I16(record.event);
             writer.U32(record.phase);
             writer.U32(record.display);
-            writer.F32(record.x);
-            writer.F32(record.y);
-            writer.F32(record.z);
-            writer.F32(record.orientation);
+            writer.F32(moving ? 0.0f : record.x);
+            writer.F32(moving ? 0.0f : record.y);
+            writer.F32(moving ? 0.0f : record.z);
+            writer.F32(moving ? 0.0f : record.orientation);
             writer.F32(record.scale);
             if (record.kind == Kind::GameObject)
             {
@@ -172,11 +175,16 @@ namespace UniwowObserver
             writer.U8(uint8(record.path.size()));
             if (!record.path.empty())
             {
-                writer.U32(record.duration);
-                writer.U32(record.elapsed);
-                for (auto const& point : record.path)
-                    for (float value : point)
-                        writer.F32(value);
+                writer.U32(record.spline);
+                writer.U8(record.splineFlags);
+                writer.U32(moving ? 0 : record.elapsed);
+                for (PathPoint const& point : record.path)
+                {
+                    writer.F32(point.x);
+                    writer.F32(point.y);
+                    writer.F32(point.z);
+                    writer.U32(point.time);
+                }
             }
             writer.String(record.name);
             return writer.Finish();
@@ -309,16 +317,25 @@ namespace UniwowObserver
         bool const fresh = !_subscription;
         if (fresh)
             _subscription = std::make_shared<Subscription>();
+        bool moved = false;
         {
             std::lock_guard<std::mutex> guard(_subscription->lock);
+            moved = !fresh && _subscription->zone.map == zone.map && _subscription->zone.instance == zone.instance;
             _subscription->zone = zone;
             ++_subscription->version;
-            _subscription->state = State::Waiting;
-            _subscription->reading.reset();
-            _subscription->kept.reset();
+            if (!moved)
+            {
+                ++_subscription->generation;
+                _subscription->state = State::Waiting;
+                _subscription->reading.reset();
+                _subscription->kept.reset();
+            }
         }
         if (fresh)
             _server.PublishSubscriptions();
+        // Moved on the same map: what was sent stays, the next readings send what changed.
+        if (moved)
+            return;
         _subscribed = Clock::now();
         _status = State::Waiting;
         _snapshot = false;
@@ -397,9 +414,8 @@ namespace UniwowObserver
             writer.U32(uint32(reading->records.size()));
             for (Record const& record : reading->records)
             {
-                std::vector<uint8> bytes = Encode(record);
-                writer.Bytes(bytes);
-                sent[record.guid] = std::move(bytes);
+                writer.Bytes(Encode(record));
+                sent[record.guid] = Encode(record, true);
             }
             _sent = std::move(sent);
             _snapshot = true;
@@ -409,14 +425,14 @@ namespace UniwowObserver
             return;
         }
 
-        std::vector<uint64> changed;
+        std::vector<std::vector<uint8>> changed;
         for (Record const& record : reading->records)
         {
-            std::vector<uint8> bytes = Encode(record);
+            std::vector<uint8> compared = Encode(record, true);
             auto const before = _sent.find(record.guid);
-            if (before == _sent.end() || before->second != bytes)
-                changed.push_back(record.guid);
-            sent[record.guid] = std::move(bytes);
+            if (before == _sent.end() || before->second != compared)
+                changed.push_back(Encode(record));
+            sent[record.guid] = std::move(compared);
         }
         std::vector<uint64> left;
         for (auto const& [guid, bytes] : _sent)
@@ -431,8 +447,8 @@ namespace UniwowObserver
         writer.U32(zone.instance);
         writer.U64(_sequence);
         writer.U32(uint32(changed.size()));
-        for (uint64 guid : changed)
-            writer.Bytes(_sent[guid]);
+        for (std::vector<uint8> const& bytes : changed)
+            writer.Bytes(bytes);
         writer.U32(uint32(left.size()));
         for (uint64 guid : left)
             writer.U64(guid);
@@ -537,7 +553,7 @@ namespace UniwowObserver
         _server.Remove(this);
     }
 
-    Server::Server(Settings const& settings) : _settings(settings), _acceptor(_io), _timer(_io)
+    Server::Server(Settings const& settings) : _settings(settings), _acceptor(_io), _timer(_io), _retry(_io)
     {
     }
 
@@ -576,6 +592,7 @@ namespace UniwowObserver
             boost::system::error_code ignored;
             _acceptor.close(ignored);
             _timer.cancel();
+            _retry.cancel();
             for (std::shared_ptr<Connection> const& connection : std::vector<std::shared_ptr<Connection>>(_connections))
                 connection->Close("the server stops");
         });
@@ -611,16 +628,24 @@ namespace UniwowObserver
         {
             if (!_acceptor.is_open())
                 return;
-            if (!error)
+            // An error that lasts, such as no handle left, is not retried at once.
+            if (error)
             {
-                auto connection = std::make_shared<Connection>(*this, std::move(socket), _next++);
-                if (_connections.size() >= _settings.maxConnections)
-                    connection->Refuse("too many connections, " + std::to_string(_settings.maxConnections) + " at most");
-                else
+                _retry.expires_after(std::chrono::milliseconds(100));
+                _retry.async_wait([this](boost::system::error_code cancelled)
                 {
-                    _connections.push_back(connection);
-                    connection->Start();
-                }
+                    if (!cancelled)
+                        Accept();
+                });
+                return;
+            }
+            auto connection = std::make_shared<Connection>(*this, std::move(socket), _next++);
+            if (_connections.size() >= _settings.maxConnections)
+                connection->Refuse("too many connections, " + std::to_string(_settings.maxConnections) + " at most");
+            else
+            {
+                _connections.push_back(connection);
+                connection->Start();
             }
             Accept();
         });

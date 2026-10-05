@@ -161,17 +161,33 @@ namespace UniwowObserver
                 record.flags |= FLAG_WALKING;
             if (unit->IsFlying())
                 record.flags |= FLAG_FLYING;
-            Movement::MoveSpline const* spline = unit->movespline;
-            if (!spline || !spline->Initialized() || spline->Finalized())
+            Movement::MoveSpline const* move = unit->movespline;
+            if (!move || !move->Initialized() || move->Finalized())
                 return;
             record.flags |= FLAG_MOVING;
-            record.duration = uint32(std::max(spline->Duration(), 0));
-            record.elapsed = uint32(std::max(spline->timePassed(), 0));
-            auto const& points = spline->_Spline().getPoints();
-            size_t const count = std::min(points.size(), PATH_POINTS);
-            record.path.reserve(count);
-            for (size_t index = 0; index < count; ++index)
-                record.path.push_back({ points[index].x, points[index].y, points[index].z });
+            Movement::MoveSpline::MySpline const& spline = move->_Spline();
+            record.spline = move->GetId();
+            if (spline.mode() == Movement::SplineBase::ModeCatmullrom)
+                record.splineFlags |= SPLINE_CATMULL_ROM;
+            if (spline.isCyclic())
+                record.splineFlags |= SPLINE_CYCLIC;
+            if (move->isFalling())
+                record.splineFlags |= SPLINE_FALLING;
+            record.elapsed = uint32(std::max(move->timePassed(), 0));
+            // The points gone through, from first() to last(): Catmull-Rom has one more for control
+            // at each end. A long spline is sent from the segment it is on.
+            int32 const first = spline.first();
+            int32 const last = spline.last();
+            int32 const most = int32(PATH_POINTS);
+            int32 const start = last - first + 1 > most ? std::clamp(move->_currentSplineIdx(), first, last - most + 1) : first;
+            int32 const end = std::min(last, start + most - 1);
+            int32 const zero = spline.length(first);
+            record.path.reserve(size_t(end - start + 1));
+            for (int32 index = start; index <= end; ++index)
+            {
+                G3D::Vector3 const& point = spline.getPoint(index);
+                record.path.push_back({ point.x, point.y, point.z, uint32(std::max(spline.length(index) - zero, 0)) });
+            }
         }
 
         Observer const& _observer;
@@ -276,6 +292,7 @@ namespace UniwowObserver
         Clock::time_point const now = Clock::now();
         Zone zone;
         uint64 version = 0;
+        uint64 generation = 0;
         bool due = false;
         bool load = false;
         std::shared_ptr<std::vector<ObjectGuid> const> kept;
@@ -285,8 +302,13 @@ namespace UniwowObserver
                 return;
             zone = subscription.zone;
             version = subscription.version;
+            generation = subscription.generation;
             kept = subscription.kept;
-            due = !subscription.read || subscription.readVersion != version || now - subscription.lastRead >= _period;
+            // At once on a new map; else at the pace of the protocol, a zone moved read after half
+            // of it at the soonest however often it moves.
+            Clock::duration const since = now - subscription.lastRead;
+            due = !subscription.read || subscription.readGeneration != generation || since >= _period
+                || (subscription.readVersion != version && since >= _period / 2);
             load = !subscription.loaded || subscription.loadedVersion != version;
         }
 
@@ -321,7 +343,7 @@ namespace UniwowObserver
         std::lock_guard<std::mutex> guard(subscription.lock);
         if (keepTime >= 0.0)
             subscription.keeps.Add(keepTime);
-        if (!due || subscription.closed || subscription.version != version)
+        if (!due || subscription.closed || subscription.generation != generation)
             return;
         subscription.reads.Add(readTime);
         reading->sequence = ++subscription.sequence;
@@ -329,6 +351,7 @@ namespace UniwowObserver
         subscription.kept = std::move(found);
         subscription.read = true;
         subscription.readVersion = version;
+        subscription.readGeneration = generation;
         subscription.lastRead = now;
         subscription.loaded = true;
         subscription.loadedVersion = version;

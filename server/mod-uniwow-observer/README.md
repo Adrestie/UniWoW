@@ -66,11 +66,14 @@ Alternatively, `UniwowObserver.Enable = 0` keeps it built but idle.
 
 ```
 python tools/probe.py watch --token <token> --map 1 --x 1629 --y -4373 --radius 200 --seconds 60
+python tools/probe.py move --token <token> --map 1 --x 1629 --y -4373 --radius 300 --speed 100
 python tools/probe.py abuse --token <token>
 ```
 
-`watch` prints what it receives each second and, at the end, which entities moved. `abuse` sends what
-the module must survive: messages corrupted, cut short, too long or out of order, 100 connections in
-a row, more connections than allowed, zones that do not exist; the worldserver goes on. With
+`watch` prints what it receives each second and, at the end, which entities moved. `move` moves the
+zone as a flying camera would, subscribing again as `PROTOCOL.md` says: one SNAPSHOT, then CHANGES
+only. `abuse` sends what the module must survive: messages corrupted, cut short, too long or out of
+order, 100 connections in a row, more connections than allowed, zones that do not exist; the
+worldserver goes on. With
 `UniwowObserver.StatsInterval` set, the log gives, per connection, the time the module took in the
 update of its map, reading and keeping apart, on average and at most, and the bytes sent a second.
