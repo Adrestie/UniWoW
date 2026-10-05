@@ -3843,6 +3843,41 @@ vertices in the arena gaining their four bone indices and weights (8 bytes) then
 instances by `place`; the loads stay jobs writing into the arena and the arrays by copies they
 submit.
 
+#### Step 9.4e, added by the review of the proposal
+
+- **A texture without room (9.4e2).** Sixty-four slots hold a city (36 classes in Dalaran), but a
+  continent, and the modern models of WarcraftXL (1024, 2048, other formats), can fill them. A
+  texture finding no room is never drawn white: its look falls back on the path of 9.4c (its own
+  textures, a draw a group), and the statistics count the looks on that path. Measured in Dalaran:
+  what the arrays reserve (their capacity) against what they hold (the layers used). Kept in
+  reserve, built only if that measure or a city's classes ask for it: `binding_array` for the
+  models alone (the adapter offers it, with non-uniform indexing), a texture an entry, without
+  classes nor copies to grow, the path of 9.4c the fallback in the same way.
+- **The lists of the instances seen (9.4e3)**, without reserving a range for each (look, level,
+  batch) as large as the look's instances nor copying 64 bytes into it, which multiplies the memory
+  by the levels and the batches (80,000 entries for a city, but 50,000 doodads of 5 batches and 4
+  levels in 9.6 would reserve 1,000,000 entries, 64 MB):
+  - at each frame, the instances of every owner are first copied by the GPU into one buffer of the
+    frame, each owner at its base, so that an instance is one index whoever owns it;
+  - the compute counts the instances of each record, a prefix sum gives each record its offset,
+    then each instance writes 8 bytes (its index in the buffer of the frame, its record) at its
+    record's place: the lists hold exactly the pairs seen, the vertex shader following the index to
+    the instance's data and the record to its material;
+  - reserved for a zone of 50,000 doodads of 5 batches, all seen at worst: 250,000 entries, 2 MB,
+    and, for its records (say 500 looks × 4 levels × 5 batches: 10,000), their counts, offsets and
+    arguments, 0.3 MB; the buffer of the frame 3.2 MB.
+- **The draws without instances (9.4e3).** About 15,000 records in Dalaran (looks × 4 levels ×
+  batches), most without an instance once chosen: the pass giving the offsets also appends the
+  records that have instances to a list of each state of pipeline, counted, and each state is
+  drawn by `multi_draw_indexed_indirect_count` over its list (the adapter offers
+  `MULTI_DRAW_INDIRECT_COUNT`); without it, `multi_draw_indexed_indirect` over every record of the
+  state, the time of the empty draws measured on the GPU.
+- **Layers drawn in the pass and in bundles, mixed (9.4e1).** `execute_bundles` resets the state of
+  the pass after the bundles run: a layer drawn in the pass sets all its state (pipeline, bind
+  groups, vertex and index buffers) without assuming anything of what came before, and a layer
+  drawn in a bundle never sees the state a layer drawn in the pass left. Tested with a layer of
+  each kind, in both orders.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around
