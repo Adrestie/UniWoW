@@ -3504,6 +3504,83 @@ Added by the review of the proposal, before the service is written:
   moustache 302 and a goatee of his baked skin. Should a capture of the client show a beard where
   the rule finds none, the rule changes, not the files.
 
+#### Step 9.4c2, as built
+
+- **The shader of each batch** (`src/shaders.rs`), chosen when its look loads, as WotLK chooses
+  it: translated from the implementation of the Wowser project published on wowdev (*M2/.skin/WotLK
+  shader selection*, MIT, its notice in `modules/models/THIRD_PARTY.md`):
+  - `sub_836980`: a model without combiners (its flag 0x08) takes the shader of a batch from its
+    blending and its first coordinates (a blended batch on the environment marked so, the second
+    set flagged); a model with them takes the combiner of each of its one or two textures at its
+    shader in `combiner_combos`, the first of an opaque batch opaque, one on the environment
+    marked; a shader from 0x8000 is kept;
+  - `sub_837680`, on a skin of more than one layer: the layers of a submesh merged into its first
+    where WotLK draws them in one, each of the same weight, the alpha layers of the same unlit
+    flag: after an opaque layer of two textures whose second is mod2x on the environment, an alpha
+    layer of its first texture (`Opaque_Mod2xNA_Alpha`); after an opaque layer of one texture on
+    the first set, an added or mod2x layer on the environment (`Opaque_AddAlpha`, or the shader
+    0xE for mod2x, `Opaque_Mod2xNA`), then an alpha layer of the first texture
+    (`Opaque_AddAlpha_Alpha`). A layer merged is not drawn; the batches sharing the material of
+    the one before take what it became;
+  - the names of its shaders as a pixel shader, one of the 23 of WotLK the models use, and the
+    coordinates of each texture (the first set, the second, the environment); a pair of
+    combiners WotLK has no shader for takes that of 0x11, as it does. For one texture, the
+    coordinates 0 are the first set and any other the second, as the tables of the names read
+    them; step 9.4b said "any other the first", from `sub_836980` alone, and the documentation of
+    `Batch` says so now.
+  - Only for the models of 3.3.5a (version 264): a batch of a later version (the models brought
+    back from later clients) is drawn with its first texture alone, opaque or modulated by its
+    blending, as is one WotLK names no shader for. A model of 3.3.5a without combos of coordinates
+    takes the first set.
+- **The vertices** carry both sets of coordinates (40 bytes).
+- **The pixel shader** (`src/models.wgsl`): its two textures sampled on the coordinates chosen and
+  combined by the formulas of wowdev (*M2/Rendering*) in gamma, as WotLK combines them (mod2x
+  doubles around 0.5): the textures are read as they are stored (`Unorm`, `UnormSrgb` before);
+  the alpha tested on the combined alpha as step 9.4c1 says; then the colour made linear for the
+  target of the view, lit and fogged in linear as the terrain. A batch of one texture draws what
+  9.4c1 drew. A batch of mod2x blending writes its colour such that the doubling the target makes
+  in linear gives the doubling in gamma, `(2c)^2.2 / 2`, as far as a power of 2.2 follows the
+  curve of sRGB (62 for 64 in the test), grey 0.5 in the fog.
+- **The environment** (wowdev, *M2/.skin*): the position and the normal in the space of the
+  camera of the client (across, up, away from the eye), the direction from the eye reflected on
+  the normal, its depth plus 1, normalized, its first two halved and moved by 0.5, at each vertex;
+  the axes of the camera come from the rows of `view_proj` (the first two, minus the fourth), in
+  the camera of the shader (52 floats).
+- **The depth tested or equal**, against 9.4c1: a layer of a submesh lies on its first, at the
+  same depth, and failed the test (`Greater`), as the test of a mod2x layer shows; the glow of
+  the iron dwarf, an added layer on the submeshes of its skin, is such a layer. The client draws
+  them: with the reversed depth of the view, `Greater` is taken as `GreaterEqual`.
+- **The preview** takes the file of a model too: the field "or the model" of the panel and `model`
+  in the command `models.preview` (a path), its default submeshes, without the textures a display
+  fills (drawn white).
+- **Seen in the editor**, the user going on without captures of the client:
+  - `FrostLord` (display 23344): its two textures and its glows on the environment;
+  - Marshal Dughan (display 1985): as in 9.4c1;
+  - the iron dwarf (display 25748): its alpha layer merged into its first
+    (`Opaque_Mod2xNA_Alpha`, the reflection `ORBREFLECT` where the alpha of its skin lets it),
+    dark as its skin `IronDwarf_Dark` is (mean 36, 37, 45 of 255) and as 9.4c1 draws it: e014979
+    built again and drawn at the same place gives the same. The silver of a capture taken during
+    the work on 9.4c1 (`c1_irondwarf_view.png`, before aaaf1f0) came from a state not kept;
+  - the mace of Drak'Tharon (`Mace_1H_DrakTharon_D_01`): its first texture is filled by
+    `ItemDisplayInfo`, not read yet; drawn white, its reflection on it;
+  - the falls of Coilfang (`Coilfang_waterfall_Type1`): loaded (15 textures, 6 MB) but not seen
+    at rest: their waters are dark blue with little alpha (a mean alpha of 33 to 84 of 255), which
+    the client moves and stacks by their texture transforms, not drawn yet.
+- **Tests**: the shader of a batch alone from its blending and its coordinates; the combiners of
+  a model, the first of an opaque batch opaque, a pair without a shader taking that of 0x11; an
+  added or mod2x layer on the environment merged, then an alpha layer, one of its own weight or
+  on the first set apart; an alpha layer of the first texture of two merged; a shader already
+  chosen kept, a later model neither chosen nor merged, a shared material copied, a skin of one
+  layer neither merged nor copied; and on the software adapter, unlit and unfogged so that a
+  pixel is the colour combined: opaque then mod2x (128 and 64 give 64) and opaque then added
+  (192), a mod2x layer drawn on its first (62), the second texture on the second set, the
+  coordinates of the environment those of the sphere map at the vertices (within 6 of 255), the
+  merged layer of the iron dwarf (128 where its skin is opaque, 64 where not). Each of 21 changes
+  made on purpose to the selection, the shader, the loading and the camera made a test fail.
+- Open: the texture transforms and the animated colours (the falls of Coilfang), with the
+  animations; the textures of items (`ItemDisplayInfo`); the logic of `sub_876530`, which Wowser
+  leaves to do (a shader thrown back to the table), not taken.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

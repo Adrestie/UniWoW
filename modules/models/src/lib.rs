@@ -13,15 +13,18 @@ mod layer;
 mod loading;
 mod service;
 #[cfg(test)]
+mod shader_tests;
+mod shaders;
+#[cfg(test)]
 mod tests;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use uniwow_api::formats::{self, Formats};
+use uniwow_api::formats::{self, FileRef, Formats};
 use uniwow_api::glam::{Mat4, Quat, Vec3};
-use uniwow_api::models::{self, Instance, LookId, LookState, Models};
+use uniwow_api::models::{self, Geosets, Instance, Look, LookId, LookState, Models};
 use uniwow_api::viewport::Demand;
 use uniwow_api::{
     Context, DockArea, Event, JobId, JobOutcome, MODULE_FAILED_TOPIC, Module, PropertyValue, Registrar, egui, log,
@@ -50,17 +53,42 @@ const MB: f64 = 1024.0 * 1024.0;
 /// What a load ends with: the look on the GPU or why not, and the textures drawn white.
 type Loaded = Option<(Result<LookGpu, String>, Vec<String>)>;
 
-/// The instances of a preview of the display `display`: `count` of them in a grid before the
-/// camera at `eye` looking at `target`, the first twice its height away, facing it.
+/// What a preview shows: a creature display, or a model by its path with its default submeshes.
+#[derive(Clone, Debug, PartialEq)]
+enum Shown {
+    Display(u32),
+    Model(String),
+}
+
+/// The instances of a preview of `shown`: `count` of them in a grid before the camera at `eye`
+/// looking at `target`, the first twice its height away, facing it.
 fn preview(
     service: &Service,
     formats: &dyn Formats,
-    display: u32,
+    shown: &Shown,
     count: u32,
     eye: Vec3,
     target: Vec3,
 ) -> Result<String, String> {
-    let (look, scale) = display::display(formats, display)?;
+    let (look, scale, alpha) = match shown {
+        Shown::Display(display) => {
+            let (look, scale) = display::display(formats, *display)?;
+            let displays = formats.creature_displays()?;
+            let alpha = displays
+                .iter()
+                .find(|row| row.id == *display)
+                .map_or(1.0, |row| row.alpha as f32 / 255.0);
+            (look, scale, alpha)
+        }
+        Shown::Model(path) => {
+            let look = Look {
+                model: FileRef::Path(path.clone()),
+                textures: Vec::new(),
+                geosets: Geosets::Default,
+            };
+            (look, 1.0, 1.0)
+        }
+    };
     let model = formats.model(&look.model)?;
     // Its size at rest, from its vertices: its bounds hold its animations too.
     let (low, high) = model.vertices.iter().fold(
@@ -71,14 +99,9 @@ fn preview(
         },
     );
     if !low.is_finite() {
-        return Err(format!("display {display}: its model has no vertex"));
+        return Err(format!("{shown:?}: its model has no vertex"));
     }
     let size = (high - low).length() * scale;
-    let displays = formats.creature_displays()?;
-    let alpha = displays
-        .iter()
-        .find(|row| row.id == display)
-        .map_or(1.0, |row| row.alpha as f32 / 255.0);
     let id = service.look(&look);
     let looking = (target - eye).try_normalize().unwrap_or(Vec3::X);
     // Its middle at the height of the eye.
@@ -109,7 +132,7 @@ fn preview(
         .collect();
     service.place(PREVIEW, &instances);
     Ok(format!(
-        "display {display}: {count} of {:?}, scale {scale:.2}, radius {:.2}, at {:.0} {:.0} {:.0}",
+        "{shown:?}: {count} of {:?}, scale {scale:.2}, radius {:.2}, at {:.0} {:.0} {:.0}",
         look.model, model.radius, at.x, at.y, at.z
     ))
 }
@@ -123,9 +146,10 @@ fn forget_failed(service: &Service, event: &Event) {
     }
 }
 
-/// The preview of the panel.
+/// The preview of the panel: a display, or a model when its path is given.
 struct Preview {
     display: u32,
+    model: String,
     count: u32,
     job: Option<JobId>,
     said: String,
@@ -135,6 +159,7 @@ impl Default for Preview {
     fn default() -> Self {
         Self {
             display: 1985,
+            model: String::new(),
             count: 1,
             job: None,
             said: String::new(),
@@ -373,7 +398,7 @@ impl ModelsModule {
 
     /// Starts the preview of the panel, or clears it for a count of 0: from a job, which reads the
     /// tables and the model.
-    fn start_preview(&mut self, display: u32, count: u32, ctx: &mut Context) -> Result<(), String> {
+    fn start_preview(&mut self, shown: Shown, count: u32, ctx: &mut Context) -> Result<(), String> {
         if let Some(job) = self.preview.job.take() {
             ctx.cancel(job);
         }
@@ -389,10 +414,10 @@ impl ModelsModule {
         };
         let (eye, target) = (point("viewport/camera_position")?, point("viewport/camera_target")?);
         let service = self.service.clone();
-        self.preview.job = Some(ctx.spawn(&format!("Preview the display {display}"), move |_| {
-            preview(&service, &*formats, display, count, eye, target)
+        self.preview.said = format!("reading {shown:?}");
+        self.preview.job = Some(ctx.spawn(&format!("Preview {shown:?}"), move |_| {
+            preview(&service, &*formats, &shown, count, eye, target)
         }));
-        self.preview.said = format!("reading the display {display}");
         Ok(())
     }
 }
@@ -405,14 +430,14 @@ impl Module for ModelsModule {
             .subscribe(MODULE_FAILED_TOPIC)
             .command(
                 "models.preview",
-                "Shows count instances of the creature display display before the camera, in a grid facing it, as the owner models; a count of 0 clears them.",
+                "Shows count instances of the creature display display, or of the model at the path model with its default submeshes, before the camera, in a grid facing it, as the owner models; a count of 0 clears them.",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
                         "display": { "type": "integer", "minimum": 0 },
+                        "model": { "type": "string" },
                         "count": { "type": "integer", "minimum": 0, "maximum": 10000 },
                     },
-                    "required": ["display"],
                 }),
                 serde_json::json!({ "type": "object" }),
             );
@@ -463,15 +488,21 @@ impl Module for ModelsModule {
             ui.label("count");
             ui.add(egui::DragValue::new(&mut self.preview.count).range(1..=10_000));
             if ui.button("Show").clicked() {
-                let (display, count) = (self.preview.display, self.preview.count);
-                if let Err(why) = self.start_preview(display, count, ctx) {
+                let shown = match self.preview.model.trim() {
+                    "" => Shown::Display(self.preview.display),
+                    model => Shown::Model(model.to_owned()),
+                };
+                if let Err(why) = self.start_preview(shown, self.preview.count, ctx) {
                     self.preview.said = why;
                 }
             }
             if ui.button("Clear").clicked() {
-                let display = self.preview.display;
-                let _ = self.start_preview(display, 0, ctx);
+                let _ = self.start_preview(Shown::Display(0), 0, ctx);
             }
+        });
+        ui.horizontal(|ui| {
+            ui.label("or the model");
+            ui.add(egui::TextEdit::singleline(&mut self.preview.model).desired_width(360.0));
         });
         if !self.preview.said.is_empty() {
             ui.label(&self.preview.said);
@@ -495,10 +526,14 @@ impl Module for ModelsModule {
     ) -> Result<serde_json::Value, String> {
         match name {
             "models.preview" => {
-                let display = arguments["display"].as_u64().ok_or("'display' must be a number")? as u32;
+                let shown = match (arguments["model"].as_str(), arguments["display"].as_u64()) {
+                    (Some(model), _) => Shown::Model(model.to_owned()),
+                    (None, Some(display)) => Shown::Display(display as u32),
+                    _ => return Err("'display' or 'model' must be given".to_owned()),
+                };
                 let count = arguments["count"].as_u64().unwrap_or(1).min(10_000) as u32;
-                self.start_preview(display, count, ctx)?;
-                Ok(serde_json::json!({ "display": display, "count": count }))
+                self.start_preview(shown, count, ctx)?;
+                Ok(serde_json::json!({ "count": count }))
             }
             _ => Err(format!("'{name}' is not handled")),
         }

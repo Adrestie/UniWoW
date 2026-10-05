@@ -13,13 +13,13 @@ use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
 use crate::lock;
 
-/// A vertex of a model as the shader reads it: position, normal, coordinates.
+/// A vertex of a model as the shader reads it: position, normal, its two sets of coordinates.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
-    pub uv: [f32; 2],
+    pub uv: [[f32; 2]; 2],
 }
 
 /// An instance as the shader reads it: the rows of its transform, then its alpha.
@@ -30,13 +30,15 @@ pub struct InstanceGpu {
     pub extra: [f32; 4],
 }
 
-/// What a batch tells its shader: its colour at rest, its flags, the radius of its model.
+/// What a batch tells its shader: its colour at rest, its flags, the radius of its model, and its
+/// pixel shader with where its two textures take their coordinates (`shaders`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BatchParams {
     pub colour: [f32; 4],
     pub flags: [f32; 4],
     pub model: [f32; 4],
+    pub combine: [u32; 4],
 }
 
 // SAFETY: plain numbers laid out by `repr(C)` without padding, any bit pattern valid.
@@ -48,7 +50,7 @@ unsafe impl bytemuck::Zeroable for BatchParams {}
 unsafe impl bytemuck::Pod for BatchParams {}
 
 /// Floats of the shader's `Camera`.
-pub const CAMERA: usize = 40;
+pub const CAMERA: usize = 52;
 
 /// The share of its alpha under which a pixel of an alpha-keyed batch is not drawn, in WotLK.
 pub const ALPHA_KEY: f32 = 224.0 / 255.0;
@@ -124,6 +126,15 @@ impl State {
     }
 }
 
+/// `compare`, letting an equal depth pass too.
+fn or_equal(compare: wgpu::CompareFunction) -> wgpu::CompareFunction {
+    match compare {
+        wgpu::CompareFunction::Greater => wgpu::CompareFunction::GreaterEqual,
+        wgpu::CompareFunction::Less => wgpu::CompareFunction::LessEqual,
+        other => other,
+    }
+}
+
 /// The flags a batch of `material` gives its shader: its alpha key, whether unlit and unfogged,
 /// and the colour of its fog, black for the added ones, white for mod, grey for mod2x.
 pub fn flags(material: &formats::Material) -> [f32; 4] {
@@ -140,7 +151,8 @@ pub fn flags(material: &formats::Material) -> [f32; 4] {
     [key, f32::from(u8::from(unlit)), f32::from(u8::from(unfogged)), fog]
 }
 
-/// The camera of the shader: the view, its sun and its fog, and how far an instance is drawn.
+/// The camera of the shader: the view, its sun and its fog, how far an instance is drawn, and the
+/// axes of the camera, across, up and back, which the environment is mapped by.
 pub fn camera_values(view: &View, reach: f32) -> [f32; CAMERA] {
     let mut values = [0f32; CAMERA];
     values[..16].copy_from_slice(&view.view_proj.to_cols_array());
@@ -151,6 +163,12 @@ pub fn camera_values(view: &View, reach: f32) -> [f32; CAMERA] {
     values[31] = reach;
     values[32..35].copy_from_slice(&view.fog.colour);
     values[36..39].copy_from_slice(&[view.fog.start, view.fog.middle, view.fog.end]);
+    // The rows of the view, from those of the view and its projection: its fourth row is minus
+    // the third of the view, the distance in front of the eye.
+    let row = |index: usize| view.view_proj.row(index).truncate().normalize_or_zero();
+    values[40..43].copy_from_slice(&row(0).to_array());
+    values[44..47].copy_from_slice(&row(1).to_array());
+    values[48..51].copy_from_slice(&(-row(3)).to_array());
     values
 }
 
@@ -209,6 +227,22 @@ impl Shared {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
@@ -289,13 +323,15 @@ impl Shared {
                     Some(wgpu::VertexBufferLayout {
                         array_stride: size_of::<Vertex>() as u64,
                         step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+                        attributes: &wgpu::vertex_attr_array![
+                            0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2
+                        ],
                     }),
                     Some(wgpu::VertexBufferLayout {
                         array_stride: size_of::<InstanceGpu>() as u64,
                         step_mode: wgpu::VertexStepMode::Instance,
                         attributes: &wgpu::vertex_attr_array![
-                            3 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4
+                            4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4
                         ],
                     }),
                 ],
@@ -307,8 +343,9 @@ impl Shared {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: target.depth_format,
                 depth_write_enabled: Some(state.depth_write),
+                // Or equal, as the client tests the depth: the layers of a submesh lie on its first.
                 depth_compare: Some(if state.depth_test {
-                    target.depth_compare
+                    or_equal(target.depth_compare)
                 } else {
                     wgpu::CompareFunction::Always
                 }),
@@ -351,11 +388,12 @@ impl Shared {
 /// `texture` on the GPU: its levels larger than the device takes left out, those of BC under 4
 /// texels too; filled by a copy this thread submits.
 fn upload(device: &wgpu::Device, queue: &wgpu::Queue, texture: &Texture) -> Result<TextureGpu, String> {
+    // Read as they are, in gamma: the pixel shaders of WotLK combine them so (mod2x doubles them).
     let format = match texture.format {
-        TextureFormat::Rgba8 => wgpu::TextureFormat::Rgba8UnormSrgb,
-        TextureFormat::Bc1 => wgpu::TextureFormat::Bc1RgbaUnormSrgb,
-        TextureFormat::Bc2 => wgpu::TextureFormat::Bc2RgbaUnormSrgb,
-        TextureFormat::Bc3 => wgpu::TextureFormat::Bc3RgbaUnormSrgb,
+        TextureFormat::Rgba8 => wgpu::TextureFormat::Rgba8Unorm,
+        TextureFormat::Bc1 => wgpu::TextureFormat::Bc1RgbaUnorm,
+        TextureFormat::Bc2 => wgpu::TextureFormat::Bc2RgbaUnorm,
+        TextureFormat::Bc3 => wgpu::TextureFormat::Bc3RgbaUnorm,
     };
     let largest = device.limits().max_texture_dimension_2d;
     let first = (0..texture.levels.len())

@@ -30,15 +30,15 @@ use crate::{forget_failed, lock};
 
 /// The tables, a model and the textures a test gives.
 #[derive(Default)]
-struct Fake {
-    displays: Vec<CreatureDisplay>,
-    models: Vec<CreatureModel>,
-    looks: Vec<CreatureLook>,
-    hairs: Vec<HairGeoset>,
-    facials: Vec<FacialHair>,
-    sections: Vec<CharSection>,
-    model: Option<Model>,
-    textures: HashMap<String, Texture>,
+pub struct Fake {
+    pub displays: Vec<CreatureDisplay>,
+    pub models: Vec<CreatureModel>,
+    pub looks: Vec<CreatureLook>,
+    pub hairs: Vec<HairGeoset>,
+    pub facials: Vec<FacialHair>,
+    pub sections: Vec<CharSection>,
+    pub model: Option<Model>,
+    pub textures: HashMap<String, Texture>,
 }
 
 impl Formats for Fake {
@@ -96,7 +96,7 @@ impl Formats for Fake {
 }
 
 /// A texture of 4 × 4 texels, all `colour`.
-fn plain(colour: [u8; 4]) -> Texture {
+pub fn plain(colour: [u8; 4]) -> Texture {
     Texture {
         width: 4,
         height: 4,
@@ -105,7 +105,7 @@ fn plain(colour: [u8; 4]) -> Texture {
     }
 }
 
-fn instance(id: u64, look: u32, at: Vec3, scale: f32) -> Instance {
+pub fn instance(id: u64, look: u32, at: Vec3, scale: f32) -> Instance {
     Instance {
         id,
         look: LookId(look),
@@ -539,7 +539,7 @@ fn resolved<F: Future>(future: F) -> Option<F::Output> {
 }
 
 /// A device of the software adapter of the system, or none.
-fn device() -> Option<egui_wgpu::RenderState> {
+pub fn device() -> Option<egui_wgpu::RenderState> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = resolved(instance.request_adapter(&wgpu::RequestAdapterOptions {
         force_fallback_adapter: true,
@@ -561,7 +561,7 @@ fn device() -> Option<egui_wgpu::RenderState> {
     })
 }
 
-const TARGET: Target = Target {
+pub const TARGET: Target = Target {
     color_format: wgpu::TextureFormat::Rgba8UnormSrgb,
     depth_format: wgpu::TextureFormat::Depth32Float,
     sample_count: 1,
@@ -570,7 +570,7 @@ const TARGET: Target = Target {
 
 /// A model of a square facing +X, 2 yards high, its two triangles counterclockwise seen from
 /// there, a batch of `flags` and `blending` with the texture `red.blp`.
-fn square(flags: u16, blending: u16) -> Model {
+pub fn square(flags: u16, blending: u16) -> Model {
     let vertex = |y: f32, z: f32, u: f32, v: f32| ModelVertex {
         position: [0.0, y, z],
         normal: [1.0, 0.0, 0.0],
@@ -631,11 +631,11 @@ fn square(flags: u16, blending: u16) -> Model {
 
 /// What the module would have made: the service on the device, a look of `model` with its
 /// texture `red`, held by the scene of a layer.
-struct Bench {
-    gpu: egui_wgpu::RenderState,
-    service: Arc<Service>,
-    layer: ModelsLayer,
-    scene: Arc<Mutex<Scene>>,
+pub struct Bench {
+    pub gpu: egui_wgpu::RenderState,
+    pub service: Arc<Service>,
+    pub layer: ModelsLayer,
+    pub scene: Arc<Mutex<Scene>>,
 }
 
 fn bench(model: Model, red: [u8; 4]) -> Option<Bench> {
@@ -689,7 +689,7 @@ fn read_back(gpu: &egui_wgpu::RenderState, buffer: &wgpu::Buffer, size: u64) -> 
 }
 
 /// What the layer draws seen from `eye` towards `look`, 32 × 32 pixels of RGBA cleared to black.
-fn render(bench: &mut Bench, eye: Vec3, look: Vec3) -> Vec<u8> {
+pub fn render(bench: &mut Bench, eye: Vec3, look: Vec3) -> Vec<u8> {
     let gpu = bench.gpu.clone();
     let size = 32u32;
     let view = View {
@@ -797,7 +797,7 @@ fn render(bench: &mut Bench, eye: Vec3, look: Vec3) -> Vec<u8> {
 }
 
 /// The pixel at the middle of an image of `render`.
-fn middle(pixels: &[u8]) -> [u8; 4] {
+pub fn middle(pixels: &[u8]) -> [u8; 4] {
     let at = 16 * 256 + 16 * 4;
     [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
 }
@@ -807,9 +807,9 @@ fn red(pixel: [u8; 4]) -> bool {
 }
 
 const BLACK: [u8; 4] = [0, 0, 0, 255];
-const FRONT: Vec3 = Vec3::new(5.0, 0.0, 1.0);
+pub const FRONT: Vec3 = Vec3::new(5.0, 0.0, 1.0);
 const BEHIND: Vec3 = Vec3::new(-5.0, 0.0, 1.0);
-const AIM: Vec3 = Vec3::new(0.0, 0.0, 1.0);
+pub const AIM: Vec3 = Vec3::new(0.0, 0.0, 1.0);
 
 #[test]
 fn a_model_is_drawn_where_its_instance_stands_lit_and_one_sided() {

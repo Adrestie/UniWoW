@@ -309,9 +309,10 @@ pub struct Batch {
     pub material: u16,
     pub layer: u16,
     /// Its textures: `texture_count` from `texture_combo` in `Model::texture_combos`; their
-    /// coordinates from `uv_combo` in `Model::uv_combos`: 1 the second set, 0xFFFF the
-    /// environment, any other value the first, as the client's choice of shader reads them; chosen
-    /// by its shader when the model has none, as since Cataclysm. Its weight at `weight_combo` in
+    /// coordinates from `uv_combo` in `Model::uv_combos`, as the shader WotLK chooses at load
+    /// reads them: for one texture, 0 the first set, 0xFFFF the environment when blended, another
+    /// value the second; for two, the first and the second sets, 0xFFFF the environment. Chosen by
+    /// its shader when the model has none, as since Cataclysm. Its weight at `weight_combo` in
     /// `Model::weight_combos`; its transforms from `transform_combo` in `Model::transform_combos`.
     /// Every one of them is there, for each of its textures.
     pub texture_count: u16,
