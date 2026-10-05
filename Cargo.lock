@@ -3452,6 +3452,7 @@ dependencies = [
  "serde",
  "serde_json",
  "uniwow-lua",
+ "windows",
 ]
 
 [[package]]

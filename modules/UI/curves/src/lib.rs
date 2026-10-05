@@ -10,6 +10,7 @@ use uniwow_api::curve::{
     TangentMode, TimeAxis,
 };
 use uniwow_api::egui::{self, Align2, Color32, FontId, PointerButton, Pos2, Rect, Sense, Stroke, Vec2};
+use uniwow_api::hotkey::{Hotkey, HotkeyKind, Keys};
 use uniwow_api::{Module, Registrar};
 
 /// A key: its curve and its index there.
@@ -126,9 +127,41 @@ impl Graph {
     }
 }
 
+/// The hotkeys of the curve views.
+struct Hotkeys {
+    delete: Hotkey,
+    frame: Hotkey,
+}
+
+impl Hotkeys {
+    fn declare(reg: &mut Registrar) -> Self {
+        Self {
+            delete: reg.hotkey(
+                "delete",
+                "Delete the selected keys",
+                HotkeyKind::Press,
+                Keys::key(egui::Key::Delete),
+            ),
+            frame: reg.hotkey(
+                "frame",
+                "Frame the selected keys, or all",
+                HotkeyKind::Press,
+                Keys::key(egui::Key::F),
+            ),
+        }
+    }
+}
+
+impl Default for Hotkeys {
+    fn default() -> Self {
+        Self::declare(&mut Registrar::default())
+    }
+}
+
 #[derive(Default)]
 struct Editor {
     states: Mutex<HashMap<egui::Id, State>>,
+    keys: Hotkeys,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -710,20 +743,17 @@ impl CurveEditor for Editor {
         }
 
         // Delete removes the selected keys, but not under a gesture, which holds their numbers;
-        // F frames them, or all the keys.
+        // F frames them, or all the keys: their hotkeys by default.
         let typing = ui.ctx().memory(|memory| memory.focused().is_some());
         if ui.rect_contains_pointer(rect) && !typing {
             let idle = matches!(state.gesture, Gesture::None);
-            if idle
-                && !state.selection.is_empty()
-                && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Delete))
-            {
+            if idle && !state.selection.is_empty() && self.keys.delete.pressed(ui.ctx()) {
                 remove_keys(curves, &state.selection);
                 state.selection.clear();
                 state.keys_renumbered();
                 change = CurveChange::Finished;
             }
-            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F)) {
+            if self.keys.frame.pressed(ui.ctx()) {
                 let points = key_points(curves, &state.selection);
                 graph.frame(&points, options.span, true);
             }
@@ -901,7 +931,10 @@ struct CurvesModule;
 
 impl Module for CurvesModule {
     fn register(&mut self, reg: &mut Registrar) {
-        let editor: Arc<dyn CurveEditor> = Arc::new(Editor::default());
+        let editor: Arc<dyn CurveEditor> = Arc::new(Editor {
+            states: Mutex::default(),
+            keys: Hotkeys::declare(reg),
+        });
         reg.provide(curve::SERVICE, editor);
     }
 }

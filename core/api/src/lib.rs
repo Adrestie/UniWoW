@@ -20,6 +20,9 @@ pub use serde;
 pub use serde_json;
 /// Lua 5.1 (`libs/lua`), part of the runtime.
 pub use uniwow_lua::mlua;
+/// The API of Windows, for what wgpu does not tell, such as the memory of the GPU.
+#[cfg(windows)]
+pub use windows;
 
 /// An enumeration of numbers shared with every language, read back from a number.
 macro_rules! numbered {
@@ -48,6 +51,7 @@ pub mod dopesheet;
 mod editor;
 mod event;
 pub mod formats;
+pub mod hotkey;
 mod job;
 mod module;
 mod numbers;
@@ -70,7 +74,7 @@ pub use job::{JobContext, JobFn, JobId, JobOutcome};
 pub use module::{CREATE_SYMBOL, CreateFn, Module, PACKAGE_SYMBOL, PackageFn};
 pub use parallel::parallel_for;
 pub use property::{PropertyInfo, PropertyKind, PropertySpec, PropertyValue, ReadProperty, WriteProperty, range_error};
-pub use registrar::{DockArea, MenuItemSpec, PanelSpec, Registrar};
+pub use registrar::{DockArea, HotkeySpec, MenuItemSpec, PanelSpec, Registrar};
 pub use service::ServiceKey;
 
 /// Topic published by the kernel when a module fails while running. Payload: `{ "id": <module id> }`.

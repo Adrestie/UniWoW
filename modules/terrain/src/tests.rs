@@ -196,6 +196,14 @@ fn beyond_the_budget_the_tiles_out_of_sight_are_released_and_loaded_again_in_sig
 }
 
 #[test]
+fn the_budget_by_default_is_half_the_memory_of_the_gpu_when_told() {
+    assert_eq!(crate::default_budget(Some(12 << 30)), 6144, "a GPU of 12 GB");
+    assert_eq!(crate::default_budget(None), 1024, "not told");
+    assert_eq!(crate::default_budget(Some(64 << 20)), 64, "never under the least");
+    assert_eq!(crate::default_budget(Some(1 << 40)), 65_536, "nor over the most");
+}
+
+#[test]
 fn a_box_is_in_sight_ahead_and_not_behind_nor_aside() {
     let view = Mat4::perspective_rh(1.0, 1.0, 1.0, 10_000.0)
         * Mat4::look_at_rh(Vec3::new(0.0, 0.0, 10.0), Vec3::new(100.0, 0.0, 0.0), Vec3::Z);

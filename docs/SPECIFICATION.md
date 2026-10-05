@@ -271,6 +271,8 @@ fills it, or *not planned* when no milestone does yet.
 | Splitting work over the cores, `parallel_for` | `uniwow_api::parallel_for` (step 9.2a) | — not planned; compiled modules run threads of their own (T7) | — | — |
 | Picking in the 3D view, the selection shown in 3D | — designed in milestone 9, not built | — | — | — |
 | The terrain of a map shown in the 3D view | The module `terrain` (step 9.2c) | — not planned yet | — | — |
+| Hotkeys: declared, read, bound to other keys by the user in *Edit > Hotkey* | `Registrar::hotkey`, `Hotkey::pressed`, `held` (step 9.2d) | — not planned yet | — | — |
+| The memory of the GPU the editor draws with | `Context::gpu_memory` (step 9.2d) | — not planned yet | — | — |
 | Editing the world: terrain, painting, objects and creatures placed | — designed in milestone 9, not built | — | — | — |
 | Unsaved changes, asked about when the editor closes | `Module::unsaved`, `save_unsaved` | — not planned | — | — |
 | Menu items | `Registrar::menu_item`, `Module::on_menu` | — not planned | — | — |
@@ -385,6 +387,7 @@ the same runtime.
 | Animatable properties | Registry of the properties modules let be animated: path, type, range, reading and writing; written without history during playback (milestone 6). A property whose range is not two numbers, the lowest first, is refused with the reason |
 | Project | Open, save; content defined in a later step |
 | Settings | Global, per project, per module. Written atomically (temporary file, then rename), at most once per second and at exit |
+| Hotkeys | Registry of the keys the kernel and the modules act on (`Registrar::hotkey`), with their keys by default; *Edit > Hotkey* binds them to others, kept in the settings (step 9.2d) |
 | Jobs | Pool of worker threads, one per processor core: background jobs with progress and cancel (T2) |
 | Log | Log panel shared by all modules. GPU errors captured by no module are logged instead of stopping the editor |
 | Inspector host | Shows the selection with the inspector registered for its type |
@@ -2173,7 +2176,7 @@ Step 9.2a, the additions to the core:
 
 Step 9.2 is built in parts, each reviewed: the readers of the terrain and of the textures (9.2b);
 the module `terrain`, its model chunk by chunk, loaded and drawn, with the GPU memory budget and a
-map to choose (9.2c); the free camera (9.2d).
+map to choose (9.2c); the free camera, with the hotkeys and the GPU budget by default (9.2d).
 
 First part (9.2b), the readers of the terrain and of the textures:
 
@@ -2289,6 +2292,81 @@ Where the work of the terrain is done:
 | Steering the loads, handing over within 2 ms, keeping to the budget | Interface, at each frame (`windows_ui`) | The scene shared with the layer, briefly |
 | A tile read, its model, its resources created and uploaded | A job of the pool per tile, its chunks written over `parallel_for` | The cache of textures, briefly; a texture read once (`OnceLock`) |
 | The tiles in sight, the camera written, the bundle recorded when they change | Interface, the layer's `prepare` and `draw` | The scene, in `prepare` |
+
+Third part (9.2d), the free camera, with the hotkeys the user asked for and the GPU budget by
+default:
+
+- The hotkeys (`uniwow_api::hotkey`): a module declares each key it acts on with
+  `Registrar::hotkey(name, label, kind, keys)`, as `<module>/<name>`, and keeps the handle returned,
+  `Hotkey`. It tells whether its keys were pressed this frame (`pressed`: its modifiers exactly,
+  the press then taken) or are held now (`held`: other modifiers allowed, but Ctrl). A hotkey of
+  `HotkeyKind::Hold` may be modifiers alone; one of `HotkeyKind::Press` may not. No hotkey acts
+  while a text field has the keyboard, nor while the user chooses new keys.
+- The kernel keeps the registry: its own hotkeys, Undo (Ctrl+Z) and Redo (Ctrl+Y), whose keys the
+  Edit menu shows, and those of the running modules.
+- *Edit > Hotkey* lists them by module:
+  - a click on the keys of one, then the new keys pressed, binds it to them: a key with the
+    modifiers held, or, for a hotkey held, modifiers alone once released; Escape cancels;
+    *Default* gives its own keys back;
+  - two hotkeys bound to the same keys are said when they may act at once: of the same module, or
+    one of them the kernel's, which acts anywhere.
+- The settings keep, in `hotkeys`, the keys of the hotkeys bound to other keys than their own, by
+  `<owner>/<name>`. Keys saved that cannot be read, or modifiers alone for a hotkey pressed, are
+  said in the log and its own keys kept; a hotkey declared twice is left without keys.
+- The keys of the modules became hotkeys: Space in the Timeline (play or pause), Delete and F
+  (frame) in the Curves view, Delete in the dopesheet. Escape, which closes a dialog, and Enter,
+  which runs the line of the Lua console, stay as they are: they belong to the dialog and to the
+  field.
+- The camera of `viewport`:
+  - it flies with its hotkeys while the pointer is over the view: Z forward, S back, Q left,
+    D right, E up, A down by default, for a French keyboard, egui naming a key by what it types;
+    four times faster while Shift is held. Forward is where the view looks, up or down included;
+    up and down follow Z;
+  - the right or middle drag looks around, the eye staying; with Alt held, it turns around the
+    target, as the orbit of step 8.3;
+  - the wheel sets the speed, from 1 to 2,000 yards a second, 30 at start; the caption gives it
+    with the keys bound;
+  - a left click does nothing: it is kept for the tools to come;
+  - the properties and commands of step 8.3 are unchanged.
+- The memory of the GPU: wgpu does not tell it. The kernel reads it through DXGI, from the adapter
+  of the same vendor and device as the one wgpu draws with, whatever its backend, logs it at start,
+  and gives it to the modules (`Context::gpu_memory`). The crate `windows`, already in the runtime
+  for wgpu with the same options, is re-exported by `uniwow_api`, through which the kernel reaches
+  it (`cargo xtask check`).
+- The terrain's GPU budget by default is half of it, or 1,024 MB when it is not told (the
+  software adapter has no memory of its own). `gpu_budget_mb`, set by the panel from 64 MB to
+  64 GB, still wins.
+- On the user's machine (an RTX 3080 Ti, 12,084 MB of its own, drawn with through Vulkan): the
+  budget by default 6,042 MB. The camera read in the Lua console (`viewport.camera`): Z held a
+  second flew 31 yards along the view, Shift and Z 124, D 31.6 to the right, E 31 up; the right
+  drag turned the view, the eye staying, and with Alt the eye around the target; a left drag, and Z
+  held while the console's field had the keyboard, changed nothing. In *Edit > Hotkey*, *Fly
+  forward* bound to W, which the caption said, then to S, said on both lines to be the keys of the
+  other; W kept in the settings and read again at the next start; *Default* gave Z back and took it
+  out of the settings. No entry in the history.
+- Tests:
+  - the keys written and read back; a hotkey pressed by exactly its keys, the press taken; held
+    with Shift, not with Ctrl; none acting while suspended, while a field has the keyboard, nor
+    without keys;
+  - the keys saved applied, and only those changed saved; a hotkey declared twice, or pressed and
+    bound to modifiers alone, left without keys; the conflicts, within a module or with the
+    kernel, among the modules running;
+  - in frames run as eframe runs them: a hotkey bound in its window, whose new keys act and are
+    saved while the keys awaited act on nothing; Escape cancelling; Ctrl+Z awaited not undoing,
+    said to be Undo's keys; a hotkey held bound to Shift alone, nothing held meanwhile, a hotkey
+    pressed taking no modifiers alone; Undo and Redo on other keys;
+  - the camera flying forward, right and up as seen, the eye and the target together, within
+    reach; looking keeping the eye and turning the way of the drag, the orbit keeping the target;
+    in frames: Z, Q, S, D, E and A flying their ways, Ctrl+Z not flying, the forward hotkey bound to
+    W; flying only with the pointer over the view; a left drag doing nothing, a right drag looking,
+    a middle drag with Alt turning around the target; the wheel setting the speed within its range,
+    Shift flying four times faster;
+  - each adapter of DXGI found by its ids and none by others, the software adapter without memory
+    of its own; the budget by default half of it, 1,024 MB when not told, within its range.
+  Each of 28 changes made on purpose to the hotkeys, their window, the camera and the budget made
+  a test fail.
+- Not in this part: the hotkeys of the compiled modules and of the scripts (the table of the
+  capabilities).
 
 #### Tests
 

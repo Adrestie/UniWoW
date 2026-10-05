@@ -20,6 +20,9 @@ pub struct Settings {
     /// Settings of each module, by module id then key.
     #[serde(default, alias = "features")]
     pub modules: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
+    /// The keys the user bound hotkeys to, by `<owner>/<name>`, those other than their own.
+    #[serde(default)]
+    pub hotkeys: BTreeMap<String, String>,
     /// Never written to disk, for the tests.
     #[serde(skip)]
     pub in_memory: bool,

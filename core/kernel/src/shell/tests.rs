@@ -6,6 +6,7 @@ use std::sync::Mutex;
 
 use uniwow_api::Command;
 use uniwow_api::egui::{Key, Modifiers, RawInput, ViewportCommand, ViewportEvent, ViewportId};
+use uniwow_api::hotkey::{Hotkey, HotkeyKind, Keys};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::ui::{self, Kind, Property, SharedUi, Signal, SignalData, Ui};
 
@@ -1251,4 +1252,153 @@ fn a_document_forgotten_takes_the_changes_of_the_tracks_of_its_sequence_with_it(
     uniwow_api::Host::forget_document(&mut harness.shell.host, "rust", "intro");
     harness.frame(RawInput::default());
     assert_eq!(harness.shell.history.done.len(), 1, "the other sequence's change stays");
+}
+
+/// How often the first hotkey of `Keyed` was pressed, and whether the second was held at the last
+/// frame.
+type Seen = Arc<Mutex<(u32, bool)>>;
+
+/// A module acting at each frame on two hotkeys of its own.
+struct Keyed {
+    act: Hotkey,
+    walk: Hotkey,
+    seen: Seen,
+}
+
+impl Module for Keyed {
+    fn register(&mut self, reg: &mut Registrar) {
+        self.act = reg.hotkey("act", "Act", HotkeyKind::Press, Keys::key(Key::F));
+        self.walk = reg.hotkey("walk", "Walk", HotkeyKind::Hold, Keys::key(Key::W));
+    }
+
+    fn windows_ui(&mut self, egui: &egui::Context, _ctx: &mut Context) {
+        let mut seen = lock(&self.seen);
+        seen.0 += u32::from(self.act.pressed(egui));
+        seen.1 = self.walk.held(egui);
+    }
+}
+
+fn keyed() -> (Box<dyn Module>, Seen) {
+    let seen = Seen::default();
+    let module = Keyed {
+        act: Hotkey::new(HotkeyKind::Press, Keys::NONE),
+        walk: Hotkey::new(HotkeyKind::Hold, Keys::NONE),
+        seen: seen.clone(),
+    };
+    (Box::new(module), seen)
+}
+
+/// The modifiers `held` down from this frame on.
+fn modifiers(held: Modifiers) -> RawInput {
+    RawInput {
+        events: vec![egui::Event::ModifiersChanged(held)],
+        ..RawInput::default()
+    }
+}
+
+fn hotkey(shell: &Shell, id: &str) -> usize {
+    shell.hotkeys.entries.iter().position(|entry| entry.id() == id).unwrap()
+}
+
+#[test]
+fn a_hotkey_bound_in_its_window_acts_by_its_new_keys_which_are_saved() {
+    let (module, seen) = keyed();
+    let (counter, value) = counter("a");
+    let mut harness = Harness::new(vec![("m", module), ("a", counter)]);
+    harness.frame(key(Key::F, false));
+    assert_eq!(lock(&seen).0, 1, "F by default");
+    let act = hotkey(&harness.shell, "m/act");
+    harness.shell.hotkey_window.open = true;
+    harness.shell.hotkey_window.awaiting = Some((act, Keys::NONE));
+    harness.frame(key(Key::G, false));
+    assert_eq!(lock(&seen).0, 1, "the keys awaited act on nothing");
+    assert!(harness.shell.hotkey_window.awaiting.is_none());
+    assert_eq!(harness.shell.host.settings.hotkeys["m/act"], "G");
+    harness.frame(key(Key::F, false));
+    harness.frame(key(Key::G, false));
+    assert_eq!(lock(&seen).0, 2, "G now, F no longer");
+
+    harness.shell.hotkey_window.awaiting = Some((act, Keys::NONE));
+    harness.frame(key(Key::Escape, false));
+    assert!(harness.shell.hotkey_window.awaiting.is_none(), "Escape cancels");
+    assert_eq!(harness.shell.hotkeys.entries[act].hotkey.keys(), Keys::key(Key::G));
+
+    harness.call("a", "a.add", json!({ "by": 1 })).unwrap();
+    harness.shell.hotkey_window.awaiting = Some((act, Keys::NONE));
+    harness.frame(key(Key::Z, true));
+    assert_eq!(*lock(&value), 1, "Ctrl+Z awaited does not undo");
+    assert_eq!(harness.shell.hotkeys.entries[act].hotkey.keys(), Keys::ctrl(Key::Z));
+    let undo = hotkey(&harness.shell, "kernel/undo");
+    assert_eq!(
+        harness.shell.hotkeys.conflicts(act, |_| true),
+        vec![undo],
+        "said to be Undo's keys"
+    );
+    harness.frame(RawInput::default());
+
+    harness.shell.hotkey_window.open = false;
+    harness.frame(RawInput::default());
+    assert!(harness.shell.hotkey_window.awaiting.is_none());
+}
+
+#[test]
+fn a_held_hotkey_takes_modifiers_alone_and_none_acts_while_keys_are_awaited() {
+    let (module, seen) = keyed();
+    let mut harness = Harness::new(vec![("m", module)]);
+    harness.frame(key(Key::W, false));
+    assert!(lock(&seen).1, "W held");
+    let walk = hotkey(&harness.shell, "m/walk");
+    harness.shell.hotkey_window.open = true;
+    harness.shell.hotkey_window.awaiting = Some((walk, Keys::NONE));
+    harness.frame(modifiers(Modifiers::SHIFT));
+    assert!(!lock(&seen).1, "nothing acts while keys are awaited");
+    assert!(
+        harness.shell.hotkey_window.awaiting.is_some(),
+        "Shift may come with a key"
+    );
+    harness.frame(modifiers(Modifiers::NONE));
+    assert_eq!(
+        harness.shell.hotkeys.entries[walk].hotkey.keys(),
+        Keys::SHIFT,
+        "Shift alone, once released"
+    );
+    assert_eq!(harness.shell.host.settings.hotkeys["m/walk"], "Shift");
+    harness.frame(modifiers(Modifiers::SHIFT));
+    assert!(lock(&seen).1, "Shift held");
+
+    let act = hotkey(&harness.shell, "m/act");
+    harness.shell.hotkey_window.awaiting = Some((act, Keys::NONE));
+    harness.frame(modifiers(Modifiers::ALT));
+    harness.frame(modifiers(Modifiers::NONE));
+    assert!(
+        harness.shell.hotkey_window.awaiting.is_some(),
+        "a hotkey pressed takes no modifiers alone"
+    );
+    harness.frame(key(Key::H, false));
+    assert_eq!(harness.shell.hotkeys.entries[act].hotkey.keys(), Keys::key(Key::H));
+}
+
+#[test]
+fn undo_and_redo_follow_the_keys_they_are_bound_to() {
+    let (module, value) = counter("a");
+    let mut harness = Harness::new(vec![("a", module)]);
+    harness.call("a", "a.add", json!({ "by": 1 })).unwrap();
+    harness.call("a", "a.add", json!({ "by": 1 })).unwrap();
+    let (undo, redo) = (
+        hotkey(&harness.shell, "kernel/undo"),
+        hotkey(&harness.shell, "kernel/redo"),
+    );
+    let shell = &mut harness.shell;
+    shell
+        .hotkeys
+        .bind(undo, Keys::ctrl(Key::U), &mut shell.host.settings.hotkeys);
+    shell
+        .hotkeys
+        .bind(redo, Keys::ctrl(Key::R), &mut shell.host.settings.hotkeys);
+    harness.frame(key(Key::Z, true));
+    assert_eq!(*lock(&value), 2, "Ctrl+Z no longer undoes");
+    harness.frame(key(Key::U, true));
+    assert_eq!(*lock(&value), 1);
+    harness.frame(key(Key::R, true));
+    assert_eq!(*lock(&value), 2);
 }

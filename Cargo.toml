@@ -26,6 +26,7 @@ blake3 = "1"
 cc = "1"
 miniz_oxide = "0.8"
 rfd = { version = "0.17", default-features = false }
+windows = "0.62"
 
 # Optimised even in debug: without it the runtime DLL exceeds the Windows limit of 65,535 exported symbols.
 [profile.dev]

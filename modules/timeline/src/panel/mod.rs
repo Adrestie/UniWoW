@@ -199,10 +199,11 @@ fn finish_editing(timeline: &mut TimelineModule, ctx: &mut Context) {
     }
 }
 
-/// Space plays or pauses, while the pointer is over the panel and no field has the keyboard.
+/// Its hotkey, Space by default, plays or pauses, while the pointer is over the panel and no field
+/// has the keyboard.
 fn keyboard(timeline: &mut TimelineModule, ui: &mut egui::Ui) {
     let typing = ui.ctx().memory(|memory| memory.focused().is_some());
-    if !typing && ui.ui_contains_pointer() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space)) {
+    if !typing && ui.ui_contains_pointer() && timeline.play.pressed(ui.ctx()) {
         timeline.objects.toggle_playback();
     }
 }

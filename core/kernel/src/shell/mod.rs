@@ -4,6 +4,7 @@ mod calls;
 mod closing;
 mod frame;
 mod history_ops;
+mod hotkey_window;
 mod menus;
 mod modules_panel;
 mod tabs;
@@ -26,6 +27,7 @@ use crate::groups::{Closed, Ended, Groups};
 use crate::guard::{guarded, guarded_as};
 use crate::history::{self, History};
 use crate::host::{KernelHost, Service};
+use crate::hotkeys::Hotkeys;
 use crate::jobs::Pool;
 use crate::layout::{self, PanelEntry, Tab};
 use crate::loader::{self, Slot, State};
@@ -38,6 +40,7 @@ use crate::router::{self, Bridge, Entry, PropertyEntry, ReplyTo, Request};
 use crate::settings::Settings;
 
 use history_ops::Recorded;
+use hotkey_window::HotkeyWindow;
 use menus::MenuAction;
 use modules_panel::{short, state_text};
 use tabs::{Viewer, log_panel};
@@ -80,6 +83,8 @@ pub struct Shell {
     groups: Groups,
     closing: Closing,
     players: Players,
+    hotkeys: Hotkeys,
+    hotkey_window: HotkeyWindow,
 }
 
 /// Where the closing of the editor stands while modules have unsaved changes.
@@ -117,6 +122,11 @@ impl Shell {
             gpu.device.on_uncaptured_error(Arc::new(|error| {
                 log::error!("GPU error not captured by any module: {error}");
             }));
+            let info = gpu.adapter.get_info();
+            match host.gpu_memory {
+                Some(bytes) => log::info!("GPU: {} ({:?}), {} MB of its own", info.name, info.backend, bytes >> 20),
+                None => log::info!("GPU: {} ({:?}), its memory not told", info.name, info.backend),
+            }
         }
         let discovery = loader::discover(&exe_dir, &host.settings.disabled_modules);
         Self::start(
@@ -137,6 +147,7 @@ impl Shell {
         runtime_fingerprint: Option<String>,
         modules_dir: PathBuf,
     ) -> Self {
+        let hotkeys = Hotkeys::new(&host.settings.hotkeys);
         let mut shell = Self {
             host,
             slots,
@@ -153,6 +164,8 @@ impl Shell {
             groups: Groups::new(std::thread::current().id()),
             closing: Closing::Open,
             players: Players::default(),
+            hotkeys,
+            hotkey_window: HotkeyWindow::default(),
         };
         shell.register_all();
         shell.resolve_requirements();
@@ -185,6 +198,9 @@ impl Shell {
             slot.panels = reg.panels;
             slot.menu_items = reg.menu_items;
             slot.subscriptions = reg.subscriptions;
+            for spec in reg.hotkeys {
+                self.hotkeys.declare(&slot.id, spec, &self.host.settings.hotkeys);
+            }
             declared.extend(reg.commands.into_iter().map(|spec| (slot.id.clone(), spec)));
             let mut properties = self.host.bridge.properties.write().unwrap_or_else(|e| e.into_inner());
             for spec in reg.properties {

@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use crate::hotkey::{Hotkey, HotkeyKind, Keys};
 use crate::{CommandHandler, CommandSpec, PropertyKind, PropertySpec, PropertyValue, RunsOn, ServiceKey};
 
 /// Where a panel goes the first time it is shown.
@@ -31,6 +32,15 @@ pub struct MenuItemSpec {
     pub action: String,
 }
 
+/// A hotkey a module declared, `<module>/<name>`, with the keys it has by default.
+#[derive(Clone, Debug)]
+pub struct HotkeySpec {
+    pub name: String,
+    pub label: String,
+    pub default: Keys,
+    pub hotkey: Hotkey,
+}
+
 /// Collects what a module contributes during `Module::register`.
 #[derive(Default)]
 pub struct Registrar {
@@ -43,6 +53,7 @@ pub struct Registrar {
     pub subscriptions: Vec<String>,
     /// Animatable properties.
     pub properties: Vec<PropertySpec>,
+    pub hotkeys: Vec<HotkeySpec>,
 }
 
 impl Registrar {
@@ -150,6 +161,20 @@ impl Registrar {
             write: Arc::new(write),
         });
         self
+    }
+
+    /// Declares a hotkey, `<module>/<name>`, bound to `default` until the user binds it to other
+    /// keys in *Edit > Hotkey*: the module reads it, where it acts on it, through the handle
+    /// returned. Modifiers alone are refused for a hotkey of `HotkeyKind::Press`.
+    pub fn hotkey(&mut self, name: &str, label: &str, kind: HotkeyKind, default: Keys) -> Hotkey {
+        let hotkey = Hotkey::new(kind, default);
+        self.hotkeys.push(HotkeySpec {
+            name: name.to_owned(),
+            label: label.to_owned(),
+            default,
+            hotkey: hotkey.clone(),
+        });
+        hotkey
     }
 
     pub fn subscribe(&mut self, topic: &str) -> &mut Self {

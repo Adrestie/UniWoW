@@ -14,6 +14,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use uniwow_api::hotkey::{Hotkey, HotkeyKind, Keys};
 use uniwow_api::sequence::Sequence;
 use uniwow_api::serde_json;
 use uniwow_api::ui::{self, Handle, Kind, Property, SharedUi, Ui};
@@ -23,6 +24,8 @@ use uniwow_api::{
 
 /// The panel of the objects, which holds the dopesheet and the Curves view.
 const VIEWS: &str = "views";
+/// The keys that play or pause, by default.
+const PLAY: Keys = Keys::key(egui::Key::Space);
 
 /// A sequence opened during this session: its object, and what its file holds.
 struct Document {
@@ -149,6 +152,7 @@ struct TimelineModule {
     objects: Objects,
     question: Option<Question>,
     panel: panel::State,
+    play: Hotkey,
 }
 
 impl Default for TimelineModule {
@@ -162,6 +166,7 @@ impl Default for TimelineModule {
             objects: Objects::new(),
             question: None,
             panel: panel::State::default(),
+            play: Hotkey::new(HotkeyKind::Press, PLAY),
         }
     }
 }
@@ -170,6 +175,7 @@ impl Module for TimelineModule {
     fn register(&mut self, reg: &mut Registrar) {
         reg.panel("timeline", "Timeline", DockArea::Bottom)
             .subscribe(DIALOG_ANSWERED_TOPIC);
+        self.play = reg.hotkey("play", "Play or pause", HotkeyKind::Press, PLAY);
     }
 
     fn init(&mut self, ctx: &mut Context) {

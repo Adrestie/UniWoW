@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use uniwow_api::curve::{self, TimeAxis};
 use uniwow_api::dopesheet::{self, CurveProperties, Dopesheet, DopesheetInput, DopesheetOutput, KeysChange};
 use uniwow_api::egui::{self, Align, Align2, Color32, FontId, Layout, Pos2, Rect, Sense, Stroke, UiBuilder, Vec2};
+use uniwow_api::hotkey::{Hotkey, HotkeyKind, Keys};
 use uniwow_api::sequence::{self, KeyId, Sequence, Track, frame_of, number_colour, number_names};
 use uniwow_api::{Module, PropertyKind, PropertyValue, Registrar};
 
@@ -124,9 +125,22 @@ impl Edited {
     }
 }
 
-#[derive(Default)]
 struct Sheet {
     states: Mutex<HashMap<egui::Id, State>>,
+    /// The hotkey deleting the selected keys.
+    delete: Hotkey,
+}
+
+/// The keys deleting the selected keys, by default.
+const DELETE: Keys = Keys::key(egui::Key::Delete);
+
+impl Default for Sheet {
+    fn default() -> Self {
+        Self {
+            states: Mutex::default(),
+            delete: Hotkey::new(HotkeyKind::Press, DELETE),
+        }
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -290,7 +304,7 @@ impl Dopesheet for Sheet {
                 } else if moved != KeysChange::None {
                     moved
                 } else {
-                    delete(state, sequence, keys, ui)
+                    delete(state, sequence, keys, &self.delete, ui)
                 };
             });
         state.expect(&output.keys, sequence);
@@ -1016,17 +1030,12 @@ fn diamond(painter: &egui::Painter, centre: Pos2, fill: Color32, outline: Color3
     painter.add(egui::Shape::convex_polygon(points, fill, Stroke::new(1.0, outline)));
 }
 
-/// Delete removes the selected keys, while the pointer is over the keys and no field has the
-/// keyboard, but not under a gesture.
-fn delete(state: &mut State, sequence: &Sequence, area: Rect, ui: &mut egui::Ui) -> KeysChange {
+/// Its hotkey, Delete by default, removes the selected keys, while the pointer is over the keys and
+/// no field has the keyboard, but not under a gesture.
+fn delete(state: &mut State, sequence: &Sequence, area: Rect, hotkey: &Hotkey, ui: &mut egui::Ui) -> KeysChange {
     let typing = ui.ctx().memory(|memory| memory.focused().is_some());
     let idle = matches!(state.gesture, Gesture::None);
-    if typing
-        || !idle
-        || state.selection.is_empty()
-        || !ui.rect_contains_pointer(area)
-        || !ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Delete))
-    {
+    if typing || !idle || state.selection.is_empty() || !ui.rect_contains_pointer(area) || !hotkey.pressed(ui.ctx()) {
         return KeysChange::None;
     }
     let mut after = sequence.clone();
@@ -1043,7 +1052,10 @@ struct DopesheetModule;
 
 impl Module for DopesheetModule {
     fn register(&mut self, reg: &mut Registrar) {
-        let sheet: Arc<dyn Dopesheet> = Arc::new(Sheet::default());
+        let sheet: Arc<dyn Dopesheet> = Arc::new(Sheet {
+            states: Mutex::default(),
+            delete: reg.hotkey("delete", "Delete the selected keys", HotkeyKind::Press, DELETE),
+        });
         reg.provide(dopesheet::SERVICE, sheet);
     }
 }

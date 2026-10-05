@@ -24,10 +24,14 @@ impl Shell {
             });
             ui.menu_button("Edit", |ui| {
                 let blocked = self.blocking_undo();
-                if history_button(ui, "Undo", "Ctrl+Z", self.history.undo_label(), blocked.as_deref()) {
+                let (undo, redo) = (
+                    self.hotkeys.undo.keys().to_string(),
+                    self.hotkeys.redo.keys().to_string(),
+                );
+                if history_button(ui, "Undo", &undo, self.history.undo_label(), blocked.as_deref()) {
                     actions.push(MenuAction::Undo);
                 }
-                if history_button(ui, "Redo", "Ctrl+Y", self.history.redo_label(), blocked.as_deref()) {
+                if history_button(ui, "Redo", &redo, self.history.redo_label(), blocked.as_deref()) {
                     actions.push(MenuAction::Redo);
                 }
                 // A group a module's thread never ended would block Undo for good.
@@ -39,6 +43,10 @@ impl Shell {
                     if ui.button(format!("Close the undo group '{label}'")).clicked() {
                         actions.push(MenuAction::CloseGroup(id));
                     }
+                }
+                ui.separator();
+                if ui.button("Hotkey").clicked() {
+                    actions.push(MenuAction::Hotkeys);
                 }
                 self.module_items(ui, "Edit", &mut actions);
             });
@@ -114,6 +122,7 @@ pub(super) enum MenuAction {
     Redo,
     CloseGroup(u64),
     SetPanelOpen(Tab, bool),
+    Hotkeys,
     Module(usize, String),
 }
 

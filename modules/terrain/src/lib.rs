@@ -32,7 +32,17 @@ const MAP: &str = "map";
 const DISTANCE: &str = "view_distance";
 const BUDGET: &str = "gpu_budget_mb";
 const DEFAULT_DISTANCE: u32 = 3;
-const DEFAULT_BUDGET: u64 = 1024;
+/// The GPU budget in MB when the memory of the GPU is not told, and the least and most it can be.
+const FALLBACK_BUDGET: u64 = 1024;
+const BUDGETS: [u64; 2] = [64, 65_536];
+
+/// The GPU budget by default, in MB: half the memory of its own of the GPU, `gpu_memory` bytes,
+/// when the system tells it.
+fn default_budget(gpu_memory: Option<u64>) -> u64 {
+    gpu_memory
+        .map_or(FALLBACK_BUDGET, |bytes| bytes / 2 / (1024 * 1024))
+        .clamp(BUDGETS[0], BUDGETS[1])
+}
 
 /// The time a frame gives to handing ready tiles to the drawing.
 const HAND_OVER: Duration = Duration::from_millis(2);
@@ -301,8 +311,8 @@ impl Module for TerrainModule {
         self.budget_mb = ctx
             .setting(BUDGET)
             .and_then(|value| value.as_u64())
-            .unwrap_or(DEFAULT_BUDGET)
-            .max(64);
+            .unwrap_or_else(|| default_budget(ctx.gpu_memory()))
+            .clamp(BUDGETS[0], BUDGETS[1]);
         self.remembered = ctx.setting(MAP).and_then(|value| value.as_str().map(str::to_owned));
         let Some(view) = ctx.service(viewport::SERVICE) else {
             log::info!("no viewport service: the terrain is not drawn");
@@ -383,7 +393,11 @@ impl Module for TerrainModule {
             }
             ui.label("GPU budget (MB)");
             if ui
-                .add(egui::DragValue::new(&mut self.budget_mb).range(64..=65536).speed(16))
+                .add(
+                    egui::DragValue::new(&mut self.budget_mb)
+                        .range(BUDGETS[0]..=BUDGETS[1])
+                        .speed(16),
+                )
                 .changed()
             {
                 ctx.set_setting(BUDGET, serde_json::json!(self.budget_mb));

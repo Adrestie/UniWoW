@@ -14,6 +14,7 @@ pub trait Host {
     /// The module providing the service `id`.
     fn service_provider(&self, id: &str) -> Option<String>;
     fn gpu(&self) -> Option<&egui_wgpu::RenderState>;
+    fn gpu_memory(&self) -> Option<u64>;
     fn draw_panel(&mut self, owner: &str, objects: &SharedUi, panel: &str, ui: &mut egui::Ui);
     fn draw_dialogs(&mut self, owner: &str, objects: &SharedUi, egui: &egui::Context);
     fn adopt_objects(&mut self, owner: &str, objects: &SharedUi);
@@ -106,6 +107,11 @@ impl<'a> Context<'a> {
     /// The GPU device used by the editor window.
     pub fn gpu(&self) -> Option<&egui_wgpu::RenderState> {
         self.host.gpu()
+    }
+
+    /// The memory of its own of the GPU the editor draws with, in bytes, when the system tells it.
+    pub fn gpu_memory(&self) -> Option<u64> {
+        self.host.gpu_memory()
     }
 
     /// Draws the panel `panel` of interface objects (section 3) in `ui`, as the kernel draws those

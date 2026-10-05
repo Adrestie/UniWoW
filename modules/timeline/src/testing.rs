@@ -42,6 +42,10 @@ impl Host for FakeHost {
         None
     }
 
+    fn gpu_memory(&self) -> Option<u64> {
+        None
+    }
+
     fn draw_panel(&mut self, _owner: &str, _objects: &SharedUi, _panel: &str, _ui: &mut egui::Ui) {}
 
     fn draw_dialogs(&mut self, _owner: &str, _objects: &SharedUi, _egui: &egui::Context) {}

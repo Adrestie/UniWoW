@@ -6,10 +6,12 @@
 mod capi;
 mod compiled;
 mod draw;
+mod gpu_memory;
 mod groups;
 mod guard;
 mod history;
 mod host;
+mod hotkeys;
 mod jobs;
 mod layout;
 mod loader;

@@ -89,6 +89,7 @@ impl Shell {
 
     /// Draws the window and handles what the user did in it; the rest waits for `logic`.
     pub(super) fn ui_pass(&mut self, ui: &mut egui::Ui) {
+        self.await_keys(ui.ctx());
         let mut actions = Vec::new();
         egui::Panel::top("menu_bar").show(ui, |ui| actions = self.menu_bar(ui));
         egui::Panel::bottom("status_bar").show(ui, |ui| self.status_bar(ui));
@@ -160,6 +161,7 @@ impl Shell {
                 self.fail(index, format!("windows: {message}"));
             }
         }
+        self.hotkey_window(&ctx);
         // A modal window takes the keyboard from the editor: one the kernel draws, from the frame it
         // is drawn in to the last one; one a Rust module draws with egui, as egui knows it, from
         // the frame after.
@@ -170,15 +172,11 @@ impl Shell {
         let modal = kernel_modal || module_modal;
         // Nor while something is dragged: undoing under a drag would change what it moves.
         let dragging = ctx.dragged_id().is_some();
-        if !ctx.egui_wants_keyboard_input() && !modal && !dragging {
-            if ctx
-                .input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Z)))
-            {
+        if !modal && !dragging {
+            if self.hotkeys.undo.pressed(&ctx) {
                 actions.push(MenuAction::Undo);
             }
-            if ctx
-                .input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Y)))
-            {
+            if self.hotkeys.redo.pressed(&ctx) {
                 actions.push(MenuAction::Redo);
             }
         }
@@ -193,6 +191,7 @@ impl Shell {
                     }
                 }
                 MenuAction::SetPanelOpen(tab, open) => self.set_panel_open(&tab, open),
+                MenuAction::Hotkeys => self.hotkey_window.open = true,
                 MenuAction::Module(index, action) => {
                     if self.slots[index].state.is_running()
                         && let Err(message) =

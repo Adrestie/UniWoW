@@ -11,7 +11,7 @@ pub const FOV: [f32; 2] = [1.0, 170.0];
 /// to the target being at most as much.
 pub const REACH: f64 = 100_000.0;
 
-/// Camera turning around a target point. Z is up.
+/// Camera looking at a target point, which it turns around or flies with. Z is up.
 pub struct OrbitCamera {
     target: Vec3,
     /// Angle around Z, in radians.
@@ -39,10 +39,15 @@ impl Default for OrbitCamera {
 }
 
 impl OrbitCamera {
-    pub fn eye(&self) -> Vec3 {
+    /// The direction from the target to the eye.
+    fn back(&self) -> Vec3 {
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
         let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
-        self.target + self.distance * Vec3::new(cos_pitch * cos_yaw, cos_pitch * sin_yaw, sin_pitch)
+        Vec3::new(cos_pitch * cos_yaw, cos_pitch * sin_yaw, sin_pitch)
+    }
+
+    pub fn eye(&self) -> Vec3 {
+        self.target + self.distance * self.back()
     }
 
     pub fn target(&self) -> Vec3 {
@@ -105,34 +110,32 @@ impl OrbitCamera {
         proj * view
     }
 
-    /// Moves the target across the view by `delta` points, within reach of the origin.
-    fn pan(&mut self, delta: egui::Vec2) {
-        let forward = (self.target - self.eye()).normalize();
-        let right = forward.cross(Vec3::Z).normalize_or_zero();
-        let up = right.cross(forward);
-        let scale = self.distance * 0.0015;
-        let reach = Vec3::splat(REACH as f32);
-        self.target = (self.target + (-right * delta.x + up * delta.y) * scale).clamp(-reach, reach);
+    /// Turns the eye around the target by a drag of `delta` points.
+    pub fn orbit(&mut self, delta: egui::Vec2) {
+        self.yaw -= delta.x * 0.008;
+        self.pitch = (self.pitch + delta.y * 0.008).clamp(-PITCH, PITCH);
     }
 
-    /// Left drag orbits, right or middle drag pans, the wheel zooms.
-    pub fn handle_input(&mut self, ui: &egui::Ui, response: &egui::Response) {
-        let delta = response.drag_delta();
-        if response.dragged_by(egui::PointerButton::Primary) {
-            self.yaw -= delta.x * 0.008;
-            self.pitch = (self.pitch + delta.y * 0.008).clamp(-PITCH, PITCH);
-        } else if response.dragged_by(egui::PointerButton::Secondary)
-            || response.dragged_by(egui::PointerButton::Middle)
-        {
-            self.pan(delta);
-        }
-        if response.hovered() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 {
-                self.distance = (self.distance * (-scroll * 0.0015).exp()).clamp(DISTANCE[0], DISTANCE[1]);
-            }
-        }
+    /// Turns the view around the eye by a drag of `delta` points: a drag to the right looks to the
+    /// right, up looks up. The eye stays, unless the target would go beyond reach of the origin.
+    pub fn look(&mut self, delta: egui::Vec2) {
+        let eye = self.eye();
+        self.orbit(delta);
+        self.target = within_reach(eye - self.distance * self.back());
     }
+
+    /// Moves the eye and the target together by `step` yards: forward along the view, right
+    /// across it, and up along Z; the target within reach of the origin.
+    pub fn fly(&mut self, step: Vec3) {
+        let forward = -self.back();
+        let right = forward.cross(Vec3::Z).normalize_or_zero();
+        self.target = within_reach(self.target + forward * step.x + right * step.y + Vec3::Z * step.z);
+    }
+}
+
+fn within_reach(point: Vec3) -> Vec3 {
+    let reach = Vec3::splat(REACH as f32);
+    point.clamp(-reach, reach)
 }
 
 #[cfg(test)]
@@ -171,15 +174,67 @@ mod tests {
     }
 
     #[test]
-    fn a_pan_keeps_the_target_within_reach_and_the_eye_within_twice() {
+    fn a_flight_keeps_the_target_within_reach_and_the_eye_within_twice() {
         let mut camera = OrbitCamera::default();
         camera.look_at(Vec3::new(0.0, -100_000.0, 0.0), Vec3::ZERO);
-        for _ in 0..100 {
-            camera.pan(egui::vec2(-10_000.0, 10_000.0));
-        }
         let reach = REACH as f32;
-        assert!(camera.target().abs().max_element() <= reach, "{}", camera.target());
+        for _ in 0..100 {
+            camera.fly(Vec3::new(-10_000.0, 10_000.0, 10_000.0));
+            assert!(
+                camera.target().abs().max_element() <= reach,
+                "flown: {}",
+                camera.target()
+            );
+            camera.look(egui::vec2(100.0, 0.0));
+            assert!(
+                camera.target().abs().max_element() <= reach,
+                "looked: {}",
+                camera.target()
+            );
+        }
         assert!(camera.eye().abs().max_element() <= 2.0 * reach, "{}", camera.eye());
+    }
+
+    #[test]
+    fn flying_moves_the_eye_and_the_target_forward_right_and_up_as_seen() {
+        let mut camera = OrbitCamera::default();
+        camera.look_at(Vec3::new(0.0, -10.0, 5.0), Vec3::new(0.0, 0.0, 5.0));
+        camera.fly(Vec3::new(2.0, 0.0, 0.0));
+        assert!(
+            close(camera.eye(), Vec3::new(0.0, -8.0, 5.0)),
+            "forward: {}",
+            camera.eye()
+        );
+        assert!(close(camera.target(), Vec3::new(0.0, 2.0, 5.0)));
+        let before = clip(&camera, 1.5, Vec3::new(0.0, 2.0, 5.0));
+        camera.fly(Vec3::new(0.0, 3.0, 1.0));
+        assert!(
+            close(camera.eye(), Vec3::new(3.0, -8.0, 6.0)),
+            "right and up: {}",
+            camera.eye()
+        );
+        let after = clip(&camera, 1.5, Vec3::new(0.0, 2.0, 5.0));
+        assert!(
+            after.x < before.x && after.y < before.y,
+            "what was ahead goes left and down"
+        );
+    }
+
+    #[test]
+    fn looking_keeps_the_eye_and_turns_the_view_the_way_of_the_drag() {
+        let mut camera = OrbitCamera::default();
+        camera.look_at(Vec3::new(0.0, -10.0, 5.0), Vec3::new(0.0, 0.0, 5.0));
+        let ahead = Vec3::new(0.0, 0.0, 5.0);
+        camera.look(egui::vec2(30.0, 0.0));
+        assert!(close(camera.eye(), Vec3::new(0.0, -10.0, 5.0)), "the eye stays");
+        assert!(clip(&camera, 1.5, ahead).x < 0.0, "a drag to the right turns right");
+        camera.look(egui::vec2(-30.0, -30.0));
+        assert!(close(camera.eye(), Vec3::new(0.0, -10.0, 5.0)));
+        assert!(clip(&camera, 1.5, ahead).y < 0.0, "a drag up looks up");
+        let target = camera.target();
+        camera.orbit(egui::vec2(50.0, 10.0));
+        assert!(close(camera.target(), target), "an orbit keeps the target");
+        assert!(!close(camera.eye(), Vec3::new(0.0, -10.0, 5.0)));
     }
 
     /// The clip coordinates of `point`: x, y and the depth, divided by w.

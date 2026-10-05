@@ -36,6 +36,8 @@ pub struct KernelHost {
     pub forgotten: Vec<(String, String)>,
     pub services: HashMap<String, Service>,
     pub gpu: Option<egui_wgpu::RenderState>,
+    /// The memory of its own of the GPU, when the system tells it.
+    pub gpu_memory: Option<u64>,
     pub settings: Settings,
     pub settings_changed: bool,
     pub reported: Vec<Reported>,
@@ -114,6 +116,9 @@ impl KernelHost {
     /// The settings of the modules move to the bridge, where every thread reads them.
     pub fn new(gpu: Option<egui_wgpu::RenderState>, mut settings: Settings, pool: Pool, bridge: Arc<Bridge>) -> Self {
         *bridge.settings.write().unwrap_or_else(|e| e.into_inner()) = std::mem::take(&mut settings.modules);
+        let gpu_memory = gpu
+            .as_ref()
+            .and_then(|gpu| crate::gpu_memory::dedicated(&gpu.adapter.get_info()));
         Self {
             events: Vec::new(),
             pending: Vec::new(),
@@ -124,6 +129,7 @@ impl KernelHost {
             adopted: Vec::new(),
             services: HashMap::new(),
             gpu,
+            gpu_memory,
             settings,
             settings_changed: false,
             reported: Vec::new(),
@@ -167,6 +173,10 @@ impl Host for KernelHost {
 
     fn gpu(&self) -> Option<&egui_wgpu::RenderState> {
         self.gpu.as_ref()
+    }
+
+    fn gpu_memory(&self) -> Option<u64> {
+        self.gpu_memory
     }
 
     fn draw_panel(&mut self, owner: &str, objects: &SharedUi, panel: &str, ui: &mut egui::Ui) {

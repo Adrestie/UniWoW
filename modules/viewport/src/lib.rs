@@ -2,7 +2,8 @@
 //! "viewport" service, into an offscreen target shown in its panel. Its camera is offered to every
 //! language: animatable properties and commands (step 8.3). A layer's bundle is kept while its
 //! version stays the same, and a frame signal tells the threads of modules that a frame was
-//! submitted (step 9.2a).
+//! submitted (step 9.2a). The camera flies with its hotkeys, looks with the right or middle drag,
+//! and turns around its target with the drag while its orbit hotkey is held (step 9.2d).
 
 mod camera;
 mod grid;
@@ -15,6 +16,7 @@ use std::task::{Poll, Waker};
 use std::time::{Duration, Instant};
 
 use uniwow_api::glam::Vec3;
+use uniwow_api::hotkey::{Hotkey, HotkeyKind, Keys};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::viewport::{self, Frame, Layer, MAX_FRAME_WAIT, Target, View};
 use uniwow_api::{
@@ -224,6 +226,69 @@ impl viewport::Viewport for Service {
     }
 }
 
+/// The speed of the flight at start, the slowest and the fastest the wheel sets, in yards a
+/// second, and how many times faster it goes while its hotkey is held.
+const SPEED: f32 = 30.0;
+const SPEEDS: [f32; 2] = [1.0, 2_000.0];
+const FASTER: f32 = 4.0;
+
+/// The hotkeys of the camera.
+struct CameraKeys {
+    forward: Hotkey,
+    back: Hotkey,
+    left: Hotkey,
+    right: Hotkey,
+    up: Hotkey,
+    down: Hotkey,
+    faster: Hotkey,
+    orbit: Hotkey,
+}
+
+impl CameraKeys {
+    fn declare(reg: &mut Registrar) -> Self {
+        let mut held = |name, label, keys| reg.hotkey(name, label, HotkeyKind::Hold, keys);
+        Self {
+            forward: held("fly_forward", "Fly forward", Keys::key(egui::Key::Z)),
+            back: held("fly_back", "Fly back", Keys::key(egui::Key::S)),
+            left: held("fly_left", "Fly left", Keys::key(egui::Key::Q)),
+            right: held("fly_right", "Fly right", Keys::key(egui::Key::D)),
+            up: held("fly_up", "Fly up", Keys::key(egui::Key::E)),
+            down: held("fly_down", "Fly down", Keys::key(egui::Key::A)),
+            faster: held("fly_faster", "Fly faster", Keys::SHIFT),
+            orbit: held("orbit", "Turn around the target with the drag", Keys::ALT),
+        }
+    }
+
+    /// The flight asked now, forward, right and up: each -1, 0 or 1.
+    fn flight(&self, ctx: &egui::Context) -> Vec3 {
+        let axis =
+            |plus: &Hotkey, minus: &Hotkey| f32::from(u8::from(plus.held(ctx))) - f32::from(u8::from(minus.held(ctx)));
+        Vec3::new(
+            axis(&self.forward, &self.back),
+            axis(&self.right, &self.left),
+            axis(&self.up, &self.down),
+        )
+    }
+
+    /// What the caption says of them.
+    fn caption(&self) -> String {
+        let flight = [&self.forward, &self.left, &self.back, &self.right, &self.up, &self.down];
+        let names: Vec<String> = flight.iter().map(|hotkey| hotkey.keys().to_string()).collect();
+        format!(
+            "right drag: look · {} + right drag: orbit · {}: fly · {}: faster",
+            self.orbit.keys(),
+            names.join(" "),
+            self.faster.keys()
+        )
+    }
+}
+
+impl Default for CameraKeys {
+    fn default() -> Self {
+        Self::declare(&mut Registrar::default())
+    }
+}
+
 /// Offscreen textures, recreated when the panel changes size.
 struct Targets {
     size: [u32; 2],
@@ -246,6 +311,9 @@ struct ViewportModule {
     interval: f32,
     /// The device the kept bundles were recorded on.
     device: Option<wgpu::Device>,
+    keys: CameraKeys,
+    /// The speed of the flight, in yards a second.
+    speed: f32,
 }
 
 impl Default for ViewportModule {
@@ -261,6 +329,8 @@ impl Default for ViewportModule {
             last_time: None,
             interval: 0.0,
             device: None,
+            keys: CameraKeys::default(),
+            speed: SPEED,
         }
     }
 }
@@ -275,6 +345,7 @@ impl Module for ViewportModule {
             .provide(viewport::SERVICE, service)
             .subscribe(MODULE_FAILED_TOPIC)
             .menu_item("View", "Reset camera", "reset_camera");
+        self.keys = CameraKeys::declare(reg);
 
         // The camera for every language: animatable, and moved by commands.
         let shared = self.camera.clone();
@@ -339,7 +410,7 @@ impl Module for ViewportModule {
         };
         let size = ui.available_size().max(egui::vec2(1.0, 1.0));
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-        camera(&self.camera).handle_input(ui, &response);
+        self.steer(ui, &response);
 
         let pixels = size * ui.ctx().pixels_per_point();
         let pixels = [pixels.x.round().max(1.0) as u32, pixels.y.round().max(1.0) as u32];
@@ -350,8 +421,10 @@ impl Module for ViewportModule {
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
         ui.painter().image(targets.texture_id, rect, uv, egui::Color32::WHITE);
         let caption = format!(
-            "{} layers · drag: orbit · right drag: pan · wheel: zoom",
-            lock(&self.layers).layers.len()
+            "{} layers · {} · wheel: speed {:.0} yd/s",
+            lock(&self.layers).layers.len(),
+            self.keys.caption(),
+            self.speed
         );
         ui.painter().text(
             rect.left_bottom() + egui::vec2(8.0, -8.0),
@@ -379,6 +452,34 @@ impl Module for ViewportModule {
 }
 
 impl ViewportModule {
+    /// Moves the camera as the user asks: the right or middle drag looks, or turns around the
+    /// target while the orbit hotkey is held; with the pointer over the view, the hotkeys fly and
+    /// the wheel sets the speed. A left click does nothing: it is kept for the tools to come.
+    fn steer(&mut self, ui: &egui::Ui, response: &egui::Response) {
+        let ctx = ui.ctx();
+        let mut camera = camera(&self.camera);
+        if response.dragged_by(egui::PointerButton::Secondary) || response.dragged_by(egui::PointerButton::Middle) {
+            if self.keys.orbit.held(ctx) {
+                camera.orbit(response.drag_delta());
+            } else {
+                camera.look(response.drag_delta());
+            }
+        }
+        if !(response.hovered() || response.dragged()) {
+            return;
+        }
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll != 0.0 {
+            self.speed = (self.speed * (scroll * 0.002).exp()).clamp(SPEEDS[0], SPEEDS[1]);
+        }
+        let flight = self.keys.flight(ctx);
+        if flight != Vec3::ZERO {
+            let speed = self.speed * if self.keys.faster.held(ctx) { FASTER } else { 1.0 };
+            let seconds = ui.input(|i| i.stable_dt).min(0.1);
+            camera.fly(flight.normalize() * speed * seconds);
+        }
+    }
+
     fn ensure_targets(&mut self, gpu: &egui_wgpu::RenderState, size: [u32; 2]) {
         if self.targets.as_ref().is_some_and(|t| t.size == size) {
             return;
@@ -663,8 +764,13 @@ mod tests {
     use uniwow_api::viewport::{Frame, Layer, Target, View};
     use uniwow_api::{egui, egui_wgpu, wgpu};
 
+    use uniwow_api::egui::{Event, Key, Modifiers, PointerButton, Pos2, vec2};
+    use uniwow_api::glam::Vec3;
+    use uniwow_api::hotkey::Keys;
+
     use super::{
-        Camera, Entry, FrameSignal, Layers, ViewportModule, camera, draw_layers, frame, lock, look_at, resolved, view,
+        Camera, CameraKeys, Entry, FrameSignal, Layers, ViewportModule, camera, draw_layers, frame, lock, look_at,
+        resolved, view,
     };
 
     /// A device of the software adapter of the system, or none where there is none.
@@ -872,5 +978,191 @@ mod tests {
         // A second lock while the first is held would never return.
         let drawn = view(&shared, [640, 480], 0.0);
         assert_eq!(drawn.eye, camera(&shared).eye());
+    }
+
+    /// A frame of `ctx` with `events`, a view 400 × 300 at its top left steered by `module`.
+    fn steered(module: &mut ViewportModule, ctx: &egui::Context, events: Vec<Event>) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            let (_, response) = ui.allocate_exact_size(vec2(400.0, 300.0), egui::Sense::click_and_drag());
+            module.steer(ui, &response);
+        });
+        output.textures_delta.clear();
+    }
+
+    fn key(key: Key, pressed: bool) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    /// A drag of `button` in the view, 120 points to the right, `held` down meanwhile.
+    fn drag(module: &mut ViewportModule, ctx: &egui::Context, button: PointerButton, held: Modifiers) {
+        let at = Pos2::new(100.0, 100.0);
+        let press = |pos, pressed| Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: held,
+        };
+        steered(
+            module,
+            ctx,
+            vec![Event::ModifiersChanged(held), Event::PointerMoved(at)],
+        );
+        steered(module, ctx, vec![press(at, true)]);
+        steered(module, ctx, vec![Event::PointerMoved(at + vec2(60.0, 0.0))]);
+        steered(module, ctx, vec![Event::PointerMoved(at + vec2(120.0, 0.0))]);
+        steered(
+            module,
+            ctx,
+            vec![
+                press(at + vec2(120.0, 0.0), false),
+                Event::ModifiersChanged(Modifiers::NONE),
+            ],
+        );
+    }
+
+    fn eye_and_target(module: &ViewportModule) -> (Vec3, Vec3) {
+        let camera = camera(&module.camera);
+        (camera.eye(), camera.target())
+    }
+
+    fn close(a: Vec3, b: Vec3) -> bool {
+        (a - b).length() < 1e-3
+    }
+
+    #[test]
+    fn the_right_drag_looks_or_orbits_while_held_and_the_left_does_nothing() {
+        let ctx = egui::Context::default();
+        let mut module = ViewportModule::default();
+        let (eye, target) = eye_and_target(&module);
+        drag(&mut module, &ctx, PointerButton::Primary, Modifiers::NONE);
+        assert_eq!(eye_and_target(&module), (eye, target), "a left drag does nothing");
+        drag(&mut module, &ctx, PointerButton::Secondary, Modifiers::NONE);
+        let (looked_eye, looked) = eye_and_target(&module);
+        assert!(close(looked_eye, eye) && !close(looked, target), "looks: the eye stays");
+        drag(&mut module, &ctx, PointerButton::Middle, Modifiers::ALT);
+        let (turned, kept) = eye_and_target(&module);
+        assert!(
+            close(kept, looked) && !close(turned, eye),
+            "Alt: turns around the target"
+        );
+    }
+
+    #[test]
+    fn its_hotkeys_fly_the_camera_while_the_pointer_is_over_the_view() {
+        let ctx = egui::Context::default();
+        let keys = CameraKeys::default();
+        let flight = |events: Vec<Event>| {
+            let mut asked = Vec3::ZERO;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| asked = keys.flight(ui.ctx()),
+            );
+            output.textures_delta.clear();
+            asked
+        };
+        assert_eq!(flight(vec![key(Key::Z, true)]), Vec3::X, "Z forward");
+        assert_eq!(flight(vec![key(Key::D, true)]), Vec3::new(1.0, 1.0, 0.0), "D right");
+        assert_eq!(
+            flight(vec![
+                key(Key::Z, false),
+                key(Key::D, false),
+                key(Key::Q, true),
+                key(Key::S, true)
+            ]),
+            Vec3::new(-1.0, -1.0, 0.0),
+            "Q left, S back"
+        );
+        assert_eq!(
+            flight(vec![key(Key::Q, false), key(Key::S, false), key(Key::E, true)]),
+            Vec3::Z,
+            "E up"
+        );
+        assert_eq!(flight(vec![key(Key::A, true)]), Vec3::ZERO, "A down, against E");
+        let ctrl = Modifiers {
+            ctrl: true,
+            command: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            flight(vec![
+                key(Key::E, false),
+                key(Key::A, false),
+                key(Key::Z, true),
+                Event::ModifiersChanged(ctrl)
+            ]),
+            Vec3::ZERO,
+            "Ctrl+Z is Undo"
+        );
+        keys.forward.set_keys(Keys::key(Key::W));
+        assert_eq!(
+            flight(vec![Event::ModifiersChanged(Modifiers::NONE)]),
+            Vec3::ZERO,
+            "bound to W"
+        );
+        assert_eq!(flight(vec![key(Key::W, true)]), Vec3::X);
+
+        let mut module = ViewportModule::default();
+        let (eye, target) = eye_and_target(&module);
+        steered(&mut module, &ctx, vec![key(Key::Z, true)]);
+        assert_eq!(
+            eye_and_target(&module),
+            (eye, target),
+            "the pointer is not over the view"
+        );
+        steered(&mut module, &ctx, vec![Event::PointerMoved(Pos2::new(100.0, 100.0))]);
+        let (flown, ahead) = eye_and_target(&module);
+        let forward = (target - eye).normalize();
+        assert!((flown - eye).normalize().dot(forward) > 0.999, "forward along the view");
+        assert!(close(ahead - flown, target - eye), "the eye and the target together");
+    }
+
+    #[test]
+    fn the_wheel_sets_the_speed_and_shift_flies_four_times_faster() {
+        let ctx = egui::Context::default();
+        let mut module = ViewportModule::default();
+        let at = Pos2::new(100.0, 100.0);
+        let wheel = |y: f32| Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, y),
+            phase: egui::TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        };
+        steered(&mut module, &ctx, vec![Event::PointerMoved(at), wheel(200.0)]);
+        for _ in 0..30 {
+            steered(&mut module, &ctx, Vec::new());
+        }
+        let faster = module.speed;
+        assert!(faster > super::SPEED, "{faster}");
+        steered(&mut module, &ctx, vec![wheel(-100_000.0)]);
+        for _ in 0..30 {
+            steered(&mut module, &ctx, Vec::new());
+        }
+        assert_eq!(module.speed, super::SPEEDS[0], "never slower than the slowest");
+
+        let step = |module: &mut ViewportModule, events| {
+            let (eye, _) = eye_and_target(module);
+            steered(module, &ctx, events);
+            (eye_and_target(module).0 - eye).length()
+        };
+        let slow = step(&mut module, vec![key(Key::Z, true)]);
+        let fast = step(&mut module, vec![Event::ModifiersChanged(Modifiers::SHIFT)]);
+        assert!(
+            slow > 0.0 && (fast / slow - super::FASTER).abs() < 0.01,
+            "{slow} then {fast}"
+        );
     }
 }
