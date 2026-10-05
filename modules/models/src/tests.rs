@@ -15,7 +15,7 @@ use uniwow_api::formats::{
     Submesh, Texture, TextureFormat, Tile, Wdl, Wdt,
 };
 use uniwow_api::glam::{Mat4, Vec3};
-use uniwow_api::models::{Geosets, Instance, Look, LookId, LookState, Models};
+use uniwow_api::models::{Extent, Geosets, Instance, Look, LookId, LookState, Models};
 use uniwow_api::viewport::{Layer, Target, View};
 use uniwow_api::{Event, MODULE_FAILED_TOPIC, bytemuck, egui, egui_wgpu, serde_json, wgpu};
 
@@ -37,6 +37,7 @@ pub struct Fake {
     pub hairs: Vec<HairGeoset>,
     pub facials: Vec<FacialHair>,
     pub sections: Vec<CharSection>,
+    pub objects: Vec<GameObjectDisplay>,
     pub model: Option<Model>,
     pub textures: HashMap<String, Texture>,
 }
@@ -64,7 +65,7 @@ impl Formats for Fake {
         Ok(Arc::new(self.facials.clone()))
     }
     fn game_object_displays(&self) -> Result<Arc<Vec<GameObjectDisplay>>, String> {
-        Err("no looks".to_owned())
+        Ok(Arc::new(self.objects.clone()))
     }
     fn char_sections(&self) -> Result<Arc<Vec<CharSection>>, String> {
         Ok(Arc::new(self.sections.clone()))
@@ -527,6 +528,75 @@ fn a_look_shows_the_submeshes_its_rule_chooses() {
         "creature\\wolf\\wolf.m2"
     );
     assert_eq!(loading::key(&FileRef::Id(42)), "#42");
+}
+
+#[test]
+fn a_game_object_display_gives_its_m2_with_its_default_submeshes_and_none_for_a_wmo() {
+    let object = |id: u32, path: &str| GameObjectDisplay {
+        id,
+        path: path.to_owned(),
+    };
+    let fake = Arc::new(Fake {
+        objects: vec![
+            object(1, "World/Generic/Chair.mdx"),
+            object(2, "World/wmo/Hut.WMO"),
+            object(4, ""),
+        ],
+        ..Fake::default()
+    });
+    let service = Service::default();
+    *lock(&service.formats) = Some(fake);
+    assert_eq!(
+        service.object(1),
+        Ok(Some(Look {
+            model: FileRef::Path("World/Generic/Chair.mdx".to_owned()),
+            textures: Vec::new(),
+            geosets: Geosets::Default,
+        }))
+    );
+    assert_eq!(service.object(2), Ok(None));
+    assert!(service.object(3).unwrap_err().contains("not in GameObjectDisplayInfo"));
+    assert!(service.object(4).unwrap_err().contains("no model"));
+}
+
+#[test]
+fn a_look_drawn_tells_its_extent_until_it_is_released() {
+    let service = Service::default();
+    let plain_look = Look {
+        model: FileRef::Path("square.m2".to_owned()),
+        textures: Vec::new(),
+        geosets: Geosets::All,
+    };
+    let look = service.look(&plain_look);
+    assert_eq!(service.extent(look), None, "not drawn");
+    service.set_reach(100.0);
+    let extent = Extent {
+        low: Vec3::new(0.0, -1.0, 0.0),
+        high: Vec3::new(0.0, 1.0, 2.0),
+        radius: 1.5,
+        batches: 1,
+        reach: 0.0,
+    };
+    service.set_drawn(look, extent);
+    assert_eq!(service.state(look), LookState::Drawn);
+    let told = service.extent(look).unwrap();
+    assert_eq!(told, Extent { reach: 100.0, ..extent }, "with the setting");
+    assert_eq!(told.distance(2.0), 300.0);
+    assert_eq!(told.distance(0.1), 100.0, "at least the reach");
+    service.set_state(look, LookState::Waiting);
+    assert_eq!(service.extent(look), None, "released");
+    // On the GPU: the bounds of its vertices at rest, its batches seen, its radius.
+    let Some(gpu) = device() else {
+        return;
+    };
+    let shared = Shared::new(&gpu, &TARGET);
+    let fake = Fake {
+        model: Some(square(0, 0)),
+        textures: HashMap::from([("red.blp".to_owned(), plain([255, 0, 0, 255]))]),
+        ..Fake::default()
+    };
+    let ready = loading::look(&shared, &fake, &Caches::default(), &plain_look, &mut Vec::new()).unwrap();
+    assert_eq!(ready.extent(100.0), Extent { reach: 100.0, ..extent });
 }
 
 // Drawn on the software adapter.

@@ -341,6 +341,7 @@ impl ModelsModule {
             .count();
         let bytes = self.told.as_ref().map_or(0, Demand::used);
         scene.reach = self.reach;
+        self.service.set_reach(self.reach);
         scene.bytes = bytes;
         scene.summary = format!(
             "{} looks on the GPU ({:.0} MB), {} loading, {waiting} waiting; {} models and {} textures held, {} textures unreadable",
@@ -446,6 +447,11 @@ impl Module for ModelsModule {
     fn init(&mut self, ctx: &mut Context) {
         if let Some(reach) = ctx.setting(REACH).and_then(|value| value.as_f64()) {
             self.reach = (reach as f32).clamp(REACHES[0], REACHES[1]);
+        }
+        self.service.set_reach(self.reach);
+        // The tables, for the modules asking for looks before the first frame.
+        if let Some(formats) = ctx.service(formats::SERVICE) {
+            *lock(&self.service.formats) = Some(formats);
         }
         let (Some(view), Some(gpu)) = (ctx.service(viewport::SERVICE), ctx.gpu().cloned()) else {
             return;
@@ -562,8 +568,8 @@ impl Module for ModelsModule {
                     for why in refused {
                         self.refuse(why);
                     }
+                    self.service.set_drawn(id, look.extent(self.reach));
                     self.held.insert(id, Arc::new(look));
-                    self.service.set_state(id, LookState::Drawn);
                     self.publish();
                 }
                 Some(Some((Err(why), _))) => {

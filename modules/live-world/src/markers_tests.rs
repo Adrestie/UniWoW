@@ -12,7 +12,7 @@ use uniwow_api::{bytemuck, egui, egui_wgpu, wgpu};
 use crate::markers::{self, Drawing, Instance, LABEL_REACH, LABELS, Markers, SIZE};
 use crate::world::{Tracked, World, catmull_rom};
 
-fn entity(guid: u64, kind: Kind, position: [f32; 3]) -> Entity {
+pub fn entity(guid: u64, kind: Kind, position: [f32; 3]) -> Entity {
     Entity {
         guid,
         kind,
@@ -33,7 +33,7 @@ fn entity(guid: u64, kind: Kind, position: [f32; 3]) -> Entity {
     }
 }
 
-fn path(points: &[([f32; 2], u32)], flags: u8, elapsed: u32) -> Spline {
+pub fn path(points: &[([f32; 2], u32)], flags: u8, elapsed: u32) -> Spline {
     Spline {
         id: 1,
         flags,
@@ -123,7 +123,11 @@ fn the_markers_stand_on_their_entities_coloured_by_kind_and_the_nearest_named() 
     nameless.name.clear();
     add(nameless);
 
-    let (instances, labels) = markers::build(&world, now, Some(Vec3::new(0.0, 0.0, 15.0)));
+    let markers::Frame {
+        markers: instances,
+        labels,
+        ..
+    } = markers::build(&world, now, Some(Vec3::new(0.0, 0.0, 15.0)), None);
     assert_eq!(instances.len(), 5);
     let by_x = |x: f32| instances.iter().find(|instance| instance.centre[0] == x).unwrap();
     assert_eq!(by_x(0.0).centre, [0.0, 0.0, 10.0 + SIZE], "standing on its position");
@@ -142,7 +146,10 @@ fn the_markers_stand_on_their_entities_coloured_by_kind_and_the_nearest_named() 
         Vec3::new(0.0, 0.0, 10.0 + 2.0 * SIZE),
         "above its marker"
     );
-    assert!(markers::build(&world, now, None).1.is_empty(), "no eye, no name");
+    assert!(
+        markers::build(&world, now, None, None).labels.is_empty(),
+        "no eye, no name"
+    );
 
     let crowd: Vec<Entity> = (0..100)
         .map(|i| entity(100 + i, Kind::Creature, [i as f32, 0.0, 0.0]))
@@ -152,7 +159,7 @@ fn the_markers_stand_on_their_entities_coloured_by_kind_and_the_nearest_named() 
             .entities
             .insert(entity.guid, Arc::new(Tracked { entity, received: now }));
     }
-    assert_eq!(markers::build(&world, now, Some(Vec3::ZERO)).1.len(), LABELS);
+    assert_eq!(markers::build(&world, now, Some(Vec3::ZERO), None).labels.len(), LABELS);
 }
 
 fn resolved<F: Future>(future: F) -> Option<F::Output> {

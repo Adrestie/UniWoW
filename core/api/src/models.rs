@@ -68,6 +68,27 @@ pub enum LookState {
     Refused(String),
 }
 
+/// What a look drawn is made of: `Models::extent`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Extent {
+    /// The bounds of its vertices at rest, in the space of its model.
+    pub low: glam::Vec3,
+    pub high: glam::Vec3,
+    pub radius: f32,
+    /// Its batches seen at rest at its finest level: none for a model that draws nothing then.
+    pub batches: usize,
+    /// The setting `reach` of the module `models`.
+    pub reach: f32,
+}
+
+impl Extent {
+    /// How far from the eye an instance of it at `scale` is drawn, in yards: `reach` times its
+    /// radius times its scale, at least `reach`.
+    pub fn distance(&self, scale: f32) -> f32 {
+        self.reach * (self.radius * scale).max(1.0)
+    }
+}
+
 /// Shared between threads (rule T3). An owner places its instances from one thread at a time, the
 /// thread of its module that moves them, at the frame signal: the service writes the buffers of
 /// that owner's instances from that thread.
@@ -82,6 +103,11 @@ pub trait Models: Send + Sync {
     /// tables: from a job.
     fn display(&self, display: u32) -> Result<(Look, f32), String>;
 
+    /// The look of the game object display `display` (`GameObjectDisplayInfo`): its M2 with its
+    /// default submeshes; none for a WMO, which the models do not draw. Reads the tables: from a
+    /// job.
+    fn object(&self, display: u32) -> Result<Option<Look>, String>;
+
     /// Makes `instances` the whole set of `owner`'s, kept until it gives another: an owner that
     /// moves its instances gives them again at each frame signal, one that does not gives them
     /// once, then when they change. Writes their buffer from the calling thread.
@@ -95,4 +121,7 @@ pub trait Models: Send + Sync {
     fn clear(&self, owner: &str);
 
     fn state(&self, look: LookId) -> LookState;
+
+    /// What `look` is made of while it is drawn; none otherwise.
+    fn extent(&self, look: LookId) -> Option<Extent>;
 }

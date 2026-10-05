@@ -8,7 +8,8 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use uniwow_api::formats::{self, FacialHair, FileRef, Formats, HairGeoset, Model, ModelTextureSource, TextureFormat};
-use uniwow_api::models::{Geosets, Look};
+use uniwow_api::glam::Vec3;
+use uniwow_api::models::{Extent, Geosets, Look};
 use uniwow_api::{bytemuck, wgpu};
 
 use crate::cache::Cache;
@@ -19,6 +20,8 @@ use crate::shaders;
 /// vertices left out.
 pub struct ModelGpu {
     pub model: Model,
+    /// The bounds of its vertices at rest; those of the model hold its animations too.
+    pub rest: [Vec3; 2],
     pub vertices: wgpu::Buffer,
     pub skins: Vec<SkinGpu>,
     pub bytes: u64,
@@ -50,6 +53,18 @@ pub struct LookGpu {
 impl LookGpu {
     pub fn radius(&self) -> f32 {
         self.model.model.radius
+    }
+
+    /// What it is made of, with the setting `reach`.
+    pub fn extent(&self, reach: f32) -> Extent {
+        let [low, high] = self.model.rest;
+        Extent {
+            low,
+            high,
+            radius: self.radius(),
+            batches: self.skins.first().map_or(0, Vec::len),
+            reach,
+        }
     }
 }
 
@@ -151,9 +166,21 @@ fn model(shared: &Shared, formats: &dyn Formats, file: &FileRef) -> Result<Model
             }
         })
         .collect();
+    let rest = if model.vertices.is_empty() {
+        [Vec3::ZERO; 2]
+    } else {
+        model
+            .vertices
+            .iter()
+            .fold([Vec3::INFINITY, Vec3::NEG_INFINITY], |[low, high], vertex| {
+                let position = Vec3::from(vertex.position);
+                [low.min(position), high.max(position)]
+            })
+    };
     model.vertices = Vec::new();
     Ok(ModelGpu {
         model,
+        rest,
         vertices: vertex_buffer,
         skins,
         bytes,

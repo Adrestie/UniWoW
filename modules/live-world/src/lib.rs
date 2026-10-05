@@ -5,11 +5,14 @@
 //! what each message of the observer changed.
 
 mod link;
+mod looks;
 mod markers;
 mod world;
 
 #[cfg(test)]
 mod markers_tests;
+#[cfg(test)]
+mod models_tests;
 #[cfg(test)]
 mod tests;
 
@@ -18,9 +21,13 @@ use std::time::Instant;
 
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::server_link::protocol::{DEAD, Kind, MOVING, State, TEMPORARY};
-use uniwow_api::{Context, DockArea, Editor, JobId, JobOutcome, Module, PropertyValue, Registrar, egui, log, viewport};
+use uniwow_api::{
+    Context, DockArea, Editor, JobId, JobOutcome, Module, PropertyValue, Registrar, egui, formats, log, models,
+    viewport,
+};
 
 use link::{Connection, Settings, Shared, Surroundings};
+use looks::Looks;
 use world::Change;
 
 /// The topic of the event published for each message of the observer that changed something.
@@ -240,6 +247,10 @@ struct LiveWorld {
     /// What the thread placing the markers shares with their layer, and that thread.
     drawing: Arc<markers::Drawing>,
     animating: Option<JobId>,
+    /// The service drawing the models, the looks of the displays, and the job reading them.
+    models: Option<models::Handle>,
+    looks: Arc<Looks>,
+    reading: Option<JobId>,
 }
 
 impl LiveWorld {
@@ -327,10 +338,13 @@ impl Module for LiveWorld {
             return;
         };
         view.add_layer(ctx.module_id(), Box::new(markers::Markers::new(self.drawing.clone())));
+        self.models = ctx.service(models::SERVICE);
         let (drawing, current) = (self.drawing.clone(), self.current.clone());
+        let (service, looks) = (self.models.clone(), self.looks.clone());
         self.animating = Some(
-            ctx.spawn_thread("Place the markers of the live world at each frame", move |job| {
-                markers::animate(&view, &gpu, &drawing, &|| lock(&current).world(), &|| {
+            ctx.spawn_thread("Place the entities of the live world at each frame", move |job| {
+                let models = service.as_deref().map(|service| (&*looks, service));
+                markers::animate(&view, &gpu, &drawing, &|| lock(&current).world(), models, &|| {
                     job.is_cancelled()
                 });
             }),
@@ -403,7 +417,32 @@ impl Module for LiveWorld {
         }
     }
 
+    fn windows_ui(&mut self, _egui: &egui::Context, ctx: &mut Context) {
+        // Called at every frame: the displays the entities wanted are read here, one job at a time.
+        if self.reading.is_some() {
+            return;
+        }
+        let (Some(service), Some(tables)) = (self.models.clone(), ctx.service(formats::SERVICE)) else {
+            return;
+        };
+        let displays = self.looks.take_wanted();
+        if displays.is_empty() {
+            return;
+        }
+        let looks = self.looks.clone();
+        self.reading = Some(ctx.spawn("Read the looks of the live world", move |_| {
+            looks.insert(looks::read(&*service, &*tables, &displays));
+        }));
+    }
+
     fn on_job(&mut self, job: JobId, outcome: JobOutcome, _ctx: &mut Context) {
+        if self.reading == Some(job) {
+            self.reading = None;
+            if let JobOutcome::Panicked(message) = outcome {
+                log::error!("the looks of the live world could not be read: {message}");
+            }
+            return;
+        }
         if self.animating == Some(job) {
             self.animating = None;
             if let JobOutcome::Panicked(message) = outcome {

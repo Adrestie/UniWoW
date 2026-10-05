@@ -1,19 +1,27 @@
-//! The entities as markers in the 3D view: a coloured shape each, by kind, and the names of the
-//! nearest written over the view. A thread woken by the frame signal places them where they stand
-//! when the next frame is shown, along their splines, and writes them to the GPU itself; the layer
-//! draws them all in one draw, its bundle kept while their buffer stays.
+//! The entities in the 3D view: as their models where the module `models` draws them, as markers
+//! otherwise, a coloured shape each by kind; and the names of the nearest written over the view. A
+//! thread woken by the frame signal places them where they stand when the next frame is shown,
+//! along their splines: it gives the instances of the models to `models` and writes the markers to
+//! the GPU itself; the layer draws the markers in one draw, its bundle kept while their buffer
+//! stays.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use uniwow_api::glam::Vec3;
+use uniwow_api::glam::{Mat4, Vec3};
+use uniwow_api::models::{Extent, Instance as Placed, LookId, Models};
 use uniwow_api::server_link::protocol::{DEAD, Entity, GAME_MASTER, Kind};
 use uniwow_api::viewport::{Handle, Label, Layer, LayerStats, MAX_FRAME_WAIT, Target, View};
 use uniwow_api::wgpu::util::DeviceExt;
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
 use crate::lock;
+use crate::looks::{Display, Looks, Resolved};
 use crate::world::World;
+
+/// The owner of the instances of the live world in the service `models`.
+pub const OWNER: &str = "live-world";
 
 /// Half the height of a marker at the scale 1, in yards: about a person's.
 pub const SIZE: f32 = 1.2;
@@ -86,23 +94,75 @@ pub fn colour(entity: &Entity) -> [f32; 4] {
     }
 }
 
-/// The markers of `world` at `when`, standing on their positions, and the names of the nearest
-/// to `eye`.
-pub fn build(world: &World, when: Instant, eye: Option<Vec3>) -> (Vec<Instance>, Vec<Label>) {
-    let mut instances = Vec::with_capacity(world.entities.len());
+/// The models the entities are drawn as: the looks of the displays read, and the service.
+#[derive(Clone, Copy)]
+pub struct Drawn<'a> {
+    pub looks: &'a HashMap<Display, Resolved>,
+    pub service: &'a dyn Models,
+}
+
+/// What a frame gives: the markers, the names, the instances of the models, and the displays not
+/// read yet.
+#[derive(Default)]
+pub struct Frame {
+    pub markers: Vec<Instance>,
+    pub labels: Vec<Label>,
+    pub placed: Vec<Placed>,
+    pub wanted: Vec<Display>,
+}
+
+/// The entities of `world` at `when`, standing on their positions: as their models where `drawn`
+/// draws them, as markers otherwise; and the names of the nearest to `eye`, over either.
+pub fn build(world: &World, when: Instant, eye: Option<Vec3>, drawn: Option<Drawn>) -> Frame {
+    let mut frame = Frame {
+        markers: Vec::with_capacity(world.entities.len()),
+        ..Frame::default()
+    };
+    let mut extents: HashMap<LookId, Option<Extent>> = HashMap::new();
     let mut named: Vec<(f32, Label)> = Vec::new();
     for tracked in world.entities.values() {
         let entity = &tracked.entity;
-        let [x, y, z] = tracked.position_at(when);
-        let size = SIZE * entity.scale.clamp(0.1, 10.0);
+        let position = Vec3::from(tracked.position_at(when));
         let colour = colour(entity);
-        instances.push(Instance {
-            centre: [x, y, z + size],
-            size,
-            colour,
+        // The top of its model, when it is seen as one: read, drawn, within its reach and drawing
+        // something at rest. Its instance is placed all the same, which makes its look load.
+        let model_top = drawn.filter(|_| entity.kind != Kind::Player).and_then(|drawn| {
+            let display = (entity.kind, entity.display);
+            let Some(Resolved::Look { look, scale, alpha }) = drawn.looks.get(&display) else {
+                if !drawn.looks.contains_key(&display) {
+                    frame.wanted.push(display);
+                }
+                return None;
+            };
+            let scale = scale * entity.scale;
+            frame.placed.push(Placed {
+                id: entity.guid,
+                look: *look,
+                transform: Mat4::from_scale_rotation_translation(
+                    Vec3::splat(scale),
+                    tracked.rotation_at(when),
+                    position,
+                ),
+                alpha: *alpha,
+            });
+            let extent = *extents.entry(*look).or_insert_with(|| drawn.service.extent(*look));
+            extent
+                .filter(|extent| {
+                    extent.batches > 0 && eye.is_none_or(|eye| eye.distance(position) <= extent.distance(scale))
+                })
+                .map(|extent| position.z + extent.high.z * scale)
+        });
+        let top = model_top.unwrap_or_else(|| {
+            let size = SIZE * entity.scale.clamp(0.1, 10.0);
+            frame.markers.push(Instance {
+                centre: [position.x, position.y, position.z + size],
+                size,
+                colour,
+            });
+            position.z + 2.0 * size
         });
         if let Some(eye) = eye {
-            let top = Vec3::new(x, y, z + 2.0 * size);
+            let top = Vec3::new(position.x, position.y, top);
             let distance = top.distance(eye);
             if distance <= LABEL_REACH && !entity.name.is_empty() {
                 named.push((
@@ -118,7 +178,8 @@ pub fn build(world: &World, when: Instant, eye: Option<Vec3>) -> (Vec<Instance>,
     }
     named.sort_by(|a, b| a.0.total_cmp(&b.0));
     named.truncate(LABELS);
-    (instances, named.into_iter().map(|(_, label)| label).collect())
+    frame.labels = named.into_iter().map(|(_, label)| label).collect();
+    frame
 }
 
 /// What the thread placing the markers shares with the layer drawing them.
@@ -137,6 +198,12 @@ struct State {
     labels: Vec<Label>,
     /// The eye of the last frame drawn, which the names are chosen from.
     eye: Option<Vec3>,
+    /// The instances given to `models` at the last frame, the time the thread took to place it,
+    /// and the longest since the start of the last second counted.
+    models: u32,
+    spent: Duration,
+    longest: Duration,
+    since: Option<Instant>,
 }
 
 impl Drawing {
@@ -184,6 +251,20 @@ impl Drawing {
 
     pub fn eye(&self) -> Option<Vec3> {
         lock(&self.state).eye
+    }
+
+    /// Notes the instances given to `models` and the time placing the frame took.
+    pub fn placed(&self, models: usize, spent: Duration) {
+        let now = Instant::now();
+        let mut state = lock(&self.state);
+        state.models = models as u32;
+        state.spent = spent;
+        if state.since.is_none_or(|since| now - since > Duration::from_secs(1)) {
+            state.since = Some(now);
+            state.longest = spent;
+        } else {
+            state.longest = state.longest.max(spent);
+        }
     }
 }
 
@@ -377,7 +458,14 @@ impl Layer for Markers {
             draws: u64::from(self.drawn.is_some()),
             triangles: 8 * u64::from(state.count),
             bytes: u64::from(state.capacity) * size_of::<Instance>() as u64,
-            items: format!("{} markers, {} names", state.count, state.labels.len()),
+            items: format!(
+                "{} markers, {} models, {} names; placed in {:.2} ms, {:.2} at most",
+                state.count,
+                state.models,
+                state.labels.len(),
+                state.spent.as_secs_f64() * 1000.0,
+                state.longest.as_secs_f64() * 1000.0
+            ),
             steering: Duration::ZERO,
         }
     }
@@ -387,13 +475,15 @@ impl Layer for Markers {
     }
 }
 
-/// Places the markers at each frame signal until `cancelled`: where they stand when the next
-/// frame is shown, about a frame from now.
+/// Places the entities at each frame signal until `cancelled`, where they stand when the next frame
+/// is shown, about a frame from now: their models given to `models` when it is there, as the owner
+/// `OWNER`, the looks not read asked of `looks`; the markers written.
 pub fn animate(
     viewport: &Handle,
     gpu: &egui_wgpu::RenderState,
     drawing: &Drawing,
     world: &dyn Fn() -> Arc<World>,
+    models: Option<(&Looks, &dyn Models)>,
     cancelled: &dyn Fn() -> bool,
 ) {
     let mut last = 0;
@@ -411,7 +501,18 @@ pub fn animate(
                 interval = (interval * 7 + between) / 8;
             }
         }
-        let (instances, labels) = build(&world(), now + interval, drawing.eye());
-        drawing.write(&gpu.device, &gpu.queue, &instances, labels);
+        let frame = {
+            let looks = models.map(|(looks, _)| looks.resolved());
+            let drawn = models
+                .zip(looks.as_deref())
+                .map(|((_, service), looks)| Drawn { looks, service });
+            build(&world(), now + interval, drawing.eye(), drawn)
+        };
+        if let Some((looks, service)) = models {
+            looks.want(frame.wanted);
+            service.place(OWNER, &frame.placed);
+        }
+        drawing.write(&gpu.device, &gpu.queue, &frame.markers, frame.labels);
+        drawing.placed(frame.placed.len(), now.elapsed());
     }
 }

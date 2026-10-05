@@ -2,6 +2,7 @@
 //! it gives the model in the folder of the model, and the submeshes it shows; a character's look,
 //! whose display names the model of its race and sex, with its skin baked into one texture, the
 //! texture of its hair, and its hair and facial hair. Its equipment is not drawn in this milestone.
+//! The look of a game object display: its M2, or none for a WMO.
 
 use uniwow_api::formats::{FileRef, Formats};
 use uniwow_api::models::{Geosets, Look};
@@ -111,4 +112,24 @@ pub fn display(formats: &dyn Formats, id: u32) -> Result<(Look, f32), String> {
         },
         scale,
     ))
+}
+
+/// The look of the game object display `id`: its M2 with its default submeshes, the textures its
+/// model names; none for a WMO.
+pub fn object(formats: &dyn Formats, id: u32) -> Result<Option<Look>, String> {
+    let objects = formats.game_object_displays()?;
+    let object = find(&objects, id, |object| object.id)
+        .ok_or_else(|| format!("the game object display {id}: not in GameObjectDisplayInfo"))?;
+    let path = object.path.to_ascii_lowercase();
+    if path.ends_with(".wmo") {
+        return Ok(None);
+    }
+    if path.is_empty() {
+        return Err(format!("the game object display {id}: no model"));
+    }
+    Ok(Some(Look {
+        model: FileRef::Path(object.path.clone()),
+        textures: Vec::new(),
+        geosets: Geosets::Default,
+    }))
 }

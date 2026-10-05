@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use uniwow_api::glam::Vec3;
-use uniwow_api::server_link::protocol::{CATMULL_ROM, CYCLIC, Entity, Kind};
+use uniwow_api::glam::{Quat, Vec3};
+use uniwow_api::server_link::protocol::{CATMULL_ROM, CYCLIC, Entity, Kind, Spline};
 
 /// An entity and when it was received, from which the time along its spline counts on.
 #[derive(Debug)]
@@ -20,55 +20,98 @@ impl Tracked {
     /// Catmull-Rom between its points, from the time gone at the reading and the time since it was
     /// received; where it was read otherwise.
     pub fn position_at(&self, now: Instant) -> [f32; 3] {
-        let Some(spline) = &self.entity.spline else {
-            return self.entity.position;
-        };
-        let points = &spline.points;
-        let (Some(first), Some(last)) = (points.first(), points.last()) else {
-            return self.entity.position;
-        };
-        if points.len() == 1 {
-            return first.position;
+        match (&self.entity.spline, self.time_at(now)) {
+            (Some(spline), Some(time)) => point_at(spline, time),
+            (Some(spline), None) if spline.points.len() == 1 => spline.points[0].position,
+            _ => self.entity.position,
         }
-        // A spline sent whole starts at 0. One sent by a window of its points does not, and is sent
-        // again as its entity moves on, before it leaves the window.
-        let whole = first.time == 0;
-        let cyclic = spline.flags & CYCLIC != 0 && whole;
+    }
+
+    /// The milliseconds along its spline at `now`, from its first point to its last; none without a
+    /// spline of two points.
+    fn time_at(&self, now: Instant) -> Option<u32> {
+        let spline = self.entity.spline.as_ref()?;
+        let (first, last) = (spline.points.first()?, spline.points.last()?);
+        if spline.points.len() < 2 {
+            return None;
+        }
         let since = now.saturating_duration_since(self.received).as_millis() as u64;
         let mut time = u64::from(spline.elapsed) + since;
-        if cyclic && last.time > 0 {
+        if cyclic(spline) && last.time > 0 {
             time %= u64::from(last.time);
         }
-        let time = time.clamp(u64::from(first.time), u64::from(last.time)) as u32;
-        let next = points
-            .iter()
-            .position(|point| point.time > time)
-            .unwrap_or(points.len() - 1)
-            .max(1);
-        let (a, b) = (points[next - 1], points[next]);
-        let part = (time - a.time) as f32 / b.time.saturating_sub(a.time).max(1) as f32;
-        if spline.flags & CATMULL_ROM == 0 {
-            return std::array::from_fn(|axis| a.position[axis] + (b.position[axis] - a.position[axis]) * part);
-        }
-        // The points of control beyond each end, as AzerothCore makes them (`InitCatmullRom`): a
-        // cyclic spline goes on round; else a yard back from the first point, the way it heads, and
-        // the last point again.
-        let before = match next {
-            1 if cyclic && points.len() > 2 => points[points.len() - 2].position,
-            1 => {
-                let (p0, p1) = (Vec3::from(first.position), Vec3::from(points[1].position));
-                (p0 - (p1 - p0).normalize_or_zero()).to_array()
+        Some(time.clamp(u64::from(first.time), u64::from(last.time)) as u32)
+    }
+
+    /// How it is turned at `now`: a game object by its quaternion; a creature along its spline
+    /// while it moves, as the client turns it, the way it came at its end; by its orientation
+    /// otherwise.
+    pub fn rotation_at(&self, now: Instant) -> Quat {
+        if let Some([x, y, z, w]) = self.entity.rotation {
+            let rotation = Quat::from_xyzw(x, y, z, w);
+            if rotation.length() > 0.5 {
+                return rotation.normalize();
             }
-            _ => points[next - 2].position,
-        };
-        let after = match points.get(next + 1) {
-            Some(point) => point.position,
-            None if cyclic && points.len() > 2 => points[1].position,
-            None => last.position,
-        };
-        catmull_rom([before, a.position, b.position, after], part)
+        }
+        if let (Some(spline), Some(time)) = (&self.entity.spline, self.time_at(now)) {
+            let (first, last) = (spline.points[0].time, spline.points[spline.points.len() - 1].time);
+            let at = |time: u32| Vec3::from(point_at(spline, time));
+            let here = at(time);
+            let ahead = at((time + STEP).min(last));
+            let behind = at(time.saturating_sub(STEP).max(first));
+            for way in [ahead - here, here - behind] {
+                if way.truncate().length_squared() > 1e-6 {
+                    return Quat::from_rotation_z(way.y.atan2(way.x));
+                }
+            }
+        }
+        Quat::from_rotation_z(self.entity.orientation)
     }
 }
+
+/// Whether `spline` goes on round: a cyclic one sent whole, from 0. One sent by a window of its
+/// points does not start at 0, and is sent again as its entity moves on, before it leaves the
+/// window.
+fn cyclic(spline: &Spline) -> bool {
+    spline.flags & CYCLIC != 0 && spline.points.first().is_some_and(|first| first.time == 0)
+}
+
+/// The point of `spline`, of two points or more, at `time`, within its points.
+fn point_at(spline: &Spline, time: u32) -> [f32; 3] {
+    let points = &spline.points;
+    let (first, last) = (points[0], points[points.len() - 1]);
+    let next = points
+        .iter()
+        .position(|point| point.time > time)
+        .unwrap_or(points.len() - 1)
+        .max(1);
+    let (a, b) = (points[next - 1], points[next]);
+    let part = (time.saturating_sub(a.time)) as f32 / b.time.saturating_sub(a.time).max(1) as f32;
+    if spline.flags & CATMULL_ROM == 0 {
+        return std::array::from_fn(|axis| a.position[axis] + (b.position[axis] - a.position[axis]) * part);
+    }
+    // The points of control beyond each end, as AzerothCore makes them (`InitCatmullRom`): a
+    // cyclic spline goes on round; else a yard back from the first point, the way it heads, and
+    // the last point again.
+    let cyclic = cyclic(spline);
+    let before = match next {
+        1 if cyclic && points.len() > 2 => points[points.len() - 2].position,
+        1 => {
+            let (p0, p1) = (Vec3::from(first.position), Vec3::from(points[1].position));
+            (p0 - (p1 - p0).normalize_or_zero()).to_array()
+        }
+        _ => points[next - 2].position,
+    };
+    let after = match points.get(next + 1) {
+        Some(point) => point.position,
+        None if cyclic && points.len() > 2 => points[1].position,
+        None => last.position,
+    };
+    catmull_rom([before, a.position, b.position, after], part)
+}
+
+/// The milliseconds between the two points of a spline its way is taken from.
+const STEP: u32 = 50;
 
 /// The point at `t`, from 0 to 1, of the Catmull-Rom segment between the second and the third of
 /// `points`, with the weights of AzerothCore (`s_catmullRomCoeffs`).

@@ -3670,6 +3670,79 @@ stand within 300 yards (9.3a, 9.3b).
   (hair, beard) by a mask of submeshes for each instance, or by groups of the looks of the same
   submeshes.
 
+#### Step 9.4d, as built
+
+- **Checked at the start**, by a probe not kept (a test of `assets` subscribing to the observer of
+  the worldserver of `E:`, already running, for 300 yards, and reading the tables and models of
+  the client); the draws counted as if every look were loaded and drawn, skin 0, a group a look and
+  tile:
+
+  | City | Entities | Distinct displays | Looks (of characters) | Models | Groups | Draws |
+  |---|---|---|---|---|---|---|
+  | Orgrimmar (1629, -4373) | 576: 329 creatures, 247 game objects | 190, all in the tables | 190 (144) | 56 | 232 | 2,237 |
+  | Dalaran (5804, 624) | 1,206: 508 creatures, 698 game objects | 492, 4 not in the tables | 481 (287) | 192 | 551 | 4,683 |
+
+  No game object of either is a WMO. Drawing nothing at rest: `InvisibleStalker`,
+  `InvisibleStalkerNoName` (the triggers) and `KristallSpider` (its batches transparent at rest).
+- **`Models::object`** (`display.rs`): the M2 of a `GameObjectDisplayInfo` row with its default
+  submeshes, none for a `.wmo`, an error for a row missing or without a model. **`Models::extent`**:
+  `Extent` (the bounds of the vertices at rest, kept with the model when it is read, its radius,
+  its batches seen at rest at the finest skin, the setting `reach`) while the look is drawn, given
+  by the module when a load ends and taken back when the look is released; `Extent::distance`, how
+  far an instance at a scale is drawn, as the vertex shader tests it. `models` takes the tables at
+  its start, not at its first frame, for the modules asking for looks before.
+- **`live-world`** uses `models` and `formats`:
+  - the displays are read by a job of the module, started at each frame from `windows_ui` when the
+    thread placing the entities asked for some, one job at a time (`looks.rs`): a creature's look
+    by `Models::display` with the alpha of its display, a game object's by `Models::object`; a
+    display read once, a failure kept (a marker, and why);
+  - the thread placing the markers builds at each frame signal the markers, the names and the
+    instances (`markers.rs`): an instance for each creature and game object whose look is read, its
+    id its GUID, its transform its position along its spline, its rotation (`Tracked::rotation_at`:
+    a game object's quaternion; a creature moving the way it goes, taken 50 ms ahead along its
+    spline, the way it came at its end; its orientation otherwise), its scale the display's times
+    the server's; given whole to `Models::place` as the owner `live-world`;
+  - a marker is kept for a player, an entity without a look, one whose look is not drawn, one
+    beyond `Extent::distance` at its scale, and one whose look draws nothing at rest; the name of
+    an entity seen as its model at the top of its vertices at rest times its scale;
+  - the statistics of the markers give the models placed and the time the thread takes for a frame,
+    and its longest within the last second.
+- **Accepted on the user's machine** (RTX 3080 Ti), the worldserver of `E:` started by the user
+  and left running, observed only; the user saw the models in the world, without animations
+  (step 9.5). A script of Lua, not kept, run from the panel of scripts: the camera still over the
+  city for 25 seconds, then flying 400 yards across it in 20 seconds. Read from the statistics of
+  the view:
+
+  | | Orgrimmar | Dalaran |
+  |---|---|---|
+  | Models: draws | 1,085 still; 376 to 882 flying | 2,743 to 3,124 still; 1,472 to 2,789 flying over the city, 14 past it |
+  | Looks on the GPU, instances in sight | 180 to 192 looks (53 to 63 MB), 231 to 305 instances | 425 to 482 looks (144 to 158 MB), 578 to 688 instances |
+  | The view on the interface thread (preparing, recording, submitting) | 0.51 to 0.74 ms (submitting 0.37 to 0.60), 1.23 at most | 1.46 to 2.12 ms over the city (submitting 0.99 to 1.62), 3.10 at most, once 7.25 |
+  | The bundle of the models recorded | once a second still, 1 to 10 times flying | 1 to 22 times a second still, 14 to 21 flying |
+  | The GPU | 0.8 to 1.5 ms a frame, 2.2 at most | 1.5 to 1.9 ms, 3.7 at most |
+  | The thread of `live-world` | 0.17 to 0.20 ms a frame, 0.34 at most; 540 to 584 models, 89 to 134 markers | 0.30 to 0.36 ms, 0.51 at most; 1,102 to 1,210 models, 462 to 542 markers |
+  | The budget of the view | 534 to 569 MB of 6,042 | 482 to 510 MB of 6,042 |
+
+  Close by, in Orgrimmar: an Orgrimmar Grunt with his baked skin, a banner of Brewfest, the
+  invisible "[DND] Brewfest Barker Bunny" kept as a marker, the names over the models. In Dalaran,
+  the entities stand in the air over Crystalsong; the game objects farther than the reach of
+  their small models are markers.
+- **The goal of step 9.2e is not met by the draws**: 1,085 in Orgrimmar, over 3,000 in Dalaran,
+  where a few hundred were wanted; the interface thread stays under 4 ms on average (2.1 ms in
+  Dalaran) but its submitting grows with the draws (about 0.5 µs a draw) and went once to 7.25 ms;
+  and the bundle is recorded again about 20 times a second in Dalaran, its blended groups crossing
+  as their creatures walk. The point to revisit above (the baked skins in arrays of textures, a
+  group a body) is what the measure calls for: to decide by the review, as a step of its own.
+- **Tests**: a display read once with its look, scale and alpha, a failure kept, a WMO and a row
+  missing as markers; an entity seen as its model without a marker and its name over it, its
+  instance placed before its look is drawn, beyond its reach and drawing nothing as a marker, a
+  player never placed, an unread display asked for; a creature turned the way it moves and at the
+  end of its spline, standing by its orientation, a game object by its quaternion; a morph taking
+  its new look; in `models`, the look of a game object and the extent of a look, told and taken
+  back, on the GPU from its vertices at rest. Each of 15 changes made on purpose to `live-world`
+  and `models` made a test fail; the call to `Models::place` from the thread and the extent given
+  when a load ends are checked by the acceptance only.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around
