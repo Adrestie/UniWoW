@@ -205,6 +205,17 @@ fn the_tiles_wanted_are_those_around_the_camera_the_nearest_first() {
 }
 
 #[test]
+fn at_the_largest_distance_every_tile_of_a_map_is_wanted_from_its_middle() {
+    let all = vec![true; 4096];
+    let middle = id(32, 32).centre();
+    assert_eq!(loading::wanted(&all, middle, crate::DISTANCES[1]).len(), 4096);
+    assert!(
+        loading::wanted(&all, middle, 8).len() < 300,
+        "at 8, the tiles around only"
+    );
+}
+
+#[test]
 fn the_loads_start_nearest_first_within_their_slots_and_those_left_are_cancelled() {
     let (a, b, c, d, e) = (id(1, 1), id(2, 2), id(3, 3), id(4, 4), id(5, 5));
     let plan = loading::plan(&[b, c, d, e, a], &HashSet::from([a]), &HashSet::from([b]), 3);

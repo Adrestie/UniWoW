@@ -36,6 +36,9 @@ const MAP: &str = "map";
 const DISTANCE: &str = "view_distance";
 const BUDGET: &str = "gpu_budget_mb";
 const DEFAULT_DISTANCE: u32 = 3;
+/// The least and most `view_distance`, in tiles: the most is the side of a map, all of which it
+/// reaches from its middle.
+const DISTANCES: [u32; 2] = [1, 64];
 /// The GPU budget in MB when the memory of the GPU is not told, and the least and most it can be.
 const FALLBACK_BUDGET: u64 = 1024;
 const BUDGETS: [u64; 2] = [64, 65_536];
@@ -357,7 +360,9 @@ impl Module for TerrainModule {
         self.distance = ctx
             .setting(DISTANCE)
             .and_then(|value| value.as_u64())
-            .map_or(DEFAULT_DISTANCE, |value| value.clamp(1, 8) as u32);
+            .map_or(DEFAULT_DISTANCE, |value| {
+                value.clamp(u64::from(DISTANCES[0]), u64::from(DISTANCES[1])) as u32
+            });
         self.budget_mb = ctx
             .setting(BUDGET)
             .and_then(|value| value.as_u64())
@@ -438,7 +443,10 @@ impl Module for TerrainModule {
         ));
         ui.horizontal(|ui| {
             ui.label("Distance (tiles)");
-            if ui.add(egui::DragValue::new(&mut self.distance).range(1..=8)).changed() {
+            if ui
+                .add(egui::DragValue::new(&mut self.distance).range(DISTANCES[0]..=DISTANCES[1]))
+                .changed()
+            {
                 ctx.set_setting(DISTANCE, serde_json::json!(self.distance));
             }
             ui.label("GPU budget (MB)");

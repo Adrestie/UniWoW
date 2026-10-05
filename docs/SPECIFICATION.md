@@ -2469,6 +2469,8 @@ change of the tiles in sight; wgpu's work for each draw, on the interface thread
     workers below the normal priority; the device asking for timestamps.
   Each of 21 changes made on purpose to the arrays, the meshes, the horizon, the layer, the
   statistics, the priority of the workers and the reading of the WDL made a test fail.
+- After the step, at the user's request, `view_distance` goes up to 64 tiles, the side of a map,
+  all of which it reaches from its middle; 8 at most before.
 - Not in this part: the doodads, the buildings and the water (9.6); the lights of the map (9.7);
   editing the terrain, for which a chunk changed writes its vertices, its skirts and its blending,
   and the codes of its textures would be written again.
