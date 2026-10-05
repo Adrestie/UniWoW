@@ -1,0 +1,19 @@
+[package]
+name = "uniwow-module-terrain"
+description = "The terrain of a map: its tiles loaded around the camera in jobs, drawn chunk by chunk in the 3D view"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+uniwow-api.workspace = true
+
+[package.metadata.uniwow]
+id = "terrain"
+name = "Terrain"
+category = "World"
+# Services the module cannot work without, and services it uses when present.
+requires = []
+uses = ["viewport", "formats"]

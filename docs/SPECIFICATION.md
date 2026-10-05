@@ -270,6 +270,7 @@ fills it, or *not planned* when no milestone does yet.
 | The live world: entities of the server around a point, their moves | Inside the module `live-world` | — step 9.3 (commands and events) | — step 9.3 | — milestones 10 and 11 |
 | Splitting work over the cores, `parallel_for` | `uniwow_api::parallel_for` (step 9.2a) | — not planned; compiled modules run threads of their own (T7) | — | — |
 | Picking in the 3D view, the selection shown in 3D | — designed in milestone 9, not built | — | — | — |
+| The terrain of a map shown in the 3D view | The module `terrain` (step 9.2c) | — not planned yet | — | — |
 | Editing the world: terrain, painting, objects and creatures placed | — designed in milestone 9, not built | — | — | — |
 | Unsaved changes, asked about when the editor closes | `Module::unsaved`, `save_unsaved` | — not planned | — | — |
 | Menu items | `Registrar::menu_item`, `Module::on_menu` | — not planned | — | — |
@@ -2226,6 +2227,68 @@ First part (9.2b), the readers of the terrain and of the textures:
   fail.
 - Not in this part: the liquids (`MH2O`, `MCLQ`) and the building of a map made of one, with the
   water and the buildings (9.6); the map of low quality textures, the sound emitters, `MTXF`.
+
+Second part (9.2c), the module `terrain`, with the two points of the review of 9.2b:
+
+- The device asks for the block compressions BC1 to BC3 when the adapter offers them: the kernel
+  wraps the description of the device egui-wgpu asks by default (`core/kernel/src/lib.rs`). The
+  textures then go to the GPU as their BLP stores them (`Formats::texture`). Without it, they go
+  decoded (`Formats::texture_rgba`), four to eight times larger on the GPU and in the transfer, so
+  that the budget fills that much sooner; the panel says which. The software adapter of Windows
+  offers BC, and so does the user's GPU.
+- `modules/terrain`, its panel *Terrain* on the right: the maps that have terrain (from `Map.dbc`
+  and their WDT, named in the locale of the client), the map chosen kept in its settings (`map`)
+  and shown again at start; the camera placed over the middle of the map, 1,200 yards high and 800
+  aside, through the properties of the viewport, without history.
+- The model (`model`): a tile as read, its chunks able to be marked changed, a bit each, which
+  nothing marks yet; a chunk known by its tile and index. `model`, `mesh` and `gpu` are public, for
+  the editing to come.
+- A chunk is placed by its tile and its index, as the client does, `Chunk::position` giving only
+  the base of its heights: so are the 17 tiles of the row 60 of Azeroth, whose positions are wrong.
+- Loading, steered at each frame from `windows_ui`, the one call of a module at every frame: the
+  tiles whose centre lies within `view_distance` tiles of the camera (3 by default), nearest first;
+  at most a load per worker but one; a load whose tile left the zone cancelled; nothing started
+  while the view is not drawn (no frame signal). A tile refused is said in the panel and not read
+  again.
+- A job per tile reads it into its model, takes its textures from a cache the tiles share (each
+  read once, a load in flight shared), creates its buffers and its texture of blending (the 256
+  chunks of the tile, 64 × 64: three alpha maps and the shadow), writes its chunks over the threads
+  of the pool (`write_chunk`, which a chunk changed takes alone), its triangles (the quads of its
+  holes left out), and submits its uploads.
+- The tiles ready are handed to the drawing within 2 ms a frame, one at least.
+- The GPU budget, `gpu_budget_mb` in the settings (1,024 by default): beyond it, the tiles out of
+  sight are released, the longest unseen and then the farthest first, and the textures no tile
+  holds are forgotten; the tiles in sight are kept, even beyond it; a tile released is loaded again
+  once wanted.
+- The layer keeps its bundle while the tiles drawn and those in sight stay the same, a tile in
+  sight when its bounds may meet the view; the camera written in `prepare`; a draw a chunk, with its
+  four textures. Its shader blends the layers by their alpha maps (the first by what the others
+  leave), repeats a texture eight times across a chunk, multiplies by twice the vertex colour,
+  darkens by the shadow baked in, and lights by a fixed sun until the lights of the map (9.7). The
+  triangles face up, counter-clockwise; their backs are not drawn.
+- On the user's client (deDE since 5 October), Azeroth chosen: 39 tiles drawn and 223 MB on the GPU
+  at start, BC; 62 tiles and 353 MB once the camera moved; Dun Morogh as the client shows its
+  ground; no entry in the history.
+- Tests: a chunk placed by its tile and index, its position wrong; the triangles facing up, the
+  holes left out; the texels of blending; the tiles wanted, nearest first; the loads within their
+  slots and those left cancelled; the tiles released beyond the budget and loaded again; a box in
+  sight, behind, aside, behind and wider than the view; on the software adapter, skipped where there
+  is none: a tile built and uploaded while no view draws, read back from the GPU, a chunk written
+  again alone, a load cancelled, the textures as BC or decoded, read once for two tiles and
+  forgotten once no tile holds them; the device asking for BC when the adapter offers it. Each of 17
+  changes made on purpose to the module made a test fail. Its steering and handing over, which no
+  test runs without a context, are checked in the recette.
+- Not in this part: the free camera (9.2d), so that a left click still orbits; the water, the
+  doodads and the buildings (9.6); the overlays; the lights of the map (9.7); the device lost; the
+  cache of textures of `libs/gpu` shared with the models, the terrain keeping its own until then.
+
+Where the work of the terrain is done:
+
+| Work | Thread | Lock |
+|---|---|---|
+| Steering the loads, handing over within 2 ms, keeping to the budget | Interface, at each frame (`windows_ui`) | The scene shared with the layer, briefly |
+| A tile read, its model, its resources created and uploaded | A job of the pool per tile, its chunks written over `parallel_for` | The cache of textures, briefly; a texture read once (`OnceLock`) |
+| The tiles in sight, the camera written, the bundle recorded when they change | Interface, the layer's `prepare` and `draw` | The scene, in `prepare` |
 
 #### Tests
 
