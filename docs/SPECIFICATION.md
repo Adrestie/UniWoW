@@ -1739,13 +1739,14 @@ built with the AzerothCore source tree; how to build it is documented):
   - its movement: standing, walking, running, flying, following a path (the spline when there is
     one);
   - its name.
-- **The zone looked at stays alive without a player**: AzerothCore updates a grid only near a
-  player. The observer places at the camera's position an **active invisible object, not a
-  character**, which follows the subscription and keeps the grids around it loaded and updated. It
-  cannot be selected, is invisible to every player, game masters included, has no AI, takes no part
-  in the game, and is never saved. It is removed when the editor unsubscribes or disconnects, and
-  when nothing comes from the editor for 10 seconds (a heartbeat), so that an editor that crashed
-  leaves no zone alive behind it.
+- **The zone looked at stays alive without a player**: AzerothCore updates an object only near a
+  player. As proposed with step 9.3, from the sources of AzerothCore (*Step 9.3, proposed*, below),
+  the observer spawns nothing: on the map's own update, it loads the grids of the zone and keeps
+  its creatures and game objects in the map's list of objects to update, as the sight of a player
+  does. An active invisible object, first chosen here, would keep only itself updated. The zone is
+  kept no longer once the editor unsubscribes or disconnects, or when nothing comes from the
+  editor for 10 seconds (a heartbeat), so that an editor that crashed leaves no zone alive behind
+  it.
 - **Supported AzerothCore**: the module is built against a given commit of AzerothCore, written in
   its documentation and in the handshake; moving to a newer one is a change of the module, reviewed
   as such. The CI cannot build AzerothCore: the protocol is tested against a fake server.
@@ -1914,7 +1915,7 @@ On the server, in `mod-uniwow-observer` (AzerothCore updates its maps on several
   its thread, and copied into the outgoing state of each subscription. The network runs on a thread
   of its own and never touches an object of the game.
 - A subscription the network moves is applied at the next update of its map, through a queue; the
-  active invisible object is created, moved and removed there, never from the network thread.
+  grids of its zone are loaded and its objects kept updated there, never from the network thread.
 
 #### Preparing the editing to come (designed here, not built)
 
@@ -1962,7 +1963,10 @@ Each step is reviewed before the next one; the milestone is delivered once all a
 | 9.2 | The terrain model that can be edited (point 1 above), from the ADT of 3.3.5a and the split tiles, loaded in jobs in the order of *Threads*, its uploads submitted by the jobs, the GPU memory budget, drawn chunk by chunk; the free camera |
 | 9.2e | The performance of the terrain, asked by the review of 9.2c and 9.2d: measured first (the statistics of the view); a draw per tile, its textures in arrays; levels of detail by distance; the horizon of the WDL with a fog; the targets measured on the user's machine; what will hold for the doodads and the creatures (*Drawing many models*, below) |
 | 9.2f | The terrain at a distance of 64, asked by the review of 9.2e: the budget kept without loading and releasing in turn; light tiles beyond 7 tiles; the limits of the device; measured on three maps; the budget shared by the view for 9.4 (*GPU memory*, above) |
-| 9.3 | The observer and its threads, on both sides; the entities as markers (a coloured shape and the name) moving in real time; the commands and events of L4 |
+| 9.3 | The observer and its threads, on both sides; the entities as markers (a coloured shape and the name) moving in real time; the commands and events of L4. In three parts (*Step 9.3, proposed*, below): |
+| 9.3a | The protocol, written down; the observer on the server, built in the user's AzerothCore and checked there with a small probe: the zone kept alive, its cost, the bytes a second in a city |
+| 9.3b | The editor's side: the client of the protocol in `libs/server-link`, tested against a fake server; the module `live-world`, its connection thread, its snapshot, its settings and states; the commands and events of L4 |
+| 9.3c | The entities as markers moving in real time, interpolated on the frame signal; accepted on the user's machine with the server running |
 | 9.4 | Still M2 models, of 3.3.5a and modern: from the display id to the model, its skin, its textures and its scale |
 | 9.5 | M2 animations, of 3.3.5a and modern (`.anim` files): *Stand*, *Walk*, *Run* chosen by the movement received, on the animation thread |
 | 9.6 | Buildings (WMO, of 3.3.5a and modern), doodads and water |
@@ -1972,7 +1976,7 @@ Each step is reviewed before the next one; the milestone is delivered once all a
 
 | Risk | Result |
 |---|---|
-| Does the active invisible object keep the zone looked at alive without any player: creatures moving, paths followed, respawns? | To verify |
+| Does the active invisible object keep the zone looked at alive without any player: creatures moving, paths followed, respawns? | Read in the sources of AzerothCore for the proposal of step 9.3: no, an active object keeps only itself updated; the observer keeps the objects of the zone in the map's update list instead (*Step 9.3, proposed*). On the server: to verify in step 9.3a |
 | The volume of data in a crowded city at the rate chosen | To verify |
 | The work of the M2 animations (bones, interpolation) | To estimate |
 | Speed of the terrain and the models in a city (the goal to fix), and the cost of rebuilding one terrain chunk alone, for the editing to come | The terrain measured in step 9.2e (below); the models and a chunk rebuilt alone: to measure |
@@ -1982,7 +1986,7 @@ Each step is reviewed before the next one; the milestone is delivered once all a
 | What warcraft-rs reads and writes correctly in 3.3.5a, format by format; what `assets` copies of it, without `rayon` | Reading verified in step 9.1 (below): archives, DBC, WDT, ADT and WMO groups read; M2, skins, WMO roots and BLP have faults to correct in the copy. Writing not verified yet |
 | Which versions of the modern formats the extensions of WarcraftXL load, and where they find the files (their folders, loose files, FileDataIDs and listfile): the editor must read the same files from the same places | Verified in step 9.1 in their sources (below) |
 | What wow.export reads of those formats, and how much of it the translation takes | DB2 verified in step 9.1: wow.export reads WDC2, `1SLC`, WDC3, WDC4 and WDC5, not WDC1; the translation takes WDC2, `1SLC` and WDC3, for the tables of paths, which read their strings, ids and rows as wxl-db2 does. M2, WMO, ADT and BLP: at their steps |
-| Does the active invisible object stay out of the game (no aggro, no AI, not seen by game masters), and is it always removed (unsubscription, disconnection, heartbeat lost)? | To verify |
+| Does the active invisible object stay out of the game (no aggro, no AI, not seen by game masters), and is it always removed (unsubscription, disconnection, heartbeat lost)? | No object is spawned any more (proposal of step 9.3); that the zone is kept no longer after an unsubscription, a disconnection or a heartbeat lost: to verify in step 9.3a |
 
 #### Results of the verifications (step 9.1)
 
@@ -2623,6 +2627,86 @@ Where the work of the terrain is done, since step 9.2f:
 | The horizon of the map read and built | A job, its tiles over `parallel_for` | None |
 | The textures no tile holds forgotten; the models of the tiles left freed | A job each | The arrays of textures; none |
 | The tiles in sight and their levels, the camera and the bits of the horizon written, the bundle recorded when they change | Interface, the layer's `prepare` and `draw` | The scene, in `prepare`; the views of the arrays as published, briefly |
+
+#### Step 9.3, proposed
+
+The server of the user (decision of the user): the AzerothCore of `E:\azerothcore-wotlk`, at commit
+bc9198ce7, built in `E:\Serveur`. The module stays in this repository, `server/mod-uniwow-observer/`,
+and is seen by AzerothCore through a junction of its folder of modules; the worldserver is linked
+again while stopped, and started and stopped for the checks once no real player is connected. Its
+settings: `MapUpdate.Threads = 1`, `MapUpdateInterval = 10`, `PreloadAllNonInstancedMapGrids = 0`.
+
+What the sources of AzerothCore at that commit say (read only, the lines are theirs):
+
+- **The map's own update**: `AllMapScript::OnMapUpdate(Map*, uint32)` (`AllMapScript.h:97`) is
+  called at the end of `Map::Update` (`Map.cpp:529`), on the worker updating that map
+  (`MapUpdater.cpp:43-47`); the instances of a map are updated in parallel with each other
+  (`MapInstanced.cpp:64-67`). The hook is skipped by the ticks without time (`Map.cpp:460-464`).
+  The observer reads there, and only there: a map's objects are touched by its own thread.
+- **Listing a zone**: `Cell::VisitObjects(x, y, map, visitor, radius)` (`CellImpl.h:171`), its radius
+  capped to a grid, 533 yards (`CellImpl.h:79-80`), the grids not loaded skipped (`Map.h:783-785`).
+  A visitor of its own for creatures, game objects and players needs no object to search from,
+  whose phase would filter what it sees (`GridNotifiersImpl.h:469`).
+- **Keeping a zone alive**: a grid once loaded stays loaded (`Map::UnloadAll` only, `Map.cpp:1026`);
+  `Map::LoadGrid` is public (`Map.h:224`). But an object is updated only while it is in the map's
+  update list, and is taken out of it every 30 seconds unless it is active, near a player, in
+  combat, summoned, on waypoints or in a formation (`Creature.cpp:3940-3966`,
+  `Map.cpp:546-568`); the cells near an object are marked only for players (`Map.cpp:491-502`). An
+  active object keeps only itself updated (`Object.cpp:1086-1104`). `Map::AddObjectToPendingUpdateList`
+  (`Map.h:553`), which the sight of a player calls (`PlayerUpdates.cpp:1710`), puts an object back
+  at the next update (`Map.cpp:540-544, 583-593`). Respawns run over the whole map every 5
+  seconds where its grids are loaded (`Map.cpp:467-476, 2817-2822`).
+- **What each object gives**: its spawn id (`Creature::GetSpawnId`), summoned or not
+  (`Unit::IsSummon`), its pool (`PoolMgr::IsPartOfAPool`), its game event (the public
+  `GameEventMgr::GameEventCreatureGuids`), phase mask, display id, scale, walking or flying, its
+  spline (`movespline->_Spline().getPoints()`: `MoveSpline::getPath` is protected), its name; for a
+  game object its spawn id, display id and rotation.
+- **The network**: Boost.Asio is in the tree; the main `io_context` is local to `main` and out of a
+  module's reach, `AsyncAcceptor` is a header (`AsyncAcceptor.h`). A module runs its own
+  `io_context` on a thread of its own, started at `WorldScript::OnStartup` (`Main.cpp:395`) and
+  stopped at `OnShutdown` (`Main.cpp:419`), as SOAP runs on a thread of its own
+  (`Main.cpp:337-345`). Its settings come from `configs/modules/mod_uniwow_observer.conf`, found by
+  its `.conf.dist` (`modules/CMakeLists.txt:342-351`).
+- **Instances**: `MapMgr::FindMap` reads without a lock, and an instance is destroyed by a worker
+  (`MapInstanced.cpp:263-281`): the network thread never looks a map up; the subscription waits for
+  the next update of the map that matches it. An empty instance unloads (`Map.h:178-188`).
+
+Changes from the design above, proposed:
+
+1. **No object spawned**: the observer loads the grids of the zone and keeps its creatures and
+   game objects in the map's update list at each of its updates, as the sight of a player does.
+   The creatures of the zone then move, follow their paths and respawn as near a player; nothing
+   is created, nothing can be seen, selected or saved.
+2. **A zone of one grid at most in this milestone**, 533 yards around the centre, the cap of
+   `Cell::VisitObjects`; more would need several visits.
+3. **A dungeon or a battleground is shown while its instance exists**: the observer does not keep
+   an instance alive.
+
+The parts:
+
+- **9.3a, the observer.** The protocol, written in `server/mod-uniwow-observer/PROTOCOL.md`: a
+  little-endian binary framing, each message its length then its kind; the handshake (version of
+  the protocol, token, capabilities, the commit of AzerothCore, the limits), the subscription (map,
+  instance, centre, radius), the heartbeat, the snapshot then the changes 10 times a second (the
+  setting), the fields of the components above. The module: its network thread, 127.0.0.1 only,
+  a few connections at most; the subscriptions queued to the updates of their maps; at each update
+  of a map subscribed, its zone read into plain records under a lock per subscription, no pointer
+  of the game leaving the map's thread; the changes sent by the network thread. How to build it is
+  written beside it. Checked on the server, with `tools/probe.py` beside the module (a client of
+  the protocol in Python, printing what it receives): a zone without a player kept alive (creatures
+  moving, respawning) and no longer once unsubscribed, disconnected or silent for 10 seconds; the
+  time the observer takes in the update of a map; the bytes a second in a city; a game master sees
+  nothing new. The CI cannot build AzerothCore: the module is built on the user's machine only.
+- **9.3b, the editor's side.** `libs/server-link` in the runtime (its fingerprint changes once): the
+  client of the protocol, tested against a fake server in Rust that the CI runs. The module
+  `live-world`: the connection on a thread of its own, the snapshot of the entities shared between
+  threads, the subscription following the camera, the heartbeat, reconnection, the address, port
+  and token in its settings, the states *server stopped* and *observer missing* shown; the commands
+  that read (*the entities around a point*) and the batched events of L4; the table of
+  capabilities.
+- **9.3c, the markers.** The entities as markers, a coloured shape by kind and the name, drawn
+  instanced in one layer; their moves interpolated between two updates by a thread of `live-world`
+  woken by the frame signal; accepted on the user's machine with the server running.
 
 #### Tests
 
