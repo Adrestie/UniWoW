@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use uniwow_api::server_link::protocol::{CYCLIC, Entity, Kind};
+use uniwow_api::glam::Vec3;
+use uniwow_api::server_link::protocol::{CATMULL_ROM, CYCLIC, Entity, Kind};
 
 /// An entity and when it was received, from which the time along its spline counts on.
 #[derive(Debug)]
@@ -15,30 +16,71 @@ pub struct Tracked {
 }
 
 impl Tracked {
-    /// Where it stands at `now`: along its spline, linearly between its points, from the time
-    /// gone at the reading and the time since it was received; where it was read otherwise.
+    /// Where it stands at `now`: along its spline as the client computes it, linearly or by
+    /// Catmull-Rom between its points, from the time gone at the reading and the time since it was
+    /// received; where it was read otherwise.
     pub fn position_at(&self, now: Instant) -> [f32; 3] {
         let Some(spline) = &self.entity.spline else {
             return self.entity.position;
         };
-        let (Some(first), Some(last)) = (spline.points.first(), spline.points.last()) else {
+        let points = &spline.points;
+        let (Some(first), Some(last)) = (points.first(), points.last()) else {
             return self.entity.position;
         };
+        if points.len() == 1 {
+            return first.position;
+        }
+        // A spline sent whole starts at 0. One sent by a window of its points does not, and is sent
+        // again as its entity moves on, before it leaves the window.
+        let whole = first.time == 0;
+        let cyclic = spline.flags & CYCLIC != 0 && whole;
         let since = now.saturating_duration_since(self.received).as_millis() as u64;
         let mut time = u64::from(spline.elapsed) + since;
-        if spline.flags & CYCLIC != 0 && last.time > 0 {
+        if cyclic && last.time > 0 {
             time %= u64::from(last.time);
         }
         let time = time.clamp(u64::from(first.time), u64::from(last.time)) as u32;
-        let next = spline.points.iter().position(|point| point.time >= time).unwrap_or(0);
-        if next == 0 {
-            return spline.points[0].position;
+        let next = points
+            .iter()
+            .position(|point| point.time > time)
+            .unwrap_or(points.len() - 1)
+            .max(1);
+        let (a, b) = (points[next - 1], points[next]);
+        let part = (time - a.time) as f32 / b.time.saturating_sub(a.time).max(1) as f32;
+        if spline.flags & CATMULL_ROM == 0 {
+            return std::array::from_fn(|axis| a.position[axis] + (b.position[axis] - a.position[axis]) * part);
         }
-        let (a, b) = (spline.points[next - 1], spline.points[next]);
-        let span = b.time.saturating_sub(a.time).max(1) as f32;
-        let part = (time - a.time) as f32 / span;
-        std::array::from_fn(|axis| a.position[axis] + (b.position[axis] - a.position[axis]) * part)
+        // The points of control beyond each end, as AzerothCore makes them (`InitCatmullRom`): a
+        // cyclic spline goes on round; else a yard back from the first point, the way it heads, and
+        // the last point again.
+        let before = match next {
+            1 if cyclic && points.len() > 2 => points[points.len() - 2].position,
+            1 => {
+                let (p0, p1) = (Vec3::from(first.position), Vec3::from(points[1].position));
+                (p0 - (p1 - p0).normalize_or_zero()).to_array()
+            }
+            _ => points[next - 2].position,
+        };
+        let after = match points.get(next + 1) {
+            Some(point) => point.position,
+            None if cyclic && points.len() > 2 => points[1].position,
+            None => last.position,
+        };
+        catmull_rom([before, a.position, b.position, after], part)
     }
+}
+
+/// The point at `t`, from 0 to 1, of the Catmull-Rom segment between the second and the third of
+/// `points`, with the weights of AzerothCore (`s_catmullRomCoeffs`).
+pub fn catmull_rom(points: [[f32; 3]; 4], t: f32) -> [f32; 3] {
+    let (t2, t3) = (t * t, t * t * t);
+    let weights = [
+        -0.5 * t3 + t2 - 0.5 * t,
+        1.5 * t3 - 2.5 * t2 + 1.0,
+        -1.5 * t3 + 2.0 * t2 + 0.5 * t,
+        0.5 * t3 - 0.5 * t2,
+    ];
+    std::array::from_fn(|axis| (0..4).map(|i| points[i][axis] * weights[i]).sum())
 }
 
 /// The entities of a zone of a map.

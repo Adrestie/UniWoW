@@ -18,10 +18,10 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::task::{Poll, Waker};
 use std::time::{Duration, Instant};
 
-use uniwow_api::glam::Vec3;
+use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::hotkey::{Hotkey, HotkeyKind, Keys};
 use uniwow_api::serde_json::{Value, json};
-use uniwow_api::viewport::{self, Frame, Layer, MAX_FRAME_WAIT, Target, View};
+use uniwow_api::viewport::{self, Frame, Label, Layer, MAX_FRAME_WAIT, Target, View};
 use uniwow_api::{
     Context, DockArea, Event, MODULE_FAILED_TOPIC, Module, PropertyKind, PropertyValue, Registrar, egui, egui_wgpu,
     wgpu,
@@ -327,6 +327,8 @@ struct ViewportModule {
     timer: Option<GpuTimer>,
     last_frame: Option<Instant>,
     show_stats: bool,
+    /// What the layers wrote over the view at the last frame, with the transform it was drawn with.
+    labels: (Mat4, Vec<Label>),
 }
 
 impl Default for ViewportModule {
@@ -348,6 +350,7 @@ impl Default for ViewportModule {
             timer: None,
             last_frame: None,
             show_stats: false,
+            labels: (Mat4::IDENTITY, Vec::new()),
         }
     }
 }
@@ -458,9 +461,24 @@ impl Module for ViewportModule {
             egui::FontId::proportional(12.0),
             egui::Color32::from_gray(150),
         );
+        let painter = ui.painter_at(rect);
+        for label in &self.labels.1 {
+            let Some(at) = project(&self.labels.0, rect, label.position) else {
+                continue;
+            };
+            let [r, g, b, a] = label.colour;
+            let colour = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
+            let galley = painter.layout_no_wrap(label.text.clone(), egui::FontId::proportional(11.0), colour);
+            let at = at - egui::vec2(galley.size().x / 2.0, galley.size().y + 4.0);
+            painter.rect_filled(
+                egui::Rect::from_min_size(at, galley.size()).expand(2.0),
+                2.0,
+                egui::Color32::from_black_alpha(140),
+            );
+            painter.galley(at, galley, colour);
+        }
         if self.show_stats {
             let colour = egui::Color32::from_gray(225);
-            let painter = ui.painter_at(rect);
             let text = self.stats.text(self.timer.is_some(), stats::process_memory());
             let galley = painter.layout_no_wrap(text, egui::FontId::monospace(11.0), colour);
             let at = rect.left_top() + egui::vec2(8.0, 8.0);
@@ -592,7 +610,8 @@ impl ViewportModule {
             self.device = Some(gpu.device.clone());
             self.timer = GpuTimer::new(&gpu.device, &gpu.queue);
         }
-        let (bundles, failures, layers) = draw_layers(&self.layers, gpu, &view, new_device);
+        let (bundles, failures, layers, labels) = draw_layers(&self.layers, gpu, &view, new_device);
+        self.labels = (view.view_proj, labels);
         for (owner, message) in failures {
             ctx.report_failure(&owner, &message);
         }
@@ -693,7 +712,29 @@ impl ViewportModule {
 
 /// The bundles to draw, the layers that panicked or failed, with why, and what each layer cost and
 /// drew.
-type Drawn = (Vec<wgpu::RenderBundle>, Vec<(String, String)>, Vec<LayerTiming>);
+type Drawn = (
+    Vec<wgpu::RenderBundle>,
+    Vec<(String, String)>,
+    Vec<LayerTiming>,
+    Vec<Label>,
+);
+
+/// Where `position` of the world falls in `rect` through `view_proj`; none behind the eye or out
+/// of the view.
+fn project(view_proj: &Mat4, rect: egui::Rect, position: Vec3) -> Option<egui::Pos2> {
+    let clip = *view_proj * position.extend(1.0);
+    if clip.w <= 0.0 {
+        return None;
+    }
+    let [x, y] = [clip.x / clip.w, clip.y / clip.w];
+    if !(-1.0..=1.0).contains(&x) || !(-1.0..=1.0).contains(&y) {
+        return None;
+    }
+    Some(egui::pos2(
+        rect.left() + (x + 1.0) / 2.0 * rect.width(),
+        rect.top() + (1.0 - y) / 2.0 * rect.height(),
+    ))
+}
 
 /// Prepares each layer with the view of this frame, then records it into its own render bundle,
 /// or keeps the bundle of its version unless the device is `new_device`. The layers that panicked
@@ -709,14 +750,16 @@ fn draw_layers(layers: &Layers, gpu: &egui_wgpu::RenderState, view: &View, new_d
     let mut bundles = Vec::new();
     let mut failures = Vec::new();
     let mut timings = Vec::new();
+    let mut labels = Vec::new();
     entries.retain_mut(|entry| {
         if new_device {
             entry.kept = None;
         }
         match draw_layer(entry, gpu, view) {
-            Ok((bundle, timing)) => {
+            Ok((bundle, timing, mut written)) => {
                 bundles.push(bundle);
                 timings.push(timing);
+                labels.append(&mut written);
                 true
             }
             Err(message) => {
@@ -731,16 +774,16 @@ fn draw_layers(layers: &Layers, gpu: &egui_wgpu::RenderState, view: &View, new_d
     entries.retain(|entry| !removed.contains(&entry.owner));
     entries.append(&mut list.layers);
     list.layers = entries;
-    (bundles, failures, timings)
+    (bundles, failures, timings, labels)
 }
 
 /// Prepares one layer, then gives the bundle kept for its version, or records it, each inside a
-/// validation error scope; with what it cost and drew.
+/// validation error scope; with what it cost and drew, and what it writes over the view.
 fn draw_layer(
     entry: &mut Entry,
     gpu: &egui_wgpu::RenderState,
     view: &View,
-) -> Result<(wgpu::RenderBundle, LayerTiming), String> {
+) -> Result<(wgpu::RenderBundle, LayerTiming, Vec<Label>), String> {
     let started = Instant::now();
     let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
     let layer = entry.layer.as_mut();
@@ -780,13 +823,15 @@ fn draw_layer(
             panic_text(payload)
         )
     })?;
+    let labels = catch_unwind(AssertUnwindSafe(|| layer.labels()))
+        .map_err(|payload| format!("its viewport layer panicked giving its labels: {}", panic_text(payload)))?;
     let timing = LayerTiming {
         owner: entry.owner.clone(),
         prepare,
         record,
         stats,
     };
-    Ok((bundle, timing))
+    Ok((bundle, timing, labels))
 }
 
 /// Records `layer` into its own render bundle, inside a validation error scope.
@@ -858,7 +903,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use uniwow_api::serde_json::json;
-    use uniwow_api::viewport::{Frame, Layer, LayerStats, Target, View};
+    use uniwow_api::viewport::{Frame, Label, Layer, LayerStats, Target, View};
     use uniwow_api::{egui, egui_wgpu, wgpu};
 
     use uniwow_api::egui::{Event, Key, Modifiers, PointerButton, Pos2, vec2};
@@ -868,7 +913,7 @@ mod tests {
     use super::stats::{GpuTimer, LayerTiming, Sample, Stats};
     use super::{
         Camera, CameraKeys, Entry, FrameSignal, Layers, ViewportModule, camera, draw_layers, frame, lock, look_at,
-        resolved, view,
+        project, resolved, view,
     };
 
     /// A device of the software adapter of the system, with timestamps when it offers them, as the
@@ -938,6 +983,14 @@ mod tests {
                 ..LayerStats::default()
             }
         }
+
+        fn labels(&self) -> Vec<Label> {
+            vec![Label {
+                position: Vec3::ZERO,
+                text: format!("prepared {}", self.counts.prepared.load(Ordering::Relaxed)),
+                colour: [255; 4],
+            }]
+        }
     }
 
     fn add(layers: &Layers, owner: &str, counts: &Counts, failing: bool) {
@@ -965,9 +1018,11 @@ mod tests {
         add(&layers, "cube", &every, false);
         let view = view(&Camera::default(), [64, 64], 0.0);
         let frames = |new_device| {
-            let (bundles, failures, timings) = draw_layers(&layers, &gpu, &view, new_device);
+            let (bundles, failures, timings, labels) = draw_layers(&layers, &gpu, &view, new_device);
             assert!(failures.is_empty(), "{failures:?}");
             assert_eq!(timings.len(), bundles.len(), "what each layer cost and drew");
+            assert_eq!(labels.len(), bundles.len(), "what each layer writes over the view");
+            assert!(labels.iter().all(|label| label.text.starts_with("prepared ")));
             timings
         };
         for frame in 0..3u64 {
@@ -998,12 +1053,27 @@ mod tests {
         assert_eq!(count(&kept), (6, 3));
 
         add(&layers, "faulty", &Counts::default(), true);
-        let (bundles, failures, _) = draw_layers(&layers, &gpu, &view, false);
+        let (bundles, failures, _, _) = draw_layers(&layers, &gpu, &view, false);
         assert_eq!(bundles.len(), 2);
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].0, "faulty");
         assert!(failures[0].1.contains("panicked while preparing"), "{}", failures[0].1);
         assert_eq!(lock(&layers).layers.len(), 2, "the faulty layer is removed");
+    }
+
+    #[test]
+    fn a_label_is_written_where_its_point_falls_in_the_view_and_not_behind_the_eye() {
+        let shared = Camera::default();
+        let view = view(&shared, [200, 100], 0.0);
+        let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(200.0, 100.0));
+        let target = camera(&shared).target();
+        let centre = project(&view.view_proj, rect, target).expect("the point looked at");
+        assert!((centre - rect.center()).length() < 0.5, "{centre:?}");
+        let eye = view.eye;
+        let behind = eye + (eye - target);
+        assert_eq!(project(&view.view_proj, rect, behind), None);
+        let aside = target + (target - eye).cross(Vec3::Z).normalize() * 100_000.0;
+        assert_eq!(project(&view.view_proj, rect, aside), None, "out of the view");
     }
 
     #[test]

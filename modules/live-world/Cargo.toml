@@ -16,4 +16,4 @@ name = "Live world"
 category = "World"
 # Services the module cannot work without, and services it uses when present.
 requires = []
-uses = []
+uses = ["viewport"]

@@ -265,7 +265,7 @@ fills it, or *not planned* when no milestone does yet.
 | Sequences and their playback | `uniwow_api::sequence`; the objects `Sequence` and `Player` handed to the kernel with `Context::adopt_objects`, as the Timeline does | `Sequence`, `Player` | `uniwow::Sequence`, `uniwow::Player`; `Sequence`, `Player` | — milestones 10 and 11 |
 | The dopesheet | The service `dopesheet`; the objects `DopesheetView` and `CurveView`, as the Timeline does | `DopesheetView`; `CurveView` showing a `Sequence` | `uniwow::DopesheetView`; `DopesheetView` | — milestones 10 and 11 |
 | Tree, table, property grid | egui; the service `property-grid` | `TreeView`, `TableView`, with `set_cell`, `insert_rows`, `remove_rows`; `PropertyGrid` | `uniwow::TreeView`, `uniwow::TableView`, `uniwow::PropertyGrid`; `TreeView`, `TableView`, `PropertyGrid` | — milestones 10 and 11 |
-| Drawing in the 3D view | The service `viewport`: its layers (`prepare`, a version to keep their bundle, their statistics with `stats`) and its frame signal (`wait_frame`) | — not planned (an other 3D access of step 8.3) | — | — |
+| Drawing in the 3D view | The service `viewport`: its layers (`prepare`, a version to keep their bundle, their statistics with `stats`, the texts they write over the view with `labels`) and its frame signal (`wait_frame`) | — not planned (an other 3D access of step 8.3) | — | — |
 | The client's files, read from its archives, and their formats | The services `vfs` and `formats` of the module `assets` — step 9.1 | — not planned yet | — | — |
 | The live world: entities of the server around a point, their moves | The commands `live-world.state` and `live-world.entities`, the event `live-world.changed` (step 9.3b); the client of the observer, `uniwow_api::server_link` | The same commands and event, through `call` and `subscribe` | The same, through `call` and `subscribe` | Lua: the same, through `uniwow.call` and `uniwow.subscribe` (checked in step 9.3b); Python: milestone 11 |
 | Splitting work over the cores, `parallel_for` | `uniwow_api::parallel_for` (step 9.2a) | — not planned; compiled modules run threads of their own (T7) | — | — |
@@ -2935,6 +2935,45 @@ The parts:
     measured with four zones at once (step 9.3a) come with four zones kept alive on one thread;
   - with step 9.3c: the time along a cyclic spline sent by a window of 32 points, which does not
     start at 0, wrapped as its curves are.
+
+#### Step 9.3c, as built
+
+- The service `viewport` gains `Layer::labels`, none by default: texts a layer writes over the view,
+  each above a point of the world, with its colour, a few dozen at most; called after `prepare` and
+  `draw`, inside `catch_unwind` as `stats` is. The view projects each through the transform of the
+  frame, leaves out those behind the eye or out of the view, and writes them over its image on a
+  dark ground.
+- The markers of `live-world`:
+  - an octahedron each, standing on the position of its entity, its height that of a person by the
+    scale of the entity, never smaller than a few pixels however far; orange a creature, blue a game
+    object, green a player, violet a game master, grey the dead;
+  - drawn in one instanced draw by a layer of `live-world`, from a buffer of the markers; its bundle
+    is kept while the buffer stays, and recorded again when the buffer grows (256 markers at least,
+    by powers of two). Its camera is written in `prepare`;
+  - a thread of `live-world`, woken by the frame signal, places them where they stand when the next
+    frame is shown, about a frame later by the time between two signals, and writes them itself with
+    `Queue::write_buffer`, out of every lock the layer takes: drawn by the next frame. Those drawn
+    before and not now are given a size of 0;
+  - the names of the 48 nearest to the eye within 120 yards, by `Layer::labels`.
+- An entity on a spline stands where the client puts it: linearly or by Catmull-Rom between its
+  points, with the weights of AzerothCore (`s_catmullRomCoeffs`), and the points of control beyond
+  each end as `InitCatmullRom` makes them: a cyclic spline sent whole goes on round; else a yard
+  back from the first point the way it heads (AzerothCore takes the orientation the entity had,
+  which is not sent), and the last point again. A spline sent by a window, which does not start at
+  0, is not wrapped: it stops at the end of the window, which the observer sends again as the
+  entity moves on (the point of the review of step 9.3b). The command `live-world.entities` gives
+  the same positions.
+- Tests: the weights against a straight line and a corner computed by hand; a cyclic spline round
+  its loop, a window not wrapped; the markers standing on their entities, their colours, their
+  scale, the nearest named, at most 48, none without an eye; on the software adapter, a marker
+  drawn orange where it stands, in one draw, its buffer grown and recorded again, the markers no
+  longer drawn given no size; the labels of the layers collected with the bundles; a label at the
+  centre of the view for the point looked at, none behind the eye nor out of the view. Each of 10
+  changes made on purpose to the curves, the markers, their buffer and the labels made a test fail.
+- Accepted on the user's machine, the worldserver of `E:` started and stopped as for step 9.3a, no
+  player connected: over Orgrimmar, 548 to 567 markers and 48 names, the creatures walking from one
+  capture to the next; 60 frames a second still and flying; the layer of `live-world` 0.02 ms on the
+  interface thread, 0.07 at most, the view 0.21 to 0.23 ms; one draw.
 
 #### Tests
 

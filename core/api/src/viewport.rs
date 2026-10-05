@@ -99,6 +99,22 @@ pub trait Layer: Send {
     fn stats(&self) -> LayerStats {
         LayerStats::default()
     }
+
+    /// Texts the view writes over its image, each above a point of the world, such as the names of
+    /// what the layer draws; a few dozen at most. Called after `prepare` and `draw`, as `stats` is;
+    /// none by default.
+    fn labels(&self) -> Vec<Label> {
+        Vec::new()
+    }
+}
+
+/// A text written over the view, above a point of the world.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Label {
+    pub position: glam::Vec3,
+    pub text: String,
+    /// Its colour, RGBA.
+    pub colour: [u8; 4],
 }
 
 /// What a layer drew in a frame, as the statistics of the view show it.

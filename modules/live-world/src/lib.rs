@@ -5,8 +5,11 @@
 //! what each message of the observer changed.
 
 mod link;
+mod markers;
 mod world;
 
+#[cfg(test)]
+mod markers_tests;
 #[cfg(test)]
 mod tests;
 
@@ -15,7 +18,7 @@ use std::time::Instant;
 
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::server_link::protocol::{DEAD, Kind, MOVING, State, TEMPORARY};
-use uniwow_api::{Context, DockArea, Editor, JobId, JobOutcome, Module, PropertyValue, Registrar, egui, log};
+use uniwow_api::{Context, DockArea, Editor, JobId, JobOutcome, Module, PropertyValue, Registrar, egui, log, viewport};
 
 use link::{Connection, Settings, Shared, Surroundings};
 use world::Change;
@@ -234,6 +237,9 @@ struct LiveWorld {
     settings: Arc<Mutex<Settings>>,
     editing: Settings,
     thread: Option<JobId>,
+    /// What the thread placing the markers shares with their layer, and that thread.
+    drawing: Arc<markers::Drawing>,
+    animating: Option<JobId>,
 }
 
 impl LiveWorld {
@@ -315,6 +321,20 @@ impl Module for LiveWorld {
         self.editing = settings.clone();
         *lock(&self.settings) = settings;
         self.start(ctx);
+
+        // The markers, where there is a 3D view.
+        let (Some(view), Some(gpu)) = (ctx.service(viewport::SERVICE), ctx.gpu().cloned()) else {
+            return;
+        };
+        view.add_layer(ctx.module_id(), Box::new(markers::Markers::new(self.drawing.clone())));
+        let (drawing, current) = (self.drawing.clone(), self.current.clone());
+        self.animating = Some(
+            ctx.spawn_thread("Place the markers of the live world at each frame", move |job| {
+                markers::animate(&view, &gpu, &drawing, &|| lock(&current).world(), &|| {
+                    job.is_cancelled()
+                });
+            }),
+        );
     }
 
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
@@ -384,6 +404,13 @@ impl Module for LiveWorld {
     }
 
     fn on_job(&mut self, job: JobId, outcome: JobOutcome, _ctx: &mut Context) {
+        if self.animating == Some(job) {
+            self.animating = None;
+            if let JobOutcome::Panicked(message) = outcome {
+                log::error!("the markers of the live world stopped: {message}");
+            }
+            return;
+        }
         if self.thread != Some(job) {
             return;
         }
