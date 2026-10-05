@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use uniwow_api::formats::{self, Formats, Wdt};
 use uniwow_api::vfs::{self, VfsState};
+use uniwow_api::viewport::{Allowance, Demand};
 use uniwow_api::{
     Context, DockArea, JobContext, JobId, JobOutcome, Module, PropertyValue, Registrar, egui, log, serde_json, viewport,
 };
@@ -31,25 +32,18 @@ use layer::{Scene, TerrainLayer, lock};
 use loading::{Held, Inputs, Kind};
 use model::{TILE, TileId, TileModel};
 
-/// The settings: the map shown, how far around the camera tiles load, and the GPU budget.
+/// The settings: the map shown and how far around the camera tiles load. The GPU budget is the
+/// view's, shared with its other layers; the terrain's own, before, is given to the view once.
 const MAP: &str = "map";
 const DISTANCE: &str = "view_distance";
-const BUDGET: &str = "gpu_budget_mb";
+const OLD_BUDGET: &str = "gpu_budget_mb";
 const DEFAULT_DISTANCE: u32 = 3;
 /// The least and most `view_distance`, in tiles: the most is the side of a map, all of which it
 /// reaches from its middle.
 const DISTANCES: [u32; 2] = [1, 64];
-/// The GPU budget in MB when the memory of the GPU is not told, and the least and most it can be.
-const FALLBACK_BUDGET: u64 = 1024;
+/// The least and most budget of the view the panel sets, in MB.
 const BUDGETS: [u64; 2] = [64, 65_536];
-
-/// The GPU budget by default, in MB: half the memory of its own of the GPU, `gpu_memory` bytes,
-/// when the system tells it.
-fn default_budget(gpu_memory: Option<u64>) -> u64 {
-    gpu_memory
-        .map_or(FALLBACK_BUDGET, |bytes| bytes / 2 / (1024 * 1024))
-        .clamp(BUDGETS[0], BUDGETS[1])
-}
+const MB: u64 = 1024 * 1024;
 
 /// The time a frame gives to handing ready tiles to the drawing.
 const HAND_OVER: Duration = Duration::from_millis(2);
@@ -135,7 +129,8 @@ struct TerrainModule {
     /// The last frame signal seen.
     frame: u64,
     distance: u32,
-    budget_mb: u64,
+    /// What the terrain told the budget of the view last.
+    told: Option<Demand>,
     /// When the map shown was chosen, until all the tiles within reach are loaded; then what that
     /// took and how many they are.
     shown_at: Option<Instant>,
@@ -148,13 +143,14 @@ struct TerrainModule {
     dropped: Vec<TileModel>,
 }
 
-/// What a plan of the loads depends on: the camera, by eighths of a tile; the distance and the
-/// budget; and the counts of the changes of the tiles, of their loads and of the textures.
+/// What a plan of the loads depends on: the camera, by eighths of a tile; the distance; what the
+/// budget of the view allows, the reaches by eighths of a tile and what the other layers hold by
+/// 16 MB; and the counts of the changes of the tiles, of their loads and of the textures.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PlanKey {
     eye: [i32; 2],
     distance: u32,
-    budget_mb: u64,
+    allowed: [u64; 4],
     tiles: u64,
     loading: usize,
     ready: usize,
@@ -384,6 +380,29 @@ impl TerrainModule {
         self.horizon = Some((job, self.showing));
     }
 
+    /// What the terrain may take of the budget allowed: all of it but what the other layers hold.
+    fn budget(&self, allowance: &Allowance) -> u64 {
+        let own = self.told.as_ref().map_or(0, Demand::used);
+        allowance.budget.saturating_sub(allowance.used.saturating_sub(own))
+    }
+
+    /// `allowance` as a plan depends on it.
+    fn allowed(&self, allowance: &Allowance) -> [u64; 4] {
+        let tiles = |reach: f32| {
+            if reach.is_finite() {
+                (reach / TILE * 8.0) as u64
+            } else {
+                u64::MAX
+            }
+        };
+        [
+            allowance.budget / MB,
+            self.budget(allowance) / (16 * MB),
+            tiles(allowance.load),
+            tiles(allowance.keep),
+        ]
+    }
+
     /// At each frame: hands over what is ready, then, while the view is drawn, starts the loads the
     /// camera wants, cancels those it left, and keeps the terrain to its budget; then tells the
     /// layer how long it took, how far the tiles load and what the terrain takes on the GPU.
@@ -445,10 +464,11 @@ impl TerrainModule {
             return;
         };
         self.build_horizon(ctx, &shared, &formats, &directory);
-        let key = PlanKey {
+        let allowance = view.allowance();
+        let mut key = PlanKey {
             eye: eye.map(|at| (at / TILE * 8.0).floor() as i32),
             distance: self.distance,
-            budget_mb: self.budget_mb,
+            allowed: self.allowed(&allowance),
             tiles: lock(&self.scene).generation,
             loading: self.loading.len(),
             ready: self.ready.len(),
@@ -458,23 +478,33 @@ impl TerrainModule {
         if self.planned == Some(key) {
             return;
         }
-        self.planned = Some(key);
         let wanted = loading::wanted(&wdt.tiles, eye, self.distance);
         let held = self.held();
         let fixed = self.fixed();
         let loading: HashMap<TileId, Kind> = self.loading.iter().map(|(tile, (_, kind))| (*tile, *kind)).collect();
         let workers = std::thread::available_parallelism().map_or(2, |n| n.get());
-        let plan = loading::plan(&Inputs {
+        let mut inputs = Inputs {
             wanted: &wanted,
             held: &held,
             loading: &loading,
             refused: &self.refused,
             used: fixed + held.values().map(|held| held.bytes).sum::<u64>(),
-            fixed,
-            budget: self.budget_mb * 1024 * 1024,
+            budget: self.budget(&allowance),
+            allowance,
             costs: loading::costs(&held),
             slots: workers.saturating_sub(1).max(1),
-        });
+        };
+        // What the terrain wants told to the budget of the view, which answers with what it allows
+        // now; planned with that, and with the same at the next frame unless something changed.
+        let demand = loading::demand(&inputs, eye, fixed);
+        if self.told.as_ref() != Some(&demand) {
+            inputs.allowance = view.tell_budget(ctx.module_id(), demand.clone());
+            self.told = Some(demand);
+            inputs.budget = self.budget(&inputs.allowance);
+            key.allowed = self.allowed(&inputs.allowance);
+        }
+        self.planned = Some(key);
+        let plan = loading::plan(&inputs);
         lock(&self.scene).limited = plan.limited;
         for tile in &plan.cancel {
             if let Some((job, _)) = self.loading.remove(tile) {
@@ -538,16 +568,15 @@ impl Module for TerrainModule {
             .map_or(DEFAULT_DISTANCE, |value| {
                 value.clamp(u64::from(DISTANCES[0]), u64::from(DISTANCES[1])) as u32
             });
-        self.budget_mb = ctx
-            .setting(BUDGET)
-            .and_then(|value| value.as_u64())
-            .unwrap_or_else(|| default_budget(ctx.gpu_memory()))
-            .clamp(BUDGETS[0], BUDGETS[1]);
         self.remembered = ctx.setting(MAP).and_then(|value| value.as_str().map(str::to_owned));
         let Some(view) = ctx.service(viewport::SERVICE) else {
             log::info!("no viewport service: the terrain is not drawn");
             return;
         };
+        if let Some(mb) = ctx.setting(OLD_BUDGET).and_then(|value| value.as_u64()) {
+            view.set_budget(mb * MB);
+            ctx.set_setting(OLD_BUDGET, serde_json::Value::Null);
+        }
         let Some(gpu) = ctx.gpu().cloned() else {
             return;
         };
@@ -613,12 +642,14 @@ impl Module for TerrainModule {
             Some(_) => "textures decoded (RGBA): the device has no BC",
             None => "pipeline being built",
         };
+        let allowance = self.view.as_ref().map(|view| view.allowance()).unwrap_or_default();
         ui.label(format!(
-            "{} tiles drawn ({full} full, {light} light), {} loading; {:.0} MB of {} MB on the GPU; {textures}",
+            "{} tiles drawn ({full} full, {light} light), {} loading; {:.0} MB on the GPU, the view {:.0} of {} MB; {textures}",
             full + light,
             self.loading.len(),
-            used as f64 / (1024.0 * 1024.0),
-            self.budget_mb
+            used as f64 / MB as f64,
+            allowance.used as f64 / MB as f64,
+            allowance.budget / MB
         ));
         if let Some(shared) = &self.shared {
             let counts = shared.textures.counts();
@@ -651,16 +682,14 @@ impl Module for TerrainModule {
             {
                 ctx.set_setting(DISTANCE, serde_json::json!(self.distance));
             }
-            ui.label("GPU budget (MB)");
+            ui.label("GPU budget of the view (MB)");
+            let mut mb = allowance.budget / MB;
             if ui
-                .add(
-                    egui::DragValue::new(&mut self.budget_mb)
-                        .range(BUDGETS[0]..=BUDGETS[1])
-                        .speed(16),
-                )
+                .add(egui::DragValue::new(&mut mb).range(BUDGETS[0]..=BUDGETS[1]).speed(16))
                 .changed()
+                && let Some(view) = &self.view
             {
-                ctx.set_setting(BUDGET, serde_json::json!(self.budget_mb));
+                view.set_budget(mb * MB);
             }
         });
         for refusal in &self.refusals {

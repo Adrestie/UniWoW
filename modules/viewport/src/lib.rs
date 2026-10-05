@@ -12,6 +12,7 @@ mod grid;
 mod stats;
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::pin;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -21,7 +22,7 @@ use std::time::{Duration, Instant};
 use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::hotkey::{Hotkey, HotkeyKind, Keys};
 use uniwow_api::serde_json::{Value, json};
-use uniwow_api::viewport::{self, Frame, Label, Layer, MAX_FRAME_WAIT, Target, View};
+use uniwow_api::viewport::{self, Allowance, Demand, Frame, Label, Layer, MAX_FRAME_WAIT, Target, View};
 use uniwow_api::{
     Context, DockArea, Event, MODULE_FAILED_TOPIC, Module, PropertyKind, PropertyValue, Registrar, egui, egui_wgpu,
     wgpu,
@@ -205,10 +206,50 @@ impl FrameSignal {
     }
 }
 
-/// Implementation of the service, sharing the layer list and the frame signal with the module.
+/// The GPU budget of the view: its size, what each module told it, what that allows, and a size
+/// set and not yet saved in the settings.
+#[derive(Default)]
+struct BudgetState {
+    bytes: u64,
+    demands: HashMap<String, Demand>,
+    allowance: Allowance,
+    unsaved: Option<u64>,
+}
+
+impl BudgetState {
+    /// Decides again what the budget allows, after a change.
+    fn allow(&mut self) -> Allowance {
+        self.allowance = viewport::allow(self.bytes, &self.demands.values().collect::<Vec<_>>());
+        self.allowance
+    }
+}
+
+type Budget = Arc<Mutex<BudgetState>>;
+
+fn budget(budget: &Budget) -> MutexGuard<'_, BudgetState> {
+    budget.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The setting of the budget, in MB; half the memory of the GPU's own by default, when told.
+const BUDGET: &str = "gpu_budget_mb";
+const FALLBACK_BUDGET: u64 = 1024;
+const BUDGETS: [u64; 2] = [64, 65_536];
+const MB: u64 = 1024 * 1024;
+
+/// The budget by default, in MB: half of `gpu_memory` bytes, the memory of the GPU's own, when the
+/// system tells it.
+fn default_budget(gpu_memory: Option<u64>) -> u64 {
+    gpu_memory
+        .map_or(FALLBACK_BUDGET, |bytes| bytes / 2 / MB)
+        .clamp(BUDGETS[0], BUDGETS[1])
+}
+
+/// Implementation of the service, sharing the layer list, the frame signal and the budget with the
+/// module.
 struct Service {
     layers: Layers,
     frames: Arc<FrameSignal>,
+    budget: Budget,
 }
 
 impl viewport::Viewport for Service {
@@ -222,6 +263,10 @@ impl viewport::Viewport for Service {
 
     fn remove_layers(&self, owner: &str) {
         remove(&self.layers, owner);
+        let mut state = budget(&self.budget);
+        if state.demands.remove(owner).is_some() {
+            state.allow();
+        }
     }
 
     fn target(&self) -> Target {
@@ -230,6 +275,24 @@ impl viewport::Viewport for Service {
 
     fn wait_frame(&self, after: u64, timeout: Duration) -> Option<Frame> {
         self.frames.wait(after, timeout)
+    }
+
+    fn tell_budget(&self, owner: &str, demand: Demand) -> Allowance {
+        let mut state = budget(&self.budget);
+        state.demands.insert(owner.to_owned(), demand);
+        state.allow()
+    }
+
+    fn allowance(&self) -> Allowance {
+        budget(&self.budget).allowance
+    }
+
+    fn set_budget(&self, bytes: u64) {
+        let bytes = bytes.clamp(BUDGETS[0] * MB, BUDGETS[1] * MB);
+        let mut state = budget(&self.budget);
+        state.bytes = bytes;
+        state.unsaved = Some(bytes);
+        state.allow();
     }
 }
 
@@ -329,6 +392,7 @@ struct ViewportModule {
     show_stats: bool,
     /// What the layers wrote over the view at the last frame, with the transform it was drawn with.
     labels: (Mat4, Vec<Label>),
+    budget: Budget,
 }
 
 impl Default for ViewportModule {
@@ -351,6 +415,7 @@ impl Default for ViewportModule {
             last_frame: None,
             show_stats: false,
             labels: (Mat4::IDENTITY, Vec::new()),
+            budget: Arc::default(),
         }
     }
 }
@@ -360,6 +425,7 @@ impl Module for ViewportModule {
         let service: viewport::Handle = Arc::new(Service {
             layers: self.layers.clone(),
             frames: self.frames.clone(),
+            budget: self.budget.clone(),
         });
         reg.panel("view", "3D View", DockArea::Center)
             .provide(viewport::SERVICE, service)
@@ -429,6 +495,14 @@ impl Module for ViewportModule {
             .setting(STATISTICS)
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
+        let mut state = budget(&self.budget);
+        state.bytes = ctx
+            .setting(BUDGET)
+            .and_then(|value| value.as_u64())
+            .unwrap_or_else(|| default_budget(ctx.gpu_memory()))
+            .clamp(BUDGETS[0], BUDGETS[1])
+            * MB;
+        state.allow();
     }
 
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
@@ -479,12 +553,18 @@ impl Module for ViewportModule {
         }
         if self.show_stats {
             let colour = egui::Color32::from_gray(225);
-            let text = self.stats.text(self.timer.is_some(), stats::process_memory());
+            let allowance = budget(&self.budget).allowance;
+            let text = self
+                .stats
+                .text(self.timer.is_some(), stats::process_memory(), &allowance);
             let galley = painter.layout_no_wrap(text, egui::FontId::monospace(11.0), colour);
             let at = rect.left_top() + egui::vec2(8.0, 8.0);
             let back = egui::Rect::from_min_size(at, galley.size()).expand(4.0);
             painter.rect_filled(back, 3.0, egui::Color32::from_black_alpha(170));
             painter.galley(at, galley, colour);
+        }
+        if let Some(bytes) = budget(&self.budget).unsaved.take() {
+            ctx.set_setting(BUDGET, json!(bytes / MB));
         }
         ui.ctx().request_repaint();
     }
@@ -494,6 +574,10 @@ impl Module for ViewportModule {
             && let Some(id) = event.payload.get("id").and_then(|v| v.as_str())
         {
             remove(&self.layers, id);
+            let mut state = budget(&self.budget);
+            if state.demands.remove(id).is_some() {
+                state.allow();
+            }
         }
     }
 
@@ -903,7 +987,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use uniwow_api::serde_json::json;
-    use uniwow_api::viewport::{Frame, Label, Layer, LayerStats, Target, View};
+    use uniwow_api::viewport::{self, Allowance, Frame, Label, Layer, LayerStats, Target, View};
     use uniwow_api::{egui, egui_wgpu, wgpu};
 
     use uniwow_api::egui::{Event, Key, Modifiers, PointerButton, Pos2, vec2};
@@ -1059,6 +1143,44 @@ mod tests {
         assert_eq!(failures[0].0, "faulty");
         assert!(failures[0].1.contains("panicked while preparing"), "{}", failures[0].1);
         assert_eq!(lock(&layers).layers.len(), 2, "the faulty layer is removed");
+    }
+
+    #[test]
+    fn the_budget_of_the_view_is_half_the_memory_of_the_gpu_by_default_and_follows_what_is_told() {
+        assert_eq!(super::default_budget(Some(12 << 30)), 6144, "a GPU of 12 GB");
+        assert_eq!(super::default_budget(None), 1024, "not told");
+        assert_eq!(super::default_budget(Some(64 << 20)), 64, "never under the least");
+        assert_eq!(super::default_budget(Some(1 << 40)), 65_536, "nor over the most");
+
+        let shared = super::Budget::default();
+        let service = super::Service {
+            layers: Layers::default(),
+            frames: Arc::default(),
+            budget: shared.clone(),
+        };
+        use uniwow_api::viewport::Viewport as _;
+        service.set_budget(100 << 20);
+        let mut terrain = viewport::Demand {
+            fixed: 20 << 20,
+            ..viewport::Demand::default()
+        };
+        terrain.wanted[..10].fill(10 << 20);
+        let allowance = service.tell_budget("terrain", terrain.clone());
+        assert_eq!(allowance.load, 7.0 * viewport::BAND, "at once, with what was told");
+        assert_eq!(service.allowance(), allowance);
+        let allowance = service.tell_budget("models", terrain);
+        assert_eq!(
+            allowance.load,
+            2.0 * viewport::BAND,
+            "40 fixed, then 20 a band within 90"
+        );
+        service.remove_layers("models");
+        assert_eq!(
+            service.allowance().load,
+            7.0 * viewport::BAND,
+            "given back once it is gone"
+        );
+        assert_eq!(super::budget(&shared).unsaved, Some(100 << 20), "kept in the settings");
     }
 
     #[test]
@@ -1440,7 +1562,7 @@ mod tests {
             stats.push(start + Duration::from_millis(frame * 20), sample);
         }
         stats.push_gpu(start, 3.0);
-        let text = stats.text(true, None);
+        let text = stats.text(true, None, &Allowance::default());
         assert!(text.starts_with("48 fps: a frame 20.7 ms, the longest 40.0"), "{text}");
         assert!(text.contains("view, interface thread: 2.00 ms"), "{text}");
         assert!(text.contains("GPU: 3.00 ms"), "{text}");
@@ -1454,9 +1576,21 @@ mod tests {
             ),
             "{text}"
         );
-        assert!(stats.text(false, None).contains("not timed"));
-        let memory = stats.text(true, Some((300 << 20, 200 << 20)));
+        assert!(stats.text(false, None, &Allowance::default()).contains("not timed"));
+        let memory = stats.text(true, Some((300 << 20, 200 << 20)), &Allowance::default());
         assert!(memory.contains("process: 300 MB in memory, 200 MB private"), "{memory}");
+        assert!(!memory.contains("GPU budget"), "no budget told, none written");
+        let budget = Allowance {
+            budget: 1000 << 20,
+            used: 300 << 20,
+            limited: Some(viewport::BAND * 8.0),
+            ..Allowance::default()
+        };
+        let limited = stats.text(true, None, &budget);
+        assert!(
+            limited.contains("GPU budget of the view: 300 of 1000 MB; reach limited to 2.0 tiles"),
+            "{limited}"
+        );
         let (working, private) = super::stats::process_memory().expect("Windows tells it");
         assert!(working > 1 << 20 && private > 1 << 20);
 
@@ -1467,9 +1601,9 @@ mod tests {
         };
         stats.push(start + Duration::from_secs(3), later);
         assert!(
-            stats.text(true, None).starts_with("100 fps"),
+            stats.text(true, None, &Allowance::default()).starts_with("100 fps"),
             "{}",
-            stats.text(true, None)
+            stats.text(true, None, &Allowance::default())
         );
     }
 }

@@ -27,6 +27,128 @@ pub trait Viewport: Send + Sync {
     /// submitted a frame, so that what a thread writes then is drawn by the next one; it is not
     /// given while the view is not drawn.
     fn wait_frame(&self, after: u64, timeout: Duration) -> Option<Frame>;
+
+    /// Tells the budget of the view what `owner` keeps and wants on the GPU, until it tells again
+    /// or its layers are removed: what the budget allows now, with what every other layer told
+    /// last. On the interface thread, as it steers its loads.
+    fn tell_budget(&self, owner: &str, demand: Demand) -> Allowance;
+
+    /// What the budget of the view allows every layer, from what they told last.
+    fn allowance(&self) -> Allowance;
+
+    /// Sets the budget of the view, in bytes; kept in the settings of the view.
+    fn set_budget(&self, bytes: u64);
+}
+
+/// The width of a band of distance of the budget, in yards: a quarter of a tile.
+pub const BAND: f32 = 533.333_3 / 4.0;
+/// The bands of the budget, up to 64 tiles from the eye; what lies beyond counts in the last.
+pub const BANDS: usize = 256;
+/// The share of the budget the loads fill; what is held is kept up to all of it, so that an item
+/// at the edge is neither loaded nor released in turn.
+pub const LOAD_SHARE: f64 = 0.9;
+
+/// What a layer keeps on the GPU, as it tells the budget of the view: what it takes outside its
+/// items, such as arrays of textures, and the bytes of its items held and of those it wants, by
+/// their distance from the eye.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Demand {
+    pub fixed: u64,
+    /// `BANDS` bands of `BAND` yards each.
+    pub held: Vec<u64>,
+    pub wanted: Vec<u64>,
+}
+
+impl Default for Demand {
+    fn default() -> Self {
+        Self {
+            fixed: 0,
+            held: vec![0; BANDS],
+            wanted: vec![0; BANDS],
+        }
+    }
+}
+
+impl Demand {
+    /// The band of an item `distance` yards from the eye.
+    pub fn band(distance: f32) -> usize {
+        ((distance.max(0.0) / BAND) as usize).min(BANDS - 1)
+    }
+
+    /// What it holds on the GPU in all.
+    pub fn used(&self) -> u64 {
+        self.fixed + self.held.iter().sum::<u64>()
+    }
+}
+
+/// What the budget of the view allows, the same distances for every layer: the nearest items
+/// first, whatever layer they belong to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Allowance {
+    pub budget: u64,
+    /// What every layer holds, as they told.
+    pub used: u64,
+    /// The distance from the eye, in yards, the loads of every layer fill `LOAD_SHARE` of the
+    /// budget to, and the one what is held is kept to; infinite when all that is wanted fits.
+    pub load: f32,
+    pub keep: f32,
+    /// When the budget holds fewer items than the layers want: the reach it leaves, in yards.
+    pub limited: Option<f32>,
+}
+
+impl Default for Allowance {
+    fn default() -> Self {
+        Self {
+            budget: u64::MAX,
+            used: 0,
+            load: f32::INFINITY,
+            keep: f32::INFINITY,
+            limited: None,
+        }
+    }
+}
+
+/// What `budget` allows the layers that told `demands`: the bands of all of them, the nearest
+/// first, as far as their fixed costs and the items they want fit `LOAD_SHARE` of it, and all of it.
+pub fn allow(budget: u64, demands: &[&Demand]) -> Allowance {
+    let fixed: u64 = demands.iter().map(|demand| demand.fixed).sum();
+    let used = demands.iter().map(|demand| demand.used()).sum();
+    let wanted: Vec<u64> = (0..BANDS)
+        .map(|band| {
+            demands
+                .iter()
+                .map(|demand| demand.wanted.get(band).copied().unwrap_or(0))
+                .sum()
+        })
+        .collect();
+    let last = wanted.iter().rposition(|bytes| *bytes > 0).map_or(0, |band| band + 1);
+    // The bands that fit `room`, the nearest first.
+    let fitting = |room: u64| {
+        let mut total = fixed;
+        wanted[..last]
+            .iter()
+            .take_while(|bytes| {
+                total += **bytes;
+                total <= room
+            })
+            .count()
+    };
+    let reach = |bands: usize| {
+        if bands == last {
+            f32::INFINITY
+        } else {
+            bands as f32 * BAND
+        }
+    };
+    let loaded = fitting((budget as f64 * LOAD_SHARE) as u64);
+    let kept = fitting(budget);
+    Allowance {
+        budget,
+        used,
+        load: reach(loaded),
+        keep: reach(kept),
+        limited: (loaded < last).then_some(loaded as f32 * BAND),
+    }
 }
 
 /// The longest a thread waits for the frame signal at a time.
@@ -129,4 +251,65 @@ pub struct LayerStats {
     /// The time its module spent on the interface thread for it this frame, outside `prepare` and
     /// `draw`, such as steering what it loads.
     pub steering: Duration,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Allowance, BAND, BANDS, Demand, allow};
+
+    /// A demand of `fixed` bytes, wanting `bytes` in each of the bands `wanted` and holding `held`.
+    fn demand(fixed: u64, wanted: std::ops::Range<usize>, bytes: u64, held: u64) -> Demand {
+        let mut demand = Demand {
+            fixed,
+            ..Demand::default()
+        };
+        for band in wanted {
+            demand.wanted[band] = bytes;
+            demand.held[band] = held;
+        }
+        demand
+    }
+
+    #[test]
+    fn the_budget_gives_every_layer_the_same_reach_the_nearest_items_first() {
+        // 20 fixed and 10 a band: 90 % of 100 holds 7 bands, all of it 8.
+        let one = demand(20, 0..10, 10, 5);
+        let allowance = allow(100, &[&one]);
+        assert_eq!(allowance.load, 7.0 * BAND);
+        assert_eq!(allowance.keep, 8.0 * BAND);
+        assert_eq!(allowance.limited, Some(7.0 * BAND));
+        assert_eq!(allowance.used, 20 + 10 * 5);
+
+        // All fits: no limit, no reach.
+        let all = allow(1_000, &[&one]);
+        assert_eq!((all.load, all.keep, all.limited), (f32::INFINITY, f32::INFINITY, None));
+
+        // Two layers share the bands: 10 + 10 a band, the fixed costs of both first.
+        let other = demand(10, 0..10, 10, 0);
+        let shared = allow(100, &[&one, &other]);
+        assert_eq!(shared.load, 3.0 * BAND, "30 fixed, then 20 a band within 90");
+        assert_eq!(shared.keep, 3.0 * BAND, "within 100");
+
+        // A layer wanting nothing yet takes its fixed cost only.
+        assert_eq!(
+            allow(100, &[&demand(50, 0..0, 0, 0)]),
+            Allowance {
+                budget: 100,
+                used: 50,
+                load: f32::INFINITY,
+                keep: f32::INFINITY,
+                limited: None,
+            }
+        );
+        assert_eq!(allow(100, &[]).limited, None);
+    }
+
+    #[test]
+    fn an_item_falls_in_the_band_of_its_distance_the_farthest_in_the_last() {
+        assert_eq!(Demand::band(0.0), 0);
+        assert_eq!(Demand::band(BAND * 1.5), 1);
+        assert_eq!(Demand::band(-5.0), 0);
+        assert_eq!(Demand::band(1e9), BANDS - 1);
+        assert_eq!(Demand::default().held.len(), BANDS);
+    }
 }

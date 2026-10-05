@@ -1,10 +1,13 @@
 //! The order of loading, decided on the interface thread at each frame: the tiles wanted around
-//! the camera, nearest first, full near it and light beyond; as many of them as the GPU budget
-//! holds; the loads to start, at most a job per worker but one and never beyond the budget; those
-//! to cancel; and the tiles to release, those no longer wanted first, then the farthest. Nothing
-//! here depends on where the camera looks: turning it loads and releases nothing.
+//! the camera, nearest first, full near it and light beyond; as far as the GPU budget of the view
+//! lets them reach, shared with the other layers; the loads to start, at most a job per worker but
+//! one and never beyond the budget; those to cancel; and the tiles to release, those no longer
+//! wanted first, then the farthest. Nothing here depends on where the camera looks: turning it
+//! loads and releases nothing.
 
 use std::collections::{HashMap, HashSet};
+
+use uniwow_api::viewport::{Allowance, Demand};
 
 use crate::model::{TILE, TileId};
 
@@ -114,11 +117,12 @@ pub struct Inputs<'a> {
     pub loading: &'a HashMap<TileId, Kind>,
     /// The tiles that could not be read, never asked again.
     pub refused: &'a HashSet<TileId>,
-    /// All the terrain takes on the GPU, and what of it does not go with the tiles: the arrays of
-    /// textures and the horizon.
+    /// All the terrain takes on the GPU, and what it may take of the budget of the view: the budget
+    /// less what the other layers hold.
     pub used: u64,
-    pub fixed: u64,
     pub budget: u64,
+    /// What the budget of the view allows every layer: how far the loads go, and what is kept.
+    pub allowance: Allowance,
     pub costs: Costs,
     /// The loads that may run at once.
     pub slots: usize,
@@ -136,10 +140,33 @@ pub struct Plan {
     pub limited: Option<f32>,
 }
 
-/// The share of the budget the loads may fill. The tiles already held beyond it are kept up to the
-/// whole budget: between the two, a tile at the edge is neither loaded nor released, so that the
-/// edge does not go back and forth.
-const LOAD_SHARE: f64 = 0.9;
+/// What the terrain tells the budget of the view: what it takes outside its tiles, `fixed`; the
+/// bytes of the tiles held, by their distance from `eye`; and those of the tiles wanted, at the kind
+/// each wants, as they take when held so, as `costs` expects otherwise.
+pub fn demand(inputs: &Inputs, eye: [f32; 2], fixed: u64) -> Demand {
+    let mut demand = Demand {
+        fixed,
+        ..Demand::default()
+    };
+    for (tile, held) in inputs.held {
+        demand.held[Demand::band(distance(*tile, eye))] += held.bytes;
+    }
+    for &(tile, tiles) in inputs.wanted {
+        if inputs.refused.contains(&tile) {
+            continue;
+        }
+        let held = inputs.held.get(&tile);
+        let now = held
+            .map(|held| held.kind)
+            .or_else(|| inputs.loading.get(&tile).copied());
+        let kind = kind(tiles, now, held.is_some_and(|held| held.changed));
+        let bytes = held
+            .filter(|held| held.kind == kind)
+            .map_or(inputs.costs.of(kind), |held| held.bytes);
+        demand.wanted[Demand::band(tiles * TILE)] += bytes;
+    }
+    demand
+}
 
 /// The plan for this frame.
 pub fn plan(inputs: &Inputs) -> Plan {
@@ -159,19 +186,15 @@ pub fn plan(inputs: &Inputs) -> Plan {
             (tile, distance, kind(distance, now, changed))
         })
         .collect();
-    // How many of the tiles wanted, the nearest first, `share` of the budget holds.
-    let fit = |share: f64| {
-        let room = ((inputs.budget as f64 * share) as u64).saturating_sub(inputs.fixed);
-        let mut total = 0;
+    // The tiles wanted the budget of the view lets the loads reach, the nearest first, and those it
+    // keeps: between the two, a tile at the edge is neither loaded nor released.
+    let within = |reach: f32| {
         desired
             .iter()
-            .take_while(|(_, _, kind)| {
-                total += costs.of(*kind);
-                total <= room
-            })
+            .take_while(|(_, distance, _)| distance * TILE < reach)
             .count()
     };
-    let (loaded, kept) = (fit(LOAD_SHARE), fit(1.0));
+    let (loaded, kept) = (within(inputs.allowance.load), within(inputs.allowance.keep));
     let to_load: HashMap<TileId, Kind> = desired[..loaded].iter().map(|(tile, _, kind)| (*tile, *kind)).collect();
     let to_keep: HashSet<TileId> = desired[..kept].iter().map(|(tile, ..)| *tile).collect();
     let wanted_at: HashMap<TileId, f32> = desired.iter().map(|(tile, distance, _)| (*tile, *distance)).collect();

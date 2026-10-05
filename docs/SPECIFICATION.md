@@ -3039,6 +3039,46 @@ Risks, verified at the start of their part: how many M2 of the client the copy r
 how many distinct models and batches a city draws, and the draws it makes (9.4c, 9.4d); whether the
 terrain keeps its behaviour at 64 on the shared budget (9.4a).
 
+#### Step 9.4a, as built
+
+- `uniwow_api::viewport` holds the budget shared by the view:
+  - `Demand`: what a layer takes outside its items (`fixed`), and the bytes of its items held and
+    wanted, in 256 bands of a quarter of a tile (`BAND`, 133.3 yards) from the eye, the last band
+    holding all beyond 64 tiles;
+  - `Allowance`: the budget, what every layer holds, the distance the loads fill `LOAD_SHARE`
+    (90 %) of the budget to, the one what is held is kept to, and the reach left when the budget
+    holds fewer items than wanted;
+  - `allow(budget, demands)`, pure: the fixed costs of every layer first, then the bands of all of
+    them, the nearest first, whatever layer they belong to;
+  - the service: `tell_budget(owner, demand)` answers at once with what the budget allows, with
+    what every other layer told last, so that a layer never plans on an allowance that misses its
+    own demand; `allowance()`; `set_budget(bytes)`. A layer removed, or whose module failed, is no
+    longer counted.
+- The module `viewport` keeps the budget, `gpu_budget_mb` in its settings, half the memory of the
+  GPU's own by default (1,024 MB when not told), from 64 MB to 64 GB. The statistics of the view
+  give *GPU budget of the view: N of M MB*, and the reach left when limited.
+- The terrain is on it: its planner (`loading::plan`) loads the tiles wanted closer than the
+  distance allowed for the loads, keeps those closer than the one allowed for what is held, and
+  never starts a load beyond the budget less what the other layers hold; `loading::demand` tells
+  the tiles held by their distance and the tiles wanted at the kind each wants, at the bytes they
+  take when held so, at the cost expected otherwise. It tells when its demand changes, and plans
+  again when what is allowed changes (the reaches by eighths of a tile, what the others leave by
+  16 MB). Its panel sets the budget of the view; the terrain's own `gpu_budget_mb`, of before, is
+  given to the view once, then cleared.
+- Tests: the budget given by bands, the nearest first, shared by two layers, without margin
+  between loads and keeps once nothing more fits, the fixed costs first, all fitting without a
+  reach; the band of a distance; the service answering at once, shared, given back when a layer is
+  gone, kept in the settings; half the GPU by default; the terrain telling its tiles held and
+  wanted, refused ones aside; its loads within the reach allowed for the loads and not as far as
+  the one for what is kept; the world of tiles of step 9.2f under a budget settling, still,
+  turning and moving, now on the budget of the view. Each of 8 changes made on purpose to the
+  budget, the service and the terrain's demand made a test fail.
+- Measured again on the user's machine, as in step 9.2f: Kalimdor at 64, its 988 tiles in 1.1 s,
+  1,269 to 1,340 MB of a budget of 6,042 MB, 60 frames a second; with 600 MB given by the terrain's
+  setting of before, 500 MB of 600 held, the reach limited to 5.0 tiles, 78 tiles (84 before: the
+  budget now counts by quarters of a tile), nothing loaded nor released afterwards, still or
+  turning.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

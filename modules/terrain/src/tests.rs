@@ -12,7 +12,7 @@ use uniwow_api::formats::{
     Tile, Wdl, Wdt,
 };
 use uniwow_api::glam::{Mat4, Vec3};
-use uniwow_api::viewport::{Layer as _, Target, View};
+use uniwow_api::viewport::{self, Allowance, Layer as _, Target, View};
 use uniwow_api::{JobId, JobOutcome, bytemuck, egui, egui_wgpu, wgpu};
 
 use crate::gpu::{self, Shared};
@@ -310,17 +310,21 @@ impl World {
             );
         }
         let wanted = loading::wanted(tiles, eye, distance);
-        let plan = loading::plan(&Inputs {
+        let refused = HashSet::new();
+        let mut inputs = Inputs {
             wanted: &wanted,
             held: &self.held,
             loading: &self.loading,
-            refused: &HashSet::new(),
+            refused: &refused,
             used: self.used(),
-            fixed: FIXED,
             budget,
+            allowance: Allowance::default(),
             costs: COSTS,
             slots: 15,
-        });
+        };
+        // The terrain alone on the budget of the view, as the module tells it at each plan.
+        inputs.allowance = viewport::allow(budget, &[&loading::demand(&inputs, eye, FIXED)]);
+        let plan = loading::plan(&inputs);
         for tile in &plan.cancel {
             self.loading.remove(tile);
         }
@@ -361,8 +365,8 @@ fn the_loads_start_nearest_first_full_near_and_light_beyond_within_their_slots()
         loading: &no_loads,
         refused: &HashSet::new(),
         used: FIXED,
-        fixed: FIXED,
         budget: 1 << 40,
+        allowance: Allowance::default(),
         costs: COSTS,
         slots: 3,
     };
@@ -379,6 +383,26 @@ fn the_loads_start_nearest_first_full_near_and_light_beyond_within_their_slots()
         .filter(|(_, distance)| *distance > loading::FULL[0])
         .count();
     assert_eq!(light, far, "light beyond 7 tiles");
+
+    // The loads go as far as the budget lets them, not as far as it keeps what is held.
+    inputs.allowance = Allowance {
+        load: 1.5 * TILE,
+        keep: 2.5 * TILE,
+        ..Allowance::default()
+    };
+    let plan = loading::plan(&inputs);
+    assert!(
+        plan.start
+            .iter()
+            .all(|(tile, _)| loading::distance(*tile, eye) < 1.5 * TILE)
+    );
+    assert_eq!(plan.start.len(), 9, "the nearest, four a tile away and four across");
+    let reach = plan.limited.expect("fewer than wanted");
+    assert!(
+        (reach - 2f32.sqrt()).abs() < 1e-4,
+        "the farthest within the reach: {reach}"
+    );
+    inputs.allowance = Allowance::default();
 
     // A load for a tile left behind, or of the kind it no longer wants, is cancelled.
     let loading = HashMap::from([(id(0, 0), Kind::Full), (id(32, 32), Kind::Light)]);
@@ -408,17 +432,23 @@ fn beyond_the_budget_the_tiles_not_wanted_go_first_then_the_farthest_never_those
     ]);
     let loading = HashMap::new();
     let used = FIXED + 30 * MB;
-    let inputs = Inputs {
+    let mut inputs = Inputs {
         wanted: &wanted,
         held: &held,
         loading: &loading,
         refused: &HashSet::new(),
         used,
-        fixed: FIXED,
         budget: FIXED + 12 * MB,
+        allowance: Allowance::default(),
         costs: COSTS,
         slots: 15,
     };
+    inputs.allowance = viewport::allow(inputs.budget, &[&loading::demand(&inputs, eye, FIXED)]);
+    assert_eq!(
+        inputs.allowance.load,
+        viewport::BAND * 4.0,
+        "the nearest band only, then a ring of 24 MB"
+    );
     let plan = loading::plan(&inputs);
     assert_eq!(
         plan.release,
@@ -431,13 +461,15 @@ fn beyond_the_budget_the_tiles_not_wanted_go_first_then_the_farthest_never_those
     // A changed tile keeps its room: the load it leaves no room for waits.
     let wanted = loading::wanted(&all, eye, 0);
     let held = HashMap::from([(id(45, 32), held_as(Kind::Full, true))]);
-    let plan = loading::plan(&Inputs {
+    let mut changed = Inputs {
         wanted: &wanted,
         held: &held,
         used: FIXED + 6 * MB,
         budget: FIXED + 10 * MB,
         ..inputs
-    });
+    };
+    changed.allowance = viewport::allow(changed.budget, &[&loading::demand(&changed, eye, FIXED)]);
+    let plan = loading::plan(&changed);
     assert_eq!(plan.release, Vec::<TileId>::new());
     assert!(plan.start.is_empty(), "nothing started beyond the budget");
 }
@@ -515,11 +547,74 @@ fn the_costs_expected_are_the_means_of_the_tiles_held_or_the_defaults() {
 }
 
 #[test]
-fn the_budget_by_default_is_half_the_memory_of_the_gpu_when_told() {
-    assert_eq!(crate::default_budget(Some(12 << 30)), 6144, "a GPU of 12 GB");
-    assert_eq!(crate::default_budget(None), 1024, "not told");
-    assert_eq!(crate::default_budget(Some(64 << 20)), 64, "never under the least");
-    assert_eq!(crate::default_budget(Some(1 << 40)), 65_536, "nor over the most");
+fn the_terrain_tells_the_budget_its_tiles_held_and_wanted_by_their_distance() {
+    let all = vec![true; 4096];
+    let eye = id(32, 32).centre();
+    let wanted = loading::wanted(&all, eye, 10);
+    let held = HashMap::from([
+        (
+            id(32, 32),
+            Held {
+                kind: Kind::Full,
+                bytes: 5 * MB,
+                changed: false,
+            },
+        ),
+        // Light, where it should be full: wanted at the cost of a full tile.
+        (
+            id(33, 32),
+            Held {
+                kind: Kind::Light,
+                bytes: MB,
+                changed: false,
+            },
+        ),
+        // Held and no longer wanted.
+        (
+            id(60, 32),
+            Held {
+                kind: Kind::Light,
+                bytes: 2 * MB,
+                changed: false,
+            },
+        ),
+    ]);
+    let refused = HashSet::from([id(32, 33)]);
+    let inputs = Inputs {
+        wanted: &wanted,
+        held: &held,
+        loading: &HashMap::new(),
+        refused: &refused,
+        used: 0,
+        budget: 0,
+        allowance: Allowance::default(),
+        costs: COSTS,
+        slots: 1,
+    };
+    let demand = loading::demand(&inputs, eye, FIXED);
+    assert_eq!(demand.fixed, FIXED);
+    assert_eq!(demand.held[0], 5 * MB);
+    assert_eq!(
+        demand.held[4], MB,
+        "a tile away, in the fourth band of a quarter of a tile"
+    );
+    assert_eq!(
+        demand.held[viewport::Demand::band(loading::distance(id(60, 32), eye))],
+        2 * MB
+    );
+    assert_eq!(demand.wanted[0], 5 * MB, "as it takes when held at the kind wanted");
+    // A tile away: four tiles, one refused, one held light where it should be full.
+    assert_eq!(demand.wanted[4], 3 * COSTS.full);
+    let far = viewport::Demand::band(9.0 * TILE);
+    assert!(
+        demand.wanted[far] > 0 && demand.wanted[far].is_multiple_of(COSTS.light),
+        "light beyond 7 tiles"
+    );
+    assert_eq!(
+        demand.wanted[viewport::Demand::band(28.0 * TILE)],
+        0,
+        "beyond the distance wanted"
+    );
 }
 
 #[test]

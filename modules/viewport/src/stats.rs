@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
-use uniwow_api::viewport::LayerStats;
+use uniwow_api::viewport::{self, Allowance, LayerStats};
 use uniwow_api::wgpu;
 
 /// What the samples cover.
@@ -116,7 +116,7 @@ impl Stats {
     /// The statistics as the view shows them, a line each: the frames, the interface thread, the
     /// GPU, the memory of the process, then each layer; `timed` says whether the GPU is timed,
     /// `memory` what the process takes, its working set and its private bytes.
-    pub fn text(&self, timed: bool, memory: Option<(u64, u64)>) -> String {
+    pub fn text(&self, timed: bool, memory: Option<(u64, u64)>, budget: &Allowance) -> String {
         let samples = || self.samples.iter().map(|(_, sample)| sample);
         let (interval, longest) = spread(samples().filter_map(|s| s.interval.map(ms)));
         let mut lines = vec![format!(
@@ -136,12 +136,22 @@ impl Stats {
         } else {
             "GPU: not timed, the device has no timestamps".to_owned()
         });
+        let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
         if let Some((working, private)) = memory {
-            let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
             lines.push(format!(
                 "process: {:.0} MB in memory, {:.0} MB private",
                 mb(working),
                 mb(private)
+            ));
+        }
+        if budget.budget != u64::MAX {
+            let limited = budget.limited.map_or(String::new(), |reach| {
+                format!("; reach limited to {:.1} tiles", reach / (viewport::BAND * 4.0))
+            });
+            lines.push(format!(
+                "GPU budget of the view: {:.0} of {:.0} MB{limited}",
+                mb(budget.used),
+                mb(budget.budget)
             ));
         }
         let Some((_, last)) = self.samples.back() else {
