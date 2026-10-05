@@ -3743,6 +3743,106 @@ stand within 300 yards (9.3a, 9.3b).
   and `models` made a test fail; the call to `Models::place` from the thread and the extent given
   when a load ends are checked by the acceptance only.
 
+#### Step 9.4e, proposed: the drawing of the models led by the GPU
+
+Decided by the user after the review of 9.4d: the draws of a city are settled now, before step
+9.5, whose animation is built on this. Each look today has its own buffers, textures and bind
+groups, a draw per group, look and batch, chosen on the CPU and kept in a bundle recorded again
+when the order of the blended groups changes.
+
+**Checked before proposing**, on the user's machine (RTX 3080 Ti) and the client:
+
+- What the adapter offers, through Vulkan, wgpu 30: `INDIRECT_FIRST_INSTANCE`,
+  `MULTI_DRAW_INDIRECT_COUNT`, `TIMESTAMP_QUERY`, `TIMESTAMP_QUERY_INSIDE_ENCODERS` and
+  `_INSIDE_PASSES`, `TEXTURE_BINDING_ARRAY` with non-uniform indexing; `VERTEX_STORAGE`,
+  `INDIRECT_EXECUTION`, compute; 2,048 layers an array, 524,288 sampled textures a stage, a
+  storage binding of 2 GB. The software adapter of the tests (Microsoft Basic Render Driver)
+  offers the same features.
+- In wgpu 30, `RenderPass` has `multi_draw_indexed_indirect` and its count variant, issued as one
+  `vkCmdDrawIndexedIndirect` with its count when the device has `multiDrawIndirect` (else a loop
+  in wgpu-hal); `RenderBundleEncoder` has neither, only `draw_indexed_indirect`. A layer that
+  draws by multi-draw draws in the pass of the view, not in a bundle.
+- The textures of a city, by class (format, size, levels), read by a probe not kept: Orgrimmar
+  266 textures in 25 classes (138 of them BC1 of 512 × 512), Dalaran 762 in 36; 25 and 34
+  classes by format and size alone. The terrain binds 12 arrays at once.
+- The pairs (instance, batch) at rest, every submesh counted: Orgrimmar 20,183, of them 1,856
+  alpha-keyed and 894 blended; Dalaran 21,424, 2,878 and 1,336. The vertices and indices of the
+  models of a city, every skin: 179 K and 2.6 M (Orgrimmar), 499 K and 6.1 M (Dalaran).
+
+**In three parts, each reviewed before the next:**
+
+- **9.4e1, the core and the arrays of textures.**
+  - `Layer` gains a step of computation before the pass: `compute(&mut self, gpu, view, encoder:
+    &mut CommandEncoder)`, nothing by default, run after `prepare`, in the same scope of
+    validation, its failure removing the layer as `prepare`'s does; and a way to draw in the pass
+    itself: a layer says it draws in the pass (`Drawing::Pass`, `Drawing::Bundle` by default) and
+    is then given `draw_pass(&mut self, gpu, target, view, pass: &mut RenderPass)` at each frame,
+    the layers drawn in their order, bundles and passes mixed. Tested in `core/api` and
+    `viewport` as the additions of 9.2a: the order kept, a compute writing what the pass reads in
+    the same frame, a failure of each kind reported.
+  - The statistics time each layer's computation and drawing on the GPU apart, by timestamps
+    around its compute pass and its draws (inside the pass where the adapter allows it, the
+    layer's total otherwise).
+  - The kernel asks, when the adapter offers them, for `INDIRECT_FIRST_INSTANCE`,
+    `MULTI_DRAW_INDIRECT_COUNT` and `TIMESTAMP_QUERY_INSIDE_PASSES`, and for 64 sampled textures a
+    stage at least.
+  - The arrays of textures of the terrain (`terrain/src/textures.rs`) move into `core/api`,
+    generalised: as many slots as the user asks, the class by format and size, a texture of fewer
+    levels than its class taking the chain of its class, its own levels filled and its level of
+    detail held to them by its shader (its gradients clamped). The terrain uses them unchanged,
+    its tests kept; measured as in 9.2f.
+- **9.4e2, the shared resources of the models, drawn in the pass by multi-draw.**
+  - The vertices of every model read in one arena, the indices (32 bits) in another: a buffer
+    each, a list of holes, grown by a buffer twice as large filled by a copy the job submits (the
+    rule of 9.2f), a model's ranges given back when no look holds it; counted in the shared
+    budget with the arrays.
+  - A record of draw for each (look, level of skin, batch): its range of indices, its base vertex,
+    its material, its state of pipeline. A table of materials in a storage buffer: the colour and
+    weight at rest, the flags, the shader of 9.4c2 and its coordinates, its two textures as
+    (array, layer, levels, wrapping); the textures of the looks in the arrays of `core/api`, 64
+    slots read by a `switch` as the terrain does (no `binding_array`: 36 classes in Dalaran fit),
+    a texture clamped or wrapped by the shader from its wrapping, one sampler. The baked skins
+    are textures like the others: the NPCs of one body share its vertices and differ by their
+    materials.
+  - Drawn in the pass, by state of pipeline (blending, two sides, depth: a dozen at most), by one
+    `multi_draw_indexed_indirect` over the records of that state, their arguments written by the
+    CPU at each frame for the groups in sight (as 9.4c chooses them), `first_instance` pointing
+    into a list of the instances seen; the blended ones sorted by the CPU, the farthest first,
+    within each blended state, the states in a fixed order (alpha and blend add sorted, then add,
+    mod and mod2x, whose order changes nothing within themselves). The bundle is gone: the layer
+    records a few dozen commands each frame, whatever moves.
+  - Kept: the path of 9.4c, for an adapter without the features or limits above, chosen at start
+    and tested by forcing it; the API of the service `models`, unchanged for its users.
+- **9.4e3, the choice by the GPU.**
+  - A pass of computation at each frame, over the instances of each owner: in sight (the bounds of
+    its look, turned and scaled, against the planes of the view), within the reach of its size, its
+    level of skin by its distance in radii with the margin of 9.4c1, the level before kept in a
+    buffer for each instance (begun again when its owner's set is regrouped); for each record of
+    its look at that level, its instance appended to the record's list by an atomic add in a range
+    reserved as many as the look's instances (reserved by the CPU when the sets change), the
+    arguments of the draws copied from their templates first. What a seen instance needs (its rows,
+    alpha, record) is copied into the list, the vertex shader reading it there by
+    `instance_index`: every owner's instances drawn by the same commands.
+  - The blended pairs stay sorted by the CPU as in 9.4e2, now by instance, its arguments written
+    for the draws; a sort on the GPU only if the measure asks for it.
+  - Measured against the table of 9.4d, in Orgrimmar and Dalaran, still then flying: the commands
+    of the layer, the interface thread (preparing, recording, submitting), the GPU (computation
+    and drawing apart), the bundles recorded a second. Goals: a few dozen commands for the layer,
+    the interface thread under 1 ms on average in Dalaran, no recording while flying but when the
+    looks change, the GPU no worse than in 9.4d.
+
+**What this settles too**: the point to revisit of 9.4c1 (the level and the reach of each instance,
+for the doodads of 9.6) by 9.4e3; and the bundle recorded again 20 times a second in Dalaran, gone
+in 9.4e2.
+
+**Made ready for step 9.5, not built**: the bones of an instance as an offset into a storage
+buffer of matrices, carried with the instance into the list the vertex shader reads; the
+vertices in the arena gaining their four bone indices and weights (8 bytes) then.
+
+**Threads**: the choice moves from the CPU to the GPU; the thread of `live-world` keeps writing its
+instances by `place`; the loads stay jobs writing into the arena and the arrays by copies they
+submit.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around
