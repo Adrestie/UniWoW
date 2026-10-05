@@ -2678,9 +2678,40 @@ Changes from the design above, proposed:
    The creatures of the zone then move, follow their paths and respawn as near a player; nothing
    is created, nothing can be seen, selected or saved.
 2. **A zone of one grid at most in this milestone**, 533 yards around the centre, the cap of
-   `Cell::VisitObjects`; more would need several visits.
+   `Cell::VisitObjects`; more would need several visits. Every grid the circle touches is loaded,
+   up to 4 when the centre is near a corner of grids, by `Map::LoadGridsInRange(center, radius)`
+   (`Map.h:226`).
 3. **A dungeon or a battleground is shown while its instance exists**: the observer does not keep
    an instance alive.
+
+Added by the review of the proposal:
+
+- **The licence of the module**: AzerothCore is under the GPL 2.0 or later (the headers of its
+  sources); a module compiled into the worldserver with its headers takes a licence compatible with
+  it. `server/mod-uniwow-observer/` is under the GPL 2.0 or later, with its file `LICENSE`, and so
+  are `PROTOCOL.md` and `tools/probe.py`, which go with it. The editor speaks to it only through
+  the network protocol: two separate programs, and the licence of UniWoW stays the open question of
+  section 10. Nothing of the code of AzerothCore goes into the editor.
+- **The worldserver never falls nor waits because of the module**, which runs in the user's
+  server:
+  - no exception leaves the network thread nor the hook;
+  - the size of a message, the connections and the subscriptions are bounded; a message malformed
+    closes its connection, nothing more;
+  - the thread of a map takes only the lock of its subscription, briefly, and never waits for the
+    network;
+  - a setting `Enable` in its `.conf` turns it off.
+- **The cost of each update**: reading the zone, at the pace of the protocol (10 times a second),
+  is apart from putting its objects back in the update list. If visiting the cells costs at each
+  full update, the objects are put back from the GUIDs of the last reading (`Map::GetCreature`,
+  `Map::GetGameObject`), not by a new visit. Both are measured.
+- **Care on the user's server**:
+  - `worldserver.exe` and its configuration are saved before the module is linked, and how to go
+    back is written;
+  - a check with `MapUpdate.Threads = 4` tries the lock of each subscription while maps update in
+    parallel, then the user's setting is put back;
+  - the documentation of the module says that the grids it loads stay loaded until the server
+    starts again, as those a player crossed (`UnloadAll` only): flying over the whole world in the
+    editor loads all it flew over.
 
 The parts:
 
@@ -2695,8 +2726,12 @@ The parts:
   written beside it. Checked on the server, with `tools/probe.py` beside the module (a client of
   the protocol in Python, printing what it receives): a zone without a player kept alive (creatures
   moving, respawning) and no longer once unsubscribed, disconnected or silent for 10 seconds; the
-  time the observer takes in the update of a map; the bytes a second in a city; a game master sees
-  nothing new. The CI cannot build AzerothCore: the module is built on the user's machine only.
+  time the observer takes in the update of a map, reading and keeping apart, on average and at
+  most, in a city; the bytes a second in a city; a game master sees nothing new; messages corrupted
+  and cut short, a client cut in the middle of a message, 100 connections and disconnections in a
+  row, a subscription to a map or an instance that does not exist, the worldserver going on
+  without an error; the same with `MapUpdate.Threads = 4`. The CI cannot build AzerothCore: the
+  module is built on the user's machine only.
 - **9.3b, the editor's side.** `libs/server-link` in the runtime (its fingerprint changes once): the
   client of the protocol, tested against a fake server in Rust that the CI runs. The module
   `live-world`: the connection on a thread of its own, the snapshot of the entities shared between
