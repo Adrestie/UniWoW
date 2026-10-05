@@ -241,8 +241,14 @@ impl LiveWorld {
         lock(&self.current).clone()
     }
 
-    /// Starts the connection thread again with the settings in use.
+    /// Starts the connection thread again with the settings in use. The entities of the one
+    /// before are said to leave first, through the same queue of events its thread told them
+    /// through, and it tells nothing more.
     fn start(&mut self, ctx: &mut Context) {
+        let change = self.shared().retire();
+        if !change.is_empty() {
+            let _ = ctx.editor().publish(CHANGED, change_json(&change));
+        }
         if let Some(job) = self.thread.take() {
             ctx.cancel(job);
         }

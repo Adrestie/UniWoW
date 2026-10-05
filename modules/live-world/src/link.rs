@@ -19,6 +19,9 @@ const CONNECT: Duration = Duration::from_secs(1);
 /// Between two attempts to connect, and after a refusal.
 const RETRY: Duration = Duration::from_secs(2);
 const RETRY_REFUSED: Duration = Duration::from_secs(10);
+/// Between two looks at the port of the worldserver, each of which costs it a query of its
+/// database of logins.
+const PROBE_WORLD: Duration = Duration::from_secs(30);
 /// A message at least this often keeps the connection alive.
 const HEARTBEAT: Duration = Duration::from_secs(2);
 /// Two subscriptions that move the zone are this far apart in time at least.
@@ -87,6 +90,10 @@ impl Default for Status {
 pub struct Shared {
     world: Mutex<Arc<World>>,
     status: Mutex<Status>,
+    /// Whether another connection took its place, after which it changes and tells nothing; held
+    /// while the world is changed and told, so that nothing is told after the change that
+    /// retires it.
+    retired: Mutex<bool>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -107,8 +114,26 @@ impl Shared {
         self.set_connection(Connection::Broken(why));
     }
 
-    fn set_world(&self, world: World) {
+    /// Puts `world` in place and tells `change`, unless it was retired.
+    fn tell(&self, world: World, change: &Change, surroundings: &dyn Surroundings) {
+        let retired = lock(&self.retired);
+        if *retired {
+            return;
+        }
         *lock(&self.world) = Arc::new(world);
+        if !change.is_empty() {
+            surroundings.changed(change);
+        }
+    }
+
+    /// Retires it, its entities gone: the change that says so, for the one taking its place to
+    /// tell; nothing is told after it.
+    pub fn retire(&self) -> Change {
+        let mut retired = lock(&self.retired);
+        *retired = true;
+        let (world, change) = self.world().emptied();
+        *lock(&self.world) = Arc::new(world);
+        change
     }
 
     fn set_connection(&self, connection: Connection) {
@@ -148,6 +173,8 @@ pub fn should_subscribe(sent: Option<&Zone>, wanted: &Zone, since: Duration) -> 
 /// Runs until `cancelled` says so.
 pub fn run(settings: &Settings, shared: &Shared, surroundings: &dyn Surroundings, cancelled: &dyn Fn() -> bool) {
     let address = SocketAddr::from(([127, 0, 0, 1], settings.port));
+    // What the port of the worldserver said, and when: looked at again 30 seconds later at most.
+    let mut probed: Option<(Instant, Connection)> = None;
     while !cancelled() {
         if settings.token.is_empty() {
             shared.set_connection(Connection::NoToken);
@@ -156,6 +183,7 @@ pub fn run(settings: &Settings, shared: &Shared, surroundings: &dyn Surroundings
         }
         let pause = match Client::connect(address, &settings.token, CONNECT) {
             Ok(client) => {
+                probed = None;
                 let ended = session(client, settings, shared, surroundings, cancelled);
                 empty(shared, surroundings);
                 shared.set_connection(ended);
@@ -166,11 +194,19 @@ pub fn run(settings: &Settings, shared: &Shared, surroundings: &dyn Surroundings
                 RETRY_REFUSED
             }
             Err(Error::Io(_)) => {
-                let world = SocketAddr::from(([127, 0, 0, 1], settings.world_port));
-                shared.set_connection(match TcpStream::connect_timeout(&world, CONNECT) {
-                    Ok(_) => Connection::ObserverMissing,
-                    Err(_) => Connection::ServerStopped,
-                });
+                let connection = match &probed {
+                    Some((when, connection)) if when.elapsed() < PROBE_WORLD => connection.clone(),
+                    _ => {
+                        let world = SocketAddr::from(([127, 0, 0, 1], settings.world_port));
+                        let connection = match TcpStream::connect_timeout(&world, CONNECT) {
+                            Ok(_) => Connection::ObserverMissing,
+                            Err(_) => Connection::ServerStopped,
+                        };
+                        probed = Some((Instant::now(), connection.clone()));
+                        connection
+                    }
+                };
+                shared.set_connection(connection);
                 RETRY
             }
             Err(error) => {
@@ -194,10 +230,7 @@ fn wait(time: Duration, cancelled: &dyn Fn() -> bool) {
 /// The entities gone, said once.
 fn empty(shared: &Shared, surroundings: &dyn Surroundings) {
     let (world, change) = shared.world().emptied();
-    shared.set_world(world);
-    if !change.is_empty() {
-        surroundings.changed(&change);
-    }
+    shared.tell(world, &change, surroundings);
 }
 
 /// A connection welcomed, until it breaks or `cancelled`: what it ended with.
@@ -282,10 +315,7 @@ fn session(
                 return Connection::Broken("a WELCOME or REFUSED after the welcome".to_owned());
             }
         };
-        shared.set_world(world);
-        if !change.is_empty() {
-            surroundings.changed(&change);
-        }
+        shared.tell(world, &change, surroundings);
     }
     Connection::Connecting
 }

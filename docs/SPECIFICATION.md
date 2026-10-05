@@ -2910,6 +2910,31 @@ The parts:
   five nearest given by `live-world.entities`; the camera moved 600 yards east, the zone followed
   (68 entities entered, 541 left); the worldserver stopped, *server stopped* and the entities gone;
   started with `UniwowObserver.Enable = 0`, *observer missing*.
+- After the review of step 9.3b:
+  - the port of the worldserver is looked at on the first failure to connect to the observer, then
+    30 seconds later at most: each connection to it costs the worldserver a query of its database of
+    logins (`WorldSocket::Start`); the observer is still tried every 2 seconds;
+  - *Apply* retires the connection before: its entities are said to leave (`live-world.changed`) by
+    the interface thread, through the queue of events of the module's `Editor`, the one its thread
+    told them through, so that they come in order, before the new connection's; a connection retired
+    changes and tells nothing more, the check and the telling under one lock;
+  - the client keeps the buffer it reads into;
+  - measured for the user's setting, `MapUpdate.Threads = 1`, one zone of 300 yards kept alive, no
+    player connected, `server info` read six times 10 seconds apart (the mean; the longest):
+
+    | | Mean | Longest |
+    |---|---|---|
+    | Module off | 9 to 14 ms | 22 to 51 ms |
+    | Orgrimmar kept alive | 9 to 14 ms | 18 to 49 ms, one reading 85 ms |
+    | Elwynn by Goldshire kept alive | 13 to 14 ms | 19 to 43 ms |
+
+    The longest updates stay within those of the server without the module, one reading aside;
+    the mean rises by some 3 ms in Elwynn, whose creatures walk at random. The module's own time,
+    reading and keeping, is 0.55 ms at most in an update of the map: the rest is the updates of the
+    creatures it keeps alive, what a player standing there would cost. The peaks of up to 117 ms
+    measured with four zones at once (step 9.3a) come with four zones kept alive on one thread;
+  - with step 9.3c: the time along a cyclic spline sent by a window of 32 points, which does not
+    start at 0, wrapped as its curves are.
 
 #### Tests
 

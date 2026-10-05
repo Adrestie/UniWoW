@@ -45,6 +45,8 @@ pub struct Client {
     stream: TcpStream,
     /// What was read and not yet a whole message.
     buffer: Vec<u8>,
+    /// Where each read lands.
+    chunk: Vec<u8>,
     welcome: Welcome,
 }
 
@@ -57,6 +59,7 @@ impl Client {
         let mut client = Self {
             stream,
             buffer: Vec::new(),
+            chunk: vec![0; 64 * 1024],
             welcome: Welcome {
                 version: 0,
                 capabilities: 0,
@@ -99,7 +102,6 @@ impl Client {
     /// The next message, or none when no whole one came within `timeout`.
     pub fn receive(&mut self, timeout: Duration) -> Result<Option<FromObserver>, Error> {
         let deadline = Instant::now() + timeout;
-        let mut chunk = vec![0u8; 64 * 1024];
         loop {
             if let Some(message) = self.take()? {
                 return Ok(Some(message));
@@ -109,9 +111,9 @@ impl Client {
                 return Ok(None);
             }
             self.stream.set_read_timeout(Some(left))?;
-            match self.stream.read(&mut chunk) {
+            match self.stream.read(&mut self.chunk) {
                 Ok(0) => return Err(Error::Closed),
-                Ok(read) => self.buffer.extend_from_slice(&chunk[..read]),
+                Ok(read) => self.buffer.extend_from_slice(&self.chunk[..read]),
                 Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
                     return Ok(None);
                 }

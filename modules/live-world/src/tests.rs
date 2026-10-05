@@ -416,3 +416,81 @@ fn no_token_a_wrong_one_a_server_stopped_and_an_observer_missing_are_told_apart(
     );
     assert!(text.1 && text.0.contains("8085") && text.0.contains("8087"), "{text:?}");
 }
+
+#[test]
+fn a_link_retired_tells_nothing_more_its_entities_said_to_leave_by_its_successor() {
+    let observer = FakeObserver::start("secret").unwrap();
+    let settings = Settings {
+        port: observer.address().port(),
+        world_port: free_port(),
+        token: "secret".to_owned(),
+        radius: 300.0,
+    };
+    let shared = Shared::default();
+    let fake = Fake::default();
+    *lock(&fake.map) = Some(1);
+    *lock(&fake.camera) = Some([0.0, 0.0, 0.0]);
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| link::run(&settings, &shared, &fake, &|| stop.load(Ordering::Acquire)));
+        let _stopper = Stopper(&stop);
+        assert!(until(|| subscriptions(&observer).len() == 1));
+        observer.send(&FromObserver::Snapshot {
+            map: 1,
+            instance: 0,
+            sequence: 1,
+            entities: vec![entity(1, Kind::Creature, [0.0; 3]), entity(2, Kind::Creature, [1.0; 3])],
+        });
+        assert!(until(|| shared.world().entities.len() == 2));
+        let told = lock(&fake.changes).len();
+
+        let mut change = shared.retire();
+        change.left.sort();
+        assert_eq!(change.left, vec![1, 2], "for the successor to tell");
+        assert!(shared.world().entities.is_empty());
+
+        // What still comes to the retired link is neither kept nor told, nor its end.
+        observer.send(&FromObserver::Changes {
+            map: 1,
+            instance: 0,
+            sequence: 2,
+            entities: vec![entity(3, Kind::Creature, [0.0; 3])],
+            left: vec![1],
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        stop.store(true, Ordering::Release);
+        assert!(shared.world().entities.is_empty());
+        assert_eq!(lock(&fake.changes).len(), told);
+    });
+    assert_eq!(lock(&fake.changes).len(), 1, "only the snapshot was told");
+}
+
+#[test]
+fn the_port_of_the_worldserver_is_looked_at_once_whatever_the_failures_to_connect() {
+    let world = TcpListener::bind("127.0.0.1:0").unwrap();
+    world.set_nonblocking(true).unwrap();
+    let settings = Settings {
+        port: free_port(),
+        world_port: world.local_addr().unwrap().port(),
+        token: "secret".to_owned(),
+        radius: 300.0,
+    };
+    let shared = Shared::default();
+    let fake = Fake::default();
+    let stop = AtomicBool::new(false);
+    let mut looked = 0;
+    std::thread::scope(|scope| {
+        scope.spawn(|| link::run(&settings, &shared, &fake, &|| stop.load(Ordering::Acquire)));
+        let _stopper = Stopper(&stop);
+        // Three attempts to connect, 2 seconds apart.
+        let end = Instant::now() + Duration::from_millis(5000);
+        while Instant::now() < end {
+            if world.accept().is_ok() {
+                looked += 1;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(shared.status().connection, Connection::ObserverMissing);
+    });
+    assert_eq!(looked, 1);
+}
