@@ -3594,6 +3594,64 @@ Added by the review of the proposal, before the service is written:
   lights in gamma. A slight difference of tint with the client would come from there; to look at
   again with the lights of the map (9.7).
 
+#### Step 9.4d, proposed
+
+What is there: `live-world` keeps the entities of its zone (step 9.3b), each with its kind, its
+display, its position or its spline, its orientation (0 while it moves: the spline gives it), the
+scale the server sends (`OBJECT_FIELD_SCALE_X`), a game object's rotation (`GetWorldRotation`, its
+orientation included) and its name; a thread of its own, woken by the frame signal, writes their
+markers and names (9.3c). `models` gives the look of a creature's display and its scale, loads a
+look once an instance of it is placed, within the distance the budget gives, and draws each
+instance up to its reach (9.4c). In Orgrimmar, 315 to 331 creatures and 226 to 247 game objects
+stand within 300 yards (9.3a, 9.3b).
+
+- **A look for each entity**, by its display, read again when the display changes (a morph):
+  - a creature by `Models::display`: its look and the scale of its display and model, times the
+    scale the server sends;
+  - a game object by `GameObjectDisplayInfo`, through a new `Models::object(display) ->
+    Result<Option<Look>, String>`: the look of its M2 (the default submeshes, its textures named by
+    the model), none for a WMO, which waits for step 9.6; drawn at the scale the server sends;
+  - a player keeps its marker: its look needs its customization and its equipment, which the
+    observer does not send;
+  - the tables are read by jobs of `live-world`, a display once (its look and scale kept, or why it
+    failed), the displays seen for the first time gathered into one job.
+- **The instances**, owned by `live-world` and given by `Models::place` at each frame signal from
+  the thread that writes the markers, as the service asks (one thread an owner): an entity's id its
+  GUID; its transform its position along its spline at the time of the next frame (as the
+  markers), turned by its orientation about Z for a creature, by its quaternion for a game object,
+  at its scale. A creature moving faces the way it goes along its spline, as the client turns it;
+  its orientation is taken again once it stops. The instance of an entity whose look is not drawn
+  is placed all the same: that is what makes `models` load it.
+- **The markers kept** for what is not seen as a model: the players; an entity without a look (a
+  WMO, a display the tables do not have, a model refused); one whose look is waiting or loading
+  (beyond the distance of the budget, or its turn to come); one beyond the reach of its model; one
+  whose model draws nothing at rest (the invisible models of the triggers, which the client does
+  not show and an editor must). For this the service gives, once a look is read, a new
+  `Models::extent(look) -> Option<Extent>`: the bounds of its vertices at rest, the count of its
+  batches seen at rest, and how far an instance of scale 1 is drawn (the setting `reach` times its
+  radius).
+- **The names** stay over every entity: over a model at the top of its vertices at rest, times its
+  scale; over a marker as today.
+- **Not in 9.4d**: the animations (a creature drawn at rest, a dead one standing, its name grey as
+  today; the state of a door), the equipment and mounts, the players' looks, the WMO (9.6), the
+  transports moving with what they carry.
+- **Checked at the start**: in Orgrimmar and in Dalaran, with the worldserver of `E:` as for step
+  9.3a, the displays the observer sends: how many distinct, how many the tables have, how many game
+  objects are a WMO, how many creatures draw nothing at rest; that `Models::place` of the whole set
+  at each frame keeps the instances written in place while none crosses a tile, and what it costs
+  the thread of `live-world`.
+- **Accepted on the user's machine**, the worldserver of `E:` started and stopped as for step 9.3a
+  (no player connected, checked by SOAP; the server left as found): Orgrimmar and Dalaran (its city
+  is a WMO, not drawn before 9.6: the entities stand in the air over Crystalsong), the creatures
+  and game objects as models, the markers left; the frames a second, the interface thread, the
+  thread of `live-world`, the draws and triangles, what the budget gives the terrain and the
+  models; the scale checked on two or three creatures whose size in the client is known, against
+  the captures the user may give.
+- **Tests**: the look of each kind of entity and the scale; the transform of a creature, a moving
+  one and a game object; which entities keep a marker; the name over a model; a display read once,
+  a failed one not read again; a morph; against a fake service `models`, and the extent of a look
+  in `models`.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around
