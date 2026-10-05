@@ -2170,6 +2170,63 @@ Step 9.2a, the additions to the core:
 - Not in this step: the jobs that create and upload GPU resources (9.2). No layer uses a version
   or the frame signal yet.
 
+Step 9.2 is built in parts, each reviewed: the readers of the terrain and of the textures (9.2b);
+the module `terrain`, its model chunk by chunk, loaded and drawn, with the GPU memory budget and a
+map to choose (9.2c); the free camera (9.2d).
+
+First part (9.2b), the readers of the terrain and of the textures:
+
+- `uniwow_api::formats` gains the plain data of the terrain and of the textures (`FileRef`, `Wdt`,
+  `Tile`, `Chunk`, `Layer`, `Doodad`, `Building`, `Texture`, `TextureFormat`) and four reads:
+  `wdt` (read once per map), `tile`, `texture` (the levels as stored, DXT kept) and
+  `texture_rgba` (every level decoded); its documentation sets the world coordinates. In debug, a
+  format asked from the interface thread is said once in the log.
+- WDT (`modules/assets/src/terrain.rs`): the flags of `MPHD`, and the tiles of `MAIN`, the tile
+  `<map>_<x>_<y>` at `y * 64 + x`: so for the 753 tiles of Azeroth the client lists. `tile`
+  gives none for a tile its WDT does not name, as the client loads none.
+- A tile of 3.3.5a finds the parts of each chunk by the offsets of its header, as the client
+  does, and only those its flags and counts ask for: some offsets point at nothing else (an offset
+  of shadow in a chunk without the flag of shadow, in Azeroth). A part whose size goes past its
+  chunk reaches its end; the alpha maps always do, as the client reads them by offset: some
+  compressed ones of Northrend go past the size of their part.
+- A split tile, as WarcraftXL loads it when its `_tex0` exists: its root, `_tex0` and `_obj0`,
+  their chunks walked as wow.export walks them; its textures by FileDataID when it has `MDID`, its
+  doodads and buildings by FileDataID by their flags (0x40, 0x8), its holes of high resolution
+  (flag 0x10000).
+- The alpha maps: compressed in runs, of 8 bits when the WDT has the flag 0x4 or 0x80, else of 4
+  bits, with their last row and column copied from the ones before when the chunk lacks the flag
+  0x8000, as the description of the format says and wow.export does not. The shadows baked in,
+  the vertex colours (stored blue first, given red first), the holes of 3.3.5a widened to the 8 × 8
+  quads, the references of doodads and buildings.
+- Positions: a chunk's as the file gives it. The client places a chunk by its tile and index,
+  which the 17 tiles of the row 60 of Azeroth contradict, all at [3200, 1066.67, 0]. The doodads
+  and buildings keep the axes of the file, world = (17066⅔ − z, 17066⅔ − x, y), checked on the
+  doodads of `Azeroth_32_48`. The components of the normals are those of the world: checked against
+  the slopes of the heights on every tile read.
+- BLP (`modules/assets/src/blp.rs`), translated from wow.export: version 2, its palette (alphas of
+  0, 1, 4 or 8 bits), DXT1, DXT3 and DXT5, kept as BC or decoded, BGRA. A level cut short ends the
+  levels kept. Versions 0 and 1 are refused by name: Wow.exe 12340 holds the mark `BLP2` seven
+  times and never `BLP1`, so the client reads no other. One texture of the terrain of the user's
+  client of 2,379 is a BLP1 (`Tileset\Aerie Peaks\AeriePeaksWebs.blp`).
+- The device of the editor has no compression BC (the features egui-wgpu asks by default):
+  `texture_rgba` serves it until 9.2c chooses.
+- warcraft-rs (`wow-adt`, `wow-wdt`, `wow-blp`) could not be copied: it reads through `binrw`, and
+  decodes through `image` and `texpresso`, which the runtime does not offer. Its layouts were
+  consulted with the public description of the formats; `THIRD_PARTY.md` says so.
+- Measured on the user's client, release: the 3,672 tiles of Azeroth, Kalimdor, Outland and
+  Northrend read in 1.3 s on 16 threads; the 205 textures of the terrain of Azeroth read and
+  decoded in 0.64 s.
+- Tests: files the tests write (a WDT and the bytes after its last chunk; tiles of 3.3.5a in every
+  way of storing alpha, alpha maps longer than their part, an offset of shadow without its flag;
+  split tiles, by names and by FileDataID, holes of high resolution, the flag 0x80; damaged files
+  without a panic; BLP of each palette, DXT1 of four and of three colours, DXT3, DXT5 in its two
+  modes, levels cut short, BGRA, BLP1 refused); the service (a tile split when its `_tex0` exists,
+  none outside its WDT, the WDT read once, a FileDataID no table names refused); the client's own
+  maps when `UNIWOW_CLIENT` names it. Each of 22 changes made on purpose to the readers made a test
+  fail.
+- Not in this part: the liquids (`MH2O`, `MCLQ`) and the building of a map made of one, with the
+  water and the buildings (9.6); the map of low quality textures, the sound emitters, `MTXF`.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

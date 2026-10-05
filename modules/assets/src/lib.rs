@@ -5,22 +5,28 @@
 //! paths read by another; the interface thread only hands the client over. Its panel chooses the
 //! folder of the client in the folder picker of the system and says how far its files are.
 
+mod blp;
 mod chain;
 mod db2;
 mod dbc;
 mod mpq;
 #[cfg(test)]
 mod table_tests;
+mod terrain;
+#[cfg(test)]
+mod terrain_tests;
 #[cfg(test)]
 mod tests;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread::ThreadId;
 
-use uniwow_api::formats::{self, AreaRecord, CreatureDisplay, CreatureModel, Formats, MapRecord};
+use uniwow_api::formats::{
+    self, AreaRecord, CreatureDisplay, CreatureModel, FileRef, Formats, MapRecord, Texture, Tile, Wdt,
+};
 use uniwow_api::vfs::{self, Vfs, VfsState};
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, Registrar, egui, log, rfd, serde_json};
 
@@ -36,6 +42,8 @@ struct Client {
     chain: Chain,
     file_ids: FileIds,
     tables: Tables,
+    /// The WDT of each map read, by its folder in lower case.
+    wdts: Mutex<HashMap<String, Arc<Wdt>>>,
 }
 
 impl Client {
@@ -48,8 +56,62 @@ impl Client {
             chain,
             file_ids,
             tables: Tables::new(locale),
+            wdts: Mutex::default(),
         };
         (client, refused)
+    }
+
+    fn wdt(&self, directory: &str) -> Result<Arc<Wdt>, String> {
+        let key = directory.to_ascii_lowercase();
+        if let Some(wdt) = self.wdts.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+            return Ok(wdt.clone());
+        }
+        let path = format!("World\\Maps\\{directory}\\{directory}.wdt");
+        let bytes = self
+            .chain
+            .read(&path)?
+            .ok_or_else(|| format!("{path}: not in the client"))?;
+        let wdt = Arc::new(terrain::wdt(&bytes).map_err(|e| format!("{path}: {e}"))?);
+        self.wdts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, wdt.clone());
+        Ok(wdt)
+    }
+
+    fn tile(&self, directory: &str, x: u32, y: u32) -> Result<Option<Tile>, String> {
+        let wdt = self.wdt(directory)?;
+        if x > 63 || y > 63 || !wdt.tiles[(y * 64 + x) as usize] {
+            return Ok(None);
+        }
+        let stem = format!("World\\Maps\\{directory}\\{directory}_{x}_{y}");
+        let read = |path: &str| self.chain.read(path).map_err(|e| format!("{path}: {e}"));
+        let root_path = format!("{stem}.adt");
+        let root = read(&root_path)?.ok_or_else(|| format!("{root_path}: named by its WDT, not in the client"))?;
+        // Split, as WarcraftXL loads it, when its `_tex0` exists.
+        let tex = read(&format!("{stem}_tex0.adt"))?;
+        let obj = match tex {
+            Some(_) => read(&format!("{stem}_obj0.adt"))?,
+            None => None,
+        };
+        terrain::tile(&root, tex.as_deref(), obj.as_deref(), wdt.flags)
+            .map(Some)
+            .map_err(|e| format!("{root_path}: {e}"))
+    }
+
+    fn texture(&self, file: &FileRef, decode: bool) -> Result<Texture, String> {
+        let path = match file {
+            FileRef::Path(path) => path.clone(),
+            FileRef::Id(id) => self
+                .file_ids
+                .path_of(*id)
+                .ok_or_else(|| format!("the FileDataID {id}: named by no table of paths"))?,
+        };
+        let bytes = self
+            .chain
+            .read(&path)?
+            .ok_or_else(|| format!("{path}: not in the client"))?;
+        blp::texture(&bytes, decode).map_err(|e| format!("{path}: {e}"))
     }
 }
 
@@ -122,16 +184,14 @@ impl Vfs for Files {
 }
 
 impl Files {
-    /// In debug, warns once that `table` was asked from the interface thread, which waits while a
-    /// table is read.
-    fn check_thread(&self, table: &str) {
+    /// In debug, warns once that `what` was asked from the interface thread, which waits while it
+    /// is read.
+    fn check_thread(&self, what: &str) {
         if cfg!(debug_assertions)
             && self.interface.get() == Some(&std::thread::current().id())
             && !self.warned.swap(true, Ordering::Relaxed)
         {
-            log::warn!(
-                "formats: {table} asked from the interface thread, which waits while a table is read: ask from a job"
-            );
+            log::warn!("formats: {what} asked from the interface thread, which waits while it is read: ask from a job");
         }
     }
 }
@@ -159,6 +219,26 @@ impl Formats for Files {
         self.check_thread("CreatureModelData.dbc");
         let client = self.client()?;
         client.tables.creature_models(&client.chain)
+    }
+
+    fn wdt(&self, directory: &str) -> Result<Arc<Wdt>, String> {
+        self.check_thread("a WDT");
+        self.client()?.wdt(directory)
+    }
+
+    fn tile(&self, directory: &str, x: u32, y: u32) -> Result<Option<Tile>, String> {
+        self.check_thread("a tile");
+        self.client()?.tile(directory, x, y)
+    }
+
+    fn texture(&self, file: &FileRef) -> Result<Texture, String> {
+        self.check_thread("a texture");
+        self.client()?.texture(file, false)
+    }
+
+    fn texture_rgba(&self, file: &FileRef) -> Result<Texture, String> {
+        self.check_thread("a texture");
+        self.client()?.texture(file, true)
     }
 }
 

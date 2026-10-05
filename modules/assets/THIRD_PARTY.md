@@ -41,13 +41,21 @@ SOFTWARE.
 
 ## wow.export
 
-- Source: <https://github.com/Kruithne/wow.export>, `src/js/db/WDCReader.js`, commit
-  `c2fd7bde36a712be78a5da896c995b84fbfa2545`.
+- Source: <https://github.com/Kruithne/wow.export>, commit
+  `c2fd7bde36a712be78a5da896c995b84fbfa2545`: `src/js/db/WDCReader.js`,
+  `src/js/3D/loaders/ADTLoader.js`, `src/js/3D/loaders/WDTLoader.js`,
+  `src/js/3D/loaders/LoaderGenerics.js` and `src/js/casc/blp.js`.
 - Authors: Kruithne and Marlamin.
 - Licence: MIT, whose notice follows.
 - Translated into `src/db2.rs`: the reading of the DB2 of versions WDC2, `1SLC` and WDC3 (their
   header, sections, columns, pallets, lists of ids and copies), for the two columns of a table of
   paths only; its strings, ids and rows are taken as wxl-db2 takes them (below).
+- Translated into `src/terrain.rs`: the reading of the split tiles (the chunks of the root, of the
+  `_tex0` and of the `_obj0` walked, `MDID`, the alpha maps compressed, of 8 bits when the WDT has
+  the flag 0x4 or 0x80, or of 4 bits), and the flags of the WDT.
+- Translated into `src/blp.rs`: the reading of the BLP of version 2 (its header, levels, palette
+  and alphas) and the decoding of DXT1, DXT3 and DXT5; the alpha of 4 bits of an odd texel is read
+  from its byte, where wow.export reads none.
 
 ```
 MIT License
@@ -86,6 +94,10 @@ SOFTWARE.
 
 - WDC1 is read from the public description of the format, as DB2Gen writes it; nothing comes from
   DB2Gen nor from WarcraftXL, under GPL-3.
+- warcraft-rs, `wow-adt` and `wow-wdt` 0.7.0 (MIT or Apache-2.0): their layouts of the WDT and of
+  the tiles of 3.3.5a consulted with the public description of the formats; no code taken, as they
+  read through `binrw`, which the runtime does not offer. Its `wow-blp` neither, which needs
+  `image` and `texpresso`.
 - wxl-db2 (<https://github.com/WarcraftXL/wxl-db2>, commit
   `30e4f2c8ed887a8d8d4b4472d688d4b8a02c310d`), `src/api/FdidResolver.cpp`,
   `src/decode/Db2Decode.cpp` and `src/decode/DB2File.cpp`: read to learn how WarcraftXL reads the
