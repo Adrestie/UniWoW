@@ -1,0 +1,81 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# mod-uniwow-observer: streams, read only, the creatures, game objects and players of a zone of a
+# map to the UniWoW editor on the same machine. Read once, when the worldserver starts.
+
+[worldserver]
+
+#
+#    UniwowObserver.Enable
+#        Description: Whether the observer listens for the editor.
+#        Default:     1 - (Enabled)
+#                     0 - (Disabled)
+
+UniwowObserver.Enable = 1
+
+#
+#    UniwowObserver.Port
+#        Description: The TCP port it listens on, on 127.0.0.1 only.
+#        Default:     8087
+
+UniwowObserver.Port = 8087
+
+#
+#    UniwowObserver.Token
+#        Description: The token the editor must give. Empty: every connection is refused.
+#        Default:     ""
+
+UniwowObserver.Token = ""
+
+#
+#    UniwowObserver.Rate
+#        Description: How many times a second a zone subscribed to is read, from 1 to 20.
+#        Default:     10
+
+UniwowObserver.Rate = 10
+
+#
+#    UniwowObserver.MaxRadius
+#        Description: The largest radius of a zone, in yards; at most a grid, 533.
+#        Default:     533
+
+UniwowObserver.MaxRadius = 533
+
+#
+#    UniwowObserver.MaxEntities
+#        Description: The most entities of a zone sent, the nearest to its centre kept.
+#        Default:     2000
+
+UniwowObserver.MaxEntities = 2000
+
+#
+#    UniwowObserver.MaxConnections
+#        Description: The most editors connected at once, from 1 to 16.
+#        Default:     4
+
+UniwowObserver.MaxConnections = 4
+
+#
+#    UniwowObserver.Heartbeat
+#        Description: Seconds without a message from an editor before its connection is closed.
+#        Default:     10
+
+UniwowObserver.Heartbeat = 10
+
+#
+#    UniwowObserver.KeepAlive
+#        Description: Whether the creatures and game objects of a zone subscribed to are kept
+#                     updated without a player near them, as the sight of a player does.
+#        Default:     1 - (Enabled)
+#                     0 - (Disabled: they stop moving once no player is near)
+
+UniwowObserver.KeepAlive = 1
+
+#
+#    UniwowObserver.StatsInterval
+#        Description: Seconds between two lines of statistics in the log, per connection: the time
+#                     the observer took in the update of the map, reading and keeping, and the
+#                     bytes sent. 0: none.
+#        Default:     0
+
+UniwowObserver.StatsInterval = 0

@@ -2743,6 +2743,73 @@ The parts:
   instanced in one layer; their moves interpolated between two updates by a thread of `live-world`
   woken by the frame signal; accepted on the user's machine with the server running.
 
+#### Step 9.3a, as built
+
+- `server/mod-uniwow-observer/`, under the GPL 2.0 or later (`LICENSE`, the text of AzerothCore's):
+  `PROTOCOL.md` (version 1), `README.md` (what it does to the server, building, going back,
+  checking), `conf/mod_uniwow_observer.conf.dist`, `src/` and `tools/probe.py`.
+- The protocol: little-endian framing, each message its length, its kind and its body; HELLO,
+  SUBSCRIBE, UNSUBSCRIBE and HEARTBEAT from the editor; WELCOME, REFUSED, STATUS, SNAPSHOT and
+  CHANGES from the observer; each entity with the fields of *Components* above, the quaternion and
+  state of a game object, and the spline it follows, 32 points at most, with its duration and the
+  time already gone. A subscription unknown after 2 seconds is told so (*not found*).
+- The module:
+  - `Observer`, on the threads of the maps: at the end of each update of a map
+    (`AllMapScript::OnMapUpdate`), for each subscription to that map and instance, the objects of
+    the last reading put back in the update list from their GUIDs (`Map::GetCreature`,
+    `Map::GetGameObject`, `Map::AddObjectToPendingUpdateList`); 10 times a second, the zone read by
+    a visitor of the cells (`Cell::VisitObjects`), the circle applied, the nearest 2,000 kept, into
+    plain records; the grids of the zone loaded when it changes (`Map::LoadGridsInRange`). The
+    subscriptions are read from a list the network thread replaces whole
+    (`std::atomic<std::shared_ptr>`); each is under its own lock, held to copy a few values.
+  - `Server`, on a thread of its own: a Boost.Asio `io_context` on 127.0.0.1, started at
+    `WorldScript::OnStartup` and stopped at `OnShutdown`. A message from the editor is 1,024 bytes at
+    most, 4 editors by default (16 at most), 32 MiB waiting to be written at most; 10 seconds of
+    silence close a connection. It encodes each entity and sends only those that changed since the
+    last reading, and those that left.
+  - No exception leaves the hook nor the network thread (each caught and logged); the token, empty
+    by default, refuses every connection until it is set; `UniwowObserver.Enable` and
+    `UniwowObserver.KeepAlive` in its settings; `UniwowObserver.StatsInterval` writes, per
+    connection, the time of reading and of keeping, on average and at most, and the bytes sent.
+- On the user's server: `worldserver.exe`, its `.pdb` and `configs` saved in
+  `E:\Serveur\backup_before_uniwow_observer_20261005` with how to go back; the junction
+  `E:\azerothcore-wotlk\modules\mod-uniwow-observer`; `cmake .`, the targets `modules` and
+  `worldserver` built; `configs\modules\mod_uniwow_observer.conf` with a token. Stopped and started
+  through SOAP once no player was connected; `MapUpdate.Threads` put back to 1 after its check
+  (`worldserver.conf` the same as saved); the worldserver left stopped, as found.
+- Measured with `tools/probe.py`, no player connected, the time in the update of a map from the log
+  of the module:
+
+  | Zone, radius, threads of the maps | Entities | Reading, 10 a second | Keeping, each update | Sent |
+  |---|---|---|---|---|
+  | Orgrimmar, 300 yards, 1 | 578: 331 creatures, 247 game objects | 0.25 to 0.28 ms, 0.52 at most (the first, loading the grids: 110 ms) | 0.14 to 0.16 ms, 0.92 at most | 37 to 40 KB a second |
+  | Elwynn by Goldshire, 400 yards, 4 | 463 | 0.39 ms, 3.6 at most | 0.16 ms, 2.9 at most | 156 to 159 KB a second |
+  | Shattrath, 400 yards, 4 | 887 | 0.61 to 0.72 ms, 3.5 at most | 0.25 to 0.35 ms, 4.1 at most | 40 to 45 KB a second |
+  | Dalaran, 400 yards, 4 | 1,252 | 0.58 to 0.67 ms, 0.98 at most | 0.37 to 0.41 ms, 0.83 at most | 97 to 103 KB a second |
+
+  The four zones were watched at once with 4 threads. The update of the world stayed at 9 ms on
+  average, 27 ms at most with 1 thread and 21 ms with 4 (`server info`). Keeping runs at each update
+  of the map, about 30 a second, from the GUIDs of the last reading: it costs about as much as
+  reading. The bytes follow the creatures walking: each one moving is sent again at each reading
+  with its spline.
+- The zone kept alive: Elwynn without a player, two minutes. Kept, about 32,000 changes every 30
+  seconds all along, 241 of its 330 creatures moved. With `UniwowObserver.KeepAlive = 0`, 25,800
+  changes in the first 30 seconds, then 8,400 in the next 90: the creatures stop in the middle of
+  their paths once the map's check of every 30 seconds takes them out of its update list.
+- Survived, with 1 thread and with 4, the worldserver going on without an error in its logs nor a
+  report of a crash (21 cases of `probe.py abuse`): a wrong token; a version not served; SUBSCRIBE
+  before HELLO; random bytes before HELLO; a length of zero; a length too long; an unknown kind; a
+  SUBSCRIBE too short and too long; a HEARTBEAT with a body; a second HELLO; a centre outside the
+  world; a radius not a number; a negative radius; a client gone in the middle of a header and of a
+  body; a map and an instance that do not exist (*not found*); 100 connections in a row, each
+  welcomed and subscribed; one connection more than allowed (refused); a connection afterwards
+  (welcomed). A silent connection was closed after 10.1 seconds; nothing came after UNSUBSCRIBE.
+- Not checked: a game master in the client (nothing is spawned, nothing can be seen); a respawn
+  seen (they run over the whole map every 5 seconds where its grids are loaded, *Step 9.3,
+  proposed*). The CI does not build the module.
+- To come with 9.3c, once the editor interpolates: a spline sent when it starts rather than at each
+  reading, which most of the bytes of Elwynn are.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around
