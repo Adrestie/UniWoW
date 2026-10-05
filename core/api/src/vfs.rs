@@ -29,6 +29,10 @@ pub trait Vfs: Send + Sync {
     /// The files under `folder` and the folders below it, by the paths the archives' lists give.
     fn files_under(&self, folder: &str) -> Vec<String>;
 
+    /// The path of the modern file of id `file_data_id`, as WarcraftXL finds it: through the tables
+    /// `TextureFilePath.db2`, then `ModelFilePath.db2`, of the client; none when neither names it.
+    fn path_of(&self, file_data_id: u32) -> Option<String>;
+
     fn state(&self) -> VfsState;
 }
 

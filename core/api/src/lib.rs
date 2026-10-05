@@ -45,6 +45,7 @@ pub mod curve;
 pub mod dopesheet;
 mod editor;
 mod event;
+pub mod formats;
 mod job;
 mod module;
 mod numbers;

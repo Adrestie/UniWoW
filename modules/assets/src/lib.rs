@@ -1,10 +1,16 @@
 //! The files of the client: its archives, in the order the client reads them, with the patches
-//! WarcraftXL adds, read from any thread at once through the service `vfs`. The archives are opened
-//! by jobs of the pool, one each, their lists merged by another; the interface thread only hands
-//! the chain over. Its panel sets the folder of the client and says how far its files are.
+//! WarcraftXL adds, read from any thread at once through the service `vfs`, which also turns a
+//! FileDataID into a path as WarcraftXL does; their formats parsed through the service `formats`.
+//! The archives are opened by jobs of the pool, one each, their lists merged and the tables of
+//! paths read by another; the interface thread only hands the client over. Its panel sets the
+//! folder of the client and says how far its files are.
 
 mod chain;
+mod db2;
+mod dbc;
 mod mpq;
+#[cfg(test)]
+mod table_tests;
 #[cfg(test)]
 mod tests;
 
@@ -12,15 +18,41 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+use uniwow_api::formats::{self, AreaRecord, CreatureDisplay, CreatureModel, Formats, MapRecord};
 use uniwow_api::vfs::{self, Vfs, VfsState};
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, Registrar, egui, log, serde_json};
 
 use chain::{Chain, Source};
+use db2::FileIds;
+use dbc::Tables;
 
 /// The setting holding the folder of the client.
 const CLIENT_FOLDER: &str = "client_folder";
 
-/// The service `vfs`: the chain once open, given whole to its readers, who read without a lock.
+/// The client once open: its archives, its FileDataIDs, and its tables, each read when first asked.
+struct Client {
+    chain: Chain,
+    file_ids: FileIds,
+    tables: Tables,
+}
+
+impl Client {
+    /// The client of `folder` and `locale`, its archives `sources`, the first read first; with the
+    /// tables of paths that could not be read, and why.
+    fn open(sources: Vec<Source>, folder: &Path, locale: &str) -> (Self, Vec<String>) {
+        let chain = Chain::new(sources);
+        let (file_ids, refused) = FileIds::load(folder, &chain);
+        let client = Self {
+            chain,
+            file_ids,
+            tables: Tables::new(locale),
+        };
+        (client, refused)
+    }
+}
+
+/// The services `vfs` and `formats`: the client once open, given whole to its readers, who read
+/// without a lock.
 #[derive(Default)]
 struct Files {
     state: RwLock<FilesState>,
@@ -29,7 +61,7 @@ struct Files {
 enum FilesState {
     NoClient(String),
     Opening,
-    Ready(Arc<Chain>),
+    Ready(Arc<Client>),
 }
 
 impl Default for FilesState {
@@ -39,9 +71,9 @@ impl Default for FilesState {
 }
 
 impl Files {
-    fn chain(&self) -> Result<Arc<Chain>, String> {
+    fn client(&self) -> Result<Arc<Client>, String> {
         match &*self.state.read().unwrap_or_else(|e| e.into_inner()) {
-            FilesState::Ready(chain) => Ok(chain.clone()),
+            FilesState::Ready(client) => Ok(client.clone()),
             FilesState::Opening => Err("the client's archives are being opened".to_owned()),
             FilesState::NoClient(reason) => Err(reason.clone()),
         }
@@ -54,35 +86,66 @@ impl Files {
 
 impl Vfs for Files {
     fn read(&self, path: &str) -> Result<Option<Vec<u8>>, String> {
-        self.chain()?.read(path)
+        self.client()?.chain.read(path)
     }
 
     fn exists(&self, path: &str) -> bool {
-        self.chain().is_ok_and(|chain| chain.exists(path))
+        self.client().is_ok_and(|client| client.chain.exists(path))
     }
 
     fn files_under(&self, folder: &str) -> Vec<String> {
-        self.chain().map(|chain| chain.files_under(folder)).unwrap_or_default()
+        self.client()
+            .map(|client| client.chain.files_under(folder))
+            .unwrap_or_default()
+    }
+
+    fn path_of(&self, file_data_id: u32) -> Option<String> {
+        self.client().ok()?.file_ids.path_of(file_data_id)
     }
 
     fn state(&self) -> VfsState {
         match &*self.state.read().unwrap_or_else(|e| e.into_inner()) {
             FilesState::NoClient(reason) => VfsState::NoClient(reason.clone()),
             FilesState::Opening => VfsState::Opening,
-            FilesState::Ready(chain) => VfsState::Ready {
-                archives: chain.sources().len(),
-                files: chain.listed_count(),
+            FilesState::Ready(client) => VfsState::Ready {
+                archives: client.chain.sources().len(),
+                files: client.chain.listed_count(),
             },
         }
     }
 }
 
-/// The archives being opened, by the job opening each, then the job merging their lists.
+impl Formats for Files {
+    fn maps(&self) -> Result<Arc<Vec<MapRecord>>, String> {
+        let client = self.client()?;
+        client.tables.maps(&client.chain)
+    }
+
+    fn areas(&self) -> Result<Arc<Vec<AreaRecord>>, String> {
+        let client = self.client()?;
+        client.tables.areas(&client.chain)
+    }
+
+    fn creature_displays(&self) -> Result<Arc<Vec<CreatureDisplay>>, String> {
+        let client = self.client()?;
+        client.tables.creature_displays(&client.chain)
+    }
+
+    fn creature_models(&self) -> Result<Arc<Vec<CreatureModel>>, String> {
+        let client = self.client()?;
+        client.tables.creature_models(&client.chain)
+    }
+}
+
+/// The archives being opened, by the job opening each, then the job merging their lists and
+/// reading the tables of paths; the folder and the locale of the client.
 #[derive(Default)]
 struct Opening {
     jobs: HashMap<JobId, usize>,
     sources: Vec<Option<Source>>,
     index: Option<JobId>,
+    folder: PathBuf,
+    locale: String,
 }
 
 #[derive(Default)]
@@ -122,6 +185,8 @@ impl AssetsModule {
         }
         self.files.set(FilesState::Opening);
         self.opening.sources = paths.iter().map(|_| None).collect();
+        self.opening.folder = folder.to_owned();
+        self.opening.locale = locale;
         for (place, path) in paths.into_iter().enumerate() {
             let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
             let job = ctx.spawn(&format!("Open {name}"), move |_| {
@@ -136,6 +201,8 @@ impl Module for AssetsModule {
     fn register(&mut self, reg: &mut Registrar) {
         let files: Arc<dyn Vfs> = self.files.clone();
         reg.provide(vfs::SERVICE, files);
+        let tables: Arc<dyn Formats> = self.files.clone();
+        reg.provide(formats::SERVICE, tables);
         reg.panel("assets", "Assets", DockArea::Bottom);
     }
 
@@ -165,7 +232,12 @@ impl Module for AssetsModule {
                 let left = self.opening.jobs.len() + usize::from(self.opening.index.is_some());
                 ui.label(format!("Opening the archives: {left} jobs left"))
             }
-            VfsState::Ready { archives, files } => ui.label(format!("{archives} archives, {files} files listed")),
+            VfsState::Ready { archives, files } => {
+                let ids = self.files.client().map(|client| client.file_ids.len()).unwrap_or(0);
+                ui.label(format!(
+                    "{archives} archives, {files} files listed, {ids} FileDataIDs named"
+                ))
+            }
         };
         for reason in &self.refused {
             ui.colored_label(ui.visuals().warn_fg_color, reason);
@@ -184,12 +256,20 @@ impl Module for AssetsModule {
             }
             if self.opening.jobs.is_empty() {
                 let sources: Vec<Source> = self.opening.sources.drain(..).flatten().collect();
-                self.opening.index = Some(ctx.spawn("Index the client's files", move |_| Chain::new(sources)));
+                let folder = std::mem::take(&mut self.opening.folder);
+                let locale = std::mem::take(&mut self.opening.locale);
+                self.opening.index = Some(ctx.spawn("Index the client's files", move |_| {
+                    Client::open(sources, &folder, &locale)
+                }));
             }
         } else if self.opening.index == Some(job) {
             self.opening.index = None;
-            if let Some(chain) = outcome.take::<Chain>() {
-                self.files.set(FilesState::Ready(Arc::new(chain)));
+            if let Some((client, refused)) = outcome.take::<(Client, Vec<String>)>() {
+                for reason in &refused {
+                    log::warn!("a table of paths of the client is left out: {reason}");
+                }
+                self.refused.extend(refused);
+                self.files.set(FilesState::Ready(Arc::new(client)));
             }
         }
     }

@@ -266,7 +266,7 @@ fills it, or *not planned* when no milestone does yet.
 | The dopesheet | The service `dopesheet`; the objects `DopesheetView` and `CurveView`, as the Timeline does | `DopesheetView`; `CurveView` showing a `Sequence` | `uniwow::DopesheetView`; `DopesheetView` | — milestones 10 and 11 |
 | Tree, table, property grid | egui; the service `property-grid` | `TreeView`, `TableView`, with `set_cell`, `insert_rows`, `remove_rows`; `PropertyGrid` | `uniwow::TreeView`, `uniwow::TableView`, `uniwow::PropertyGrid`; `TreeView`, `TableView`, `PropertyGrid` | — milestones 10 and 11 |
 | Drawing in the 3D view | The service `viewport` and its layers | — not planned (an other 3D access of step 8.3) | — | — |
-| The client's files, read from its archives | The service `vfs` of the module `assets` — step 9.1 | — not planned yet | — | — |
+| The client's files, read from its archives, and their formats | The services `vfs` and `formats` of the module `assets` — step 9.1 | — not planned yet | — | — |
 | The live world: entities of the server around a point, their moves | Inside the module `live-world` | — step 9.3 (commands and events) | — step 9.3 | — milestones 10 and 11 |
 | Splitting work over the cores, `parallel_for` | `uniwow_api::parallel_for` — step 9.2a | — not planned; compiled modules run threads of their own (T7) | — | — |
 | Picking in the 3D view, the selection shown in 3D | — designed in milestone 9, not built | — | — | — |
@@ -1925,7 +1925,7 @@ Each step is reviewed before the next one; the milestone is delivered once all a
 | The bytes of animation (instances and bones) written to the GPU per frame in a crowded city | To measure |
 | What warcraft-rs reads and writes correctly in 3.3.5a, format by format; what `assets` copies of it, without `rayon` | Reading verified in step 9.1 (below): archives, DBC, WDT, ADT and WMO groups read; M2, skins, WMO roots and BLP have faults to correct in the copy. Writing not verified yet |
 | Which versions of the modern formats the extensions of WarcraftXL load, and where they find the files (their folders, loose files, FileDataIDs and listfile): the editor must read the same files from the same places | Verified in step 9.1 in their sources (below) |
-| What wow.export reads of those formats, and how much of it the translation takes | To verify |
+| What wow.export reads of those formats, and how much of it the translation takes | DB2 verified in step 9.1: wow.export reads WDC2, `1SLC`, WDC3, WDC4 and WDC5, not WDC1; the translation takes WDC2, `1SLC`, WDC3 and WDC5, for the tables of paths. M2, WMO, ADT and BLP: at their steps |
 | Does the active invisible object stay out of the game (no aggro, no AI, not seen by game masters), and is it always removed (unsubscription, disconnection, heartbeat lost)? | To verify |
 
 #### Results of the verifications (step 9.1)
@@ -2012,11 +2012,12 @@ First part (9.1a), the archives:
   `Data` holding its `locale-<locale>.MPQ`.
 - The order is that of Wow.exe 12340 for the patches, widened to any name as the patcher of
   WarcraftXL does, a folder of that name mounted as an archive; the base archives follow in the
-  order the community documents, not checked against Wow.exe.
+  order the community documents, not checked against Wow.exe (checked and corrected in 9.1b).
 - An archive of format 1 or 2, its positions unsigned (`patch-Z.MPQ`, past 2 GB), has its tables
   read once, then its files read by position from any thread, without a lock: the packed bytes in a
-  buffer each thread reuses (kept up to 64 MB), the file in one allocation of its size; stored,
-  compressed with zlib in one unit or in sectors, with or without their checksums (not checked).
+  buffer each thread reuses (kept up to 64 MB, 8 MB since 9.1b), the file in one allocation of its
+  size; stored, compressed with zlib in one unit or in sectors, with or without their checksums
+  (not checked).
   The entry of the neutral locale comes first. A delete marker hides the file of the archives read
   after it. The encryption of files, PKWare's implode, the other compressions and the incremental
   patches are refused by name: the archives of 3.3.5a hold none.
@@ -2052,6 +2053,67 @@ Where the work of the archives is done:
 | The lists merged into the chain | A job of the pool | None |
 | The chain handed to the service | Interface, when that job ends | The state of the service, the time of an exchange |
 | A file read | The thread calling `read`, any | The state of the service, to take the chain; none while reading |
+
+Second part (9.1b), the FileDataIDs, the DB2 and the service `formats`:
+
+- Corrected after the review of the first part: the base archives follow the order of Wow.exe
+  12340, read in its table at 0xAB6168, which 0x405DD0 opens with priorities falling from 0x3F,
+  the patches above 0x40: `expansion`, `lichking`, `common`, `common-2`, then those of the locale
+  (`locale`, `speech`, `expansion-locale`, `lichking-locale`, `expansion-speech`,
+  `lichking-speech`), then `development`; `Data\alternate.MPQ` comes before every patch;
+  `base-<locale>.MPQ`, which the game does not open, is left out. No file of the user's client
+  lies in two base archives: what it reads does not change. A thread keeps up to 8 MB of packed
+  bytes; a larger file is read into a buffer of its own.
+- Every file the client lists read once, by a test run on demand
+  (`every_file_the_client_lists_is_read_and_none_is_refused`): 230,200 files, 17,157 of them
+  sounds, 36.6 GB in 57 s, none refused.
+- `uniwow_api::vfs`: `path_of`, the path of a modern file by its FileDataID, through
+  `TextureFilePath.db2`, then `ModelFilePath.db2`, as WarcraftXL does; none when neither names it.
+- `uniwow_api::formats`: the trait `Formats`, shared between threads (T3), and its rows, plain
+  data: the maps (`Map.dbc`), the areas (`AreaTable.dbc`), the looks of creatures
+  (`CreatureDisplayInfo.dbc`) and their models (`CreatureModelData.dbc`), by increasing id, their
+  texts in the locale of the client (enGB reads those of enUS). Each table is read once, by the
+  first thread asking for it, the others asking meanwhile waiting for it; another client folder
+  starts them again. The module `assets` offers it as the service `formats`.
+- The tables of paths: read loose from `DBFilesClient` in the client folder first, then from the
+  archives, both at once, each on a thread of its own, inside the job that merges the lists. A
+  table missing is not an error; one that cannot be read is said in the panel, which also says
+  how many FileDataIDs the tables name. A table keeps its bytes and, for each FileDataID, where
+  its path starts: a million rows read in about 10 ms (release), the path made only when asked.
+- DB2: WDC1, as DB2Gen writes it, read from the public description of the format; WDC2, `1SLC`,
+  WDC3 and WDC5 translated from wow.export (MIT); WDC4 refused by name, as WarcraftXL does. Each
+  section is found by the offset its header gives, which steps over what WDC4 and WDC5 put before
+  the sections. The id comes from the map of offsets, else the list of ids (all zero: the place
+  of each record), else its column, plain, packed, signed or in a pallet; the copies and the
+  records of variable size are read. WDC2 takes the offsets of its strings from their field, as
+  the description of the format says, where wow.export reads them inline. An id named twice keeps
+  its first row. A table with a column other than the id and the path is refused. A section
+  encrypted with a key the client lacks holds zeros, which name no file: it needs no reading of
+  its own.
+- DBC: the header checked against the columns WoWDBDefs gives for 3.3.5.12340 (CC BY-SA 4.0); a
+  table of another layout, or damaged, is refused with its name.
+- `modules/assets/THIRD_PARTY.md` names wow.export, its commit, its authors and its licence, and
+  WoWDBDefs; nothing comes from DB2Gen or WarcraftXL (GPL-3).
+- Measured on the user's client (frFR since 5 October), release: the four tables read in 7 ms,
+  135 maps, 2,307 areas, 24,262 looks of creatures and 1,537 models, 1,527 of them found in the
+  archives by their `.m2`. The client holds no table of paths: no FileDataID named.
+- Tests: DB2 the tests write, of each version (sections, strings, ids of every kind, copies,
+  records of variable size, an encrypted section, WDC4 refused, every file cut short refused,
+  every byte damaged without a panic); the tables of paths found loose then in the archives,
+  textures before models; DBC the tests write (the locale, the order by id, a table read once,
+  another layout and damaged files refused); the services before and after the client opens; the
+  client's own tables when `UNIWOW_CLIENT` names it. Each of 31 changes made on purpose to the
+  readers and the services made a test fail.
+- Kept for later, from the review of the first part: an index of the files by folder, for
+  `files_under`, when the browser of files needs it. The DBC the next steps need come with them.
+
+Where the work of the second part is done:
+
+| Work | Thread | Lock |
+|---|---|---|
+| The tables of paths read | The job merging the lists, a thread of its own per table | None |
+| A FileDataID turned into a path | The thread calling `path_of`, any | The state of the service, to take the client; none while reading |
+| A DBC read and its rows made | The first thread asking for it; the others asking meanwhile wait | The cell of the table (`OnceLock`), until it is read |
 
 #### Tests
 

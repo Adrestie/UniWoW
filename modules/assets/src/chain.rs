@@ -5,7 +5,10 @@
 //! `Data\<locale>\patch-<locale>-?.MPQ` sorted together by their path, from the last, case
 //! ignored, then `Data\patch.MPQ` and `Data\<locale>\patch-<locale>.MPQ`. WarcraftXL widens the
 //! patches to any name, `Data\Patch-<name>.MPQ`, which may also be a folder mounted as an archive.
-//! The base archives follow, in the order the community documents.
+//! `Data\alternate.MPQ` comes before every patch, and the base archives after them, in the order
+//! of the table of Wow.exe 12340 at 0xAB6168, which 0x405DD0 opens with priorities falling from
+//! 0x3F, the patches above 0x40: `expansion` before `lichking`, `common` before `common-2`, the
+//! archives of the locale after them. The game does not read `base-<locale>.MPQ`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -17,16 +20,20 @@ pub fn key(path: &str) -> String {
     path.replace('/', "\\").to_ascii_lowercase()
 }
 
-/// The base archives, after the patches, in the folder of the locale (`{}`) then in `Data`.
-const BASE_LOCALE: [&str; 6] = [
-    "lichking-locale-{}.mpq",
-    "expansion-locale-{}.mpq",
-    "locale-{}.mpq",
-    "lichking-speech-{}.mpq",
-    "expansion-speech-{}.mpq",
-    "base-{}.mpq",
+/// The base archives, after the patches, below `Data`, `{}` being the locale.
+const BASE: [&str; 11] = [
+    "expansion.mpq",
+    "lichking.mpq",
+    "common.mpq",
+    "common-2.mpq",
+    "{}\\locale-{}.mpq",
+    "{}\\speech-{}.mpq",
+    "{}\\expansion-locale-{}.mpq",
+    "{}\\lichking-locale-{}.mpq",
+    "{}\\expansion-speech-{}.mpq",
+    "{}\\lichking-speech-{}.mpq",
+    "development.mpq",
 ];
-const BASE: [&str; 4] = ["lichking.mpq", "expansion.mpq", "common-2.mpq", "common.mpq"];
 
 /// The entries of `folder` whose name, lower case, starts with `prefix` and ends with `.mpq`, with
 /// at least one character between, files or folders.
@@ -49,18 +56,15 @@ pub fn order(client: &Path, locale: &str) -> Vec<PathBuf> {
     let data = client.join("Data");
     let localised = data.join(locale);
     let lower = locale.to_ascii_lowercase();
-    let mut chain = patches(&data, "patch-");
-    chain.extend(patches(&localised, &format!("patch-{lower}-")));
+    let mut sorted = patches(&data, "patch-");
+    sorted.extend(patches(&localised, &format!("patch-{lower}-")));
     let path_key = |path: &PathBuf| key(&path.strip_prefix(client).unwrap_or(path).to_string_lossy());
-    chain.sort_by_key(|path| std::cmp::Reverse(path_key(path)));
+    sorted.sort_by_key(|path| std::cmp::Reverse(path_key(path)));
+    let mut chain = vec![data.join("alternate.mpq")];
+    chain.extend(sorted);
     chain.push(data.join("patch.mpq"));
     chain.push(localised.join(format!("patch-{lower}.mpq")));
-    chain.extend(
-        BASE_LOCALE
-            .iter()
-            .map(|name| localised.join(name.replace("{}", &lower))),
-    );
-    chain.extend(BASE.iter().map(|name| data.join(name)));
+    chain.extend(BASE.iter().map(|name| data.join(name.replace("{}", locale))));
     chain.into_iter().filter(|path| path.exists()).collect()
 }
 

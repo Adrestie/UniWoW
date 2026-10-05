@@ -137,12 +137,14 @@ pub struct Archive {
 }
 
 thread_local! {
-    /// The packed bytes of a file and its table of sectors, reused by each thread for every file.
-    static PACKED: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    /// The packed bytes of a file and its table of sectors, reused by each thread for every file up
+    /// to `KEPT_BUFFER` bytes.
+    pub(crate) static PACKED: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
-/// The most a thread keeps of its buffer between two files.
-const KEPT_BUFFER: usize = 64 << 20;
+/// The most a thread's buffer holds: nearly every file of a map is smaller; a larger one takes an
+/// allocation of its own, not kept.
+pub(crate) const KEPT_BUFFER: usize = 8 << 20;
 
 /// Reads `buffer.len()` bytes at `offset`, without moving a shared position.
 fn read_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
@@ -348,19 +350,20 @@ impl Archive {
             read_at(&self.file, &mut data, block.offset).map_err(failed)?;
             return Ok(data);
         }
-        PACKED.with_borrow_mut(|packed| {
-            let result = if block.flags & FILE_SINGLE_UNIT != 0 {
+        let unpack_into = |packed: &mut Vec<u8>, data: &mut [u8]| {
+            if block.flags & FILE_SINGLE_UNIT != 0 {
                 packed.resize(block.packed as usize, 0);
                 read_at(&self.file, packed, block.offset).map_err(failed)?;
-                unpack(packed, &mut data)
+                unpack(packed, data)
             } else {
-                self.read_sectors(block, packed, &mut data)
-            };
-            if packed.capacity() > KEPT_BUFFER {
-                *packed = Vec::new();
+                self.read_sectors(block, packed, data)
             }
-            result
-        })?;
+        };
+        if block.packed > KEPT_BUFFER as u64 {
+            unpack_into(&mut Vec::new(), &mut data)?;
+        } else {
+            PACKED.with_borrow_mut(|packed| unpack_into(packed, &mut data))?;
+        }
         Ok(data)
     }
 

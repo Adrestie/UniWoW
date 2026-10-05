@@ -10,7 +10,7 @@ use uniwow_api::miniz_oxide;
 use crate::chain::{self, Chain, Source};
 use crate::mpq::{
     self, Archive, ENCRYPTION_TABLE, Entry, FILE_COMPRESS, FILE_DELETE_MARKER, FILE_ENCRYPTED, FILE_EXISTS,
-    FILE_SECTOR_CRC, FILE_SINGLE_UNIT, hash_string, hash_type,
+    FILE_SECTOR_CRC, FILE_SINGLE_UNIT, KEPT_BUFFER, PACKED, hash_string, hash_type,
 };
 
 /// Copied from wow-mpq (crypto/encryption.rs): encrypts a block, as an archive's tables are.
@@ -27,7 +27,7 @@ fn encrypt_block(data: &mut [u32], mut key: u32) {
 
 /// How a file is written into a test archive.
 #[derive(Clone, Copy)]
-enum Stored {
+pub(crate) enum Stored {
     Plain,
     OneUnit,
     Sectors { crc: bool },
@@ -35,14 +35,14 @@ enum Stored {
 }
 
 /// A file of a test archive: its name, its bytes, how it is stored, and extra flags.
-struct TestFile<'a> {
+pub(crate) struct TestFile<'a> {
     name: &'a str,
     data: &'a [u8],
     stored: Stored,
     flags: u32,
 }
 
-fn file<'a>(name: &'a str, data: &'a [u8], stored: Stored) -> TestFile<'a> {
+pub(crate) fn file<'a>(name: &'a str, data: &'a [u8], stored: Stored) -> TestFile<'a> {
     TestFile {
         name,
         data,
@@ -63,7 +63,7 @@ fn pack(data: &[u8]) -> Vec<u8> {
 }
 
 /// Writes an archive of format 1 with sectors of 512 << `shift` bytes, its list included.
-fn write_archive(path: &Path, shift: u16, files: &[TestFile]) {
+pub(crate) fn write_archive(path: &Path, shift: u16, files: &[TestFile]) {
     let sector = 512usize << shift;
     let names: Vec<&str> = files.iter().map(|file| file.name).collect();
     let listfile = names.join("\r\n");
@@ -155,7 +155,7 @@ fn write_archive(path: &Path, shift: u16, files: &[TestFile]) {
 }
 
 /// A folder of its own for a test, empty.
-fn scratch(name: &str) -> PathBuf {
+pub(crate) fn scratch(name: &str) -> PathBuf {
     let folder = std::env::temp_dir()
         .join("uniwow-assets-tests")
         .join(format!("{name}-{}", std::process::id()));
@@ -228,6 +228,36 @@ fn files_stored_compressed_in_one_unit_or_in_sectors_read_back_whole() {
     let mut listed = archive.listed().unwrap();
     listed.sort();
     assert_eq!(listed.len(), 6);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_file_larger_than_a_thread_keeps_is_read_in_an_allocation_of_its_own() {
+    let folder = scratch("large");
+    let path = folder.join("test.mpq");
+    // Bytes that do not compress, more than a thread's buffer holds.
+    let mut seed = 0x9E37_79B9u32;
+    let large: Vec<u8> = (0..KEPT_BUFFER + 300_000)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as u8
+        })
+        .collect();
+    let small = sample(5000);
+    write_archive(
+        &path,
+        3,
+        &[
+            file("large.bin", &large, Stored::Sectors { crc: true }),
+            file("small.bin", &small, Stored::Sectors { crc: false }),
+        ],
+    );
+    let archive = Archive::open(&path).unwrap();
+    assert_eq!(read(&archive, "small.bin"), small);
+    assert_eq!(read(&archive, "large.bin"), large);
+    PACKED.with_borrow(|packed| assert!(packed.capacity() <= KEPT_BUFFER, "{} kept", packed.capacity()));
     let _ = std::fs::remove_dir_all(folder);
 }
 
@@ -329,6 +359,9 @@ fn patches_of_any_name_and_folders_mounted_as_archives_come_in_the_client_s_orde
     std::fs::create_dir_all(&locale).unwrap();
     for name in [
         "common.MPQ",
+        "common-2.MPQ",
+        "lichking.MPQ",
+        "expansion.MPQ",
         "patch.MPQ",
         "patch-2.MPQ",
         "patch-z.MPQ",
@@ -340,7 +373,7 @@ fn patches_of_any_name_and_folders_mounted_as_archives_come_in_the_client_s_orde
             &[file("which.txt", name.as_bytes(), Stored::Plain)],
         );
     }
-    for name in ["locale-enUS.MPQ", "patch-enUS-3.MPQ", "patch-enUS.MPQ"] {
+    for name in ["locale-enUS.MPQ", "patch-enUS-3.MPQ", "patch-enUS.MPQ", "base-enUS.MPQ"] {
         write_archive(
             &locale.join(name),
             3,
@@ -369,9 +402,13 @@ fn patches_of_any_name_and_folders_mounted_as_archives_come_in_the_client_s_orde
             "data\\enus\\patch-enus-3.mpq",
             "data\\patch.mpq",
             "data\\enus\\patch-enus.mpq",
-            "data\\enus\\locale-enus.mpq",
+            "data\\expansion.mpq",
+            "data\\lichking.mpq",
             "data\\common.mpq",
-        ]
+            "data\\common-2.mpq",
+            "data\\enus\\locale-enus.mpq",
+        ],
+        "the order of Wow.exe 12340; base-enUS.MPQ, which the game does not read, left out"
     );
     let sources = chain::order(&client, "enUS")
         .iter()
@@ -458,6 +495,69 @@ fn the_client_s_archives_read_as_the_client_reads_them() {
         chain.sources().len(),
         chain.listed_count()
     );
+}
+
+/// Run on demand, a few minutes: `cargo test -p uniwow-module-assets -- --ignored --nocapture`.
+#[test]
+#[ignore = "reads every file of the client named by UNIWOW_CLIENT"]
+fn every_file_the_client_lists_is_read_and_none_is_refused() {
+    let Some(chain) = client() else { return };
+    let all = chain.files_under("");
+    let next = AtomicUsize::new(0);
+    let refused = std::sync::Mutex::new(std::collections::BTreeMap::<String, Vec<String>>::new());
+    let (bytes, sounds) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    let started = Instant::now();
+    std::thread::scope(|scope| {
+        for _ in 0..16 {
+            scope.spawn(|| {
+                while let Some(name) = all.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    match chain.read(name) {
+                        Ok(Some(data)) => {
+                            bytes.fetch_add(data.len(), Ordering::Relaxed);
+                            let lower = name.to_ascii_lowercase();
+                            if [".wav", ".mp3", ".ogg"].iter().any(|kind| lower.ends_with(kind)) {
+                                sounds.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        Ok(None) => refused
+                            .lock()
+                            .unwrap()
+                            .entry("listed but absent".to_owned())
+                            .or_default()
+                            .push(name.clone()),
+                        Err(error) => {
+                            let cause = [
+                                "encrypted",
+                                "implode",
+                                "compression",
+                                "incremental",
+                                "table of sectors",
+                                "cannot be read",
+                                "zlib",
+                            ]
+                            .into_iter()
+                            .find(|cause| error.contains(cause))
+                            .unwrap_or("other");
+                            refused.lock().unwrap().entry(cause.to_owned()).or_default().push(error);
+                        }
+                    }
+                }
+            });
+        }
+    });
+    let refused = refused.into_inner().unwrap();
+    eprintln!(
+        "{} files read, {} sounds among them, {:.1} GB, in {:.0} s; refused: {:?}",
+        all.len(),
+        sounds.load(Ordering::Relaxed),
+        bytes.load(Ordering::Relaxed) as f64 / 1e9,
+        started.elapsed().as_secs_f64(),
+        refused
+            .iter()
+            .map(|(cause, files)| (cause.as_str(), files.len(), files.first()))
+            .collect::<Vec<_>>()
+    );
+    assert!(refused.is_empty());
 }
 
 #[test]
