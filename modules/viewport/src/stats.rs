@@ -56,6 +56,8 @@ pub struct Sample {
 pub struct Stats {
     samples: VecDeque<(Instant, Sample)>,
     gpu: VecDeque<(Instant, GpuFrame)>,
+    /// The frames whose pass failed in a row, and why.
+    pass: Option<(u32, String)>,
 }
 
 /// What the process takes in memory, in bytes: its working set and its private bytes; none where
@@ -115,6 +117,11 @@ impl Stats {
         }
     }
 
+    /// The frames whose pass failed in a row and why; none while the frames are drawn.
+    pub fn set_pass(&mut self, pass: Option<(u32, String)>) {
+        self.pass = pass;
+    }
+
     /// What the GPU spent on a frame, known some frames after it.
     pub fn push_gpu(&mut self, now: Instant, frame: GpuFrame) {
         self.gpu.push_back((now, frame));
@@ -140,6 +147,9 @@ impl Stats {
         lines.push(format!(
             "view, interface thread: {all:.2} ms (prepare {prepare:.2}, record {record:.2}, submit {submit:.2}), the longest {longest:.2}"
         ));
+        if let Some((missed, error)) = &self.pass {
+            lines.push(format!("the pass failed, {missed} frames in a row not drawn: {error}"));
+        }
         lines.push(if timed {
             let (gpu, longest) = spread(self.gpu.iter().map(|(_, gpu)| gpu.total));
             format!("GPU: {gpu:.2} ms a frame, the longest {longest:.2}")

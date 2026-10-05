@@ -3929,6 +3929,18 @@ submit.
   under 0.02 ms; nothing computed yet. The same as 9.4d (0.51 to 0.74 ms): nothing lost by the
   new frame.
 
+#### Step 9.4e1, after its review
+
+- **A pass that fails without a layer drawn in it** (the grid, the timestamps, or a bundle that got
+  through) was not drawn nor said, at every frame: the view froze without a word. The error of the
+  pass is now given with the frame (`Drawn::pass_error`) to a watch of the view (`PassWatch`): said
+  in the log at the first frame missed in a row only, shown in the statistics (`the pass failed,
+  N frames in a row not drawn: …`) while it lasts, forgotten at the first frame drawn. The layers
+  drawn in the pass are still removed at the first frame; with none, after 30 frames missed in a
+  row the viewport reports itself failed. Tested: a bundle recorded for the view's multisampling,
+  run in a pass of one sample, refused at every frame, said once, given up at the thirtieth, no
+  layer removed; the watch begun again by a frame drawn; the line of the statistics.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

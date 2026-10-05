@@ -27,7 +27,7 @@ use uniwow_api::viewport::{
 };
 use uniwow_api::{
     Context, DockArea, Event, MODULE_FAILED_TOPIC, Module, PropertyKind, PropertyValue, Registrar, egui, egui_wgpu,
-    wgpu,
+    log, wgpu,
 };
 
 use camera::{FOV, OrbitCamera, REACH};
@@ -398,6 +398,7 @@ struct ViewportModule {
     /// The timer of the GPU, when the device has timestamps; when the last frame was drawn; and
     /// whether the statistics are shown.
     timer: Option<GpuTimer>,
+    pass: PassWatch,
     last_frame: Option<Instant>,
     show_stats: bool,
     /// What the layers wrote over the view at the last frame, with the transform it was drawn with.
@@ -424,6 +425,7 @@ impl Default for ViewportModule {
             speed: SPEED,
             stats: Stats::default(),
             timer: None,
+            pass: PassWatch::default(),
             last_frame: None,
             show_stats: false,
             labels: (Mat4::IDENTITY, Vec::new()),
@@ -734,6 +736,16 @@ impl ViewportModule {
         for (owner, message) in drawn.failures {
             ctx.report_failure(&owner, &message);
         }
+        match self.pass.note(drawn.pass_error) {
+            Watched::Drawn => {}
+            Watched::First(error) => log::error!("the pass of the view failed, its frames are not drawn: {error}"),
+            Watched::Again => {}
+            Watched::Given(error) => ctx.report_failure(
+                "viewport",
+                &format!("its pass failed {MISSED_FRAMES} frames in a row: {error}"),
+            ),
+        }
+        self.stats.set_pass(self.pass.status());
         self.sample(gpu, drawn.timings, drawn.submit);
         self.signal_frame(view.time);
     }
@@ -792,6 +804,52 @@ struct Drawn {
     timings: Vec<LayerTiming>,
     labels: Vec<Label>,
     submit: Duration,
+    /// Why the pass failed, the frame not drawn; the layers drawn in it are among the failures.
+    pass_error: Option<String>,
+}
+
+/// The frames whose pass failed in a row after which the view gives up: the viewport reports itself
+/// failed, no layer drawn in the pass being left to put the error on.
+const MISSED_FRAMES: u32 = 30;
+
+/// What a frame drawn tells the watch of the pass.
+#[derive(Debug, PartialEq)]
+enum Watched {
+    Drawn,
+    /// The first frame missed in a row, and why: said in the log once.
+    First(String),
+    Again,
+    /// `MISSED_FRAMES` missed in a row: given up.
+    Given(String),
+}
+
+/// The frames missed in a row because their pass failed, and the last error.
+#[derive(Default)]
+struct PassWatch {
+    missed: u32,
+    error: Option<String>,
+}
+
+impl PassWatch {
+    fn note(&mut self, error: Option<String>) -> Watched {
+        let Some(error) = error else {
+            self.missed = 0;
+            self.error = None;
+            return Watched::Drawn;
+        };
+        self.missed += 1;
+        self.error = Some(error.clone());
+        match self.missed {
+            1 => Watched::First(error),
+            MISSED_FRAMES => Watched::Given(error),
+            _ => Watched::Again,
+        }
+    }
+
+    /// The frames missed in a row and why, for the statistics; none while the frames are drawn.
+    fn status(&self) -> Option<(u32, String)> {
+        self.error.clone().map(|error| (self.missed, error))
+    }
 }
 
 /// The textures the pass of a frame draws into.
@@ -1002,6 +1060,7 @@ fn draw_frame(
         timings,
         labels,
         submit,
+        pass_error: failed_pass,
     }
 }
 
@@ -1210,8 +1269,8 @@ mod tests {
 
     use super::stats::{GpuFrame, GpuTimer, LayerTiming, Sample, Stats};
     use super::{
-        Camera, CameraKeys, Drawn, Entry, FrameSignal, Layers, PassTargets, TARGET, ViewportModule, camera, draw_frame,
-        frame, lock, look_at, project, resolved, view,
+        Camera, CameraKeys, Drawn, Entry, FrameSignal, Layers, MISSED_FRAMES, PassTargets, PassWatch, TARGET,
+        ViewportModule, Watched, camera, draw_frame, frame, lock, look_at, project, resolved, view,
     };
 
     /// A device of the software adapter of the system, with timestamps, inside encoders and passes
@@ -1999,10 +2058,17 @@ fn cs_main() {
         resolved: wgpu::Texture,
         resolve: wgpu::TextureView,
         depth: wgpu::TextureView,
+        samples: u32,
     }
 
     impl Targets {
         fn new(gpu: &egui_wgpu::RenderState) -> Self {
+            Self::with_samples(gpu, TARGET.sample_count)
+        }
+
+        /// Multisampled `samples` times, unlike the bundles of the layers when not the view's; resolved
+        /// only when multisampled.
+        fn with_samples(gpu: &egui_wgpu::RenderState, samples: u32) -> Self {
             let texture = |format, samples, usage| {
                 gpu.device.create_texture(&wgpu::TextureDescriptor {
                     label: None,
@@ -2025,20 +2091,13 @@ fn cs_main() {
                 wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             );
             Self {
-                colour: texture(
-                    TARGET.color_format,
-                    TARGET.sample_count,
-                    wgpu::TextureUsages::RENDER_ATTACHMENT,
-                )
-                .create_view(&Default::default()),
+                colour: texture(TARGET.color_format, samples, wgpu::TextureUsages::RENDER_ATTACHMENT)
+                    .create_view(&Default::default()),
                 resolve: resolved.create_view(&Default::default()),
                 resolved,
-                depth: texture(
-                    TARGET.depth_format,
-                    TARGET.sample_count,
-                    wgpu::TextureUsages::RENDER_ATTACHMENT,
-                )
-                .create_view(&Default::default()),
+                depth: texture(TARGET.depth_format, samples, wgpu::TextureUsages::RENDER_ATTACHMENT)
+                    .create_view(&Default::default()),
+                samples,
             }
         }
 
@@ -2052,7 +2111,7 @@ fn cs_main() {
         ) -> Drawn {
             let targets = PassTargets {
                 colour: &self.colour,
-                resolve: Some(&self.resolve),
+                resolve: (self.samples > 1).then_some(&self.resolve),
                 depth: &self.depth,
             };
             draw_frame(layers, gpu, view, new_device, &targets, None, timer)
@@ -2129,6 +2188,37 @@ fn cs_main() {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_pass_failing_without_a_layer_drawn_in_it_is_said_then_given_up() {
+        let Some(gpu) = gpu() else {
+            eprintln!("skipped: no software adapter for a device");
+            return;
+        };
+        let view = view(&Camera::default(), [8, 8], 0.0, viewport::Fog::default());
+        // A bundle recorded for the view's multisampling, run in a pass of one sample: refused when
+        // the pass is finished, no layer drawn in it to blame.
+        let targets = Targets::with_samples(&gpu, 1);
+        let layers = Layers::default();
+        put(&layers, "bundled", Painter::new(Drawing::Bundle, GREEN));
+        let mut watch = PassWatch::default();
+        for frame in 1..=MISSED_FRAMES {
+            let drawn = targets.draw(&layers, &gpu, &view, false, None);
+            assert!(drawn.failures.is_empty(), "{:?}", drawn.failures);
+            let error = drawn.pass_error.expect("the pass refused");
+            let watched = watch.note(Some(error.clone()));
+            match frame {
+                1 => assert_eq!(watched, Watched::First(error), "said once"),
+                MISSED_FRAMES => assert_eq!(watched, Watched::Given(error), "given up"),
+                _ => assert_eq!(watched, Watched::Again),
+            }
+            assert_eq!(watch.status().map(|(missed, _)| missed), Some(frame));
+        }
+        assert_eq!(lock(&layers).layers.len(), 1, "no layer to put it on");
+        assert_eq!(watch.note(None), Watched::Drawn);
+        assert_eq!(watch.status(), None, "a frame drawn begins again");
+        assert_eq!(watch.note(Some("again".to_owned())), Watched::First("again".to_owned()));
     }
 
     #[test]
@@ -2216,6 +2306,14 @@ fn cs_main() {
             text.contains("  GPU: computing 0.25 ms (0.25), drawing 1.50 (1.50)"),
             "{text}"
         );
+        assert!(!text.contains("the pass failed"), "{text}");
+        stats.set_pass(Some((3, "refused".to_owned())));
+        let failing = stats.text(true, None, &Allowance::default());
+        assert!(
+            failing.contains("the pass failed, 3 frames in a row not drawn: refused"),
+            "{failing}"
+        );
+        stats.set_pass(None);
         assert!(
             text.contains("terrain: 87 draws, 2.15 M triangles, 300 MB, 85 tiles"),
             "{text}"
