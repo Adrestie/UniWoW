@@ -4,7 +4,9 @@
 
 use std::sync::{Arc, OnceLock};
 
-use uniwow_api::formats::{AreaRecord, CreatureDisplay, CreatureModel, MapRecord};
+use uniwow_api::formats::{
+    AreaRecord, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, GameObjectDisplay, HairGeoset, MapRecord,
+};
 
 use crate::chain::Chain;
 
@@ -91,6 +93,10 @@ pub struct Tables {
     areas: Rows<AreaRecord>,
     displays: Rows<CreatureDisplay>,
     models: Rows<CreatureModel>,
+    looks: Rows<CreatureLook>,
+    hairs: Rows<HairGeoset>,
+    facial_hairs: Rows<FacialHair>,
+    objects: Rows<GameObjectDisplay>,
 }
 
 impl Tables {
@@ -104,6 +110,10 @@ impl Tables {
             areas: OnceLock::new(),
             displays: OnceLock::new(),
             models: OnceLock::new(),
+            looks: OnceLock::new(),
+            hairs: OnceLock::new(),
+            facial_hairs: OnceLock::new(),
+            objects: OnceLock::new(),
         }
     }
 
@@ -144,7 +154,9 @@ impl Tables {
                 model: dbc.u32(row, 1),
                 extra: dbc.u32(row, 3),
                 scale: dbc.f32(row, 4),
+                alpha: dbc.u32(row, 5),
                 textures: [dbc.string(row, 6)?, dbc.string(row, 7)?, dbc.string(row, 8)?],
+                geosets: dbc.u32(row, 14),
             })
         };
         self.displays
@@ -165,15 +177,85 @@ impl Tables {
             .get_or_init(|| read(chain, "CreatureModelData.dbc", 28, row, |model| model.id))
             .clone()
     }
+
+    pub fn creature_looks(&self, chain: &Chain) -> Result<Arc<Vec<CreatureLook>>, String> {
+        let row = |dbc: &Dbc, row| {
+            Ok(CreatureLook {
+                id: dbc.u32(row, 0),
+                race: dbc.u32(row, 1),
+                sex: dbc.u32(row, 2),
+                skin: dbc.u32(row, 3),
+                face: dbc.u32(row, 4),
+                hair_style: dbc.u32(row, 5),
+                hair_colour: dbc.u32(row, 6),
+                facial_hair: dbc.u32(row, 7),
+                items: std::array::from_fn(|item| dbc.u32(row, 8 + item)),
+                flags: dbc.u32(row, 19),
+                baked: dbc.string(row, 20)?,
+            })
+        };
+        self.looks
+            .get_or_init(|| read(chain, "CreatureDisplayInfoExtra.dbc", 21, row, |look| look.id))
+            .clone()
+    }
+
+    pub fn hair_geosets(&self, chain: &Chain) -> Result<Arc<Vec<HairGeoset>>, String> {
+        let row = |dbc: &Dbc, row| {
+            Ok(HairGeoset {
+                race: dbc.u32(row, 1),
+                sex: dbc.u32(row, 2),
+                variation: dbc.u32(row, 3),
+                geoset: dbc.u32(row, 4),
+                scalp: dbc.u32(row, 5) != 0,
+            })
+        };
+        self.hairs
+            .get_or_init(|| {
+                read(chain, "CharHairGeosets.dbc", 6, row, |hair| {
+                    (hair.race, hair.sex, hair.variation)
+                })
+            })
+            .clone()
+    }
+
+    pub fn facial_hairs(&self, chain: &Chain) -> Result<Arc<Vec<FacialHair>>, String> {
+        let row = |dbc: &Dbc, row| {
+            Ok(FacialHair {
+                race: dbc.u32(row, 0),
+                sex: dbc.u32(row, 1),
+                variation: dbc.u32(row, 2),
+                geosets: std::array::from_fn(|value| dbc.u32(row, 3 + value)),
+            })
+        };
+        self.facial_hairs
+            .get_or_init(|| {
+                read(chain, "CharacterFacialHairStyles.dbc", 8, row, |facial| {
+                    (facial.race, facial.sex, facial.variation)
+                })
+            })
+            .clone()
+    }
+
+    pub fn game_object_displays(&self, chain: &Chain) -> Result<Arc<Vec<GameObjectDisplay>>, String> {
+        let row = |dbc: &Dbc, row| {
+            Ok(GameObjectDisplay {
+                id: dbc.u32(row, 0),
+                path: dbc.string(row, 1)?,
+            })
+        };
+        self.objects
+            .get_or_init(|| read(chain, "GameObjectDisplayInfo.dbc", 19, row, |object| object.id))
+            .clone()
+    }
 }
 
-/// The rows of the table `name` of `chain`, of `columns` columns, by increasing id.
-fn read<T>(
+/// The rows of the table `name` of `chain`, of `columns` columns, sorted by `id`.
+fn read<T, K: Ord>(
     chain: &Chain,
     name: &str,
     columns: usize,
     row: impl Fn(&Dbc, usize) -> Result<T, String>,
-    id: impl Fn(&T) -> u32,
+    id: impl Fn(&T) -> K,
 ) -> Result<Arc<Vec<T>>, String> {
     let path = format!("DBFilesClient\\{name}");
     let bytes = chain.read(&path)?.ok_or_else(|| format!("{path}: not in the client"))?;

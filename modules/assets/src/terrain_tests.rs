@@ -14,7 +14,7 @@ use crate::tests::{Stored, file, scratch, write_archive};
 use crate::{Client, blp, terrain};
 
 /// The client named by `UNIWOW_CLIENT`, open, or none.
-fn client() -> Option<Client> {
+pub(crate) fn client() -> Option<Client> {
     let Ok(folder) = std::env::var("UNIWOW_CLIENT") else {
         eprintln!("skipped: UNIWOW_CLIENT names no client folder");
         return None;

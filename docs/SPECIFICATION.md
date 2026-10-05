@@ -3156,6 +3156,82 @@ bc9198ce7, and checked on the skins and tables of the user's client; WoW Model V
     models (9.4c), then the buildings, the doodads and the water (9.6), and later a layer of a
     compiled module. The markers of `live-world` and the grid of the view, a few KB each, need not.
 
+#### Step 9.4b, as built
+
+- `uniwow_api::formats` holds a model as plain data, at rest: `Model` (its version and flags, its
+  vertices, its textures, a file, a kind its display fills, or named by no file, with their flags
+  of wrapping, its materials, the combos its batches index, its colours and weights at rest, its
+  bounds, its skins, the finest first, and its faults), `Skin` (its triangles as indices of the
+  vertices of the model, its submeshes, its batches), `Submesh`, `Batch`. The tables:
+  `CreatureLook` (`CreatureDisplayInfoExtra`), `HairGeoset` (`CharHairGeosets`), `FacialHair`
+  (`CharacterFacialHairStyles`), `GameObjectDisplay` (`GameObjectDisplayInfo`); `CreatureDisplay`
+  gains its alpha (field 5) and its variants (field 14). `Formats` gains `creature_looks`,
+  `hair_geosets`, `facial_hairs`, `game_object_displays` and `model`. The rules of the submeshes,
+  pure: `creature_geosets`, `look_geosets`, `default_geosets`.
+- The module `assets` reads them (`src/m2.rs`):
+  - a model of 3.3.5a (`MD20`, version 264) or modern (`MD21`, versions up to 274), a path a table
+    names `.mdx` or `.mdl` read as `.m2`; its skins, of 3.3.5a its views beside it (`00.skin` to
+    `03.skin`), modern by the FileDataIDs of `SFID`, its views then its levels of detail (`_lod01`
+    to `_lod03`), by the name of the model when no table of paths names them; its textures by the
+    FileDataIDs of `TXID`;
+  - at rest: a colour or a weight is the first key of its first sequence when the model holds its
+    keys (the flag 0x20 of the sequence), or of its global sequence; white and opaque otherwise,
+    the keys of an `.anim` file waiting for step 9.5;
+  - what a batch refers to is checked once, so that its readers index without a check: a batch
+    referring to what its model lacks is left out; a skin after the first that is missing or does
+    not hold together is left out with the next ones; both are said in `Model::faults`. A model
+    without its first skin is refused. A model without combos of coordinates, every modern one
+    (unused since Cataclysm), takes its coordinates by its shader: its batches are not checked
+    on them;
+  - corrected from warcraft-rs: the triangles of a skin go through its list of vertices, a submesh
+    starts at its `level` × 65,536 more, the render flags 0x08 and 0x10 are without depth test and
+    without depth write (credited in `modules/assets/THIRD_PARTY.md`).
+- Checked over every model of the user's client (`every_model_of_the_client_is_read_whole`,
+  ignored, 16 threads): 23,190 models, 23,184 read, in 6.3 s the first time and 0.9 s once the
+  system holds the archives in its cache; versions 264 (23,181), 272 (2) and 274 (1); 25,409
+  skins, 102,600 batches, 5,437 models with combiners; 2,425 models whose triangles would be wrong
+  without the skin's list of vertices; none past 65,536 indices. Refused 6, all for their first
+  skin: 5 not in the client (`arthaslichking_unarmed2`, `druidcat`, `saberon_noweapon`...), and
+  `FelBeastMount`, whose skin names its vertex 1,866 of 1,846. Left out, 96 faults: 54 batches
+  naming combos of coordinates their model lacks (`Varimathras`, `drakeold`: models of version 264
+  with the shaders of a later client), 27 batches a weight (the monocles of helms), 8 texture
+  combos (`KristallSpider`), 1 a material (`westfallcabbage`), 1 a colour (`jadeforestsky01`), and
+  5 later skins missing (`ghoul`, `Jain3`...). 39 models draw a texture named by no file: what the
+  client shows there is to see with the user in 9.4c.
+- Checked over the user's modern models, exported by wow.export (`UNIWOW_MODERN`): the 15 read
+  whole, without a fault, in 17 ms; versions 272 (5) and 274 (10); their skins by `SFID` as
+  wow.export named them in its manifest, 4 for those with levels of detail; their textures by
+  `TXID`, each in the manifest: two creatures (`owldragonmount`, 33,813 vertices and 19 textures;
+  `moirathaurissan`), a helm and two weapons, doodads, spells, a fire of particles only (no
+  vertex).
+- The tables of the user's client: 15,477 looks of characters, 370 hairs, 272 facial hairs and
+  3,791 looks of game objects, read with the others in 14 ms; 9 of the 15,433 looks of characters
+  the displays name are missing; every look of a game object an M2 or a WMO. 267 displays of 14
+  models have variants, where 39 were counted above in the tables of the server: the patches of
+  the client change `CreatureDisplayInfo`.
+- The submeshes, on known models:
+  - `IronDwarf`: its 39 displays all have variants, 6 distinct; each shows exactly the variant its
+    nibble chooses in each group, nothing else below 900;
+  - Marshal Dughan (display 1985 of `creature_template_model`, look 634: hair style 2, facial hair
+    1): `HumanMale` shows 0, 3 (his hair), 302 (the facial value 2 of the group 300), 401, 501,
+    702, 1301, 1801 and 2001; his values 1 of the groups 100 and 200 name 101 and 201, which the
+    `HumanMale` of the user's client lacks (its facial hairs are 102, 202 and 302): to compare with
+    the client in 9.4c;
+  - settled, as WoW Model Viewer dresses a character without items: the ears at 702, which the 20
+    bodies have (701 only five men); a hair of no submesh shows the scalp, 1 (that `HumanMale`
+    lacks: nothing is drawn); every other group at its first variant (x01), which keeps the
+    sleeves, chest, pants, tabard and cape bare as said above, and draws the belt 1801 and the
+    feet 2001 of the bodies that have them.
+- Tests: on files the tests write, a model of 3.3.5a at rest (vertices, textures of the three
+  sources, materials, combos, colours and weights at rest, bounds, combiners only with their
+  flag), the keys of an `.anim` sequence not read, triangles through the skin's list, a submesh's
+  level, each kind of batch left out and said, a model without its first skin refused and a later
+  one left out, a modern model's skins and textures by FileDataID, what is not a model or a skin
+  refused, a model or a skin cut anywhere refused without a panic, the paths of the tables; the tables of the four kinds; the rules of the submeshes; and,
+  given the client and the folder of wow.export, the iron dwarves, Marshal Dughan, the tables of
+  the client and the modern models. Each of 14 changes made on purpose to the reader, the tables
+  and the rules made a test fail.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

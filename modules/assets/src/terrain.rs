@@ -44,25 +44,25 @@ fn chunks(bytes: &[u8]) -> Result<Chunks<'_>, String> {
     Ok(found)
 }
 
-fn u16_at(bytes: &[u8], at: usize) -> Result<u16, String> {
+pub(crate) fn u16_at(bytes: &[u8], at: usize) -> Result<u16, String> {
     bytes
         .get(at..at + 2)
         .map(|b| u16::from_le_bytes([b[0], b[1]]))
         .ok_or_else(|| format!("cut short at byte {at}"))
 }
 
-fn u32_at(bytes: &[u8], at: usize) -> Result<u32, String> {
+pub(crate) fn u32_at(bytes: &[u8], at: usize) -> Result<u32, String> {
     bytes
         .get(at..at + 4)
         .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .ok_or_else(|| format!("cut short at byte {at}"))
 }
 
-fn f32_at(bytes: &[u8], at: usize) -> Result<f32, String> {
+pub(crate) fn f32_at(bytes: &[u8], at: usize) -> Result<f32, String> {
     u32_at(bytes, at).map(f32::from_bits)
 }
 
-fn f32s<const N: usize>(bytes: &[u8], at: usize) -> Result<[f32; N], String> {
+pub(crate) fn f32s<const N: usize>(bytes: &[u8], at: usize) -> Result<[f32; N], String> {
     let mut values = [0.0; N];
     for (index, value) in values.iter_mut().enumerate() {
         *value = f32_at(bytes, at + index * 4)?;

@@ -9,6 +9,9 @@ mod blp;
 mod chain;
 mod db2;
 mod dbc;
+mod m2;
+#[cfg(test)]
+mod m2_tests;
 mod mpq;
 #[cfg(test)]
 mod table_tests;
@@ -25,7 +28,8 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread::ThreadId;
 
 use uniwow_api::formats::{
-    self, AreaRecord, CreatureDisplay, CreatureModel, FileRef, Formats, MapRecord, Texture, Tile, Wdl, Wdt,
+    self, AreaRecord, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef, Formats, GameObjectDisplay,
+    HairGeoset, MapRecord, Model, Texture, Tile, Wdl, Wdt,
 };
 use uniwow_api::vfs::{self, Vfs, VfsState};
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, Registrar, egui, log, rfd, serde_json};
@@ -107,19 +111,41 @@ impl Client {
         }
     }
 
-    fn texture(&self, file: &FileRef, decode: bool) -> Result<Texture, String> {
-        let path = match file {
-            FileRef::Path(path) => path.clone(),
+    fn path(&self, file: &FileRef) -> Result<String, String> {
+        match file {
+            FileRef::Path(path) => Ok(path.clone()),
             FileRef::Id(id) => self
                 .file_ids
                 .path_of(*id)
-                .ok_or_else(|| format!("the FileDataID {id}: named by no table of paths"))?,
-        };
+                .ok_or_else(|| format!("the FileDataID {id}: named by no table of paths")),
+        }
+    }
+
+    fn texture(&self, file: &FileRef, decode: bool) -> Result<Texture, String> {
+        let path = self.path(file)?;
         let bytes = self
             .chain
             .read(&path)?
             .ok_or_else(|| format!("{path}: not in the client"))?;
         blp::texture(&bytes, decode).map_err(|e| format!("{path}: {e}"))
+    }
+
+    /// The model `file`, a path of a table read as an `.m2`, its skins beside it or named by
+    /// FileDataID.
+    fn model(&self, file: &FileRef) -> Result<Model, String> {
+        let path = m2::path(&self.path(file)?);
+        let bytes = self
+            .chain
+            .read(&path)?
+            .ok_or_else(|| format!("{path}: not in the client"))?;
+        m2::read(&bytes, &path, |skin| {
+            // By its FileDataID first, then by the name of the model.
+            let named = skin.id.and_then(|id| self.file_ids.path_of(id)).unwrap_or(skin.path);
+            self.chain
+                .read(&named)?
+                .ok_or_else(|| format!("{named}: not in the client"))
+        })
+        .map_err(|e| format!("{path}: {e}"))
     }
 }
 
@@ -227,6 +253,35 @@ impl Formats for Files {
         self.check_thread("CreatureModelData.dbc");
         let client = self.client()?;
         client.tables.creature_models(&client.chain)
+    }
+
+    fn creature_looks(&self) -> Result<Arc<Vec<CreatureLook>>, String> {
+        self.check_thread("CreatureDisplayInfoExtra.dbc");
+        let client = self.client()?;
+        client.tables.creature_looks(&client.chain)
+    }
+
+    fn hair_geosets(&self) -> Result<Arc<Vec<HairGeoset>>, String> {
+        self.check_thread("CharHairGeosets.dbc");
+        let client = self.client()?;
+        client.tables.hair_geosets(&client.chain)
+    }
+
+    fn facial_hairs(&self) -> Result<Arc<Vec<FacialHair>>, String> {
+        self.check_thread("CharacterFacialHairStyles.dbc");
+        let client = self.client()?;
+        client.tables.facial_hairs(&client.chain)
+    }
+
+    fn game_object_displays(&self) -> Result<Arc<Vec<GameObjectDisplay>>, String> {
+        self.check_thread("GameObjectDisplayInfo.dbc");
+        let client = self.client()?;
+        client.tables.game_object_displays(&client.chain)
+    }
+
+    fn model(&self, file: &FileRef) -> Result<Model, String> {
+        self.check_thread("a model");
+        self.client()?.model(file)
     }
 
     fn wdt(&self, directory: &str) -> Result<Arc<Wdt>, String> {

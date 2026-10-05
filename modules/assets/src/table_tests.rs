@@ -693,10 +693,64 @@ fn sample_tables() -> Vec<(&'static str, Vec<u8>)> {
                     (1, Int(50)),
                     (3, Int(7)),
                     (4, Float(1.5)),
+                    (5, Int(128)),
                     (6, Text("WolfSkinGrey")),
                     (8, Text("WolfSkinBlack")),
+                    (14, Int(0x21)),
                 ]],
             ),
+        ),
+        (
+            "CreatureDisplayInfoExtra.dbc",
+            dbc(
+                21,
+                &[
+                    &[
+                        (0, Int(9)),
+                        (1, Int(3)),
+                        (2, Int(1)),
+                        (5, Int(4)),
+                        (7, Int(2)),
+                        (18, Int(77)),
+                    ],
+                    &[
+                        (0, Int(7)),
+                        (1, Int(1)),
+                        (3, Int(2)),
+                        (4, Int(3)),
+                        (5, Int(5)),
+                        (6, Int(6)),
+                        (7, Int(1)),
+                        (8, Int(11)),
+                        (19, Int(0x10)),
+                        (20, Text("HumanGuard.blp")),
+                    ],
+                ],
+            ),
+        ),
+        (
+            "CharHairGeosets.dbc",
+            dbc(
+                6,
+                &[
+                    &[(0, Int(2)), (1, Int(1)), (3, Int(5)), (4, Int(3))],
+                    &[(0, Int(1)), (1, Int(1)), (3, Int(0)), (5, Int(1))],
+                ],
+            ),
+        ),
+        (
+            "CharacterFacialHairStyles.dbc",
+            dbc(
+                8,
+                &[
+                    &[(0, Int(1)), (2, Int(1)), (3, Int(1)), (4, Int(2)), (7, Int(3))],
+                    &[(0, Int(1)), (2, Int(0))],
+                ],
+            ),
+        ),
+        (
+            "GameObjectDisplayInfo.dbc",
+            dbc(19, &[&[(0, Int(31)), (1, Text("World\\Generic\\Chest.mdx"))]]),
         ),
         (
             "CreatureModelData.dbc",
@@ -735,6 +789,48 @@ fn the_tables_of_3_3_5a_read_their_rows_in_the_client_s_locale() {
         (display.id, display.model, display.extra, display.scale),
         (49, 50, 7, 1.5)
     );
+    assert_eq!((display.alpha, display.geosets), (128, 0x21));
+    let looks = tables.creature_looks(&chain).unwrap();
+    assert_eq!(
+        looks.iter().map(|look| look.id).collect::<Vec<_>>(),
+        [7, 9],
+        "by increasing id"
+    );
+    let look = &looks[0];
+    assert_eq!(
+        (
+            look.race,
+            look.sex,
+            look.skin,
+            look.face,
+            look.hair_style,
+            look.hair_colour,
+            look.facial_hair
+        ),
+        (1, 0, 2, 3, 5, 6, 1)
+    );
+    assert_eq!((look.items[0], look.items[10], look.flags), (11, 0, 0x10));
+    assert_eq!(look.baked, "HumanGuard.blp");
+    assert_eq!(looks[1].items[10], 77, "its cape");
+    let hairs = tables.hair_geosets(&chain).unwrap();
+    assert_eq!(
+        hairs
+            .iter()
+            .map(|hair| (hair.variation, hair.geoset, hair.scalp))
+            .collect::<Vec<_>>(),
+        [(0, 0, true), (5, 3, false)],
+        "by race, sex and variation"
+    );
+    let facials = tables.facial_hairs(&chain).unwrap();
+    assert_eq!(
+        facials
+            .iter()
+            .map(|facial| (facial.variation, facial.geosets))
+            .collect::<Vec<_>>(),
+        [(0, [0; 5]), (1, [1, 2, 0, 0, 3])]
+    );
+    let object = &tables.game_object_displays(&chain).unwrap()[0];
+    assert_eq!((object.id, object.path.as_str()), (31, "World\\Generic\\Chest.mdx"));
     assert_eq!(
         display.textures,
         ["WolfSkinGrey".to_owned(), String::new(), "WolfSkinBlack".to_owned()]
@@ -869,7 +965,37 @@ fn the_client_s_tables_read_as_the_client_shows_them() {
     let areas = tables.areas(&chain).unwrap();
     let displays = tables.creature_displays(&chain).unwrap();
     let models = tables.creature_models(&chain).unwrap();
+    let looks = tables.creature_looks(&chain).unwrap();
+    let hairs = tables.hair_geosets(&chain).unwrap();
+    let facials = tables.facial_hairs(&chain).unwrap();
+    let objects = tables.game_object_displays(&chain).unwrap();
     let read = start.elapsed();
+    // The looks of characters the displays name, but a few; hairs and facial hairs for the 20 bodies.
+    let named: Vec<_> = displays.iter().filter(|display| display.extra != 0).collect();
+    let missing = named
+        .iter()
+        .filter(|display| looks.binary_search_by_key(&display.extra, |look| look.id).is_err())
+        .count();
+    assert!(
+        missing * 100 <= named.len(),
+        "{missing} of {} looks missing",
+        named.len()
+    );
+    for race in [1, 2, 3, 4, 5, 6, 7, 8, 10, 11] {
+        for sex in [0, 1] {
+            assert!(hairs.iter().any(|hair| (hair.race, hair.sex) == (race, sex)));
+            assert!(facials.iter().any(|facial| (facial.race, facial.sex) == (race, sex)));
+        }
+    }
+    let kinds: Vec<&str> = objects
+        .iter()
+        .map(|object| object.path.as_str())
+        .filter(|path| {
+            let path = path.to_ascii_lowercase();
+            !path.is_empty() && ![".mdx", ".mdl", ".m2", ".wmo"].iter().any(|kind| path.ends_with(kind))
+        })
+        .collect();
+    assert!(kinds.is_empty(), "{kinds:?}");
     let map = |id: u32| maps.iter().find(|map| map.id == id).unwrap();
     for (id, directory) in [
         (0, "Azeroth"),
@@ -917,12 +1043,18 @@ fn the_client_s_tables_read_as_the_client_shows_them() {
     );
     let (ids, refused) = FileIds::load(&folder, &chain);
     eprintln!(
-        "{locale}: {} maps, {} areas, {} looks, {} models read in {read:?}; {found} models found; \
-         {} FileDataIDs named, refused {refused:?}; the map 0 is named {:?}",
+        "{locale}: {} maps, {} areas, {} looks, {} models, {} looks of characters, {} hairs, {} facial hairs, \
+         {} looks of objects read in {read:?}; {found} models found; {missing} of {} looks of characters named \
+         missing; {} FileDataIDs named, refused {refused:?}; the map 0 is named {:?}",
         maps.len(),
         areas.len(),
         displays.len(),
         models.len(),
+        looks.len(),
+        hairs.len(),
+        facials.len(),
+        objects.len(),
+        named.len(),
         ids.len(),
         map(0).name
     );

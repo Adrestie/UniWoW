@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use uniwow_api::formats::{
-    AreaRecord, Chunk, CreatureDisplay, CreatureModel, FileRef, Formats, Layer, MapRecord, Texture, TextureFormat,
-    Tile, Wdl, Wdt,
+    AreaRecord, Chunk, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef, Formats, GameObjectDisplay,
+    HairGeoset, Layer, MapRecord, Model, Texture, TextureFormat, Tile, Wdl, Wdt,
 };
 use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::viewport::{self, Allowance, Layer as _, Target, View};
@@ -719,6 +719,21 @@ impl Formats for Fake {
     }
     fn creature_models(&self) -> Result<Arc<Vec<CreatureModel>>, String> {
         Err("no models".to_owned())
+    }
+    fn creature_looks(&self) -> Result<Arc<Vec<CreatureLook>>, String> {
+        Err("no looks".to_owned())
+    }
+    fn hair_geosets(&self) -> Result<Arc<Vec<HairGeoset>>, String> {
+        Err("no hairs".to_owned())
+    }
+    fn facial_hairs(&self) -> Result<Arc<Vec<FacialHair>>, String> {
+        Err("no facial hairs".to_owned())
+    }
+    fn game_object_displays(&self) -> Result<Arc<Vec<GameObjectDisplay>>, String> {
+        Err("no looks".to_owned())
+    }
+    fn model(&self, _file: &FileRef) -> Result<Model, String> {
+        Err("no model".to_owned())
     }
     fn wdt(&self, _directory: &str) -> Result<Arc<Wdt>, String> {
         Err("no WDT".to_owned())

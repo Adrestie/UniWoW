@@ -1,9 +1,10 @@
 # Third-party code in the module `assets`
 
-## wow-mpq, of warcraft-rs
+## wow-mpq and wow-m2, of warcraft-rs
 
-- Source: <https://github.com/wowemulation-dev/warcraft-rs>, the crate `wow-mpq` 0.7.0
-  (`file-formats/archives/wow-mpq`), commit `627b3a0d99b8420cc7640b5f99aff18c878e1529`.
+- Source: <https://github.com/wowemulation-dev/warcraft-rs>, the crates `wow-mpq` 0.7.0
+  (`file-formats/archives/wow-mpq`) and `wow-m2` 0.7.0 (`file-formats/graphics/wow-m2`), commit
+  `627b3a0d99b8420cc7640b5f99aff18c878e1529`.
 - Authors: Daniel S. Reichenbach and WoW Emulation Contributors.
 - Licence: MIT or Apache-2.0, at the choice of whoever uses it; UniWoW takes it under MIT, whose
   notice follows.
@@ -14,6 +15,12 @@
 - Adapted into `src/mpq.rs`: the reading of the header, of the tables and of the files
   (`archive.rs`), to read by position from any thread at once, each file into one allocation of
   its size, for the formats and the compression of the archives of 3.3.5a only; without `rayon`.
+- Adapted into `src/m2.rs`, from `wow-m2`: the layout of the header of a model of 3.3.5a
+  (`header.rs`), of its vertices (`chunks/vertex.rs`) and of its skins, their submeshes and
+  batches (`skin.rs`), read from a slice without `binrw`, `bitflags` nor `anyhow`; corrected by
+  the public description of the format where it errs: the triangles of a skin go through its list
+  of vertices, a submesh starts at its `level` × 65,536 more, the render flags 0x08 and 0x10 are
+  without depth test and without depth write.
 
 ```
 MIT License
@@ -44,7 +51,8 @@ SOFTWARE.
 - Source: <https://github.com/Kruithne/wow.export>, commit
   `c2fd7bde36a712be78a5da896c995b84fbfa2545`: `src/js/db/WDCReader.js`,
   `src/js/3D/loaders/ADTLoader.js`, `src/js/3D/loaders/WDTLoader.js`,
-  `src/js/3D/loaders/LoaderGenerics.js` and `src/js/casc/blp.js`.
+  `src/js/3D/loaders/LoaderGenerics.js`, `src/js/casc/blp.js`, `src/js/3D/loaders/M2Loader.js`,
+  `src/js/3D/Skin.js` and `src/js/3D/renderers/M2RendererGL.js`.
 - Authors: Kruithne and Marlamin.
 - Licence: MIT, whose notice follows.
 - Translated into `src/db2.rs`: the reading of the DB2 of versions WDC2, `1SLC` and WDC3 (their
@@ -56,6 +64,11 @@ SOFTWARE.
 - Translated into `src/blp.rs`: the reading of the BLP of version 2 (its header, levels, palette
   and alphas) and the decoding of DXT1, DXT3 and DXT5; the alpha of 4 bits of an odd texel is read
   from its byte, where wow.export reads none.
+- Translated into `src/m2.rs`: the reading of a modern model by its chunks (`MD21`, its offsets
+  from the start of its data; `SFID`, the skins of its views then of its levels of detail; `TXID`,
+  a FileDataID a texture), and the triangles of a skin taken through its list of vertices.
+- Translated into `core/api/src/formats.rs` (`default_geosets`): the submeshes a model shows when
+  nothing chooses, by groups where wow.export compares the digits of their ids.
 
 ```
 MIT License
@@ -85,7 +98,8 @@ SOFTWARE.
 ## WoWDBDefs
 
 - Source: <https://github.com/wowdev/WoWDBDefs>, the definitions of `Map`, `AreaTable`,
-  `CreatureDisplayInfo` and `CreatureModelData` for the build 3.3.5.12340.
+  `CreatureDisplayInfo`, `CreatureModelData`, `CreatureDisplayInfoExtra`, `CharHairGeosets`,
+  `CharacterFacialHairStyles` and `GameObjectDisplayInfo` for the build 3.3.5.12340.
 - Licence of the definitions: CC BY-SA 4.0.
 - Taken into `src/dbc.rs`: the places of the columns read, and the count of the columns of each
   table; no file of the project is copied.
@@ -100,6 +114,10 @@ SOFTWARE.
   the tiles of 3.3.5a consulted with the public description of the formats; no code taken, as they
   read through `binrw`, which the runtime does not offer. Its `wow-blp` neither, which needs
   `image` and `texpresso`.
+- WoW Model Viewer (<https://github.com/Chuanhsing/wowmodelviewer>, GPL) and WMVx
+  (<https://github.com/Frostshake/WMVx>, GPL): read for the facts of the looks of characters (a
+  hair of no submesh drawn as the scalp, the ears at 702, every other group at its first variant,
+  the order of the facial hairs); no code taken.
 - wxl-db2 (<https://github.com/WarcraftXL/wxl-db2>, commit
   `30e4f2c8ed887a8d8d4b4472d688d4b8a02c310d`), `src/api/FdidResolver.cpp`,
   `src/decode/Db2Decode.cpp` and `src/decode/DB2File.cpp`: read to learn how WarcraftXL reads the
