@@ -24,7 +24,9 @@ pub struct Service {
     looks: Mutex<LookTable>,
     owners: Mutex<HashMap<String, Arc<Slot>>>,
     numbers: AtomicU32,
-    /// The device of the view, which the owners' buffers are made on.
+    /// The device of the view, which the owners' buffers are made on; set once: a device made again
+    /// after a loss is not taken, the models asking for a restart of the editor then, as the
+    /// terrain and the markers do.
     pub gpu: OnceLock<(wgpu::Device, wgpu::Queue)>,
     /// The tables `display` reads, once the module finds them.
     pub formats: Mutex<Option<Arc<dyn Formats>>>,

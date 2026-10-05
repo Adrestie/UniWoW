@@ -3468,6 +3468,42 @@ Added by the review of the proposal, before the service is written:
   instance, so that the far instances of a near group are drawn at the finest (7.28 M triangles
   for the grid), to revisit with the doodads; the second texture and the combiners in 9.4c2.
 
+#### Step 9.4c1, after its review
+
+- **Point to revisit before step 9.6, chosen before it is built and measured with its doodads:
+  the level of detail and the reach of each instance.** Today the skin of a group follows its
+  nearest instance, so that the far instances of a near group are drawn at the finest (7.28 M
+  triangles for the grid of 1,000), and the reach by size is tested in the vertex shader, so that
+  an instance beyond it still runs all its vertices: with tens of thousands of doodads, neither
+  holds. Two ways, to choose between then:
+  - at each frame, on the thread of the owner at the frame signal or on a thread of `models`, the
+    instances of each group in sight sorted by level, those in sight and within their reach only,
+    into a list of indices (a `u32` an instance seen, not its 64 bytes) the shader reads from a
+    storage buffer; a draw per group, level and batch;
+  - or a compute pass culling the instances and writing indirect draws, with a way back for a
+    device without them.
+- **The alpha, as WotLK tests it** (wowdev, *M2/Rendering*, *Alpha Testing* and *Element
+  Alpha*): the alpha of a pixel is the alpha of the batch at rest (its colour and its weight)
+  times that of the instance, times that of the texel unless the batch is opaque (the shader of
+  an opaque batch of WotLK takes the alpha of the vertex only); it is drawn when that alpha is
+  at least the reference: 224/255 times the alpha of the batch and the instance for an
+  alpha-keyed batch (128/255 from Cataclysm on, not taken), 1/255 for every other blending. The
+  key of before, on the texel alone, was the same for an alpha-keyed batch; a texel of alpha 0 of
+  an added or modulated batch is now left out, as the client leaves it. Tested: an opaque batch
+  drawn whatever the alpha of its texel, an added one without alpha not for a texel of alpha 0,
+  an alpha-keyed one at 230 and not at 200.
+- **A device lost**: the device of the view is taken once (`Service::gpu`); a device made again
+  after a loss is not taken, and the models ask for a restart of the editor then, as the terrain
+  and the markers do (only the bundles of the view are recorded again on a new device, and eframe
+  makes none after a loss today).
+- **The facial hair, without the captures** (the user goes on without them): the rule group +
+  value is kept. The rule is in Wow.exe and applies to the files of the HD pack as they are; it
+  finds every facial submesh of 17 bodies of 20 with the table and the bodies of 3.3.5a, among
+  them Marshal Dughan's three (101, 302, 201); what it misses with the pack (101 and 201 of
+  Marshal Dughan in its `HumanMale`) the client misses too. The preview of display 1985 shows his
+  moustache 302 and a goatee of his baked skin. Should a capture of the client show a beard where
+  the rule finds none, the rule changes, not the files.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

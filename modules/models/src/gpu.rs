@@ -50,7 +50,7 @@ unsafe impl bytemuck::Pod for BatchParams {}
 /// Floats of the shader's `Camera`.
 pub const CAMERA: usize = 40;
 
-/// The alpha of a texel under which an alpha-keyed batch draws nothing, as WotLK tests it.
+/// The share of its alpha under which a pixel of an alpha-keyed batch is not drawn, in WotLK.
 pub const ALPHA_KEY: f32 = 224.0 / 255.0;
 
 /// The render flags of a material.

@@ -11,7 +11,7 @@ use uniwow_api::models::{Geosets, Look};
 use uniwow_api::{bytemuck, wgpu};
 
 use crate::cache::Cache;
-use crate::gpu::{BatchParams, Shared, State, TextureGpu, Vertex, flags};
+use crate::gpu::{BatchParams, OPAQUE, Shared, State, TextureGpu, Vertex, flags};
 
 /// The vertices and skins of a model on the GPU, and what of the model its looks read: its
 /// vertices left out.
@@ -240,7 +240,7 @@ pub fn look(
                 let params = BatchParams {
                     colour,
                     flags: flags(material),
-                    model: [data.radius, 0.0, 0.0, 0.0],
+                    model: [data.radius, f32::from(u8::from(state.blending != OPAQUE)), 0.0, 0.0],
                 };
                 let uniform = shared.buffer("models batch", bytemuck::bytes_of(&params), wgpu::BufferUsages::UNIFORM);
                 bytes += size_of::<BatchParams>() as u64;

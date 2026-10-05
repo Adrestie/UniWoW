@@ -18,19 +18,21 @@ struct Camera {
 struct Batch {
     // Its colour and transparency at rest, its weight included.
     colour: vec4<f32>,
-    // The alpha of a texel under which it is not drawn, 0 for none; 1 when unlit; 1 when unfogged;
-    // the colour of its fog: 0 the view's, 1 black, 2 white, 3 grey.
+    // Its alpha key, the share of its alpha under which a pixel is not drawn, 0 for none; 1 when
+    // unlit; 1 when unfogged; the colour of its fog: 0 the view's, 1 black, 2 white, 3 grey.
     flags: vec4<f32>,
-    // The radius of the model.
+    // The radius of the model; 1 when the alpha of its texture counts, 0 when opaque.
     model: vec4<f32>,
 };
 @group(1) @binding(0) var<uniform> batch: Batch;
 @group(1) @binding(1) var diffuse: texture_2d<f32>;
 @group(1) @binding(2) var diffuse_sampler: sampler;
 
-// The share of the fog at its middle; the least radius an instance's reach counts.
+// The share of the fog at its middle; the least radius an instance's reach counts; the alpha under
+// which a pixel of a batch without an alpha key is not drawn.
 const NEAR_FOG: f32 = 0.55;
 const LEAST_RADIUS: f32 = 1.0;
+const LEAST_ALPHA: f32 = 1.0 / 255.0;
 
 struct VertexIn {
     @location(0) position: vec3<f32>,
@@ -95,7 +97,12 @@ fn fog_colour(mode: f32) -> vec3<f32> {
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let texel = textureSample(diffuse, diffuse_sampler, in.uv);
-    if texel.a < batch.flags.x {
+    // As WotLK tests it: the alpha of the batch and the instance, times the texel's but when
+    // opaque, against the alpha key times the alpha of the batch, or 1/255.
+    let element = batch.colour.a * in.alpha;
+    let alpha = element * mix(1.0, texel.a, batch.model.y);
+    let reference = select(LEAST_ALPHA, batch.flags.x * element, batch.flags.x > 0.0);
+    if alpha < reference {
         discard;
     }
     var rgb = texel.rgb * batch.colour.rgb;
@@ -106,5 +113,5 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if batch.flags.z < 0.5 {
         rgb = mix(rgb, fog_colour(batch.flags.w), fog_amount(in.world));
     }
-    return vec4<f32>(rgb, texel.a * batch.colour.a * in.alpha);
+    return vec4<f32>(rgb, alpha);
 }

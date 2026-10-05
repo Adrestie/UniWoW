@@ -991,3 +991,23 @@ fn a_look_keeps_the_batches_of_the_submeshes_it_shows_and_seen_at_rest() {
     assert_eq!(batches(Geosets::Creature(0x1)), (1, 1), "102 hidden, 101 unseen");
     assert_eq!(batches(Geosets::Creature(0x2)), (2, 1));
 }
+
+#[test]
+fn the_alpha_is_tested_as_wotlk_does() {
+    // Opaque: the alpha of the texel does not count.
+    let cases = [
+        (0, 0, true),
+        (3, 0, false),
+        (3, 255, true),
+        (1, 230, true),
+        (1, 200, false),
+    ];
+    for (blending, alpha, drawn) in cases {
+        let Some(mut bench) = bench(square(0, blending), [255, 0, 0, alpha]) else {
+            return;
+        };
+        bench.service.place("test", &[instance(1, 0, Vec3::ZERO, 1.0)]);
+        let seen = middle(&render(&mut bench, FRONT, AIM));
+        assert_eq!(seen[0] > 100, drawn, "blending {blending}, alpha {alpha}: {seen:?}");
+    }
+}
