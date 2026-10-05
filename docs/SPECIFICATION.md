@@ -3189,14 +3189,16 @@ bc9198ce7, and checked on the skins and tables of the user's client; WoW Model V
 - Checked over every model of the user's client (`every_model_of_the_client_is_read_whole`,
   ignored, 16 threads): 23,190 models, 23,184 read, in 6.3 s the first time and 0.9 s once the
   system holds the archives in its cache; versions 264 (23,181), 272 (2) and 274 (1); 25,409
-  skins, 102,600 batches, 5,437 models with combiners; 2,425 models whose triangles would be wrong
-  without the skin's list of vertices; none past 65,536 indices. Refused 6, all for their first
-  skin: 5 not in the client (`arthaslichking_unarmed2`, `druidcat`, `saberon_noweapon`...), and
-  `FelBeastMount`, whose skin names its vertex 1,866 of 1,846. Left out, 96 faults: 54 batches
-  naming combos of coordinates their model lacks (`Varimathras`, `drakeold`: models of version 264
-  with the shaders of a later client), 27 batches a weight (the monocles of helms), 8 texture
-  combos (`KristallSpider`), 1 a material (`westfallcabbage`), 1 a colour (`jadeforestsky01`), and
-  5 later skins missing (`ghoul`, `Jain3`...). 39 models draw a texture named by no file: what the
+  skins, 102,652 batches kept, 5,437 models with combiners; 2,425 models whose triangles would be
+  wrong without the skin's list of vertices; none past 65,536 indices. Refused 6, all for their
+  first skin: 5 not in the client (`arthaslichking_unarmed2`, `druidcat`, `saberon_noweapon`...),
+  and `FelBeastMount`, whose skin names its vertex 1,866 of 1,846. Said in their faults, with the
+  checks added by the review (below): 39 batches left out, 27 to a weight (the monocles of helms),
+  8 to texture combos (`KristallSpider`), 2 to combiners (`moltengiant`), 1 to a material
+  (`westfallcabbage`), 1 to a colour (`jadeforestsky01`); 5 later skins missing (`ghoul`,
+  `Jain3`...); the coordinates of 35 models completed. The first report counted 96 faults, 54 of
+  them combos of coordinates of models that have none (`Varimathras`, `drakeold`), measured before
+  such models were no longer checked on them. 39 models draw a texture named by no file: what the
   client shows there is to see with the user in 9.4c.
 - Checked over the user's modern models, exported by wow.export (`UNIWOW_MODERN`): the 15 read
   whole, without a fault, in 17 ms; versions 272 (5) and 274 (10); their skins by `SFID` as
@@ -3215,8 +3217,8 @@ bc9198ce7, and checked on the skins and tables of the user's client; WoW Model V
   - Marshal Dughan (display 1985 of `creature_template_model`, look 634: hair style 2, facial hair
     1): `HumanMale` shows 0, 3 (his hair), 302 (the facial value 2 of the group 300), 401, 501,
     702, 1301, 1801 and 2001; his values 1 of the groups 100 and 200 name 101 and 201, which the
-    `HumanMale` of the user's client lacks (its facial hairs are 102, 202 and 302): to compare with
-    the client in 9.4c;
+    `HumanMale` of the user's client lacks (its facial hairs are 102, 202 and 302): checked after
+    the review, below, and to compare with the client in 9.4c;
   - settled, as WoW Model Viewer dresses a character without items: the ears at 702, which the 20
     bodies have (701 only five men); a hair of no submesh shows the scalp, 1 (that `HumanMale`
     lacks: nothing is drawn); every other group at its first variant (x01), which keeps the
@@ -3227,10 +3229,48 @@ bc9198ce7, and checked on the skins and tables of the user's client; WoW Model V
   flag), the keys of an `.anim` sequence not read, triangles through the skin's list, a submesh's
   level, each kind of batch left out and said, a model without its first skin refused and a later
   one left out, a modern model's skins and textures by FileDataID, what is not a model or a skin
-  refused, a model or a skin cut anywhere refused without a panic, the paths of the tables; the tables of the four kinds; the rules of the submeshes; and,
-  given the client and the folder of wow.export, the iron dwarves, Marshal Dughan, the tables of
-  the client and the modern models. Each of 14 changes made on purpose to the reader, the tables
-  and the rules made a test fail.
+  refused, a model or a skin cut anywhere refused without a panic, the paths of the tables; the
+  tables of the four kinds; the rules of the submeshes; and, given the client and the folder of
+  wow.export, the iron dwarves, Marshal Dughan, the tables of the client and the modern models.
+  Each of 14 changes made on purpose to the reader, the tables and the rules made a test fail.
+
+#### Step 9.4b, after its review
+
+- Three more references of a batch checked, the batch left out and said otherwise, a test each:
+  - its transform combos, one a texture and at least one, within `transform_combos` (no model of
+    the client lacks them);
+  - with combiners (the model's flag 0x08), a shader under 0x8000 is where the combiners of its
+    textures start, within `combiner_combos`, as the client's choice of shader reads them (wowdev,
+    *M2/.skin*, `sub_836980`); a shader from 0x8000 is already chosen, as a later client does, and
+    no place. The 2 batches of `moltengiant` whose shader 16 points past its 2 combiners are left
+    out;
+  - its combo of coordinates within `uv_combos`, when the model has some.
+- The values of the combos of coordinates: 1 the second set, 0xFFFF the environment, any other the
+  first, as that choice of shader tests only for 1 and -1. Batches of 63 models of the client use
+  another value, 2 in those looked at, many of 3.3.5a itself (the weapons of Drak'Tharon, the water
+  of the Black Temple, the falls of Coilfang): kept.
+- The coordinates of the next textures of a batch, past the combos of its model, are completed
+  with the first set, as the client's choice takes one it does not find, and said in the faults:
+  35 models brought back from later clients (`Skeleton`, `Voidlord`, skies, artifact weapons) give
+  one combo for two textures; leaving those batches out would have cost 191 of them.
+- The sweep of the client and the test of the modern models index every reference of every batch
+  kept, as a reader does without a check: none is missing. Each of 5 changes made on purpose to
+  these checks and to the completion made a test fail.
+- The facial hair, checked against the files of 3.3.5a. The `HumanMale` the client reads is that
+  of an HD pack (`patch-a.mpq`: 8,522,096 bytes, version 264, 16,271 vertices, 50 submeshes,
+  without 1, 18, 101, 201, 301 nor 1501, with 1801 and 2001); that of 3.3.5a is in `patch-3.mpq`
+  and `patch-2.mpq` (1,585,376 bytes, version 264, 5,264 vertices, 54 submeshes, 101, 201 and 301
+  among them). The pack replaces `CharacterFacialHairStyles` too (`patch-frfr-u.mpq`, 272 rows for
+  222), and other bodies (`patch-u.mpq` for `ScourgeMale`). The user confirms the pack.
+  - With the table and the bodies of 3.3.5a, group + value finds every facial submesh of 17 bodies
+    of 20, `HumanMale` 27 of 27 (+ 1: 15 of 27), Marshal Dughan's three (101, 302 and 201)
+    included; `DwarfMale` 20 of 33, `NightElfMale` 15 of 24 (+ 1: 17) and `TaurenMale` 13 of 18 in
+    part either way.
+  - With the table and the bodies of the pack, group + value finds every one of 14 bodies of 20;
+    `HumanMale` 12 of 27 (+ 1: 15), `ScourgeFemale` 17 of 18 (+ 1: 8), and four others in part.
+  - Both readings stay open until the user's captures in 9.4c (Marshal Dughan from the front at
+    Goldshire, an iron dwarf): the code reads group + value meanwhile, which the files of 3.3.5a
+    confirm; the other reading is one line of `look_geosets`. The result is written here then.
 
 #### Tests
 

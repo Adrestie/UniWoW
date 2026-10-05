@@ -4,7 +4,9 @@
 //! (`SFID`, `TXID`) as the loader of wow.export reads them (MIT, see THIRD_PARTY.md). What a batch
 //! refers to is checked here, once, so that its readers index without a check: a batch referring
 //! to what its model does not have is left out, a skin that does not hold together too, with the
-//! next ones, and said in `Model::faults`. The bones and the animations wait for step 9.5.
+//! next ones, and said in `Model::faults`; the combos of coordinates a model lacks for the next
+//! textures of a batch are completed with the first set, and said too. The bones and the
+//! animations wait for step 9.5.
 //!
 //! Corrected from warcraft-rs: the triangles of a skin index its list of vertices, which indexes
 //! those of the model, where warcraft-rs takes them for the model's; a submesh starts at its
@@ -22,6 +24,8 @@ const VERSIONS: std::ops::RangeInclusive<u32> = 264..=274;
 
 /// The flag of a model whose batches combine their textures by `combiner_combos`.
 const COMBINERS: u32 = 0x08;
+/// The flag of a shader already chosen, as a later client does: not a place among the combiners.
+const CHOSEN: u16 = 0x8000;
 /// The flag of a sequence whose keys are in the model, not in an `.anim` file.
 const EMBEDDED: u32 = 0x20;
 /// The sizes of a vertex, a texture, a colour, a track, a sequence, a submesh and a batch.
@@ -78,7 +82,15 @@ pub fn read(bytes: &[u8], path: &str, skin: impl Fn(SkinRef) -> Result<Vec<u8>, 
         };
         let mut faults = Vec::new();
         match skin(SkinRef { id, path }).and_then(|bytes| self::skin(&bytes, &model, &mut faults)) {
-            Ok(read) => model.skins.push(read),
+            Ok(read) => {
+                let short = complete_coordinates(&mut model, &read);
+                if short > 0 {
+                    faults.push(format!(
+                        "the coordinates of the next textures of {short} of its batches, past its combos, taken as the first"
+                    ));
+                }
+                model.skins.push(read);
+            }
             Err(reason) if view == 0 => return Err(format!("its skin 0: {reason}")),
             Err(reason) => {
                 model
@@ -92,6 +104,26 @@ pub fn read(bytes: &[u8], path: &str, skin: impl Fn(SkinRef) -> Result<Vec<u8>, 
             .extend(faults.into_iter().map(|fault| format!("its skin {view}: {fault}")));
     }
     Ok(model)
+}
+
+/// Completes the combos of coordinates of `model` for the textures of the batches of `skin` past
+/// them with the first set, as the client's choice of shader takes one it does not find (it tests
+/// only for 1 and the environment); how many batches were short. Models brought back from later
+/// clients give one combo for two textures.
+fn complete_coordinates(model: &mut Model, skin: &Skin) -> usize {
+    if model.uv_combos.is_empty() {
+        return 0;
+    }
+    let ends: Vec<usize> = skin
+        .batches
+        .iter()
+        .map(|batch| usize::from(batch.uv_combo) + usize::from(batch.texture_count).max(1))
+        .collect();
+    let short = ends.iter().filter(|end| **end > model.uv_combos.len()).count();
+    if let Some(end) = ends.into_iter().max().filter(|end| *end > model.uv_combos.len()) {
+        model.uv_combos.resize(end, 0);
+    }
+    short
 }
 
 /// An `M2Array`: how many, and where, from the start of its model or skin.
@@ -377,7 +409,7 @@ pub fn skin(bytes: &[u8], model: &Model, faults: &mut Vec<String>) -> Result<Ski
 }
 
 /// Whether what `batch` refers to is in its skin of `submeshes` and in `model`.
-fn check(batch: &Batch, submeshes: usize, model: &Model) -> Result<(), String> {
+fn check<'a>(batch: &Batch, submeshes: usize, model: &'a Model) -> Result<(), String> {
     let within = |what: &str, index: u16, count: usize| {
         if usize::from(index) < count {
             Ok(())
@@ -390,12 +422,14 @@ fn check(batch: &Batch, submeshes: usize, model: &Model) -> Result<(), String> {
     if let Some(colour) = batch.colour {
         within("colour", colour, model.colours.len())?;
     }
-    let combos = usize::from(batch.texture_combo)..usize::from(batch.texture_combo) + usize::from(batch.texture_count);
-    let textures = model
-        .texture_combos
-        .get(combos)
-        .ok_or_else(|| format!("to its texture combos {} and on", batch.texture_combo))?;
-    for texture in textures {
+    // A combo a texture of the batch, from its first; at least one where the client reads one.
+    let count = usize::from(batch.texture_count);
+    let combos = |what: &str, combos: &'a [u16], first: u16, count: usize| {
+        combos
+            .get(usize::from(first)..usize::from(first) + count)
+            .ok_or_else(|| format!("to its {what} {first} and on, {count} of {}", combos.len()))
+    };
+    for texture in combos("texture combos", &model.texture_combos, batch.texture_combo, count)? {
         within("texture", *texture, model.textures.len())?;
     }
     within("weight combo", batch.weight_combo, model.weight_combos.len())?;
@@ -404,9 +438,20 @@ fn check(batch: &Batch, submeshes: usize, model: &Model) -> Result<(), String> {
         model.weight_combos[usize::from(batch.weight_combo)],
         model.weights.len(),
     )?;
-    // Without combos of coordinates, as since Cataclysm, a batch takes its coordinates by its shader.
-    match model.uv_combos.is_empty() {
-        true => Ok(()),
-        false => within("combo of coordinates", batch.uv_combo, model.uv_combos.len()),
+    combos(
+        "transform combos",
+        &model.transform_combos,
+        batch.transform_combo,
+        count.max(1),
+    )?;
+    // Without combos of coordinates, as since Cataclysm, a batch takes its coordinates by its shader;
+    // those of its next textures are completed by `complete_coordinates`.
+    if !model.uv_combos.is_empty() {
+        within("combo of coordinates", batch.uv_combo, model.uv_combos.len())?;
     }
+    // With combiners, its shader is where its textures' are, unless already chosen.
+    if model.flags & COMBINERS != 0 && batch.shader & CHOSEN == 0 {
+        combos("combiner combos", &model.combiner_combos, batch.shader, count)?;
+    }
+    Ok(())
 }

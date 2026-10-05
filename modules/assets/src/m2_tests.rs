@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use uniwow_api::formats::{self, FileRef, Material, ModelTextureSource};
+use uniwow_api::formats::{self, FileRef, Material, Model, ModelTextureSource};
 use uniwow_api::serde_json;
 
 use crate::terrain_tests::client;
@@ -28,6 +28,41 @@ fn kind(reason: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Indexes everything `model` gives, as a reader does without a check: panics if one is missing.
+fn index_everything(model: &Model) {
+    for skin in &model.skins {
+        for submesh in &skin.submeshes {
+            let _ = &skin.triangles[submesh.start as usize..(submesh.start + submesh.count) as usize];
+        }
+        for triangle in &skin.triangles {
+            let _ = model.vertices[*triangle as usize];
+        }
+        for batch in &skin.batches {
+            let _ = skin.submeshes[usize::from(batch.submesh)];
+            let _ = model.materials[usize::from(batch.material)];
+            if let Some(colour) = batch.colour {
+                let _ = model.colours[usize::from(colour)];
+            }
+            let _ = model.weights[usize::from(model.weight_combos[usize::from(batch.weight_combo)])];
+            let count = usize::from(batch.texture_count);
+            for texture in 0..count {
+                let _ = &model.textures[usize::from(model.texture_combos[usize::from(batch.texture_combo) + texture])];
+            }
+            for texture in 0..count.max(1) {
+                let _ = model.transform_combos[usize::from(batch.transform_combo) + texture];
+                if !model.uv_combos.is_empty() {
+                    let _ = model.uv_combos[usize::from(batch.uv_combo) + texture];
+                }
+            }
+            if model.flags & 0x08 != 0 && batch.shader & 0x8000 == 0 {
+                for texture in 0..count {
+                    let _ = model.combiner_combos[usize::from(batch.shader) + texture];
+                }
+            }
+        }
+    }
 }
 
 /// Run on demand, a minute or so: `cargo test -p uniwow-module-assets every_model -- --ignored --nocapture`.
@@ -59,6 +94,7 @@ fn every_model_of_the_client_is_read_whole() {
                 while let Some(name) = models.get(next.fetch_add(1, Ordering::Relaxed)) {
                     match client.model(&FileRef::Path(name.clone())) {
                         Ok(model) => {
+                            index_everything(&model);
                             read.fetch_add(1, Ordering::Relaxed);
                             *versions.lock().unwrap().entry(model.version).or_default() += 1;
                             skins.fetch_add(model.skins.len(), Ordering::Relaxed);
@@ -207,6 +243,7 @@ fn the_modern_models_exported_by_wow_export_are_read_whole() {
         })
         .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         assert!(model.faults.is_empty(), "{}: {:?}", path.display(), model.faults);
+        index_everything(&model);
         assert!(
             model.version > 264 && !model.skins.is_empty(),
             "{}: version {}, {} skins",
@@ -363,7 +400,7 @@ fn written_model(version: u32, flags: u32, held: bool) -> Vec<u8> {
     w.array(0x80, 3, &u16_bytes(&[0, 1, 2]));
     w.array(0x88, 2, &u16_bytes(&[0, 1]));
     w.array(0x90, 2, &u16_bytes(&[0, 1]));
-    w.array(0x98, 1, &u16_bytes(&[0xFFFF]));
+    w.array(0x98, 2, &u16_bytes(&[0xFFFF, 0xFFFF]));
     w.f32s(0xA0, &[-1.0, -2.0, -3.0, 1.0, 2.0, 3.0, 4.0]);
     if flags & 0x08 != 0 {
         w.array(0x130, 2, &u16_bytes(&[5, 6]));
@@ -371,12 +408,12 @@ fn written_model(version: u32, flags: u32, held: bool) -> Vec<u8> {
     w.bytes
 }
 
-/// A batch: its submesh, colour, material, texture count and combo, combo of coordinates and
-/// weight combo.
-type Written = [u16; 7];
+/// A batch: its submesh, colour, material, texture count and combo, combo of coordinates, weight
+/// combo, transform combo and shader.
+type Written = [u16; 9];
 
 /// A batch drawing the submesh 0 with what the written model has.
-const GOOD: Written = [0, 0xFFFF, 1, 2, 1, 0, 1];
+const GOOD: Written = [0, 0xFFFF, 1, 2, 1, 0, 1, 0, 0];
 
 /// A skin: its list of vertices `lookup`, its `indices`, its submeshes (id, level, start, count)
 /// and its batches.
@@ -397,11 +434,13 @@ fn written_skin(lookup: &[u16], indices: &[u16], submeshes: &[[u16; 4]], batches
     w.array(28, submeshes.len(), &sections);
     let units: Vec<u8> = batches
         .iter()
-        .flat_map(|[submesh, colour, material, count, combo, uv, weight]| {
-            u16_bytes(&[
-                0x10, 0, *submesh, 0, *colour, *material, 0, *count, *combo, *uv, *weight, 0,
-            ])
-        })
+        .flat_map(
+            |[submesh, colour, material, count, combo, uv, weight, transform, shader]| {
+                u16_bytes(&[
+                    0x10, *shader, *submesh, 0, *colour, *material, 0, *count, *combo, *uv, *weight, *transform,
+                ])
+            },
+        )
         .collect();
     w.array(36, batches.len(), &units);
     w.bytes
@@ -440,7 +479,7 @@ fn a_model_of_3_3_5a_is_read_at_rest() {
             model.weight_combos,
             model.transform_combos
         ),
-        (vec![0, 1, 2], vec![0, 1], vec![0, 1], vec![0xFFFF])
+        (vec![0, 1, 2], vec![0, 1], vec![0, 1], vec![0xFFFF, 0xFFFF])
     );
     let [r, g, b, a] = model.colours[0];
     assert_eq!([r, g, b], [0.5, 0.25, 1.0]);
@@ -492,7 +531,7 @@ fn a_submesh_starts_at_its_level_times_65536() {
 fn a_batch_referring_to_what_its_model_lacks_is_left_out_and_said() {
     let model = m2::model(&written_model(264, 0, true)).unwrap().model;
     let mut batches = vec![GOOD];
-    for (field, value) in [(0, 1), (1, 1), (2, 2), (4, 2), (5, 2), (6, 2)] {
+    for (field, value) in [(0, 1), (1, 1), (2, 2), (4, 2), (5, 2), (6, 2), (7, 1)] {
         let mut batch = GOOD;
         batch[field] = value;
         batches.push(batch);
@@ -507,10 +546,48 @@ fn a_batch_referring_to_what_its_model_lacks_is_left_out_and_said() {
             "its batch 1 left out, to its submesh 1 of 1",
             "its batch 2 left out, to its colour 1 of 1",
             "its batch 3 left out, to its material 2 of 2",
-            "its batch 4 left out, to its texture combos 2 and on",
+            "its batch 4 left out, to its texture combos 2 and on, 2 of 3",
             "its batch 5 left out, to its combo of coordinates 2 of 2",
             "its batch 6 left out, to its weight combo 2 of 2",
+            "its batch 7 left out, to its transform combos 1 and on, 2 of 2",
         ]
+    );
+}
+
+#[test]
+fn with_combiners_a_shader_not_yet_chosen_is_where_the_combiners_of_its_textures_are() {
+    let model = m2::model(&written_model(264, 0x08, true)).unwrap().model;
+    let at = |shader| [0, 0xFFFF, 1, 2, 1, 0, 1, 0, shader];
+    let skin = written_skin(&[0, 1, 2], &[0, 1, 2], &[[0, 0, 0, 3]], &[at(0), at(1), at(0x8005)]);
+    let mut faults = Vec::new();
+    let read = m2::skin(&skin, &model, &mut faults).unwrap();
+    let shaders: Vec<u16> = read.batches.iter().map(|batch| batch.shader).collect();
+    assert_eq!(shaders, [0, 0x8005], "a shader already chosen is no place");
+    assert_eq!(
+        faults,
+        ["its batch 1 left out, to its combiner combos 1 and on, 2 of 2"]
+    );
+}
+
+#[test]
+fn the_coordinates_past_the_combos_are_the_first_and_any_value_is_kept() {
+    let mut bytes = written_model(264, 0, true);
+    // Its combos of coordinates 0 and 2: 2 is taken as the first set by the client, and kept.
+    let at = u32::from_le_bytes(bytes[0x8C..0x90].try_into().unwrap()) as usize;
+    bytes[at + 2..at + 4].copy_from_slice(&2u16.to_le_bytes());
+    // Two textures from the second combo, the last.
+    let skin = written_skin(
+        &[0, 1, 2],
+        &[0, 1, 2],
+        &[[0, 0, 0, 3]],
+        &[[0, 0xFFFF, 1, 2, 1, 1, 1, 0, 0]],
+    );
+    let model = m2::read(&bytes, "World\\x.m2", |_| Ok(skin.clone())).unwrap();
+    assert_eq!((model.skins[0].batches.len(), model.skins[1].batches.len()), (1, 1));
+    assert_eq!(model.uv_combos, [0, 2, 0]);
+    assert_eq!(
+        model.faults,
+        ["its skin 0: the coordinates of the next textures of 1 of its batches, past its combos, taken as the first"]
     );
 }
 
@@ -545,7 +622,12 @@ fn a_modern_model_names_its_skins_and_textures_by_file_data_id() {
         chunk(b"TXID", &ids(&[7, 0, 9])),
     ]
     .concat();
-    let skin = written_skin(&[0, 1, 2], &[0, 1, 2], &[[0, 0, 0, 3]], &[[0, 0xFFFF, 1, 2, 1, 5, 1]]);
+    let skin = written_skin(
+        &[0, 1, 2],
+        &[0, 1, 2],
+        &[[0, 0, 0, 3]],
+        &[[0, 0xFFFF, 1, 2, 1, 5, 1, 0, 0]],
+    );
     let asked = Mutex::new(Vec::new());
     let model = m2::read(&bytes, "spells\\x.m2", |wanted| {
         asked.lock().unwrap().push((wanted.id, wanted.path));

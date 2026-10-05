@@ -286,6 +286,9 @@ pub struct Submesh {
 pub struct Batch {
     pub flags: u8,
     pub priority: i8,
+    /// Its shader: when the model has combiners (its flag 0x08) and this is under 0x8000, where
+    /// the combiners of its textures start in `Model::combiner_combos`; a shader already chosen,
+    /// as a later client does, from 0x8000.
     pub shader: u16,
     pub submesh: u16,
     /// Its colour and transparency, of `Model::colours`; none for 0xFFFF.
@@ -293,9 +296,11 @@ pub struct Batch {
     pub material: u16,
     pub layer: u16,
     /// Its textures: `texture_count` from `texture_combo` in `Model::texture_combos`; their
-    /// coordinates from `uv_combo` in `Model::uv_combos` (0 the first, 1 the second, 0xFFFF the
-    /// environment), chosen by its shader when the model has none, as since Cataclysm; its weight
-    /// at `weight_combo` in `Model::weight_combos`; its transforms from `transform_combo`.
+    /// coordinates from `uv_combo` in `Model::uv_combos`: 1 the second set, 0xFFFF the
+    /// environment, any other value the first, as the client's choice of shader reads them; chosen
+    /// by its shader when the model has none, as since Cataclysm. Its weight at `weight_combo` in
+    /// `Model::weight_combos`; its transforms from `transform_combo` in `Model::transform_combos`.
+    /// Every one of them is there, for each of its textures.
     pub texture_count: u16,
     pub texture_combo: u16,
     pub uv_combo: u16,
