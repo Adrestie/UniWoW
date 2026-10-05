@@ -45,10 +45,9 @@ SOFTWARE.
   `c2fd7bde36a712be78a5da896c995b84fbfa2545`.
 - Authors: Kruithne and Marlamin.
 - Licence: MIT, whose notice follows.
-- Translated into `src/db2.rs`: the reading of the DB2 of versions WDC2, `1SLC`, WDC3 and WDC5
-  (their header, sections, columns, pallets, lists of ids, copies, maps of offsets and strings),
-  for the two columns of a table of paths only; WDC2 takes the offsets of its strings from their
-  field, as WDC3 does, where wow.export reads them inline.
+- Translated into `src/db2.rs`: the reading of the DB2 of versions WDC2, `1SLC` and WDC3 (their
+  header, sections, columns, pallets, lists of ids and copies), for the two columns of a table of
+  paths only; its strings, ids and rows are taken as wxl-db2 takes them (below).
 
 ```
 MIT License
@@ -87,3 +86,7 @@ SOFTWARE.
 
 - WDC1 is read from the public description of the format, as DB2Gen writes it; nothing comes from
   DB2Gen nor from WarcraftXL, under GPL-3.
+- wxl-db2 (<https://github.com/WarcraftXL/wxl-db2>, commit
+  `30e4f2c8ed887a8d8d4b4472d688d4b8a02c310d`), `src/api/FdidResolver.cpp`,
+  `src/decode/Db2Decode.cpp` and `src/decode/DB2File.cpp`: read to learn how WarcraftXL reads the
+  tables of paths (their versions, strings, ids, last rows, copies); no code taken.

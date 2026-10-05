@@ -16,7 +16,9 @@ mod tests;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock, RwLock};
+use std::thread::ThreadId;
 
 use uniwow_api::formats::{self, AreaRecord, CreatureDisplay, CreatureModel, Formats, MapRecord};
 use uniwow_api::vfs::{self, Vfs, VfsState};
@@ -56,6 +58,10 @@ impl Client {
 #[derive(Default)]
 struct Files {
     state: RwLock<FilesState>,
+    /// The interface thread, which a table read would hold up.
+    interface: OnceLock<ThreadId>,
+    /// Whether a table was asked from the interface thread, which is said once.
+    warned: AtomicBool,
 }
 
 enum FilesState {
@@ -115,23 +121,42 @@ impl Vfs for Files {
     }
 }
 
+impl Files {
+    /// In debug, warns once that `table` was asked from the interface thread, which waits while a
+    /// table is read.
+    fn check_thread(&self, table: &str) {
+        if cfg!(debug_assertions)
+            && self.interface.get() == Some(&std::thread::current().id())
+            && !self.warned.swap(true, Ordering::Relaxed)
+        {
+            log::warn!(
+                "formats: {table} asked from the interface thread, which waits while a table is read: ask from a job"
+            );
+        }
+    }
+}
+
 impl Formats for Files {
     fn maps(&self) -> Result<Arc<Vec<MapRecord>>, String> {
+        self.check_thread("Map.dbc");
         let client = self.client()?;
         client.tables.maps(&client.chain)
     }
 
     fn areas(&self) -> Result<Arc<Vec<AreaRecord>>, String> {
+        self.check_thread("AreaTable.dbc");
         let client = self.client()?;
         client.tables.areas(&client.chain)
     }
 
     fn creature_displays(&self) -> Result<Arc<Vec<CreatureDisplay>>, String> {
+        self.check_thread("CreatureDisplayInfo.dbc");
         let client = self.client()?;
         client.tables.creature_displays(&client.chain)
     }
 
     fn creature_models(&self) -> Result<Arc<Vec<CreatureModel>>, String> {
+        self.check_thread("CreatureModelData.dbc");
         let client = self.client()?;
         client.tables.creature_models(&client.chain)
     }
@@ -209,6 +234,7 @@ impl Module for AssetsModule {
     }
 
     fn init(&mut self, ctx: &mut Context) {
+        let _ = self.files.interface.set(std::thread::current().id());
         if let Some(folder) = ctx
             .setting(CLIENT_FOLDER)
             .and_then(|value| value.as_str().map(str::to_owned))
@@ -222,14 +248,14 @@ impl Module for AssetsModule {
         ui.horizontal(|ui| {
             ui.label("Folder of the client");
             ui.add(egui::TextEdit::singleline(&mut self.folder).desired_width(360.0));
-            // The picker waits for the user on a job, the interface going on meanwhile.
+            // The picker waits for the user on a thread of its own (T2), the interface going on.
             if ui
                 .add_enabled(self.picking.is_none(), egui::Button::new("Open"))
                 .clicked()
             {
                 // The picker of Windows starts in a folder only when its separators are its own.
                 let start = PathBuf::from(self.folder.trim().replace('/', "\\"));
-                self.picking = Some(ctx.spawn("Choose the folder of the client", move |_| {
+                self.picking = Some(ctx.spawn_thread("Choose the folder of the client", move |_| {
                     let picker = rfd::FileDialog::new().set_title("Folder of the client");
                     let picker = if start.is_dir() {
                         picker.set_directory(&start)

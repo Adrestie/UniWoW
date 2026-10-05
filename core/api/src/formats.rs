@@ -54,7 +54,8 @@ pub struct CreatureModel {
 }
 
 /// The formats of the client's files, offered by the module `assets`. Each table is read once, by
-/// the first thread asking for it; the others asking meanwhile wait for it: ask from a job.
+/// the first thread asking for it; the others asking meanwhile wait for it: ask from a job. In
+/// debug, a table asked from the interface thread is said once in the log.
 pub trait Formats: Send + Sync {
     /// The maps, by increasing id.
     fn maps(&self) -> Result<Arc<Vec<MapRecord>>, String>;

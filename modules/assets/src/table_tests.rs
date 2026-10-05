@@ -11,7 +11,7 @@ use uniwow_api::formats::Formats;
 use uniwow_api::vfs::Vfs;
 
 use crate::chain::{self, Chain, Source};
-use crate::db2::{BITPACKED, COMMON, FileIds, NONE, PALLET, PathTable, SIGNED, SPARSE};
+use crate::db2::{BITPACKED, COMMON, FileIds, NONE, PALLET, PathTable, SIGNED};
 use crate::dbc::Tables;
 use crate::tests::{Stored, file, scratch, write_archive};
 use crate::{Client, Files, FilesState};
@@ -97,53 +97,28 @@ enum Ids {
     Zeros,
 }
 
-/// A WDC1 as DB2Gen writes it, an id then the offset of a path from the start of the strings, with
-/// what the format may hold besides: a list of ids, records of variable size, copies.
-fn wdc1(rows: &[(u32, &str)], ids: Ids, sparse: bool, copies: &[(u32, u32)]) -> Vec<u8> {
-    assert!(matches!(ids, Ids::Plain | Ids::List));
-    let listed = ids == Ids::List;
+/// A WDC1 as DB2Gen writes it: its records, each an id and the offset of its path from the start
+/// of `strings`, or only the offset with the ids in a list; then its copies.
+fn wdc1_raw(records: &[(u32, u32)], strings: &[u8], listed: bool, copies: &[(u32, u32)]) -> Vec<u8> {
     let columns = if listed {
         vec![storage(0, 32, NONE)]
     } else {
         vec![storage(0, 32, NONE), storage(32, 32, NONE)]
     };
     let record_size = columns.len() as u32 * 4;
-    let min_id = rows.iter().map(|row| row.0).min().unwrap_or(0);
-    let max_id = rows.iter().map(|row| row.0).max().unwrap_or(0);
+    let min_id = records.iter().map(|row| row.0).min().unwrap_or(0);
+    let max_id = records.iter().map(|row| row.0).max().unwrap_or(0);
     let mut out = vec![0u8; 84];
     put_fields(&mut out, &columns);
-    let mut map_offset = 0;
-    let mut strings_size = 0;
-    if sparse {
-        let mut offsets = vec![(0u32, 0u16); (max_id - min_id + 1) as usize];
-        for (id, path) in rows {
-            let start = out.len();
-            if !listed {
-                put(&mut out, &[*id]);
-            }
-            out.extend(path.as_bytes());
-            out.push(0);
-            offsets[(id - min_id) as usize] = (start as u32, (out.len() - start) as u16);
+    for (id, offset) in records {
+        if !listed {
+            put(&mut out, &[*id]);
         }
-        map_offset = out.len() as u32;
-        for (offset, size) in offsets {
-            put(&mut out, &[offset]);
-            out.extend(size.to_le_bytes());
-        }
-    } else {
-        let mut strings = Strings::new();
-        for (id, path) in rows {
-            if !listed {
-                put(&mut out, &[*id]);
-            }
-            let offset = strings.add(path);
-            put(&mut out, &[offset]);
-        }
-        strings_size = strings.bytes.len() as u32;
-        out.extend(&strings.bytes);
+        put(&mut out, &[*offset]);
     }
+    out.extend(strings);
     if listed {
-        put(&mut out, &rows.iter().map(|row| row.0).collect::<Vec<u32>>());
+        put(&mut out, &records.iter().map(|row| row.0).collect::<Vec<u32>>());
     }
     for (copy, copied) in copies {
         put(&mut out, &[*copy, *copied]);
@@ -154,10 +129,10 @@ fn wdc1(rows: &[(u32, &str)], ids: Ids, sparse: bool, copies: &[(u32, u32)]) -> 
     put(
         &mut header,
         &[
-            rows.len() as u32,
+            records.len() as u32,
             count,
             record_size,
-            strings_size,
+            strings.len() as u32,
             0,
             0,
             min_id,
@@ -166,24 +141,28 @@ fn wdc1(rows: &[(u32, &str)], ids: Ids, sparse: bool, copies: &[(u32, u32)]) -> 
             copies.len() as u32 * 8,
         ],
     );
-    header.extend((if sparse { SPARSE } else { 0 }).to_le_bytes());
     header.extend(0u16.to_le_bytes());
-    let ids_size = if listed { rows.len() as u32 * 4 } else { 0 };
-    put(
-        &mut header,
-        &[count, record_size, 0, map_offset, ids_size, count * 24, 0, 0, 0],
-    );
+    header.extend(0u16.to_le_bytes());
+    let ids_size = if listed { records.len() as u32 * 4 } else { 0 };
+    put(&mut header, &[count, record_size, 0, 0, ids_size, count * 24, 0, 0, 0]);
     out[..84].copy_from_slice(&header);
     out
 }
 
-/// A DB2 of WDC2 or after: its sections, how it keeps its ids, whether its records vary in size,
-/// a section encrypted with a key the client lacks, the copies of its last section.
+/// A WDC1 as DB2Gen writes it, of `rows` and `copies`, its ids plain or listed.
+fn wdc1(rows: &[(u32, &str)], ids: Ids, copies: &[(u32, u32)]) -> Vec<u8> {
+    assert!(matches!(ids, Ids::Plain | Ids::List));
+    let mut strings = Strings::new();
+    let records: Vec<(u32, u32)> = rows.iter().map(|(id, path)| (*id, strings.add(path))).collect();
+    wdc1_raw(&records, &strings.bytes, ids == Ids::List, copies)
+}
+
+/// A DB2 of WDC2 or WDC3: its sections, how it keeps its ids, a section encrypted with a key the
+/// client lacks, the copies of its last section.
 struct Wdc<'a> {
     magic: &'a [u8; 4],
     sections: Vec<Vec<(u32, &'a str)>>,
     ids: Ids,
-    sparse: bool,
     encrypted: Option<usize>,
     copies: Vec<(u32, u32)>,
 }
@@ -193,7 +172,6 @@ fn wdc<'a>(magic: &'a [u8; 4], sections: &[&[(u32, &'a str)]]) -> Wdc<'a> {
         magic,
         sections: sections.iter().map(|rows| rows.to_vec()).collect(),
         ids: Ids::Plain,
-        sparse: false,
         encrypted: None,
         copies: Vec::new(),
     }
@@ -202,7 +180,6 @@ fn wdc<'a>(magic: &'a [u8; 4], sections: &[&[(u32, &'a str)]]) -> Wdc<'a> {
 impl Wdc<'_> {
     fn write(&self) -> Vec<u8> {
         let version2 = matches!(self.magic, b"WDC2" | b"1SLC");
-        let listed = matches!(self.ids, Ids::List | Ids::Zeros);
         let all: Vec<(u32, &str)> = self.sections.concat();
         let id_bits = if self.ids == Ids::Pallet { 3 } else { 20 };
         // A packed id 3 bits into the second column, which shifts its bits.
@@ -230,13 +207,13 @@ impl Wdc<'_> {
         // The path is the column after the plain id, the first otherwise.
         let (id_index, path_byte) = match self.ids {
             Ids::Plain => (0u16, 4),
-            _ if listed => (0, 0),
+            Ids::List | Ids::Zeros => (0, 0),
             _ => (1, 0),
         };
         let record_size = columns.len() * 4;
         let min_id = all.iter().map(|row| row.0).min().unwrap_or(0);
         let max_id = all.iter().map(|row| row.0).max().unwrap_or(0);
-        let strings: Vec<Strings> = self
+        let mut strings: Vec<Strings> = self
             .sections
             .iter()
             .map(|rows| {
@@ -248,10 +225,6 @@ impl Wdc<'_> {
             })
             .collect();
         let mut out = self.magic.to_vec();
-        if self.magic == b"WDC5" {
-            put(&mut out, &[5]);
-            out.extend([b'x'; 128]);
-        }
         let header_at = out.len();
         out.extend([0u8; 68]);
         let headers_at = out.len();
@@ -269,80 +242,36 @@ impl Wdc<'_> {
             put(&mut out, &[all[0].0, 7]);
             common_size = 8;
         }
-        if self.magic == b"WDC5" {
-            // What WDC5 puts before its sections, which their offsets step over.
-            for _ in 1..self.sections.len() {
-                put(&mut out, &[1, 0xDEAD_BEEF]);
-            }
-        }
         let mut headers = Vec::new();
         let mut outside = 0;
         let mut base = 0;
         for (place, rows) in self.sections.iter().enumerate() {
             let file_offset = out.len();
-            let mut map = Vec::new();
             let encrypted = self.encrypted == Some(place);
-            if self.sparse {
-                for (id, path) in rows {
-                    let start = out.len();
-                    if !listed {
-                        put(&mut out, &[*id]);
+            for (index, (id, path)) in rows.iter().enumerate() {
+                let mut record = vec![0u8; record_size];
+                // The offset of a path among the strings of all the sections, end to end.
+                let local = strings[place].add(path) as usize;
+                let offset = if local == 0 { 0 } else { base + local };
+                record[path_byte..path_byte + 4].copy_from_slice(&(offset as u32).to_le_bytes());
+                let packed = match self.ids {
+                    Ids::Plain => {
+                        record[..4].copy_from_slice(&id.to_le_bytes());
+                        None
                     }
-                    out.extend(path.as_bytes());
-                    out.push(0);
-                    if encrypted {
-                        out[start..].fill(0);
-                        map.push((0, 0));
-                    } else {
-                        map.push((start as u32, (out.len() - start) as u16));
-                    }
+                    Ids::Bitpacked | Ids::Signed => Some(id & 0xF_FFFF),
+                    Ids::Pallet => Some((outside + index) as u32),
+                    _ => None,
+                };
+                if let Some(value) = packed {
+                    record[4..8].copy_from_slice(&(value << 3).to_le_bytes());
                 }
-            } else {
-                for (index, (id, path)) in rows.iter().enumerate() {
-                    let mut record = vec![0u8; record_size];
-                    let local = strings[place].at.get(*path).copied().unwrap_or(0) as usize;
-                    let offset = if local == 0 {
-                        0
-                    } else {
-                        base + local + all.len() * record_size - ((outside + index) * record_size + path_byte)
-                    };
-                    record[path_byte..path_byte + 4].copy_from_slice(&(offset as u32).to_le_bytes());
-                    let packed = match self.ids {
-                        Ids::Plain => {
-                            record[..4].copy_from_slice(&id.to_le_bytes());
-                            None
-                        }
-                        Ids::Bitpacked | Ids::Signed => Some(id & 0xF_FFFF),
-                        Ids::Pallet => Some((outside + index) as u32),
-                        _ => None,
-                    };
-                    if let Some(value) = packed {
-                        record[4..8].copy_from_slice(&(value << 3).to_le_bytes());
-                    }
-                    if encrypted {
-                        record.fill(0);
-                    }
-                    out.extend(record);
+                if encrypted {
+                    record.fill(0);
                 }
-                out.extend(&strings[place].bytes);
+                out.extend(record);
             }
-            let records_end = if self.sparse {
-                out.len()
-            } else {
-                file_offset + rows.len() * record_size
-            };
-            let mut map_offset = 0;
-            if version2 && self.sparse {
-                map_offset = out.len();
-                let mut by_id = vec![(0u32, 0u16); (max_id - min_id + 1) as usize];
-                for ((id, _), entry) in rows.iter().zip(&map) {
-                    by_id[(id - min_id) as usize] = *entry;
-                }
-                for (offset, size) in by_id {
-                    put(&mut out, &[offset]);
-                    out.extend(size.to_le_bytes());
-                }
-            }
+            out.extend(&strings[place].bytes);
             let ids: Vec<u32> = match self.ids {
                 Ids::List => rows.iter().map(|row| row.0).collect(),
                 Ids::Zeros => vec![0; rows.len()],
@@ -357,40 +286,20 @@ impl Wdc<'_> {
             for (copy, copied) in &copies {
                 put(&mut out, &[*copy, *copied]);
             }
-            let mut relations = 0;
-            if !version2 && self.sparse {
-                for (offset, size) in &map {
-                    put(&mut out, &[*offset]);
-                    out.extend(size.to_le_bytes());
-                }
-                // Relations of none, which the ids of the map follow.
-                put(&mut out, &[0, 0, 0]);
-                relations = 12;
-                put(&mut out, &rows.iter().map(|row| row.0).collect::<Vec<u32>>());
-            }
-            let strings_size = if self.sparse { 0 } else { strings[place].bytes.len() };
             let key: u64 = if encrypted { 0x1234_5678_9ABC_DEF0 } else { 0 };
             headers.extend(key.to_le_bytes());
+            let strings_size = strings[place].bytes.len();
             put(
                 &mut headers,
                 &[file_offset as u32, rows.len() as u32, strings_size as u32],
             );
             if version2 {
-                put(
-                    &mut headers,
-                    &[copies.len() as u32 * 8, map_offset as u32, ids.len() as u32 * 4, 0],
-                );
+                put(&mut headers, &[copies.len() as u32 * 8, 0, ids.len() as u32 * 4, 0]);
             } else {
-                let map_count = if self.sparse { map.len() as u32 } else { 0 };
+                let records_end = file_offset + rows.len() * record_size;
                 put(
                     &mut headers,
-                    &[
-                        records_end as u32,
-                        ids.len() as u32 * 4,
-                        relations,
-                        map_count,
-                        copies.len() as u32,
-                    ],
+                    &[records_end as u32, ids.len() as u32 * 4, 0, 0, copies.len() as u32],
                 );
             }
             outside += rows.len();
@@ -412,7 +321,7 @@ impl Wdc<'_> {
                 0,
             ],
         );
-        header.extend((if self.sparse { SPARSE } else { 0 }).to_le_bytes());
+        header.extend(0u16.to_le_bytes());
         header.extend(id_index.to_le_bytes());
         put(
             &mut header,
@@ -432,7 +341,7 @@ impl Wdc<'_> {
     }
 }
 
-/// Whether `table` names each of `rows` by its id, and nothing else, an empty path naming nothing.
+/// Whether `table` names each of `rows` by its id, an empty path naming nothing, and nothing else.
 fn names(table: &PathTable, rows: &[(u32, &str)]) {
     for (id, path) in rows {
         let expected = (!path.is_empty()).then(|| path.to_string());
@@ -446,6 +355,10 @@ fn parse(bytes: Vec<u8>) -> PathTable {
     PathTable::parse(bytes).unwrap()
 }
 
+fn refused(bytes: Vec<u8>) -> String {
+    PathTable::parse(bytes).err().expect("refused")
+}
+
 const ROWS: [(u32, &str); 5] = [
     (10, "world\\a.blp"),
     (3, "world\\b.blp"),
@@ -456,45 +369,49 @@ const ROWS: [(u32, &str); 5] = [
 
 #[test]
 fn a_wdc1_as_db2gen_writes_it_names_each_file_by_its_id() {
-    let table = parse(wdc1(&ROWS, Ids::Plain, false, &[]));
+    let table = parse(wdc1(&ROWS, Ids::Plain, &[]));
     names(&table, &ROWS);
     assert_eq!(table.path(11), None);
-    assert_eq!(table.path(0), None);
-    let twice = parse(wdc1(&[(3, "first.blp"), (3, "second.blp")], Ids::Plain, false, &[]));
-    assert_eq!(
-        twice.path(3).as_deref(),
-        Some("first.blp"),
-        "an id named twice keeps its first row"
-    );
-    assert_eq!(twice.len(), 1);
+    names(&parse(wdc1(&ROWS, Ids::List, &[])), &ROWS);
 }
 
 #[test]
-fn a_wdc1_with_a_list_of_ids_records_of_variable_size_or_copies_reads_the_same() {
-    names(&parse(wdc1(&ROWS[..4], Ids::List, false, &[])), &ROWS[..4]);
-    names(&parse(wdc1(&ROWS[..4], Ids::Plain, true, &[])), &ROWS[..4]);
-    names(&parse(wdc1(&ROWS[..4], Ids::List, true, &[])), &ROWS[..4]);
-    let copied = parse(wdc1(&ROWS, Ids::Plain, false, &[(20, 3), (21, 7), (22, 999)]));
+fn an_id_named_twice_keeps_its_last_row_copies_included_as_warcraftxl_does() {
+    let twice = parse(wdc1(&[(3, "first.blp"), (3, "second.blp")], Ids::Plain, &[]));
+    assert_eq!(twice.path(3).as_deref(), Some("second.blp"));
+    let emptied = parse(wdc1(&[(3, "first.blp"), (3, "")], Ids::Plain, &[]));
+    assert_eq!(emptied.path(3), None, "an empty last row names nothing");
+    assert_eq!(emptied.len(), 0);
+    let copied = parse(wdc1(&ROWS, Ids::Plain, &[(20, 3), (21, 7), (22, 999), (10, 3)]));
     assert_eq!(copied.path(20).as_deref(), Some("world\\b.blp"));
     assert_eq!(copied.path(21), None, "a copy of an empty path names nothing");
     assert_eq!(copied.path(22), None, "a copy of a row missing names nothing");
-    assert_eq!(copied.len(), 5);
+    assert_eq!(
+        copied.path(10).as_deref(),
+        Some("world\\b.blp"),
+        "a copy comes after the rows"
+    );
 }
 
 #[test]
-fn every_version_from_wdc2_reads_its_sections_and_their_strings() {
-    let first: &[(u32, &str)] = &ROWS[..3];
+fn an_offset_counts_from_the_start_of_the_strings_as_warcraftxl_reads_it() {
+    let first = parse(wdc1_raw(&[(5, 0), (6, 2)], b"a.blp\0", false, &[]));
+    assert_eq!(first.path(5).as_deref(), Some("a.blp"), "0 is the first string");
+    assert_eq!(first.path(6).as_deref(), Some("blp"), "an offset inside a string");
+    let outside = parse(wdc1_raw(&[(5, 999)], b"\0a.blp\0", false, &[]));
+    assert_eq!(outside.path(5), None, "an offset out of the strings names nothing");
+    let first_part: &[(u32, &str)] = &ROWS[..3];
     let second: &[(u32, &str)] = &[(40, "world\\c.m2"), (41, "world\\c.m2"), (42, "")];
-    let all = [first, second].concat();
-    for magic in [b"WDC2", b"1SLC", b"WDC3", b"WDC5"] {
-        let table = PathTable::parse(wdc(magic, &[first, second]).write())
+    let all = [first_part, second].concat();
+    for magic in [b"WDC2", b"1SLC", b"WDC3"] {
+        let table = PathTable::parse(wdc(magic, &[first_part, second]).write())
             .unwrap_or_else(|e| panic!("{}: {e}", String::from_utf8_lossy(magic)));
         names(&table, &all);
     }
 }
 
 #[test]
-fn ids_packed_signed_in_a_pallet_or_listed_read_as_wow_export_reads_them() {
+fn ids_packed_signed_in_a_pallet_or_listed_read_as_warcraftxl_reads_them() {
     let rows: &[(u32, &str)] = &[(70_000, "a.blp"), (3, "b.blp"), (900_000, "c.blp")];
     for ids in [Ids::Bitpacked, Ids::Pallet, Ids::List] {
         let table = Wdc {
@@ -513,72 +430,68 @@ fn ids_packed_signed_in_a_pallet_or_listed_read_as_wow_export_reads_them() {
         ids: Ids::Zeros,
         ..wdc(b"WDC3", &[rows])
     };
-    names(&parse(zeros.write()), &[(0, "a.blp"), (1, "b.blp"), (2, "c.blp")]);
+    let zeros = parse(zeros.write());
+    assert_eq!(
+        zeros.path(0).as_deref(),
+        Some("c.blp"),
+        "a list of zeros gives the id 0 to each"
+    );
+    assert_eq!(zeros.len(), 1);
     let common = Wdc {
         ids: Ids::Common,
         ..wdc(b"WDC3", &[rows])
     };
-    let refused = PathTable::parse(common.write()).err().unwrap();
-    assert!(refused.contains("common data"), "{refused}");
-}
-
-#[test]
-fn records_of_variable_size_and_copies_read_in_every_version() {
-    let first: &[(u32, &str)] = &[(4, "world\\a.wmo"), (9, ""), (5, "world\\c.wmo")];
-    let second: &[(u32, &str)] = &[(6, "world\\b.wmo")];
-    let both = [first, second].concat();
-    let copies = vec![(30, 4), (31, 6)];
-    let expected = [
-        (4, "world\\a.wmo"),
-        (5, "world\\c.wmo"),
-        (6, "world\\b.wmo"),
-        (30, "world\\a.wmo"),
-        (31, "world\\b.wmo"),
-    ];
-    // WDC2 maps its records by id over the whole table: one section.
-    let single = Wdc {
-        sparse: true,
-        copies: copies.clone(),
-        ..wdc(b"WDC2", &[both.as_slice()])
-    };
-    names(&parse(single.write()), &expected);
-    for magic in [b"WDC3", b"WDC5"] {
-        for ids in [Ids::Plain, Ids::List] {
-            let table = Wdc {
-                sparse: true,
-                ids,
-                copies: copies.clone(),
-                ..wdc(magic, &[first, second])
-            };
-            names(&parse(table.write()), &expected);
-        }
-    }
+    let reason = refused(common.write());
+    assert!(reason.contains("common data"), "{reason}");
 }
 
 #[test]
 fn a_section_encrypted_with_a_key_the_client_lacks_names_nothing() {
     let first: &[(u32, &str)] = &[(1, "a.blp"), (2, "b.blp")];
     let second: &[(u32, &str)] = &[(3, "c.blp")];
-    for sparse in [false, true] {
-        for ids in [Ids::Plain, Ids::List] {
-            let table = Wdc {
-                encrypted: Some(0),
-                sparse,
-                ids,
-                ..wdc(b"WDC3", &[first, second])
-            };
-            names(&parse(table.write()), second);
-        }
+    for ids in [Ids::Plain, Ids::List] {
+        let table = Wdc {
+            encrypted: Some(0),
+            ids,
+            ..wdc(b"WDC3", &[first, second])
+        };
+        names(&parse(table.write()), second);
     }
 }
 
 #[test]
 fn what_warcraftxl_does_not_read_is_refused_and_a_file_damaged_never_panics() {
-    let mut wdc4 = wdc(b"WDC3", &[&ROWS[..]]).write();
-    wdc4[..4].copy_from_slice(b"WDC4");
-    let refused = PathTable::parse(wdc4).err().unwrap();
-    assert!(refused.contains("WDC4"), "{refused}");
+    let mut magic = wdc(b"WDC3", &[&ROWS[..]]).write();
+    for name in [b"WDC4", b"WDC5"] {
+        magic[..4].copy_from_slice(name);
+        let reason = refused(magic.clone());
+        assert!(reason.starts_with(std::str::from_utf8(name).unwrap()), "{reason}");
+    }
     assert!(PathTable::parse(b"WDBC\0\0\0\0".to_vec()).is_err());
+    // The flag of records of variable size, then the size of the relations, in WDC1 and WDC3.
+    for (mut bytes, flags, relations) in [
+        (wdc1(&ROWS, Ids::Plain, &[]), 44, 80),
+        (wdc(b"WDC3", &[&ROWS[..]]).write(), 40, 100),
+    ] {
+        let mut sparse = bytes.clone();
+        sparse[flags] = 1;
+        assert!(refused(sparse).contains("variable size"));
+        bytes[relations] = 12;
+        assert!(refused(bytes).contains("relations"));
+    }
+    // A list of one id after the strings, the last bytes of the file, beside the column of ids.
+    let mut listed = wdc(b"WDC3", &[&ROWS[..]]).write();
+    listed.extend(10u32.to_le_bytes());
+    listed[72 + 8 + 4 * 4] = 4;
+    assert!(refused(listed).contains("2 columns and a list of ids"));
+    // Its list of ids said empty, a table of one column has no ids.
+    let mut unlisted = Wdc {
+        ids: Ids::List,
+        ..wdc(b"WDC3", &[&ROWS[..]])
+    }
+    .write();
+    unlisted[72 + 8 + 4 * 4] = 0;
+    assert!(refused(unlisted).contains("1 columns without a list of ids"));
     let mut pallet = Wdc {
         ids: Ids::Pallet,
         ..wdc(b"WDC3", &[&ROWS[..]])
@@ -587,11 +500,9 @@ fn what_warcraftxl_does_not_read_is_refused_and_a_file_damaged_never_panics() {
     // The size of the pallets in the header, 4 bytes more than they hold.
     let size = u32::from_le_bytes(pallet[64..68].try_into().unwrap());
     pallet[64..68].copy_from_slice(&(size + 4).to_le_bytes());
-    let refused = PathTable::parse(pallet).err().unwrap();
-    assert!(refused.contains("pallets"), "{refused}");
+    assert!(refused(pallet).contains("pallets"));
     let samples = [
-        wdc1(&ROWS, Ids::Plain, false, &[(20, 3)]),
-        wdc1(&ROWS[..4], Ids::Plain, true, &[]),
+        wdc1(&ROWS, Ids::Plain, &[(20, 3)]),
         wdc(b"WDC2", &[&ROWS[..]]).write(),
         Wdc {
             ids: Ids::Pallet,
@@ -599,8 +510,8 @@ fn what_warcraftxl_does_not_read_is_refused_and_a_file_damaged_never_panics() {
         }
         .write(),
         Wdc {
-            sparse: true,
-            ..wdc(b"WDC5", &[&ROWS[..2], &ROWS[2..]])
+            ids: Ids::List,
+            ..wdc(b"WDC3", &[&ROWS[..2], &ROWS[2..]])
         }
         .write(),
     ];
@@ -625,8 +536,8 @@ fn what_warcraftxl_does_not_read_is_refused_and_a_file_damaged_never_panics() {
 #[test]
 fn the_tables_of_paths_are_read_loose_first_then_from_the_archives_textures_before_models() {
     let folder = scratch("file-ids");
-    let textures = wdc1(&[(1, "a.blp"), (5, "e.blp")], Ids::Plain, false, &[]);
-    let model_rows: &[(u32, &str)] = &[(1, "m.m2"), (2, "n.m2")];
+    let textures = wdc1(&[(1, "a.blp"), (5, "e.blp"), (6, "")], Ids::Plain, &[]);
+    let model_rows: &[(u32, &str)] = &[(1, "m.m2"), (2, "n.m2"), (6, "o.m2"), (0, "zero.m2")];
     let models = wdc(b"WDC3", &[model_rows]).write();
     let archive = folder.join("patch.mpq");
     write_archive(
@@ -647,12 +558,22 @@ fn the_tables_of_paths_are_read_loose_first_then_from_the_archives_textures_befo
     assert_eq!(ids.path_of(1).as_deref(), Some("a.blp"), "the textures first");
     assert_eq!(ids.path_of(2).as_deref(), Some("n.m2"));
     assert_eq!(ids.path_of(5).as_deref(), Some("e.blp"));
+    assert_eq!(
+        ids.path_of(6).as_deref(),
+        Some("o.m2"),
+        "an empty texture leaves the model"
+    );
+    assert_eq!(ids.path_of(0), None, "0 names no file");
     assert_eq!(ids.path_of(3), None);
-    assert_eq!(ids.len(), 4);
+    assert_eq!(ids.len(), 6);
 
-    std::fs::remove_file(&loose).unwrap();
+    std::fs::write(&loose, b"").unwrap();
     let (ids, refused) = FileIds::load(&folder, &chain);
-    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(
+        refused.len(),
+        1,
+        "an empty loose table leaves that of the archives: {refused:?}"
+    );
     assert!(refused[0].starts_with("TextureFilePath.db2: "), "{refused:?}");
     assert_eq!(ids.path_of(1).as_deref(), Some("m.m2"));
 
@@ -870,7 +791,7 @@ fn a_table_of_another_layout_or_damaged_is_refused_with_its_name() {
 #[test]
 fn the_services_answer_once_the_client_is_open() {
     let mut tables = sample_tables();
-    tables.push(("ModelFilePath.db2", wdc1(&[(8, "world\\x.m2")], Ids::Plain, false, &[])));
+    tables.push(("ModelFilePath.db2", wdc1(&[(8, "world\\x.m2")], Ids::Plain, &[])));
     let (folder, _) = tables_chain("services", &tables);
     let files = Files::default();
     assert_eq!(files.path_of(8), None);
@@ -886,6 +807,24 @@ fn the_services_answer_once_the_client_is_open() {
 }
 
 #[test]
+fn a_table_asked_from_the_interface_thread_is_said_once_in_debug() {
+    let files = Files::default();
+    files.interface.set(std::thread::current().id()).unwrap();
+    std::thread::scope(|scope| {
+        scope.spawn(|| files.maps());
+    });
+    assert!(
+        !files.warned.load(std::sync::atomic::Ordering::Relaxed),
+        "another thread says nothing"
+    );
+    let _ = files.maps();
+    assert_eq!(
+        files.warned.load(std::sync::atomic::Ordering::Relaxed),
+        cfg!(debug_assertions)
+    );
+}
+
+#[test]
 fn a_table_of_a_million_paths_reads_in_a_moment() {
     let names: Vec<String> = (0..1_000_000)
         .map(|id| format!("world\\textures\\{id:07}.blp"))
@@ -895,7 +834,7 @@ fn a_table_of_a_million_paths_reads_in_a_moment() {
         .enumerate()
         .map(|(id, name)| (id as u32 * 3, name.as_str()))
         .collect();
-    let bytes = wdc1(&rows, Ids::Plain, false, &[]);
+    let bytes = wdc1(&rows, Ids::Plain, &[]);
     let start = Instant::now();
     let table = parse(bytes);
     let read = start.elapsed();

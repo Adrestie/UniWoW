@@ -1903,7 +1903,7 @@ Each step is reviewed before the next one; the milestone is delivered once all a
 
 | Step | Content |
 |---|---|
-| 9.1 | Installations; the module `assets` and its services `vfs` and `formats`, with their interfaces in `core/api`, read from any thread at once: the archives in the order of the client and of the patcher of WarcraftXL, folders mounted as archives, the delete markers of the patches; read economically (one allocation for the data of a file, buffers reused by each thread); the FileDataIDs turned into paths through `TextureFilePath.db2` and `ModelFilePath.db2`, of the versions WarcraftXL reads (WDC1 to WDC3 and WDC5), as WarcraftXL does; the DBC `Map`, `AreaTable`, `CreatureDisplayInfo`, `CreatureModelData`, and those the next steps need |
+| 9.1 | Installations; the module `assets` and its services `vfs` and `formats`, with their interfaces in `core/api`, read from any thread at once: the archives in the order of the client and of the patcher of WarcraftXL, folders mounted as archives, the delete markers of the patches; read economically (one allocation for the data of a file, buffers reused by each thread); the FileDataIDs turned into paths through `TextureFilePath.db2` and `ModelFilePath.db2`, of the versions WarcraftXL reads for them (WDC1 to WDC3), as WarcraftXL does; the DBC `Map`, `AreaTable`, `CreatureDisplayInfo`, `CreatureModelData`, and those the next steps need |
 | 9.2a | The additions to the core: `parallel_for`, bundles kept in the viewport with `prepare`, its frame signal |
 | 9.2 | The terrain model that can be edited (point 1 above), from the ADT of 3.3.5a and the split tiles, loaded in jobs in the order of *Threads*, its uploads submitted by the jobs, the GPU memory budget, drawn chunk by chunk; the free camera |
 | 9.3 | The observer and its threads, on both sides; the entities as markers (a coloured shape and the name) moving in real time; the commands and events of L4 |
@@ -1925,7 +1925,7 @@ Each step is reviewed before the next one; the milestone is delivered once all a
 | The bytes of animation (instances and bones) written to the GPU per frame in a crowded city | To measure |
 | What warcraft-rs reads and writes correctly in 3.3.5a, format by format; what `assets` copies of it, without `rayon` | Reading verified in step 9.1 (below): archives, DBC, WDT, ADT and WMO groups read; M2, skins, WMO roots and BLP have faults to correct in the copy. Writing not verified yet |
 | Which versions of the modern formats the extensions of WarcraftXL load, and where they find the files (their folders, loose files, FileDataIDs and listfile): the editor must read the same files from the same places | Verified in step 9.1 in their sources (below) |
-| What wow.export reads of those formats, and how much of it the translation takes | DB2 verified in step 9.1: wow.export reads WDC2, `1SLC`, WDC3, WDC4 and WDC5, not WDC1; the translation takes WDC2, `1SLC`, WDC3 and WDC5, for the tables of paths. M2, WMO, ADT and BLP: at their steps |
+| What wow.export reads of those formats, and how much of it the translation takes | DB2 verified in step 9.1: wow.export reads WDC2, `1SLC`, WDC3, WDC4 and WDC5, not WDC1; the translation takes WDC2, `1SLC` and WDC3, for the tables of paths, which read their strings, ids and rows as wxl-db2 does. M2, WMO, ADT and BLP: at their steps |
 | Does the active invisible object stay out of the game (no aggro, no AI, not seen by game masters), and is it always removed (unsubscription, disconnection, heartbeat lost)? | To verify |
 
 #### Results of the verifications (step 9.1)
@@ -1986,8 +1986,8 @@ commits, which may change what follows:
 - **ADT**: split when `<tile>_tex0.adt` exists; the root, `_tex0` and `_obj0` only; the doodads and
   buildings flagged as FileDataIDs (`MDDF` 0x40, `MODF` 0x8) through the tables; at most 4 texture
   layers.
-- **DB2**: WDC1 to WDC3 and WDC5; no DBC of 3.3.5a is replaced or extended: the four extensions use
-  only the two tables of paths.
+- **DB2**: WDC1 to WDC3 for the two tables of paths (corrected in 9.1b, below), WDC5 for its other
+  tables; no DBC of 3.3.5a is replaced or extended.
 - The view shows what the client shows: a modern WMO without its doodads, for one.
 
 **The client of the user**: the extensions of WarcraftXL are installed (since 2 October), but its
@@ -2066,7 +2066,8 @@ Second part (9.1b), the FileDataIDs, the DB2 and the service `formats`:
   bytes; a larger file is read into a buffer of its own.
 - Every file the client lists read once, by a test run on demand
   (`every_file_the_client_lists_is_read_and_none_is_refused`): 230,200 files, 17,157 of them
-  sounds, 36.6 GB in 57 s, none refused.
+  sounds, 36.6 GB in 57 s, none refused; again on the client as it is since 5 October: 232,042
+  files, 22,176 of them sounds, 30.9 GB in 58 s, none refused.
 - `uniwow_api::vfs`: `path_of`, the path of a modern file by its FileDataID, through
   `TextureFilePath.db2`, then `ModelFilePath.db2`, as WarcraftXL does; none when neither names it.
 - `uniwow_api::formats`: the trait `Formats`, shared between threads (T3), and its rows, plain
@@ -2074,39 +2075,52 @@ Second part (9.1b), the FileDataIDs, the DB2 and the service `formats`:
   (`CreatureDisplayInfo.dbc`) and their models (`CreatureModelData.dbc`), by increasing id, their
   texts in the locale of the client (enGB reads those of enUS). Each table is read once, by the
   first thread asking for it, the others asking meanwhile waiting for it; another client folder
-  starts them again. The module `assets` offers it as the service `formats`.
+  starts them again. In debug, a table asked from the interface thread is said once in the log.
+  The module `assets` offers it as the service `formats`.
 - The tables of paths: read loose from `DBFilesClient` in the client folder first, then from the
   archives, both at once, each on a thread of its own, inside the job that merges the lists. A
   table missing is not an error; one that cannot be read is said in the panel, which also says
   how many FileDataIDs the tables name. A table keeps its bytes and, for each FileDataID, where
   its path starts: a million rows read in about 10 ms (release), the path made only when asked.
-- DB2: WDC1, as DB2Gen writes it, read from the public description of the format; WDC2, `1SLC`,
-  WDC3 and WDC5 translated from wow.export (MIT); WDC4 refused by name, as WarcraftXL does. Each
-  section is found by the offset its header gives, which steps over what WDC4 and WDC5 put before
-  the sections. The id comes from the map of offsets, else the list of ids (all zero: the place
-  of each record), else its column, plain, packed, signed or in a pallet; the copies and the
-  records of variable size are read. WDC2 takes the offsets of its strings from their field, as
-  the description of the format says, where wow.export reads them inline. An id named twice keeps
-  its first row. A table with a column other than the id and the path is refused. A section
-  encrypted with a key the client lacks holds zeros, which name no file: it needs no reading of
-  its own.
+- DB2: WDC1, as DB2Gen writes it, read from the public description of the format; WDC2, `1SLC`
+  and WDC3 translated from wow.export (MIT), each section found by the offset its header gives.
+  The rest as wxl-db2 30e4f2c reads these two tables (`FdidResolver.cpp`, `Db2Decode.cpp`,
+  `DB2File.cpp`, read after the review, nothing copied), which corrected the first build:
+  - the offset of a path counts from the start of the strings of all the sections, end to end, in
+    every version: wxl-db2 names no column of strings for these tables, so it never takes the
+    offset from its field; an offset out of the strings names nothing;
+  - WDC4 and WDC5 are refused: wxl-db2 reads WDC5 only for its other tables (`Wdc5.cpp`);
+  - a record takes its id from the list of ids of its section as it stands, else from the column
+    of ids, plain, packed, signed or in a pallet, else from its place;
+  - an id named twice keeps its last row, copies included, which come after the rows; a last row
+    with an empty path names nothing, and the lookup goes on to `ModelFilePath.db2`;
+  - the records of variable size are refused, as a column of relations: wxl-db2 does not read a
+    path from the first, and refuses the second by the size of its rows;
+  - FileDataID 0 names no file; an empty loose table leaves that of the archives.
+
+  A table holds its paths and, with no list of ids, its ids, nothing else. A section encrypted
+  with a key the client lacks holds zeros, which name no file: it needs no reading of its own.
+  wxl-db2 also reads `TextureFileData.db2` (in WDC5), to turn a material into a FileDataID, which
+  milestone 9 does not take yet.
 - DBC: the header checked against the columns WoWDBDefs gives for 3.3.5.12340 (CC BY-SA 4.0); a
   table of another layout, or damaged, is refused with its name.
-- `modules/assets/THIRD_PARTY.md` names wow.export, its commit, its authors and its licence, and
-  WoWDBDefs; nothing comes from DB2Gen or WarcraftXL (GPL-3).
+- `modules/assets/THIRD_PARTY.md` names wow.export, its commit, its authors and its licence,
+  WoWDBDefs, and the sources of wxl-db2 read; nothing comes from DB2Gen or WarcraftXL (GPL-3).
 - Measured on the user's client (frFR since 5 October), release: the four tables read in 7 ms,
   135 maps, 2,307 areas, 24,262 looks of creatures and 1,537 models, 1,527 of them found in the
   archives by their `.m2`. The client holds no table of paths: no FileDataID named.
-- Tests: DB2 the tests write, of each version (sections, strings, ids of every kind, copies,
-  records of variable size, an encrypted section, WDC4 refused, every file cut short refused,
-  every byte damaged without a panic); the tables of paths found loose then in the archives,
-  textures before models; DBC the tests write (the locale, the order by id, a table read once,
-  another layout and damaged files refused); the services before and after the client opens; the
-  client's own tables when `UNIWOW_CLIENT` names it. Each of 31 changes made on purpose to the
-  readers and the services made a test fail.
+- Tests: DB2 the tests write, of each version (sections, strings, ids of every kind, the last
+  row kept, copies, an encrypted section; WDC4, WDC5, records of variable size and relations
+  refused; every file cut short refused, every byte damaged without a panic); the tables of paths
+  found loose then in the archives, textures before models; DBC the tests write (the locale, the
+  order by id, a table read once, another layout and damaged files refused); the services before
+  and after the client opens, and the warning of debug; the client's own tables when
+  `UNIWOW_CLIENT` names it. Each change made on purpose to the readers and the services made a
+  test fail, but the thread of the picker, which no test opens: the recette checks it.
 - At the user's request, *Open* shows the folder picker of Windows, which starts in the folder
   shown, and opens the client when a folder is chosen; cancelled, it changes nothing. The picker
-  waits for the user on a job, the interface going on meanwhile, *Open* greyed until it closes.
+  waits for the user on a thread of its own (T2), the interface going on meanwhile, *Open* greyed
+  until it closes.
   The runtime re-exports `rfd` for it, which adds no other crate to the runtime.
 - Kept for later, from the review of the first part: an index of the files by folder, for
   `files_under`, when the browser of files needs it. The DBC the next steps need come with them.
@@ -2118,7 +2132,7 @@ Where the work of the second part is done:
 | The tables of paths read | The job merging the lists, a thread of its own per table | None |
 | A FileDataID turned into a path | The thread calling `path_of`, any | The state of the service, to take the client; none while reading |
 | A DBC read and its rows made | The first thread asking for it; the others asking meanwhile wait | The cell of the table (`OnceLock`), until it is read |
-| The folder picker shown | A job of the pool, while the user chooses | None |
+| The folder picker shown | A thread of its own (T2), while the user chooses | None |
 
 #### Tests
 

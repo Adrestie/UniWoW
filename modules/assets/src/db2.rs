@@ -1,10 +1,11 @@
 //! The tables of paths of WarcraftXL, `TextureFilePath.db2` and `ModelFilePath.db2`: the FileDataID
-//! of a file and its path, in a DB2 of a version WarcraftXL reads. WDC1, the version DB2Gen writes,
-//! is read from the public description of the format; WDC2, `1SLC`, WDC3 and WDC5 are translated
-//! from the reader of wow.export (MIT, see THIRD_PARTY.md), WDC2 taking the offsets of its strings
-//! from their field, as WDC3 does. WDC4, which WarcraftXL does not read, is refused. A section
-//! encrypted with a key the client lacks holds zeros, which name no file: it needs no reading of
-//! its own.
+//! of a file and its path, read as wxl-db2 reads them (its sources read, nothing copied: GPL-3).
+//! WDC1, the version DB2Gen writes, is read from the public description of the format; WDC2, `1SLC`
+//! and WDC3 are translated from the reader of wow.export (MIT, see THIRD_PARTY.md). As wxl-db2
+//! does: the offset of a path counts from the start of the strings of all the sections, end to end,
+//! in every version; a list of ids gives each record its id as it stands; an id named twice keeps
+//! its last row, copies included; WDC4 and WDC5, the records of variable size, whose paths it does
+//! not read, and a column of relations are refused.
 
 use std::path::Path;
 
@@ -26,10 +27,16 @@ pub(crate) const PALLET_ARRAY: u32 = 4;
 pub(crate) const SIGNED: u32 = 5;
 
 /// The flag of a table whose records vary in size, found through a map of offsets.
-pub(crate) const SPARSE: u16 = 1;
+const SPARSE: u16 = 1;
+
+const SPARSE_REFUSED: &str = "records of variable size, whose paths WarcraftXL does not read";
+const RELATIONS_REFUSED: &str = "a column of relations, which WarcraftXL does not take in a table of paths";
 
 /// The tables of paths, in the order WarcraftXL looks a FileDataID up.
 pub const TABLES: [&str; 2] = ["TextureFilePath.db2", "ModelFilePath.db2"];
+
+/// The place of a row whose path is empty or out of the strings, which WarcraftXL reads as empty.
+const NO_PATH: u32 = u32::MAX;
 
 /// Reads little-endian integers, refusing to go past the end of the bytes.
 struct Cursor<'a> {
@@ -77,22 +84,6 @@ impl<'a> Cursor<'a> {
             .map(|b| u32::from_le_bytes(*b))
             .collect())
     }
-
-    /// A map of offsets: the offset in the file of each record, and its size.
-    fn offsets(&mut self, count: usize) -> Result<Vec<(usize, u16)>, String> {
-        let bytes = self.take(count.checked_mul(6).ok_or("too many offsets")?)?;
-        Ok(bytes
-            .as_chunks::<6>()
-            .0
-            .iter()
-            .map(|b| {
-                (
-                    u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize,
-                    u16::from_le_bytes([b[4], b[5]]),
-                )
-            })
-            .collect())
-    }
 }
 
 /// How a column of the records is stored.
@@ -105,31 +96,22 @@ struct Column {
     packing: [u32; 3],
 }
 
-/// A section of a table, the whole table before WDC2.
+/// A section of a table, the whole table in WDC1.
 #[derive(Default)]
 struct Section {
     records: usize,
-    records_size: usize,
     count: usize,
     strings: usize,
     strings_size: usize,
     ids: Vec<u32>,
     /// The rows copied: the id of the copy, then that of the row copied.
     copies: Vec<(u32, u32)>,
-    /// A sparse section: for each record, its place in the section, its offset in the file, and
-    /// its id when the map gives it.
-    sparse: Vec<(usize, usize, Option<u32>)>,
 }
 
 /// A table, whatever its version.
 struct Layout<'a> {
     bytes: &'a [u8],
-    /// From WDC2 on, the offset of a string counts from its field, and the strings of all the
-    /// sections follow the records of all the sections; before, it counts from the strings.
-    from_field: bool,
-    sparse: bool,
     record_size: usize,
-    record_count: usize,
     id_index: usize,
     columns: Vec<Column>,
     /// The values of each column stored in a pallet: where they start, and how many.
@@ -183,24 +165,20 @@ fn pallets(
     Ok(pallets)
 }
 
-/// The records of a map of offsets by id, from `min_id`; an entry of no size holds none.
-fn by_id(offsets: Vec<(usize, u16)>, min_id: u32) -> Vec<(usize, usize, Option<u32>)> {
-    offsets
-        .into_iter()
-        .zip(min_id..)
-        .filter(|((_, size), _)| *size != 0)
-        .enumerate()
-        .map(|(place, ((offset, _), id))| (place, offset, Some(id)))
+fn pairs(values: &[u32]) -> Vec<(u32, u32)> {
+    values
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| (pair[0], pair[1]))
         .collect()
 }
 
-/// How many entries a map of offsets by id holds.
-fn id_span(min_id: u32, max_id: u32) -> usize {
-    if max_id < min_id {
-        0
-    } else {
-        (max_id - min_id) as usize + 1
-    }
+/// Sorts `rows` by id, keeping the last row of each id.
+fn keep_last(rows: &mut Vec<(u32, u32)>) {
+    rows.reverse();
+    rows.sort_by_key(|row| row.0);
+    rows.dedup_by_key(|row| row.0);
 }
 
 impl<'a> Layout<'a> {
@@ -212,63 +190,52 @@ impl<'a> Layout<'a> {
             WDC1 => Self::wdc1(bytes),
             WDC2 | CLS1 => Self::wdc(bytes, 2),
             WDC3 => Self::wdc(bytes, 3),
-            WDC5 => Self::wdc(bytes, 5),
-            WDC4 => Err("WDC4, which WarcraftXL does not read".to_owned()),
-            _ => Err("not a DB2 of a version WarcraftXL reads (WDC1 to WDC3, WDC5)".to_owned()),
+            WDC4 => Err("WDC4, which WarcraftXL does not read for its tables of paths".to_owned()),
+            WDC5 => Err("WDC5, which WarcraftXL does not read for its tables of paths".to_owned()),
+            _ => Err("not a DB2 of a version WarcraftXL reads for its tables of paths (WDC1 to WDC3)".to_owned()),
         }
     }
 
-    /// WDC1: one section, its map of offsets by id, its pallets after the records.
+    /// WDC1: one section, its columns after the records.
     fn wdc1(bytes: &'a [u8]) -> Result<Self, String> {
         let mut at = Cursor::new(bytes, 4);
         let record_count = at.size()?;
         at.skip(4)?; // the count of the columns, which the storage of the columns gives
         let record_size = at.size()?;
         let strings_size = at.size()?;
-        at.skip(8)?; // the hashes of the table and of its layout
-        let min_id = at.u32()?;
-        let max_id = at.u32()?;
+        at.skip(16)?; // the hashes of the table and of its layout, the lowest and highest ids
         at.skip(4)?; // the locale
         let copy_size = at.size()?;
-        let sparse = at.u16()? & SPARSE != 0;
+        if at.u16()? & SPARSE != 0 {
+            return Err(SPARSE_REFUSED.to_owned());
+        }
         let id_index = usize::from(at.u16()?);
         let total_fields = at.size()?;
-        at.skip(8)?; // where the bits packed start in a record, and the count of the lookup columns
-        let map_offset = at.size()?;
+        at.skip(12)?; // where the bits packed start, the count of the lookup columns, the map of offsets
         let ids_size = at.size()?;
         let info_size = at.size()?;
         let common_size = at.size()?;
         let pallet_size = at.size()?;
-        at.skip(4)?; // the relations, last in the file
+        if at.u32()? != 0 {
+            return Err(RELATIONS_REFUSED.to_owned());
+        }
         at.skip(total_fields.checked_mul(4).ok_or("too many columns")?)?;
         let mut section = Section {
             records: at.at,
+            count: record_count,
+            strings_size,
             ..Section::default()
         };
-        if sparse {
-            section.records_size = map_offset
-                .checked_sub(section.records)
-                .ok_or("its map of offsets before its records")?;
-            at = Cursor::new(bytes, map_offset);
-            section.sparse = by_id(at.offsets(id_span(min_id, max_id))?, min_id);
-        } else {
-            section.records_size = record_count.checked_mul(record_size).ok_or("too many records")?;
-            section.count = record_count;
-            at.skip(section.records_size)?;
-            section.strings = at.at;
-            section.strings_size = strings_size;
-            at.skip(strings_size)?;
-        }
+        at.skip(record_count.checked_mul(record_size).ok_or("too many records")?)?;
+        section.strings = at.at;
+        at.skip(strings_size)?;
         section.ids = at.u32s(ids_size / 4)?;
         section.copies = pairs(&at.u32s(copy_size / 8 * 2)?);
         let columns = columns(&mut at, info_size)?;
         let pallets = pallets(&mut at, &columns, pallet_size, common_size)?;
         Ok(Self {
             bytes,
-            from_field: false,
-            sparse,
             record_size,
-            record_count,
             id_index,
             columns,
             pallets,
@@ -276,20 +243,18 @@ impl<'a> Layout<'a> {
         })
     }
 
-    /// WDC2 and after: the sections, each found by the offset its header gives, which steps over
-    /// what WDC4 and WDC5 put before them.
+    /// WDC2 and WDC3: the sections, each found by the offset its header gives.
     fn wdc(bytes: &'a [u8], version: u32) -> Result<Self, String> {
-        // WDC5 starts with the version of its schema and the build that wrote it.
-        let mut at = Cursor::new(bytes, if version == 5 { 4 + 4 + 128 } else { 4 });
-        let record_count = at.size()?;
+        let mut at = Cursor::new(bytes, 4);
+        at.skip(4)?; // the count of the records, which each section gives
         at.skip(4)?; // the count of the columns, which the storage of the columns gives
         let record_size = at.size()?;
         at.skip(4)?; // the size of the strings, which each section gives
-        at.skip(8)?; // the hashes of the table and of its layout
-        let min_id = at.u32()?;
-        let max_id = at.u32()?;
+        at.skip(16)?; // the hashes of the table and of its layout, the lowest and highest ids
         at.skip(4)?; // the locale
-        let sparse = at.u16()? & SPARSE != 0;
+        if at.u16()? & SPARSE != 0 {
+            return Err(SPARSE_REFUSED.to_owned());
+        }
         let id_index = usize::from(at.u16()?);
         let total_fields = at.size()?;
         at.skip(8)?; // where the bits packed start in a record, and the count of the lookup columns
@@ -311,73 +276,40 @@ impl<'a> Layout<'a> {
             let file_offset = headers.size()?;
             let count = headers.size()?;
             let strings_size = headers.size()?;
-            let mut section = Section {
-                records: file_offset,
-                strings_size,
-                ..Section::default()
-            };
-            let mut at = Cursor::new(bytes, file_offset);
-            if version == 2 {
+            let (copy_count, ids_size, relations_size, map_count) = if version == 2 {
                 let copy_size = headers.size()?;
-                let map_offset = headers.size()?;
+                headers.skip(4)?; // the map of offsets of records of variable size
                 let ids_size = headers.size()?;
-                headers.skip(4)?; // the relations
-                if sparse {
-                    section.records_size = map_offset
-                        .checked_sub(file_offset)
-                        .ok_or("its map of offsets before its records")?;
-                    at = Cursor::new(bytes, map_offset);
-                    section.sparse = by_id(at.offsets(id_span(min_id, max_id))?, min_id);
-                    section.strings_size = 0;
-                } else {
-                    section.count = count;
-                    section.records_size = count.checked_mul(record_size).ok_or("too many records")?;
-                    at.skip(section.records_size)?;
-                    section.strings = at.at;
-                    at.skip(strings_size)?;
-                }
-                section.ids = at.u32s(ids_size / 4)?;
-                section.copies = pairs(&at.u32s(copy_size / 8 * 2)?);
+                (copy_size / 8, ids_size, headers.size()?, 0)
             } else {
-                let records_end = headers.size()?;
+                headers.skip(4)?; // the end of records of variable size
                 let ids_size = headers.size()?;
                 let relations_size = headers.size()?;
                 let map_count = headers.size()?;
-                let copy_count = headers.size()?;
-                if sparse {
-                    section.records_size = records_end
-                        .checked_sub(file_offset)
-                        .ok_or("its records end before they start")?;
-                } else {
-                    section.count = count;
-                    section.records_size = count.checked_mul(record_size).ok_or("too many records")?;
-                }
-                at.skip(section.records_size)?;
-                section.strings = at.at;
-                at.skip(strings_size)?;
-                section.ids = at.u32s(ids_size / 4)?;
-                section.copies = pairs(&at.u32s(copy_count.checked_mul(2).ok_or("too many copies")?)?);
-                let offsets = at.offsets(map_count)?;
-                // The relations, then the ids of the map, which repeat the list of ids.
-                at.skip(relations_size)?;
-                at.skip(map_count * 4)?;
-                if sparse {
-                    section.sparse = offsets
-                        .into_iter()
-                        .enumerate()
-                        .filter(|(_, (_, size))| *size != 0)
-                        .map(|(place, (offset, _))| (place, offset, None))
-                        .collect();
-                }
+                (headers.size()?, ids_size, relations_size, map_count)
+            };
+            if relations_size != 0 {
+                return Err(RELATIONS_REFUSED.to_owned());
             }
+            let mut at = Cursor::new(bytes, file_offset);
+            let mut section = Section {
+                records: file_offset,
+                count,
+                strings_size,
+                ..Section::default()
+            };
+            at.skip(count.checked_mul(record_size).ok_or("too many records")?)?;
+            section.strings = at.at;
+            at.skip(strings_size)?;
+            section.ids = at.u32s(ids_size / 4)?;
+            section.copies = pairs(&at.u32s(copy_count.checked_mul(2).ok_or("too many copies")?)?);
+            // A map of offsets and its ids, which only records of variable size use.
+            at.skip(map_count.checked_mul(10).ok_or("too many offsets")?)?;
             sections.push(section);
         }
         Ok(Self {
             bytes,
-            from_field: true,
-            sparse,
             record_size,
-            record_count,
             id_index,
             columns,
             pallets,
@@ -433,107 +365,61 @@ impl<'a> Layout<'a> {
         Ok(bytes.iter().rev().fold(0, |value, byte| value << 8 | u32::from(*byte)))
     }
 
-    /// Where the path of the record `index` of the section `place` starts, its column at `start`;
-    /// none for an empty path. `before` gives, for each section, the bytes of the records and of
-    /// the strings of the sections before it.
-    fn string(
-        &self,
-        path: usize,
-        place: usize,
-        index: usize,
-        start: usize,
-        before: &[(usize, usize)],
-    ) -> Result<Option<usize>, String> {
+    /// Where the string at `offset` starts, among the strings of the sections end to end, each
+    /// section's starting at its place in `bases`; `NO_PATH` for an empty one or one out of them.
+    fn string(&self, offset: usize, bases: &[usize]) -> u32 {
+        self.sections
+            .iter()
+            .zip(bases)
+            .find(|(section, base)| (**base..**base + section.strings_size).contains(&offset))
+            .map(|(section, base)| section.strings + offset - base)
+            .filter(|start| self.bytes[*start] != 0)
+            .map_or(NO_PATH, |start| start as u32)
+    }
+
+    /// The rows of a table of paths: each id, and where its path starts. The table holds its paths
+    /// and, with no list of ids, its ids; a record takes the id of its place in the list of ids of
+    /// its section, else that of the column of ids, else its place.
+    fn paths(&self) -> Result<Vec<(u32, u32)>, String> {
+        let listed = self.sections.iter().any(|section| !section.ids.is_empty());
+        let path = match (listed, self.columns.len(), self.id_index) {
+            (true, 1, _) => 0,
+            (false, 2, id @ 0..=1) => 1 - id,
+            (_, count, _) => {
+                return Err(format!(
+                    "{count} columns {} a list of ids, where WarcraftXL takes a path and an id",
+                    if listed { "and" } else { "without" }
+                ));
+            }
+        };
         let stored = self.columns[path];
         if stored.compression != NONE || stored.size_bits != 32 {
             return Err("its paths are not offsets of 32 bits".to_owned());
         }
-        let field = stored.offset_bits / 8;
-        let offset = Cursor::new(self.bytes, start + field).size()?;
-        if offset == 0 {
-            return Ok(None);
-        }
-        let section = &self.sections[place];
-        if !self.from_field {
-            return if offset < section.strings_size {
-                Ok(Some(section.strings + offset))
-            } else {
-                Err(format!("a path at {offset}, out of its strings"))
-            };
-        }
-        let index = (before[place].0 + index * self.record_size + field + offset)
-            .checked_sub(self.record_count * self.record_size)
-            .ok_or("a path inside the records")?;
-        self.sections
-            .iter()
-            .zip(before)
-            .find(|(section, (_, base))| (*base..*base + section.strings_size).contains(&index))
-            .map(|(section, (_, base))| Some(section.strings + index - base))
-            .ok_or_else(|| format!("a path at {index}, out of the strings"))
-    }
-
-    /// The rows of a table of paths: each id, and where its path starts. The id is the one the map
-    /// of offsets gives, else the one of the list of ids, else that of its column.
-    fn paths(&self) -> Result<Vec<(u32, u32)>, String> {
-        let (path, id_column) = match (self.columns.len(), self.id_index) {
-            (1, _) => (0, None),
-            (2, id @ 0..=1) => (1 - id, Some(id)),
-            (count, _) => {
-                return Err(format!(
-                    "{count} columns, where a table of paths holds an id and a path"
-                ));
-            }
-        };
-        let mut before = Vec::with_capacity(self.sections.len());
-        let (mut records, mut strings) = (0, 0);
+        let mut bases = Vec::with_capacity(self.sections.len());
+        let mut base = 0;
         for section in &self.sections {
-            before.push((records, strings));
-            records += section.records_size;
-            strings += section.strings_size;
+            bases.push(base);
+            base += section.strings_size;
         }
         let mut rows = Vec::new();
-        let mut copies = Vec::new();
-        for (place, section) in self.sections.iter().enumerate() {
-            // A list of ids all zero gives each record its place.
-            let all_zero = !section.ids.is_empty() && section.ids.iter().all(|id| *id == 0);
-            let listed = |index: usize| {
-                if all_zero {
-                    Some(index as u32)
-                } else {
-                    section.ids.get(index).copied()
-                }
-            };
-            let no_id = |index: usize| format!("no id for the record {index}");
-            if self.sparse {
-                for (index, offset, mapped) in &section.sparse {
-                    let (found, inline) = self.sparse_record(path, *offset)?;
-                    let id = mapped
-                        .or_else(|| listed(*index))
-                        .or(inline)
-                        .ok_or_else(|| no_id(*index))?;
-                    if let Some(found) = found {
-                        rows.push((id, found as u32));
-                    }
-                }
-            } else {
-                for index in 0..section.count {
-                    let start = section.records + index * self.record_size;
-                    let id = match (listed(index), id_column) {
-                        (Some(id), _) => id,
-                        (None, Some(column)) => self.int(column, start)?,
-                        (None, None) => return Err(no_id(index)),
-                    };
-                    if let Some(found) = self.string(path, place, index, start, &before)? {
-                        rows.push((id, found as u32));
-                    }
-                }
+        for section in &self.sections {
+            for index in 0..section.count {
+                let start = section.records + index * self.record_size;
+                let id = match section.ids.get(index) {
+                    Some(id) => *id,
+                    None if self.id_index < self.columns.len() => self.int(self.id_index, start)?,
+                    None => index as u32,
+                };
+                let offset = Cursor::new(self.bytes, start + stored.offset_bits / 8).size()?;
+                rows.push((id, self.string(offset, &bases)));
             }
-            copies.extend_from_slice(&section.copies);
         }
-        rows.sort_by_key(|row| row.0);
-        rows.dedup_by_key(|row| row.0);
-        let copied: Vec<(u32, u32)> = copies
+        keep_last(&mut rows);
+        let copied: Vec<(u32, u32)> = self
+            .sections
             .iter()
+            .flat_map(|section| &section.copies)
             .filter_map(|(copy, copied)| {
                 let found = rows.binary_search_by_key(copied, |row| row.0).ok()?;
                 Some((*copy, rows[found].1))
@@ -541,73 +427,41 @@ impl<'a> Layout<'a> {
             .collect();
         if !copied.is_empty() {
             rows.extend(copied);
-            rows.sort_by_key(|row| row.0);
-            rows.dedup_by_key(|row| row.0);
+            keep_last(&mut rows);
         }
         Ok(rows)
     }
-
-    /// A record of variable size at `offset`, its columns one after the other, its path inline:
-    /// where its path starts, none when empty, and its id when the record holds it.
-    fn sparse_record(&self, path: usize, offset: usize) -> Result<(Option<usize>, Option<u32>), String> {
-        let mut at = offset;
-        let mut found = None;
-        let mut inline = None;
-        for column in 0..self.columns.len() {
-            if column == path {
-                let len = self
-                    .bytes
-                    .get(at..)
-                    .and_then(|rest| rest.iter().position(|byte| *byte == 0))
-                    .ok_or("a path without its end")?;
-                if len > 0 {
-                    found = Some(at);
-                }
-                at += len + 1;
-            } else {
-                let stored = self.columns[column];
-                if stored.compression != NONE {
-                    return Err("an id packed in a record of variable size".to_owned());
-                }
-                inline = Some(self.plain(stored, at)?);
-                at += stored.size_bits / 8;
-            }
-        }
-        Ok((found, inline))
-    }
-}
-
-fn pairs(values: &[u32]) -> Vec<(u32, u32)> {
-    values
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|pair| (pair[0], pair[1]))
-        .collect()
 }
 
 /// A table of paths: its bytes, and for each FileDataID, by increasing id, where its path starts.
 pub struct PathTable {
     bytes: Vec<u8>,
     rows: Vec<(u32, u32)>,
+    /// The rows naming a path.
+    named: usize,
 }
 
 impl PathTable {
     pub fn parse(bytes: Vec<u8>) -> Result<Self, String> {
         let rows = Layout::parse(&bytes)?.paths()?;
-        Ok(Self { bytes, rows })
+        let named = rows.iter().filter(|row| row.1 != NO_PATH).count();
+        Ok(Self { bytes, rows, named })
     }
 
-    /// The path of the file `id`, none when the table does not name it.
+    /// The path of the file `id`, none when the table does not name it or names it empty.
     pub fn path(&self, id: u32) -> Option<String> {
         let found = self.rows.binary_search_by_key(&id, |row| row.0).ok()?;
-        let rest = &self.bytes[self.rows[found].1 as usize..];
+        let start = self.rows[found].1;
+        if start == NO_PATH {
+            return None;
+        }
+        let rest = &self.bytes[start as usize..];
         let end = rest.iter().position(|byte| *byte == 0).unwrap_or(rest.len());
         Some(String::from_utf8_lossy(&rest[..end]).into_owned())
     }
 
     pub fn len(&self) -> usize {
-        self.rows.len()
+        self.named
     }
 }
 
@@ -619,19 +473,22 @@ pub struct FileIds {
 
 impl FileIds {
     /// Reads the tables of paths of the client in `client`, both at once, each loose in its
-    /// `DBFilesClient` first, then in `chain`: a table missing is left out, as one that cannot be
-    /// read, which is returned with why.
+    /// `DBFilesClient` first, then in `chain`, an empty file counting as none: a table missing is
+    /// left out, as one that cannot be read, which is returned with why.
     pub fn load(client: &Path, chain: &Chain) -> (Self, Vec<String>) {
         let read = |name: &str| -> Result<Option<PathTable>, String> {
             let loose = client.join("DBFilesClient").join(name);
-            let bytes = if loose.is_file() {
+            let mut bytes = if loose.is_file() {
                 std::fs::read(&loose).map_err(|e| format!("{}: {e}", loose.display()))?
             } else {
-                match chain.read(&format!("DBFilesClient\\{name}"))? {
-                    Some(bytes) => bytes,
-                    None => return Ok(None),
-                }
+                Vec::new()
             };
+            if bytes.is_empty() {
+                bytes = chain.read(&format!("DBFilesClient\\{name}"))?.unwrap_or_default();
+            }
+            if bytes.is_empty() {
+                return Ok(None);
+            }
             PathTable::parse(bytes).map(Some).map_err(|e| format!("{name}: {e}"))
         };
         let read = &read;
@@ -659,7 +516,12 @@ impl FileIds {
         (ids, refused)
     }
 
+    /// The path of the file `id`: that of the first table naming it with a path; none for 0, as
+    /// WarcraftXL resolves it.
     pub fn path_of(&self, id: u32) -> Option<String> {
+        if id == 0 {
+            return None;
+        }
         self.tables.iter().find_map(|table| table.path(id))
     }
 
