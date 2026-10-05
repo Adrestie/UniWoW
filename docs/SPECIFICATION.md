@@ -3652,6 +3652,24 @@ stand within 300 yards (9.3a, 9.3b).
   a failed one not read again; a morph; against a fake service `models`, and the extent of a look
   in `models`.
 
+#### Step 9.4d, added by the review of the proposal
+
+- **The draws of a city.** Each look of a character (`CreatureDisplayInfoExtra`) has its own baked
+  skin, so that each humanoid NPC is a look of its own, without instancing: a hundred distinct NPCs
+  in Orgrimmar, at 8 to 15 batches a body once its submeshes are chosen, can make more than 1,000
+  draws for the layer of the models alone, and wgpu replays a bundle command by command in the pass
+  at every frame on Vulkan (the submitting of the view shows it).
+  - Checked at the start, in Orgrimmar and in Dalaran: the distinct looks, the looks of
+    characters, the batches drawn and the draws.
+  - Accepted: the draws, the time of recording the bundle and the time of the view on the
+    interface thread (preparing, recording, submitting), flying over the city. The goal of step
+    9.2e holds: a few hundred draws a layer, the interface thread under 4 ms.
+- **Point to revisit, should the measure go past that goal** (built now only if it does): the
+  baked skins of the characters of one race and sex in arrays of textures, an index of layer for
+  each instance, so that every NPC of one body is drawn as one group; the submeshes that differ
+  (hair, beard) by a mask of submeshes for each instance, or by groups of the looks of the same
+  submeshes.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around
