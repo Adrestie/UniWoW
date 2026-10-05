@@ -3148,6 +3148,13 @@ bc9198ce7, and checked on the skins and tables of the user's client; WoW Model V
   setting of before, 500 MB of 600 held, the reach limited to 5.0 tiles, 78 tiles (84 before: the
   budget now counts by quarters of a tile), nothing loaded nor released afterwards, still or
   turning.
+- After the review of step 9.4a, two rules for the layers to come (9.4c, 9.6):
+  - an item counts in the band of its point nearest to the eye, by its bounds, as the levels of
+    detail of the terrain do, not of its centre: a city (WMO) or a large model around the camera
+    would otherwise count far away and be the first given up;
+  - every layer whose resources on the GPU can pass a few MB tells its demand to the budget: the
+    models (9.4c), then the buildings, the doodads and the water (9.6), and later a layer of a
+    compiled module. The markers of `live-world` and the grid of the view, a few KB each, need not.
 
 #### Tests
 
