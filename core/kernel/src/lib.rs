@@ -35,7 +35,7 @@ pub fn run() -> eframe::Result {
     logger::install();
     let mut wgpu_options = egui_wgpu::WgpuConfiguration::default();
     if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut wgpu_options.wgpu_setup {
-        setup.device_descriptor = with_block_compression(setup.device_descriptor.clone());
+        setup.device_descriptor = with_features(setup.device_descriptor.clone());
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -50,12 +50,16 @@ pub fn run() -> eframe::Result {
 /// How egui-wgpu asks for the device.
 type DeviceDescriptor = Arc<dyn Fn(&wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> + Send + Sync>;
 
-/// The device as `default` asks for it, with the block compressions of the textures of WoW (BC1
-/// to BC3) when the adapter offers them: the textures then go to the GPU as they are stored.
-fn with_block_compression(default: DeviceDescriptor) -> DeviceDescriptor {
+/// What the device asks for beyond egui-wgpu, when the adapter offers it: the block compressions
+/// of the textures of WoW (BC1 to BC3), which then go to the GPU as they are stored, and the
+/// timestamps the statistics of the view time the GPU with.
+const WANTED: wgpu::Features = wgpu::Features::TEXTURE_COMPRESSION_BC.union(wgpu::Features::TIMESTAMP_QUERY);
+
+/// The device as `default` asks for it, with what `WANTED` names when the adapter offers it.
+fn with_features(default: DeviceDescriptor) -> DeviceDescriptor {
     Arc::new(move |adapter| {
         let mut descriptor = default(adapter);
-        descriptor.required_features |= adapter.features() & wgpu::Features::TEXTURE_COMPRESSION_BC;
+        descriptor.required_features |= adapter.features() & WANTED;
         descriptor
     })
 }
@@ -68,7 +72,7 @@ mod tests {
 
     use uniwow_api::wgpu;
 
-    use super::with_block_compression;
+    use super::{WANTED, with_features};
 
     fn resolved<F: Future>(future: F) -> Option<F::Output> {
         match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
@@ -78,7 +82,7 @@ mod tests {
     }
 
     #[test]
-    fn the_device_asks_for_block_compression_when_the_adapter_offers_it() {
+    fn the_device_asks_for_block_compression_and_timestamps_when_the_adapter_offers_them() {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let Some(Ok(adapter)) = resolved(instance.request_adapter(&wgpu::RequestAdapterOptions {
             force_fallback_adapter: true,
@@ -91,15 +95,12 @@ mod tests {
             label: Some("default"),
             ..Default::default()
         });
-        let descriptor = with_block_compression(default)(&adapter);
-        let offered = adapter.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
-        assert_eq!(
-            descriptor
-                .required_features
-                .contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
-            offered
-        );
+        let descriptor = with_features(default)(&adapter);
+        for feature in WANTED.iter() {
+            let offered = adapter.features().contains(feature);
+            assert_eq!(descriptor.required_features.contains(feature), offered, "{feature:?}");
+        }
         assert_eq!(descriptor.label, Some("default"), "the rest as by default");
-        eprintln!("the software adapter offers BC: {offered}");
+        eprintln!("the software adapter offers {:?}", adapter.features() & WANTED);
     }
 }

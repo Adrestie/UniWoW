@@ -1,16 +1,19 @@
 //! The terrain of a map: its tiles loaded around the camera of the 3D view by jobs of the pool, in
 //! the order of `loading`; kept in a model chunk by chunk, as they will be edited; uploaded to the
 //! GPU by those jobs; handed to the drawing within a time each frame; released beyond the GPU
-//! budget of its settings; drawn chunk by chunk by its layer. Its panel chooses the map. Nothing is
+//! budget of its settings; drawn a draw each by its layer, at a level of detail by their distance,
+//! with the horizon of the map beyond them and a fog. Its panel chooses the map. Nothing is
 //! changed: no undo entry, no file written.
 
 pub mod gpu;
+mod horizon;
 mod layer;
 mod loading;
 pub mod mesh;
 pub mod model;
 #[cfg(test)]
 mod tests;
+mod textures;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -23,9 +26,10 @@ use uniwow_api::{
 };
 
 use gpu::{Shared, TileGpu};
+use horizon::HorizonGpu;
 use layer::{Scene, TerrainLayer, lock};
 use loading::Kept;
-use model::{TileId, TileModel};
+use model::{TILE, TileId, TileModel};
 
 /// The settings: the map shown, how far around the camera tiles load, and the GPU budget.
 const MAP: &str = "map";
@@ -108,6 +112,9 @@ struct TerrainModule {
     ready: VecDeque<(TileModel, TileGpu)>,
     refused: HashSet<TileId>,
     refusals: VecDeque<String>,
+    /// The job building the horizon, and the map shown it is for, by `showing`.
+    horizon: Option<(JobId, u64)>,
+    horizon_for: Option<u64>,
     /// The last frame signal seen.
     frame: u64,
     distance: u32,
@@ -133,12 +140,22 @@ impl TerrainModule {
         let mut scene = lock(&self.scene);
         scene.tiles.clear();
         scene.seen.clear();
+        scene.horizon = None;
+        scene.map = None;
         scene.generation += 1;
         drop(scene);
-        if let Some(shared) = &self.shared {
-            shared.textures.purge();
-        }
+        self.purge_textures(ctx);
         self.showing += 1;
+    }
+
+    /// Forgets the textures no tile holds any more, in a job: it waits for the jobs placing
+    /// textures, which the interface thread never does.
+    fn purge_textures(&self, ctx: &mut Context) {
+        if let Some(shared) = self.shared.clone() {
+            ctx.spawn("Forget the textures of the terrain no tile holds", move |_| {
+                shared.textures.purge()
+            });
+        }
     }
 
     /// Shows the map `index` of the list, the camera over its middle.
@@ -154,6 +171,13 @@ impl TerrainModule {
             .filter(|i| map.wdt.tiles[*i as usize])
             .map(|i| TileId { x: i % 64, y: i / 64 })
             .collect();
+        let corners = tiles.iter().map(|tile| tile.corner());
+        lock(&self.scene).map = Some(corners.fold([[f32::MAX; 2], [f32::MIN; 2]], |[low, high], [x, y]| {
+            [
+                [low[0].min(x - TILE), low[1].min(y - TILE)],
+                [high[0].max(x), high[1].max(y)],
+            ]
+        }));
         let count = tiles.len().max(1) as f32;
         let middle = [
             tiles.iter().map(|t| t.centre()[0]).sum::<f32>() / count,
@@ -191,15 +215,18 @@ impl TerrainModule {
         }
     }
 
-    /// The bytes the terrain takes on the GPU: its tiles, those ready, and their textures.
+    /// The bytes the terrain takes on the GPU: its tiles, those ready, their textures and the horizon.
     fn used(&self) -> u64 {
-        let tiles: u64 = lock(&self.scene).tiles.iter().map(|tile| tile.bytes).sum();
+        let scene = lock(&self.scene);
+        let tiles: u64 = scene.tiles.iter().map(|tile| tile.bytes).sum();
+        let horizon = scene.horizon.as_ref().map_or(0, |horizon| horizon.bytes);
+        drop(scene);
         let ready: u64 = self.ready.iter().map(|(_, gpu)| gpu.bytes).sum();
-        tiles + ready + self.shared.as_ref().map_or(0, |shared| shared.textures.bytes())
+        tiles + ready + horizon + self.shared.as_ref().map_or(0, |shared| shared.textures.bytes())
     }
 
     /// Releases tiles out of sight while the terrain takes more than its budget.
-    fn keep_to_budget(&mut self, eye: [f32; 2]) {
+    fn keep_to_budget(&mut self, eye: [f32; 2], ctx: &mut Context) {
         let used = self.used();
         let budget = self.budget_mb * 1024 * 1024;
         if used <= budget {
@@ -226,14 +253,36 @@ impl TerrainModule {
             self.models.remove(tile);
         }
         drop(scene);
-        if let Some(shared) = &self.shared {
-            shared.textures.purge();
+        self.purge_textures(ctx);
+    }
+
+    /// Starts building the horizon of the map shown, once what the terrain shares is built.
+    fn build_horizon(&mut self, ctx: &mut Context, shared: &Arc<Shared>, formats: &Arc<dyn Formats>, directory: &str) {
+        if self.horizon_for == Some(self.showing) {
+            return;
         }
+        self.horizon_for = Some(self.showing);
+        let (shared, formats, directory) = (shared.clone(), formats.clone(), directory.to_owned());
+        let job = ctx.spawn(&format!("Build the horizon of {directory}"), move |_| {
+            Ok::<_, String>(formats.wdl(&directory)?.and_then(|wdl| horizon::build(&shared, &wdl)))
+        });
+        self.horizon = Some((job, self.showing));
     }
 
     /// At each frame: hands over what is ready, then, while the view is drawn, starts the loads the
-    /// camera wants, cancels those it left, and keeps the terrain to its budget.
+    /// camera wants, cancels those it left, and keeps the terrain to its budget; then tells the
+    /// layer how long it took, how far the tiles load and what the terrain takes on the GPU.
     fn steer(&mut self, ctx: &mut Context) {
+        let start = Instant::now();
+        self.steer_loads(ctx);
+        let used = self.used();
+        let mut scene = lock(&self.scene);
+        scene.reach = (self.distance as f32 + 0.5) * TILE;
+        scene.bytes = used;
+        scene.steering = start.elapsed();
+    }
+
+    fn steer_loads(&mut self, ctx: &mut Context) {
         if self.maps.is_none()
             && self.maps_job.is_none()
             && ctx
@@ -285,6 +334,7 @@ impl TerrainModule {
         let Some(directory) = directory else {
             return;
         };
+        self.build_horizon(ctx, &shared, &formats, &directory);
         for tile in plan.start {
             let (formats, shared, directory) = (formats.clone(), shared.clone(), directory.clone());
             let job = ctx.spawn(
@@ -294,7 +344,7 @@ impl TerrainModule {
             self.loading.insert(tile, job);
             self.jobs.insert(job, (self.showing, tile));
         }
-        self.keep_to_budget(eye);
+        self.keep_to_budget(eye, ctx);
     }
 }
 
@@ -376,7 +426,7 @@ impl Module for TerrainModule {
         }
         let used = self.used() as f64 / (1024.0 * 1024.0);
         let textures = match &self.shared {
-            Some(shared) if shared.block_compression => "textures as stored (BC)",
+            Some(shared) if shared.textures.block_compression() => "textures as stored (BC)",
             Some(_) => "textures decoded (RGBA): the device has no BC",
             None => "pipeline being built",
         };
@@ -435,6 +485,21 @@ impl Module for TerrainModule {
             self.maps = Some(maps);
             if let Some(index) = remembered {
                 self.show(index, ctx);
+            }
+        } else if let Some((_, showing)) = self.horizon.filter(|(horizon, _)| *horizon == job) {
+            self.horizon = None;
+            let horizon = match outcome {
+                JobOutcome::Panicked(message) => Err(message),
+                outcome => outcome.take::<Result<Option<HorizonGpu>, String>>().unwrap_or(Ok(None)),
+            };
+            match horizon {
+                Ok(Some(horizon)) if showing == self.showing => {
+                    let mut scene = lock(&self.scene);
+                    scene.horizon = Some(Arc::new(horizon));
+                    scene.generation += 1;
+                }
+                Ok(_) => {}
+                Err(reason) => log::warn!("the horizon of the map is not drawn: {reason}"),
             }
         } else if let Some((showing, tile)) = self.jobs.remove(&job) {
             if self.loading.get(&tile) == Some(&job) {

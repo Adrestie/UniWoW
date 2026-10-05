@@ -3,10 +3,13 @@
 //! language: animatable properties and commands (step 8.3). A layer's bundle is kept while its
 //! version stays the same, and a frame signal tells the threads of modules that a frame was
 //! submitted (step 9.2a). The camera flies with its hotkeys, looks with the right or middle drag,
-//! and turns around its target with the drag while its orbit hotkey is held (step 9.2d).
+//! and turns around its target with the drag while its orbit hotkey is held (step 9.2d). Its
+//! statistics, shown over the view from the menu View, time the interface thread and the GPU, and
+//! say what each layer drew (step 9.2e).
 
 mod camera;
 mod grid;
+mod stats;
 
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -26,6 +29,10 @@ use uniwow_api::{
 
 use camera::{FOV, OrbitCamera, REACH};
 use grid::Grid;
+use stats::{GpuTimer, LayerTiming, Sample, Stats};
+
+/// The setting that shows the statistics over the view.
+const STATISTICS: &str = "statistics";
 
 const TARGET: Target = Target {
     color_format: wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -314,6 +321,12 @@ struct ViewportModule {
     keys: CameraKeys,
     /// The speed of the flight, in yards a second.
     speed: f32,
+    stats: Stats,
+    /// The timer of the GPU, when the device has timestamps; when the last frame was drawn; and
+    /// whether the statistics are shown.
+    timer: Option<GpuTimer>,
+    last_frame: Option<Instant>,
+    show_stats: bool,
 }
 
 impl Default for ViewportModule {
@@ -331,6 +344,10 @@ impl Default for ViewportModule {
             device: None,
             keys: CameraKeys::default(),
             speed: SPEED,
+            stats: Stats::default(),
+            timer: None,
+            last_frame: None,
+            show_stats: false,
         }
     }
 }
@@ -344,7 +361,8 @@ impl Module for ViewportModule {
         reg.panel("view", "3D View", DockArea::Center)
             .provide(viewport::SERVICE, service)
             .subscribe(MODULE_FAILED_TOPIC)
-            .menu_item("View", "Reset camera", "reset_camera");
+            .menu_item("View", "Reset camera", "reset_camera")
+            .menu_item("View", "Statistics", STATISTICS);
         self.keys = CameraKeys::declare(reg);
 
         // The camera for every language: animatable, and moved by commands.
@@ -403,6 +421,13 @@ impl Module for ViewportModule {
         );
     }
 
+    fn init(&mut self, ctx: &mut Context) {
+        self.show_stats = ctx
+            .setting(STATISTICS)
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+    }
+
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
         let Some(gpu) = ctx.gpu().cloned() else {
             ui.label("No GPU device is available.");
@@ -433,6 +458,16 @@ impl Module for ViewportModule {
             egui::FontId::proportional(12.0),
             egui::Color32::from_gray(150),
         );
+        if self.show_stats {
+            let colour = egui::Color32::from_gray(225);
+            let painter = ui.painter_at(rect);
+            let text = self.stats.text(self.timer.is_some());
+            let galley = painter.layout_no_wrap(text, egui::FontId::monospace(11.0), colour);
+            let at = rect.left_top() + egui::vec2(8.0, 8.0);
+            let back = egui::Rect::from_min_size(at, galley.size()).expand(4.0);
+            painter.rect_filled(back, 3.0, egui::Color32::from_black_alpha(170));
+            painter.galley(at, galley, colour);
+        }
         ui.ctx().request_repaint();
     }
 
@@ -444,9 +479,14 @@ impl Module for ViewportModule {
         }
     }
 
-    fn on_menu(&mut self, action: &str, _ctx: &mut Context) {
-        if action == "reset_camera" {
-            *camera(&self.camera) = OrbitCamera::default();
+    fn on_menu(&mut self, action: &str, ctx: &mut Context) {
+        match action {
+            "reset_camera" => *camera(&self.camera) = OrbitCamera::default(),
+            STATISTICS => {
+                self.show_stats = !self.show_stats;
+                ctx.set_setting(STATISTICS, json!(self.show_stats));
+            }
+            _ => {}
         }
     }
 }
@@ -550,8 +590,9 @@ impl ViewportModule {
         let new_device = self.device.as_ref() != Some(&gpu.device);
         if new_device {
             self.device = Some(gpu.device.clone());
+            self.timer = GpuTimer::new(&gpu.device, &gpu.queue);
         }
-        let (bundles, failures) = draw_layers(&self.layers, gpu, &view, new_device);
+        let (bundles, failures, layers) = draw_layers(&self.layers, gpu, &view, new_device);
         for (owner, message) in failures {
             ctx.report_failure(&owner, &message);
         }
@@ -559,10 +600,12 @@ impl ViewportModule {
         let grid = self.grid.get_or_insert_with(|| Grid::new(&gpu.device, &TARGET));
         grid.update(&gpu.queue, &view);
 
+        let submitting = Instant::now();
         let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewport"),
         });
         {
+            let timestamp_writes = self.timer.as_mut().and_then(GpuTimer::writes);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("viewport"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -583,15 +626,47 @@ impl ViewportModule {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
             grid.draw(&mut pass);
             pass.execute_bundles(bundles.iter());
         }
+        if let Some(timer) = &self.timer {
+            timer.resolve(&mut encoder);
+        }
         gpu.queue.submit([encoder.finish()]);
+        if let Some(timer) = &mut self.timer {
+            timer.submitted();
+        }
+        let submit = submitting.elapsed();
+        self.sample(gpu, layers, submit);
         self.signal_frame(view.time);
+    }
+
+    /// Notes the statistics of the frame just submitted, and the times of the GPU come back.
+    fn sample(&mut self, gpu: &egui_wgpu::RenderState, layers: Vec<LayerTiming>, submit: Duration) {
+        let now = Instant::now();
+        // A pause of the view is not a frame's time.
+        let interval = self
+            .last_frame
+            .map(|last| now - last)
+            .filter(|interval| *interval < Duration::from_secs(1));
+        self.last_frame = Some(now);
+        let sample = Sample {
+            interval,
+            prepare: layers.iter().map(|layer| layer.prepare).sum(),
+            record: layers.iter().filter_map(|layer| layer.record).sum(),
+            submit,
+            layers,
+        };
+        self.stats.push(now, sample);
+        if let Some(timer) = &mut self.timer {
+            for milliseconds in timer.collect(&gpu.device) {
+                self.stats.push_gpu(now, milliseconds);
+            }
+        }
     }
 
     /// Gives the frame signal of the frame to come, once the frame drawn at `time` is submitted.
@@ -616,15 +691,14 @@ impl ViewportModule {
     }
 }
 
+/// The bundles to draw, the layers that panicked or failed, with why, and what each layer cost and
+/// drew.
+type Drawn = (Vec<wgpu::RenderBundle>, Vec<(String, String)>, Vec<LayerTiming>);
+
 /// Prepares each layer with the view of this frame, then records it into its own render bundle,
-/// or keeps the bundle of its version unless the device is `new_device`. The bundles to draw, and
-/// the layers that panicked or failed, with why: those are removed.
-fn draw_layers(
-    layers: &Layers,
-    gpu: &egui_wgpu::RenderState,
-    view: &View,
-    new_device: bool,
-) -> (Vec<wgpu::RenderBundle>, Vec<(String, String)>) {
+/// or keeps the bundle of its version unless the device is `new_device`. The layers that panicked
+/// or failed are removed.
+fn draw_layers(layers: &Layers, gpu: &egui_wgpu::RenderState, view: &View, new_device: bool) -> Drawn {
     // Layers may be added or removed meanwhile, by a layer or by another thread: take the list
     // out, then put it back in front, without the layers removed in between.
     let mut entries = {
@@ -634,13 +708,15 @@ fn draw_layers(
     };
     let mut bundles = Vec::new();
     let mut failures = Vec::new();
+    let mut timings = Vec::new();
     entries.retain_mut(|entry| {
         if new_device {
             entry.kept = None;
         }
         match draw_layer(entry, gpu, view) {
-            Ok(bundle) => {
+            Ok((bundle, timing)) => {
                 bundles.push(bundle);
+                timings.push(timing);
                 true
             }
             Err(message) => {
@@ -655,12 +731,17 @@ fn draw_layers(
     entries.retain(|entry| !removed.contains(&entry.owner));
     entries.append(&mut list.layers);
     list.layers = entries;
-    (bundles, failures)
+    (bundles, failures, timings)
 }
 
 /// Prepares one layer, then gives the bundle kept for its version, or records it, each inside a
-/// validation error scope.
-fn draw_layer(entry: &mut Entry, gpu: &egui_wgpu::RenderState, view: &View) -> Result<wgpu::RenderBundle, String> {
+/// validation error scope; with what it cost and drew.
+fn draw_layer(
+    entry: &mut Entry,
+    gpu: &egui_wgpu::RenderState,
+    view: &View,
+) -> Result<(wgpu::RenderBundle, LayerTiming), String> {
+    let started = Instant::now();
     let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
     let layer = entry.layer.as_mut();
     let prepared = catch_unwind(AssertUnwindSafe(|| {
@@ -682,14 +763,30 @@ fn draw_layer(entry: &mut Entry, gpu: &egui_wgpu::RenderState, view: &View) -> R
         }
         (Ok(version), None) => version,
     };
-    if let (Some(version), Some((kept, bundle))) = (version, &entry.kept)
-        && *kept == version
-    {
-        return Ok(bundle.clone());
-    }
-    let bundle = record(&entry.owner, entry.layer.as_mut(), gpu, view)?;
-    entry.kept = version.map(|version| (version, bundle.clone()));
-    Ok(bundle)
+    let prepare = started.elapsed();
+    let (bundle, record) = match (version, &entry.kept) {
+        (Some(version), Some((kept, bundle))) if *kept == version => (bundle.clone(), None),
+        _ => {
+            let recording = Instant::now();
+            let bundle = record(&entry.owner, entry.layer.as_mut(), gpu, view)?;
+            entry.kept = version.map(|version| (version, bundle.clone()));
+            (bundle, Some(recording.elapsed()))
+        }
+    };
+    let layer = entry.layer.as_ref();
+    let stats = catch_unwind(AssertUnwindSafe(|| layer.stats())).map_err(|payload| {
+        format!(
+            "its viewport layer panicked giving its statistics: {}",
+            panic_text(payload)
+        )
+    })?;
+    let timing = LayerTiming {
+        owner: entry.owner.clone(),
+        prepare,
+        record,
+        stats,
+    };
+    Ok((bundle, timing))
 }
 
 /// Records `layer` into its own render bundle, inside a validation error scope.
@@ -761,19 +858,21 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use uniwow_api::serde_json::json;
-    use uniwow_api::viewport::{Frame, Layer, Target, View};
+    use uniwow_api::viewport::{Frame, Layer, LayerStats, Target, View};
     use uniwow_api::{egui, egui_wgpu, wgpu};
 
     use uniwow_api::egui::{Event, Key, Modifiers, PointerButton, Pos2, vec2};
     use uniwow_api::glam::Vec3;
     use uniwow_api::hotkey::Keys;
 
+    use super::stats::{GpuTimer, LayerTiming, Sample, Stats};
     use super::{
         Camera, CameraKeys, Entry, FrameSignal, Layers, ViewportModule, camera, draw_layers, frame, lock, look_at,
         resolved, view,
     };
 
-    /// A device of the software adapter of the system, or none where there is none.
+    /// A device of the software adapter of the system, with timestamps when it offers them, as the
+    /// editor asks for them; or none where there is no such adapter.
     fn gpu() -> Option<egui_wgpu::RenderState> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = resolved(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -781,7 +880,11 @@ mod tests {
             ..Default::default()
         }))?
         .ok()?;
-        let (device, queue) = resolved(adapter.request_device(&wgpu::DeviceDescriptor::default()))?.ok()?;
+        let (device, queue) = resolved(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+            ..Default::default()
+        }))?
+        .ok()?;
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let renderer = egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
         Some(egui_wgpu::RenderState {
@@ -828,6 +931,13 @@ mod tests {
         ) {
             self.counts.drawn.fetch_add(1, Ordering::Relaxed);
         }
+
+        fn stats(&self) -> LayerStats {
+            LayerStats {
+                draws: self.counts.drawn.load(Ordering::Relaxed) as u64,
+                ..LayerStats::default()
+            }
+        }
     }
 
     fn add(layers: &Layers, owner: &str, counts: &Counts, failing: bool) {
@@ -855,12 +965,17 @@ mod tests {
         add(&layers, "cube", &every, false);
         let view = view(&Camera::default(), [64, 64], 0.0);
         let frames = |new_device| {
-            let (bundles, failures) = draw_layers(&layers, &gpu, &view, new_device);
+            let (bundles, failures, timings) = draw_layers(&layers, &gpu, &view, new_device);
             assert!(failures.is_empty(), "{failures:?}");
-            bundles.len()
+            assert_eq!(timings.len(), bundles.len(), "what each layer cost and drew");
+            timings
         };
-        for _ in 0..3 {
-            assert_eq!(frames(false), 2);
+        for frame in 0..3u64 {
+            let timings = frames(false);
+            assert_eq!(timings[0].owner, "terrain");
+            assert_eq!(timings[0].record.is_some(), frame == 0, "a bundle kept is not recorded");
+            assert!(timings[1].record.is_some());
+            assert_eq!(timings[1].stats.draws, frame + 1, "its statistics after its drawing");
         }
         let count = |counts: &Counts| {
             (
@@ -883,7 +998,7 @@ mod tests {
         assert_eq!(count(&kept), (6, 3));
 
         add(&layers, "faulty", &Counts::default(), true);
-        let (bundles, failures) = draw_layers(&layers, &gpu, &view, false);
+        let (bundles, failures, _) = draw_layers(&layers, &gpu, &view, false);
         assert_eq!(bundles.len(), 2);
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].0, "faulty");
@@ -1164,5 +1279,119 @@ mod tests {
             slow > 0.0 && (fast / slow - super::FASTER).abs() < 0.01,
             "{slow} then {fast}"
         );
+    }
+
+    #[test]
+    fn the_gpu_is_timed_by_its_timestamps_without_waiting_when_the_device_has_them() {
+        let Some(gpu) = gpu() else {
+            eprintln!("skipped: no software adapter for a device");
+            return;
+        };
+        let Some(mut timer) = GpuTimer::new(&gpu.device, &gpu.queue) else {
+            assert!(!gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY));
+            eprintln!("skipped: the device has no timestamps");
+            return;
+        };
+        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 8,
+                height: 8,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        let mut times = Vec::new();
+        for _ in 0..6 {
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            {
+                let timestamp_writes = timer.writes();
+                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: None,
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+            }
+            timer.resolve(&mut encoder);
+            gpu.queue.submit([encoder.finish()]);
+            timer.submitted();
+            times.extend(timer.collect(&gpu.device));
+        }
+        gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        times.extend(timer.collect(&gpu.device));
+        assert!(
+            times.len() >= 4,
+            "{times:?}: the frames finding a buffer free are timed"
+        );
+        assert!(times.iter().all(|time| (0.0..1000.0).contains(time)), "{times:?}");
+    }
+
+    #[test]
+    fn the_statistics_give_the_frames_the_interface_the_gpu_and_each_layer_over_a_second() {
+        let mut stats = Stats::default();
+        let start = Instant::now();
+        let layer = |owner: &str, steering_ms| LayerTiming {
+            owner: owner.to_owned(),
+            prepare: Duration::from_millis(1),
+            record: None,
+            stats: LayerStats {
+                draws: 87,
+                triangles: 2_150_000,
+                bytes: 300 << 20,
+                items: "85 tiles".to_owned(),
+                steering: Duration::from_millis(steering_ms),
+            },
+        };
+        for frame in 0..30u64 {
+            let sample = Sample {
+                interval: Some(Duration::from_millis(if frame == 29 { 40 } else { 20 })),
+                prepare: Duration::from_millis(1),
+                record: Duration::ZERO,
+                submit: Duration::from_millis(1),
+                layers: vec![layer("terrain", 2 + frame % 2)],
+            };
+            stats.push(start + Duration::from_millis(frame * 20), sample);
+        }
+        stats.push_gpu(start, 3.0);
+        let text = stats.text(true);
+        assert!(text.starts_with("48 fps: a frame 20.7 ms, the longest 40.0"), "{text}");
+        assert!(text.contains("view, interface thread: 2.00 ms"), "{text}");
+        assert!(text.contains("GPU: 3.00 ms"), "{text}");
+        assert!(
+            text.contains("terrain: 87 draws, 2.15 M triangles, 300 MB, 85 tiles"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "interface 3.50 ms, the longest 4.00: steering 2.50 (3.00), prepare 1.00 (1.00), record 0.00 (0.00)"
+            ),
+            "{text}"
+        );
+        assert!(stats.text(false).contains("not timed"));
+
+        // A second later, the frames before are no longer counted.
+        let later = Sample {
+            interval: Some(Duration::from_millis(10)),
+            ..Sample::default()
+        };
+        stats.push(start + Duration::from_secs(3), later);
+        assert!(stats.text(true).starts_with("100 fps"), "{}", stats.text(true));
     }
 }

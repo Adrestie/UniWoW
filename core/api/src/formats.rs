@@ -75,6 +75,16 @@ pub struct Wdt {
     pub tiles: Vec<bool>,
 }
 
+/// The heights of a map at low resolution, from its WDL, which the client draws as the horizon
+/// beyond the tiles it has loaded.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wdl {
+    /// The heights of the tile `<map>_<x>_<y>`, at `y * 64 + x`, none where the WDL has none: 17 × 17,
+    /// row by row as the vertices of a chunk, a row going down in Y and the rows down in X, from the
+    /// corner of highest X and Y of the tile; 32 yards and a third apart.
+    pub tiles: Vec<Option<Vec<i16>>>,
+}
+
 /// A terrain tile: its 16 × 16 chunks, row by row, the textures its chunks name, and the doodads
 /// and buildings placed on it.
 #[derive(Clone, Debug, PartialEq)]
@@ -189,6 +199,8 @@ pub trait Formats: Send + Sync {
     /// The tile `<directory>_<x>_<y>`, of 3.3.5a, or split in a root, a `_tex0` and an `_obj0` as
     /// WarcraftXL loads it; none when the WDT of its map has no such tile.
     fn tile(&self, directory: &str, x: u32, y: u32) -> Result<Option<Tile>, String>;
+    /// The WDL of the map whose folder is `directory`; none when the client has none.
+    fn wdl(&self, directory: &str) -> Result<Option<Wdl>, String>;
     /// The BLP `file`, its levels as they are stored: DXT kept, the others as `Rgba8`.
     fn texture(&self, file: &FileRef) -> Result<Texture, String>;
     /// The BLP `file`, every level as `Rgba8`.

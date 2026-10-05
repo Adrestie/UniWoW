@@ -93,4 +93,24 @@ pub trait Layer: Send {
         view: &View,
         bundle: &mut wgpu::RenderBundleEncoder<'a>,
     );
+
+    /// What the layer drew with the view of the last frame, for the statistics of the view. Called
+    /// after `prepare` and `draw`; nothing by default.
+    fn stats(&self) -> LayerStats {
+        LayerStats::default()
+    }
+}
+
+/// What a layer drew in a frame, as the statistics of the view show it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LayerStats {
+    pub draws: u64,
+    pub triangles: u64,
+    /// What it holds on the GPU.
+    pub bytes: u64,
+    /// What it drew, counted its own way, such as `54 tiles`.
+    pub items: String,
+    /// The time its module spent on the interface thread for it this frame, outside `prepare` and
+    /// `draw`, such as steering what it loads.
+    pub steering: Duration,
 }

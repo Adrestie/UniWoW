@@ -92,6 +92,8 @@ SOFTWARE.
 
 ## Read, nothing taken
 
+- The WDL, read from the public description of the format, its rows checked against the tiles of
+  the client.
 - WDC1 is read from the public description of the format, as DB2Gen writes it; nothing comes from
   DB2Gen nor from WarcraftXL, under GPL-3.
 - warcraft-rs, `wow-adt` and `wow-wdt` 0.7.0 (MIT or Apache-2.0): their layouts of the WDT and of

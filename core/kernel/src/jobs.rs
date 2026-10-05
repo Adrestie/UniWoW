@@ -115,8 +115,23 @@ pub struct Pool {
     bridge: Option<Arc<Bridge>>,
 }
 
+/// Puts the calling worker below the normal priority, so that the interface thread, at the normal
+/// one, is never kept waiting for a core while every worker computes.
+fn lower_priority() {
+    #[cfg(windows)]
+    {
+        use uniwow_api::windows::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+        };
+        // SAFETY: the pseudo handle of the calling thread, valid while it runs.
+        if let Err(error) = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL) } {
+            uniwow_api::log::warn!("a worker keeps the normal priority: {error}");
+        }
+    }
+}
+
 impl Pool {
-    /// Starts `threads` workers. They end with the process, or once the pool is dropped and nothing
+    /// Starts `threads` workers, below the normal priority. They end with the process, or once the pool is dropped and nothing
     /// waits; a job running at exit is abandoned.
     pub fn new(threads: usize, wake: Option<egui::Context>, bridge: Option<Arc<Bridge>>) -> Self {
         let queue = Arc::new(Queue::default());
@@ -125,6 +140,7 @@ impl Pool {
             let spawned = std::thread::Builder::new()
                 .name(format!("uniwow-worker-{index}"))
                 .spawn(move || {
+                    lower_priority();
                     // The lock is released before the work runs.
                     while let Some(work) = queue.take() {
                         match work {
@@ -361,6 +377,20 @@ mod tests {
         let outcome = finished.into_iter().next().expect("one").outcome;
         assert_eq!(outcome.take::<i32>(), Some(42));
         assert!(pool.running().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_workers_run_below_the_normal_priority_of_the_interface_thread() {
+        use uniwow_api::windows::Win32::System::Threading::{
+            GetCurrentThread, GetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL, THREAD_PRIORITY_NORMAL,
+        };
+        let priority = || unsafe { GetThreadPriority(GetCurrentThread()) };
+        assert_eq!(priority(), THREAD_PRIORITY_NORMAL.0, "the test's own thread");
+        let mut pool = Pool::new(1, None, None);
+        pool.spawn("test", "priority", Box::new(move |_| Box::new(priority())), editor());
+        let outcome = wait_for(&mut pool, 1).into_iter().next().expect("one").outcome;
+        assert_eq!(outcome.take::<i32>(), Some(THREAD_PRIORITY_BELOW_NORMAL.0));
     }
 
     #[test]

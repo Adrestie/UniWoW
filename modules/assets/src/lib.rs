@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread::ThreadId;
 
 use uniwow_api::formats::{
-    self, AreaRecord, CreatureDisplay, CreatureModel, FileRef, Formats, MapRecord, Texture, Tile, Wdt,
+    self, AreaRecord, CreatureDisplay, CreatureModel, FileRef, Formats, MapRecord, Texture, Tile, Wdl, Wdt,
 };
 use uniwow_api::vfs::{self, Vfs, VfsState};
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, Registrar, egui, log, rfd, serde_json};
@@ -97,6 +97,14 @@ impl Client {
         terrain::tile(&root, tex.as_deref(), obj.as_deref(), wdt.flags)
             .map(Some)
             .map_err(|e| format!("{root_path}: {e}"))
+    }
+
+    fn wdl(&self, directory: &str) -> Result<Option<Wdl>, String> {
+        let path = format!("World\\Maps\\{directory}\\{directory}.wdl");
+        match self.chain.read(&path)? {
+            Some(bytes) => terrain::wdl(&bytes).map(Some).map_err(|e| format!("{path}: {e}")),
+            None => Ok(None),
+        }
     }
 
     fn texture(&self, file: &FileRef, decode: bool) -> Result<Texture, String> {
@@ -229,6 +237,11 @@ impl Formats for Files {
     fn tile(&self, directory: &str, x: u32, y: u32) -> Result<Option<Tile>, String> {
         self.check_thread("a tile");
         self.client()?.tile(directory, x, y)
+    }
+
+    fn wdl(&self, directory: &str) -> Result<Option<Wdl>, String> {
+        self.check_thread("a WDL");
+        self.client()?.wdl(directory)
     }
 
     fn texture(&self, file: &FileRef) -> Result<Texture, String> {

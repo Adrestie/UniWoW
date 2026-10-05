@@ -1,13 +1,33 @@
-//! The mesh of a chunk, built from the model alone, so that a chunk changed is built again by
-//! itself: its 145 vertices, its triangles, those of its holes left out, and its texels of blending.
+//! The mesh of a tile, built from the model alone, so that a chunk changed is built again by
+//! itself: the 145 vertices of each chunk, the skirts under the sides of the tile, the triangles of
+//! each level of detail, those of its holes left out, and the texels of blending of each chunk.
+
+use std::ops::Range;
 
 use uniwow_api::bytemuck::{Pod, Zeroable};
-use uniwow_api::formats::Chunk;
+use uniwow_api::formats::{Chunk, Tile};
 
 use crate::model::{TileId, chunk_corner, vertex_place, vertex_position};
 
-/// The vertices of a chunk.
+/// The chunks of a tile, and the vertices of a chunk.
+pub const CHUNKS: usize = 256;
 pub const VERTICES: usize = 145;
+
+/// The vertices of the skirts, after those of the chunks: under the 9 outer vertices of each chunk
+/// along each of the four sides of the tile.
+pub const SKIRT_VERTICES: usize = 4 * 16 * 9;
+pub const TILE_VERTICES: usize = CHUNKS * VERTICES + SKIRT_VERTICES;
+
+/// How far a skirt hangs under the side of a tile, in yards: it fills what opens between two tiles
+/// drawn at two levels of detail.
+pub const SKIRT_DEPTH: f32 = 40.0;
+
+/// The levels of detail: all the vertices; the outer ones; one outer vertex in two; the corners of
+/// each chunk.
+pub const LODS: usize = 4;
+
+/// The quads of a chunk a pair of triangles of each level covers, a side.
+const STEPS: [u16; LODS] = [1, 1, 2, 8];
 
 /// A vertex of the terrain, as its shader reads it: 32 bytes, without padding.
 #[repr(C)]
@@ -46,24 +66,133 @@ pub fn vertices(tile: TileId, place: usize, chunk: &Chunk) -> Vec<Vertex> {
         .collect()
 }
 
-/// The triangles of a chunk, by its vertices: four a quad, around its inner vertex, facing up;
-/// the quads of its holes, a bit each in `holes`, left out.
-pub fn indices(holes: u64) -> Vec<u16> {
-    let mut indices = Vec::with_capacity(8 * 8 * 12);
-    for row in 0..8u16 {
-        for column in 0..8u16 {
-            if holes & (1 << (row * 8 + column)) != 0 {
+/// The sides of a tile: its first row of vertices (highest X), its last row, its first column
+/// (highest Y), its last column.
+const SIDES: usize = 4;
+
+/// The place along the side `side` of a chunk at `index`, when it lies on that side.
+fn along(side: usize, index: [u32; 2]) -> Option<usize> {
+    let [column, row] = index.map(|i| i as usize);
+    match side {
+        0 => (row == 0).then_some(column),
+        1 => (row == 15).then_some(column),
+        2 => (column == 0).then_some(row),
+        _ => (column == 15).then_some(row),
+    }
+}
+
+/// The outer vertex `k` of a chunk along the side `side`, by its index in the chunk.
+fn edge_vertex(side: usize, k: u16) -> u16 {
+    match side {
+        0 => k,
+        1 => 8 * 17 + k,
+        2 => k * 17,
+        _ => k * 17 + 8,
+    }
+}
+
+/// The index in the tile of the skirt vertex under the outer vertex `k` of the chunk at `at` along
+/// `side`.
+fn skirt_vertex(side: usize, at: usize, k: u16) -> u16 {
+    (CHUNKS * VERTICES + (side * 16 + at) * 9) as u16 + k
+}
+
+/// The skirt vertices of the chunk `place` of the tile `tile`, nine for each side of the tile it
+/// lies on, after the index in the tile of the first: copies of its outer vertices along that
+/// side, lowered by `SKIRT_DEPTH`.
+pub fn skirt(tile: TileId, place: usize, chunk: &Chunk) -> Vec<(usize, Vec<Vertex>)> {
+    let mut found = Vec::new();
+    let mut outer: Option<Vec<Vertex>> = None;
+    for side in 0..SIDES {
+        let Some(at) = along(side, chunk.index) else {
+            continue;
+        };
+        let outer = outer.get_or_insert_with(|| vertices(tile, place, chunk));
+        let lowered = (0..9)
+            .map(|k| {
+                let mut vertex = outer[edge_vertex(side, k) as usize];
+                vertex.position[2] -= SKIRT_DEPTH;
+                vertex
+            })
+            .collect();
+        found.push((skirt_vertex(side, at, 0) as usize, lowered));
+    }
+    found
+}
+
+/// The triangles of a chunk at the level `lod`, by the vertices of its tile, those of the chunk
+/// starting at `base`: a pair a block of quads, facing up; with all the vertices, four a quad
+/// around its inner vertex. A quad of its holes, a bit each in `holes`, is left out, and a block
+/// whose quads are all holes.
+fn surface(lod: usize, base: u16, holes: u64, indices: &mut Vec<u16>) {
+    let outer = |r: u16, c: u16| base + r * 17 + c;
+    let hole = |r: u16, c: u16| holes & (1 << (r * 8 + c)) != 0;
+    let step = STEPS[lod];
+    for row in (0..8u16).step_by(step as usize) {
+        for column in (0..8u16).step_by(step as usize) {
+            if (row..row + step).all(|r| (column..column + step).all(|c| hole(r, c))) {
                 continue;
             }
-            let outer = |r: u16, c: u16| r * 17 + c;
-            let centre = row * 17 + 9 + column;
-            let (a, b) = (outer(row, column), outer(row, column + 1));
-            let (c, d) = (outer(row + 1, column + 1), outer(row + 1, column));
+            let (a, b) = (outer(row, column), outer(row, column + step));
+            let (c, d) = (outer(row + step, column + step), outer(row + step, column));
             // Counter-clockwise seen from above: the row goes down in Y, the rows down in X.
-            indices.extend_from_slice(&[centre, b, a, centre, c, b, centre, d, c, centre, a, d]);
+            if lod == 0 {
+                let centre = base + row * 17 + 9 + column;
+                indices.extend_from_slice(&[centre, b, a, centre, c, b, centre, d, c, centre, a, d]);
+            } else {
+                indices.extend_from_slice(&[d, b, a, d, c, b]);
+            }
         }
     }
-    indices
+}
+
+/// The triangles of the skirt under the chunk at `at` along `side`, at the level `lod`, from the
+/// vertices of its edge, those of the chunk starting at `base`, facing out of the tile.
+fn skirt_triangles(lod: usize, side: usize, at: usize, base: u16, indices: &mut Vec<u16>) {
+    let step = STEPS[lod];
+    for k in (0..8u16).step_by(step as usize) {
+        let (mut a, mut b) = (base + edge_vertex(side, k), base + edge_vertex(side, k + step));
+        let (mut low_a, mut low_b) = (skirt_vertex(side, at, k), skirt_vertex(side, at, k + step));
+        // Along the last row and the first column, the order that faces out is the other one.
+        if side == 1 || side == 2 {
+            (a, b, low_a, low_b) = (b, a, low_b, low_a);
+        }
+        indices.extend_from_slice(&[a, b, low_a, b, low_b, low_a]);
+    }
+}
+
+/// The triangles of a tile, the levels of detail one after the other, each with its skirts, and
+/// the range of each.
+pub fn indices(tile: &Tile) -> (Vec<u16>, [Range<u32>; LODS]) {
+    let mut indices = Vec::new();
+    let ranges = std::array::from_fn(|lod| {
+        let start = indices.len() as u32;
+        for (place, chunk) in tile.chunks.iter().enumerate() {
+            let base = (place * VERTICES) as u16;
+            surface(lod, base, chunk.holes, &mut indices);
+            for side in 0..SIDES {
+                if let Some(at) = along(side, chunk.index) {
+                    skirt_triangles(lod, side, at, base, &mut indices);
+                }
+            }
+        }
+        start..indices.len() as u32
+    });
+    (indices, ranges)
+}
+
+/// The level of detail of a tile whose nearest point is `distance` tiles away, `previous` its level
+/// so far: a level changes only once the distance is past its limit by a margin, so that a camera
+/// on a limit does not make it change at each frame.
+pub fn lod(distance: f32, previous: Option<usize>) -> usize {
+    const LIMITS: [f32; LODS - 1] = [1.5, 3.0, 6.0];
+    const MARGIN: f32 = 0.15;
+    let plain = LIMITS.iter().take_while(|limit| distance >= **limit).count();
+    match previous {
+        Some(previous) if plain > previous && distance < LIMITS[plain - 1] + MARGIN => plain - 1,
+        Some(previous) if plain < previous && distance > LIMITS[plain] - MARGIN => plain + 1,
+        _ => plain,
+    }
 }
 
 /// The texels of blending of a chunk, 64 × 64, row by row: the alpha maps of its layers after the

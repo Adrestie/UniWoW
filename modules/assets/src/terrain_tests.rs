@@ -870,3 +870,80 @@ fn the_service_reads_the_tiles_its_wdt_names_split_when_their_tex0_exists() {
     assert!(unnamed.contains("named by no table of paths"), "{unnamed}");
     let _ = std::fs::remove_dir_all(folder);
 }
+
+#[test]
+fn the_wdl_of_the_client_follows_the_heights_of_its_tiles_row_by_row() {
+    let Some(client) = client() else {
+        return;
+    };
+    let wdt = client.wdt("Azeroth").unwrap();
+    let wdl = client.wdl("Azeroth").unwrap().expect("Azeroth has a WDL");
+    // The mean distance between the heights of the WDL and those of the tiles, the rows of the WDL
+    // taken as those of the chunks (going down in X), or as their columns.
+    let mut errors = [0.0f64; 2];
+    let mut count = 0;
+    let tiles = (0..4096usize)
+        .filter(|&i| wdt.tiles[i] && wdl.tiles[i].is_some())
+        .step_by(40)
+        .take(8);
+    for index in tiles {
+        let (x, y) = (index as u32 % 64, index as u32 / 64);
+        let tile = client.tile("Azeroth", x, y).unwrap().unwrap();
+        let heights = wdl.tiles[index].as_ref().unwrap();
+        let height_at = |row: u32, column: u32| -> Option<f64> {
+            // The outer vertex at the row and column of the tile, 128 of them a side.
+            let (r, c) = (row.min(127), column.min(127));
+            let chunk = tile.chunks.iter().find(|chunk| chunk.index == [c / 8, r / 8])?;
+            let vertex = ((r % 8) + (row - r)) as usize * 17 + ((c % 8) + (column - c)) as usize;
+            Some(f64::from(chunk.position[2] + chunk.heights[vertex]))
+        };
+        for row in 0..16u32 {
+            for column in 0..16u32 {
+                let wdl_height = f64::from(heights[(row * 17 + column) as usize]);
+                if let (Some(as_rows), Some(as_columns)) =
+                    (height_at(row * 8, column * 8), height_at(column * 8, row * 8))
+                {
+                    errors[0] += (wdl_height - as_rows).abs();
+                    errors[1] += (wdl_height - as_columns).abs();
+                    count += 1;
+                }
+            }
+        }
+    }
+    let [rows, columns] = errors.map(|sum| sum / f64::from(count));
+    eprintln!("{count} heights: {rows:.2} yards apart as rows, {columns:.2} as columns");
+    assert!(count > 1000 && rows < 2.0 && columns > 3.0 * rows, "{rows} {columns}");
+}
+
+/// A WDL with the heights `tiles` give, at `y * 64 + x`, each of its heights its own place.
+fn write_wdl(tiles: &[(usize, usize)]) -> Vec<u8> {
+    let mut out = tagged(b"MVER", &words(&[18]));
+    let maof_at = out.len() + 8;
+    out.extend(tagged(b"MAOF", &vec![0u8; 64 * 64 * 4]));
+    for (x, y) in tiles {
+        let offset = out.len() as u32;
+        out[maof_at + (y * 64 + x) * 4..][..4].copy_from_slice(&offset.to_le_bytes());
+        let heights: Vec<u8> = (0..545i16).flat_map(|h| (h - 100).to_le_bytes()).collect();
+        out.extend(tagged(b"MARE", &heights));
+        out.extend(tagged(b"MAHO", &[0u8; 32]));
+    }
+    out
+}
+
+#[test]
+fn a_wdl_gives_the_heights_of_its_tiles_and_none_elsewhere() {
+    let wdl = terrain::wdl(&write_wdl(&[(32, 48), (5, 1)])).unwrap();
+    assert_eq!(wdl.tiles.len(), 4096);
+    let heights = wdl.tiles[48 * 64 + 32].as_ref().unwrap();
+    assert_eq!(heights.len(), 17 * 17, "the heights between them left");
+    assert_eq!((heights[0], heights[288]), (-100, 188));
+    assert!(wdl.tiles[64 + 5].is_some());
+    assert_eq!(wdl.tiles.iter().filter(|tile| tile.is_some()).count(), 2);
+
+    let mut wrong = write_wdl(&[(1, 1)]);
+    let at = u32::from_le_bytes(wrong[20 + (64 + 1) * 4..][..4].try_into().unwrap()) as usize;
+    wrong[at] = b'X';
+    let refused = terrain::wdl(&wrong).err().unwrap();
+    assert!(refused.contains("tile 1 1"), "{refused}");
+    assert!(terrain::wdl(&tagged(b"MVER", &words(&[18]))).is_err(), "no MAOF");
+}

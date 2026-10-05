@@ -1,10 +1,10 @@
-//! The terrain of a map: its WDT, and its tiles (ADT) of 3.3.5a, or split in a root, a `_tex0` and
-//! an `_obj0` as WarcraftXL loads them. Read from the public description of the formats and the
+//! The terrain of a map: its WDT, its WDL, and its tiles (ADT) of 3.3.5a, or split in a root, a
+//! `_tex0` and an `_obj0` as WarcraftXL loads them. Read from the public description of the formats and the
 //! layouts of warcraft-rs (wow-adt, wow-wdt: MIT); the split tiles translated from the loaders of
 //! wow.export (MIT, see THIRD_PARTY.md). A tile of 3.3.5a finds the parts of its chunks by the
 //! offsets of their header, as the client does; a split tile by walking them, as wow.export does.
 
-use uniwow_api::formats::{Building, Chunk, Doodad, FileRef, Layer, Tile, Wdt};
+use uniwow_api::formats::{Building, Chunk, Doodad, FileRef, Layer, Tile, Wdl, Wdt};
 
 /// The flags of `MPHD` that make the alpha maps 8 bits a texel, as wow.export reads them.
 const BIG_ALPHA: u32 = 0x4 | 0x80;
@@ -104,6 +104,44 @@ pub fn wdt(bytes: &[u8]) -> Result<Wdt, String> {
         flags,
         tiles: tiles.ok_or("no list of tiles (MAIN)")?,
     })
+}
+
+/// The heights of a tile in a WDL: 17 × 17.
+const WDL_HEIGHTS: usize = 17 * 17;
+
+/// The WDL of a map: the heights of each tile, in the `MARE` its `MAOF` points at, from the start
+/// of the file; the 16 × 16 heights between them and the holes (`MAHO`) are left.
+pub fn wdl(bytes: &[u8]) -> Result<Wdl, String> {
+    let offsets = chunks(bytes)?
+        .into_iter()
+        .find(|(name, _)| name == b"MAOF")
+        .map(|(_, data)| u32s(data))
+        .ok_or("no table of tiles (MAOF)")?;
+    let offsets = offsets.get(..64 * 64).ok_or("its table of tiles cut short")?;
+    let tiles = offsets
+        .iter()
+        .enumerate()
+        .map(|(index, &offset)| {
+            if offset == 0 {
+                return Ok(None);
+            }
+            let at = offset as usize;
+            let heights = bytes
+                .get(at..at + 8)
+                .filter(|header| header[..4] == *b"ERAM")
+                .and_then(|_| bytes.get(at + 8..at + 8 + WDL_HEIGHTS * 2))
+                .ok_or_else(|| format!("the heights of the tile {} {} (MARE) not found", index % 64, index / 64))?;
+            Ok(Some(
+                heights
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|b| i16::from_le_bytes(*b))
+                    .collect(),
+            ))
+        })
+        .collect::<Result<_, String>>()?;
+    Ok(Wdl { tiles })
 }
 
 /// The names of a block of strings, each ended by a zero, the empty ones left out.

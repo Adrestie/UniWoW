@@ -265,12 +265,13 @@ fills it, or *not planned* when no milestone does yet.
 | Sequences and their playback | `uniwow_api::sequence`; the objects `Sequence` and `Player` handed to the kernel with `Context::adopt_objects`, as the Timeline does | `Sequence`, `Player` | `uniwow::Sequence`, `uniwow::Player`; `Sequence`, `Player` | — milestones 10 and 11 |
 | The dopesheet | The service `dopesheet`; the objects `DopesheetView` and `CurveView`, as the Timeline does | `DopesheetView`; `CurveView` showing a `Sequence` | `uniwow::DopesheetView`; `DopesheetView` | — milestones 10 and 11 |
 | Tree, table, property grid | egui; the service `property-grid` | `TreeView`, `TableView`, with `set_cell`, `insert_rows`, `remove_rows`; `PropertyGrid` | `uniwow::TreeView`, `uniwow::TableView`, `uniwow::PropertyGrid`; `TreeView`, `TableView`, `PropertyGrid` | — milestones 10 and 11 |
-| Drawing in the 3D view | The service `viewport`: its layers (`prepare`, a version to keep their bundle) and its frame signal (`wait_frame`) | — not planned (an other 3D access of step 8.3) | — | — |
+| Drawing in the 3D view | The service `viewport`: its layers (`prepare`, a version to keep their bundle, their statistics with `stats`) and its frame signal (`wait_frame`) | — not planned (an other 3D access of step 8.3) | — | — |
 | The client's files, read from its archives, and their formats | The services `vfs` and `formats` of the module `assets` — step 9.1 | — not planned yet | — | — |
 | The live world: entities of the server around a point, their moves | Inside the module `live-world` | — step 9.3 (commands and events) | — step 9.3 | — milestones 10 and 11 |
 | Splitting work over the cores, `parallel_for` | `uniwow_api::parallel_for` (step 9.2a) | — not planned; compiled modules run threads of their own (T7) | — | — |
 | Picking in the 3D view, the selection shown in 3D | — designed in milestone 9, not built | — | — | — |
-| The terrain of a map shown in the 3D view | The module `terrain` (step 9.2c) | — not planned yet | — | — |
+| The terrain of a map shown in the 3D view, with its horizon | The module `terrain` (steps 9.2c, 9.2e) | — not planned yet | — | — |
+| The statistics of the 3D view: the times of the frames, of the interface thread and of the GPU, what each layer drew | `Layer::stats`; shown over the view (step 9.2e) | — not planned yet | — | — |
 | Hotkeys: declared, read, bound to other keys by the user in *Edit > Hotkey* | `Registrar::hotkey`, `Hotkey::pressed`, `held` (step 9.2d) | — not planned yet | — | — |
 | The memory of the GPU the editor draws with | `Context::gpu_memory` (step 9.2d) | — not planned yet | — | — |
 | Editing the world: terrain, painting, objects and creatures placed | — designed in milestone 9, not built | — | — | — |
@@ -399,7 +400,7 @@ Threads:
 | Id | Rule |
 |---|---|
 | T1 | The interface thread draws, applies the undoable commands and owns the state of each module. It never waits for slow work. |
-| T2 | The kernel keeps a pool of worker threads, one per processor core, for computations. `Context::spawn` runs a job there, with progress and cancel; its result comes back to the module on the interface thread. Work that waits, such as a script, runs with `Context::spawn_thread` on a thread of its own, so that waiting never holds a thread of the pool; it is otherwise a job like the others. A job of the pool never waits without a time limit, for instance in `next_event` without a timeout; waiting in `parallel_for` for its slices, which the workers of the pool share with it, is not waiting without a limit. A Jobs panel lists the jobs running. |
+| T2 | The kernel keeps a pool of worker threads, one per processor core, for computations, below the normal priority, so that the interface thread is never kept waiting for a core while every worker computes. `Context::spawn` runs a job there, with progress and cancel; its result comes back to the module on the interface thread. Work that waits, such as a script, runs with `Context::spawn_thread` on a thread of its own, so that waiting never holds a thread of the pool; it is otherwise a job like the others. A job of the pool never waits without a time limit, for instance in `next_event` without a timeout; waiting in `parallel_for` for its slices, which the workers of the pool share with it, is not waiting without a limit. A Jobs panel lists the jobs running. |
 | T3 | Service interfaces are shared between threads (`Send + Sync`, held in an `Arc`), so that jobs, scripts and compiled modules call them directly. An interface tied to the interface thread says so explicitly. |
 | T4 | Each named command declares where it runs: on the interface thread when it changes a module's state (through an undoable command), or on the calling thread when it only reads or synchronises itself. The second kind answers at once, without waiting for a frame; called from the interface thread, a compiled module's command runs on the module's own thread and answers later. |
 | T5 | The GPU device and queue can be used from any thread: jobs create and upload buffers and textures; only drawing happens on the interface thread. |
@@ -1794,6 +1795,25 @@ which stays on the interface thread.
 | Events of the live world | Published by the connection thread, delivered on the interface thread | Batched, as L4 says |
 | Rebuilding one terrain chunk (the editing to come) | A job | Its new GPU resources take the place of the old ones at the next frame |
 
+**Drawing many models (9.4 to 9.6)**, from what step 9.2e measured on the terrain, where a draw per
+chunk made the frames late and a draw per tile left the interface thread nearly idle:
+
+- The draws follow the models and the materials in sight, never the objects: instanced, a draw per
+  model and material, the instances and their bones in buffers (*Threads* above).
+- Each object is drawn up to a distance by its size, as the client does: the small doodads cut near,
+  the large ones and the buildings far, the distance of the view scaling them all.
+- The M2 have levels of detail by distance, their skin profiles (the files `00.skin` to `03.skin`
+  of 3.3.5a, fewer triangles each), chosen for each group of instances as the terrain chooses a
+  level for each tile, a level changing only past its limit by a margin.
+- The buildings are culled by their portals, as the client does: from the group the camera is in,
+  through the portals in sight, the groups seen; from outside, each group by its bounds.
+- Then, if the cities ask for it once measured, an occlusion on the GPU: the depth of the frame
+  before reduced to a pyramid (Hi-Z), the instances tested against it by a compute pass that writes
+  the indirect draws.
+- The statistics of the view count their draws, triangles and times, a line per layer, and the
+  targets of step 9.2e hold for them: 60 frames a second flying fast, the interface thread under 4
+  ms a frame for a layer, a few hundred draws for a layer.
+
 Additions to the core this milestone needs, specified and reviewed with step 9.2a:
 
 - **Fork-join on the pool, `parallel_for`**: a job, or a thread of its own, splits a slice of work
@@ -1910,6 +1930,7 @@ Each step is reviewed before the next one; the milestone is delivered once all a
 | 9.1 | Installations; the module `assets` and its services `vfs` and `formats`, with their interfaces in `core/api`, read from any thread at once: the archives in the order of the client and of the patcher of WarcraftXL, folders mounted as archives, the delete markers of the patches; read economically (one allocation for the data of a file, buffers reused by each thread); the FileDataIDs turned into paths through `TextureFilePath.db2` and `ModelFilePath.db2`, of the versions WarcraftXL reads for them (WDC1 to WDC3), as WarcraftXL does; the DBC `Map`, `AreaTable`, `CreatureDisplayInfo`, `CreatureModelData`, and those the next steps need |
 | 9.2a | The additions to the core: `parallel_for`, bundles kept in the viewport with `prepare`, its frame signal |
 | 9.2 | The terrain model that can be edited (point 1 above), from the ADT of 3.3.5a and the split tiles, loaded in jobs in the order of *Threads*, its uploads submitted by the jobs, the GPU memory budget, drawn chunk by chunk; the free camera |
+| 9.2e | The performance of the terrain, asked by the review of 9.2c and 9.2d: measured first (the statistics of the view); a draw per tile, its textures in arrays; levels of detail by distance; the horizon of the WDL with a fog; the targets measured on the user's machine; what will hold for the doodads and the creatures (*Drawing many models*, below) |
 | 9.3 | The observer and its threads, on both sides; the entities as markers (a coloured shape and the name) moving in real time; the commands and events of L4 |
 | 9.4 | Still M2 models, of 3.3.5a and modern: from the display id to the model, its skin, its textures and its scale |
 | 9.5 | M2 animations, of 3.3.5a and modern (`.anim` files): *Stand*, *Walk*, *Run* chosen by the movement received, on the animation thread |
@@ -1923,9 +1944,9 @@ Each step is reviewed before the next one; the milestone is delivered once all a
 | Does the active invisible object keep the zone looked at alive without any player: creatures moving, paths followed, respawns? | To verify |
 | The volume of data in a crowded city at the rate chosen | To verify |
 | The work of the M2 animations (bones, interpolation) | To estimate |
-| Speed of the terrain and the models in a city (the goal to fix), and the cost of rebuilding one terrain chunk alone, for the editing to come | To measure |
+| Speed of the terrain and the models in a city (the goal to fix), and the cost of rebuilding one terrain chunk alone, for the editing to come | The terrain measured in step 9.2e (below); the models and a chunk rebuilt alone: to measure |
 | Reading the archives from many threads at once: does it scale with the cores, or does the disk or a lock limit it? | Measured in step 9.1: the archives scale with the cores, the allocator of Windows does not beyond 8 threads; `assets` reads economically, which scales to 32 threads (step 9.1) |
-| The time the interface thread spends per frame while flying fast over a city: handing over, culling, recording | To measure |
+| The time the interface thread spends per frame while flying fast over a city: handing over, culling, recording | The terrain measured in step 9.2e, flying fast over Azeroth: 0.1 ms a frame on average, 0.3 ms at most; the models: to measure |
 | The bytes of animation (instances and bones) written to the GPU per frame in a crowded city | To measure |
 | What warcraft-rs reads and writes correctly in 3.3.5a, format by format; what `assets` copies of it, without `rayon` | Reading verified in step 9.1 (below): archives, DBC, WDT, ADT and WMO groups read; M2, skins, WMO roots and BLP have faults to correct in the copy. Writing not verified yet |
 | Which versions of the modern formats the extensions of WarcraftXL load, and where they find the files (their folders, loose files, FileDataIDs and listfile): the editor must read the same files from the same places | Verified in step 9.1 in their sources (below) |
@@ -2367,6 +2388,100 @@ default:
   a test fail.
 - Not in this part: the hotkeys of the compiled modules and of the scripts (the table of the
   capabilities).
+
+Step 9.2e, the performance of the terrain, asked by the review of 9.2c and 9.2d: the user saw the
+frames fall with the terrain alone, on an RTX 3080 Ti. A draw and a bind group a chunk made 256 draws
+a tile, up to some 74,000 a frame at a distance of 8 tiles, and the bundle was recorded again at each
+change of the tiles in sight; wgpu's work for each draw, on the interface thread, outweighed all.
+
+- Measured first, the statistics of the view (*View > Statistics*, kept in the settings of
+  `viewport`), over the last second: the frames a second and the time of a frame, with the longest;
+  the time of the view on the interface thread, preparing the layers, recording their bundles and
+  submitting; the time of the GPU on the pass of the view, by its timestamps when the device has
+  them, read back some frames later without waiting (the kernel asks for them as for BC); for each
+  layer, from `Layer::stats`, its draws, triangles, bytes on the GPU and what it counts its own way,
+  and its time on the interface thread, steering, preparing and recording, the mean and the longest
+  of each. The models to come will be measured with it.
+- A draw per tile:
+  - the textures of the terrain are layers of arrays, an array for each class of texture (format,
+    size, levels), 12 of them bound at once (`textures`). An array grows by a copy on the GPU, from 4
+    layers, doubling to 32, then 32 more, up to the limit of the device; a layer no tile holds is
+    given to the next texture; an array that holds none is dropped;
+  - the textures of each chunk, four codes of an array and a layer, are in a uniform buffer of its
+    tile; the shader takes the array by a `switch`, sampling with the gradients taken before the
+    branch, where only a gradient given allows it;
+  - one bind group for the arrays, for all the terrain, one for each tile (its blending and its
+    codes), one draw a tile: the 37,696 vertices of a tile with its skirts fit indices of 16 bits.
+    Neither `binding_array` nor indirect draws: not needed for so few draws, and some adapters lack
+    them.
+- The interface thread never waits for the jobs placing textures: it reads the views of the arrays,
+  their generation and their bytes as the jobs last published them, and a job of its own purges
+  them. The workers of the pool run below the normal priority (T2): flying fast, the 16 workers and
+  the interface thread shared the 16 cores of the user's machine, and the interface thread lost up
+  to 8 ms at a time to them.
+- Levels of detail, for each tile by the distance from the eye to its bounds: all the vertices under
+  1.5 tiles; the outer ones, two triangles a quad, under 3; one outer vertex in two under 6; the
+  corners of each chunk beyond. A level changes only 0.15 tile past its limit. The holes are left out
+  at the finer levels; a coarser block only when all its quads are holes.
+- Skirts, 40 yards deep under the four sides of each tile, at every level, facing out of it, close
+  what opens between two tiles at two levels; `write_chunk` writes those of its chunk.
+- The horizon:
+  - the WDL of the map (`Formats::wdl`, read from the public description of the format; its rows
+    checked against the tiles of the client: 0.5 yard apart on average, 51 yards taken the other way
+    round), its 17 × 17 heights a tile in one mesh, built by a job when the map is shown;
+  - one draw; the tiles drawn in detail are left out by a bit each, written when they change;
+  - it fades into the fog within 1.5 tiles of a tile without heights, where it would end on the sky.
+- The fog and the sky: the fog by the distance on the ground, half of it at the reach of the tiles
+  loaded, where the horizon starts, all of it at the farthest of the map; behind everything, the sky
+  in its colour; fixed colours until the lights of the map (9.7). The horizon ends in haze, as in the
+  client, and `view_distance` can stay moderate, 3 by default.
+- The bundle is recorded again when the tiles in sight, their levels or the arrays change: a few
+  dozen draws, recorded in a few hundredths of a millisecond. No culling on the GPU, then.
+- Measured on the user's machine (RTX 3080 Ti through Vulkan, 16 threads, 60 Hz with the vertical
+  sync), on Azeroth at a distance of 8 tiles, flying at 888 yards a second (Shift held), the horizon
+  to the edge of the map:
+
+  | Target | Measured |
+  |---|---|
+  | At least 60 frames a second | 60, the vertical sync; the longest frame 20 to 22.5 ms |
+  | The interface thread under 4 ms a frame for the terrain | 0.10 ms on average, 0.30 ms at most (steering 0.11, preparing 0.18, recording 0.13 at most) |
+  | A few hundred draws at most for the terrain | 35 to 55 (the tiles in sight, the horizon, the sky), 0.6 to 1.1 M triangles |
+  | — | The view on the interface thread 0.25 ms (preparing, recording, submitting), 1.4 ms at most; the GPU 0.6 to 1.7 ms a frame; 242 to 415 tiles loaded during the flight, 1.4 to 2.5 GB on the GPU of 6 GB |
+
+  The same views drawn a chunk at a time would have made 9,000 to 14,000 draws: the tiles in sight
+  times 256, which the statistics, new with this step, did not measure.
+- At the edge of a map, the tiles of the ocean end on the sky, where the client draws its water: it
+  comes with the water (9.6).
+- Tests:
+  - the levels of detail facing up, their triangles counted, the holes left out; the skirts upright,
+    facing out, under the vertices they copy; a level by the distance, changing past its margin; the
+    distance from an eye to a box;
+  - the horizon a mesh of the heights of the WDL, facing up, placed as the tiles, its normals by the
+    slopes, fading near the tiles without heights; the bits of the tiles drawn in detail;
+  - the WDL read, a tile without heights left none, one whose heights cannot be found refused; on the
+    client, its rows checked against those of the tiles;
+  - on the software adapter, skipped where there is none: the textures in arrays by class, read once
+    for every tile, dropped once no tile holds them; an array grown keeping its layers; the slots
+    full; a tile drawn in one draw, its chunks textured from two arrays, read back from the GPU, the
+    horizon beyond it, its own tile left out, the sky in the colour of the fog; the bundle recorded
+    again when the level of a tile changes, kept otherwise; the GPU timed by its timestamps;
+  - the statistics over a second; what each layer cost and drew, a bundle kept not recorded; the
+    workers below the normal priority; the device asking for timestamps.
+  Each of 21 changes made on purpose to the arrays, the meshes, the horizon, the layer, the
+  statistics, the priority of the workers and the reading of the WDL made a test fail.
+- Not in this part: the doodads, the buildings and the water (9.6); the lights of the map (9.7);
+  editing the terrain, for which a chunk changed writes its vertices, its skirts and its blending,
+  and the codes of its textures would be written again.
+
+Where the work of the terrain is done, since step 9.2e:
+
+| Work | Thread | Lock |
+|---|---|---|
+| Steering the loads, handing over within 2 ms, keeping to the budget | Interface, at each frame (`windows_ui`) | The scene shared with the layer, briefly; never that of the arrays of textures |
+| A tile read, its model, its resources created and uploaded, its textures placed | A job of the pool per tile, its chunks written over `parallel_for` | The arrays of textures, while a texture is written or an array grows; a texture read once (`OnceLock`) |
+| The horizon of the map read and built | A job, its tiles over `parallel_for` | None |
+| The textures no tile holds forgotten | A job | The arrays of textures |
+| The tiles in sight and their levels, the camera and the bits of the horizon written, the bundle recorded when they change | Interface, the layer's `prepare` and `draw` | The scene, in `prepare`; the views of the arrays as published, briefly |
 
 #### Tests
 
