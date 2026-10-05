@@ -14,6 +14,8 @@ pub use glam;
 pub use log;
 /// zlib, for the files of the client's archives.
 pub use miniz_oxide;
+/// The dialogs of the system, to choose a file or a folder.
+pub use rfd;
 pub use serde;
 pub use serde_json;
 /// Lua 5.1 (`libs/lua`), part of the runtime.

@@ -2104,6 +2104,10 @@ Second part (9.1b), the FileDataIDs, the DB2 and the service `formats`:
   another layout and damaged files refused); the services before and after the client opens; the
   client's own tables when `UNIWOW_CLIENT` names it. Each of 31 changes made on purpose to the
   readers and the services made a test fail.
+- At the user's request, *Open* shows the folder picker of Windows, which starts in the folder
+  shown, and opens the client when a folder is chosen; cancelled, it changes nothing. The picker
+  waits for the user on a job, the interface going on meanwhile, *Open* greyed until it closes.
+  The runtime re-exports `rfd` for it, which adds no other crate to the runtime.
 - Kept for later, from the review of the first part: an index of the files by folder, for
   `files_under`, when the browser of files needs it. The DBC the next steps need come with them.
 
@@ -2114,6 +2118,7 @@ Where the work of the second part is done:
 | The tables of paths read | The job merging the lists, a thread of its own per table | None |
 | A FileDataID turned into a path | The thread calling `path_of`, any | The state of the service, to take the client; none while reading |
 | A DBC read and its rows made | The first thread asking for it; the others asking meanwhile wait | The cell of the table (`OnceLock`), until it is read |
+| The folder picker shown | A job of the pool, while the user chooses | None |
 
 #### Tests
 

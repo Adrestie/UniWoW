@@ -2,8 +2,8 @@
 //! WarcraftXL adds, read from any thread at once through the service `vfs`, which also turns a
 //! FileDataID into a path as WarcraftXL does; their formats parsed through the service `formats`.
 //! The archives are opened by jobs of the pool, one each, their lists merged and the tables of
-//! paths read by another; the interface thread only hands the client over. Its panel sets the
-//! folder of the client and says how far its files are.
+//! paths read by another; the interface thread only hands the client over. Its panel chooses the
+//! folder of the client in the folder picker of the system and says how far its files are.
 
 mod chain;
 mod db2;
@@ -20,7 +20,7 @@ use std::sync::{Arc, RwLock};
 
 use uniwow_api::formats::{self, AreaRecord, CreatureDisplay, CreatureModel, Formats, MapRecord};
 use uniwow_api::vfs::{self, Vfs, VfsState};
-use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, Registrar, egui, log, serde_json};
+use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, Registrar, egui, log, rfd, serde_json};
 
 use chain::{Chain, Source};
 use db2::FileIds;
@@ -152,10 +152,12 @@ struct Opening {
 struct AssetsModule {
     files: Arc<Files>,
     opening: Opening,
-    /// The folder typed in the panel.
+    /// The folder shown in the panel.
     folder: String,
     /// The archives that could not be opened, with why.
     refused: Vec<String>,
+    /// The job showing the folder picker, while it is open.
+    picking: Option<JobId>,
 }
 
 impl AssetsModule {
@@ -220,10 +222,22 @@ impl Module for AssetsModule {
         ui.horizontal(|ui| {
             ui.label("Folder of the client");
             ui.add(egui::TextEdit::singleline(&mut self.folder).desired_width(360.0));
-            if ui.button("Open").clicked() {
-                let folder = self.folder.trim().to_owned();
-                ctx.set_setting(CLIENT_FOLDER, serde_json::json!(folder));
-                self.open(&PathBuf::from(folder), ctx);
+            // The picker waits for the user on a job, the interface going on meanwhile.
+            if ui
+                .add_enabled(self.picking.is_none(), egui::Button::new("Open"))
+                .clicked()
+            {
+                // The picker of Windows starts in a folder only when its separators are its own.
+                let start = PathBuf::from(self.folder.trim().replace('/', "\\"));
+                self.picking = Some(ctx.spawn("Choose the folder of the client", move |_| {
+                    let picker = rfd::FileDialog::new().set_title("Folder of the client");
+                    let picker = if start.is_dir() {
+                        picker.set_directory(&start)
+                    } else {
+                        picker
+                    };
+                    picker.pick_folder()
+                }));
             }
         });
         match self.files.state() {
@@ -245,7 +259,14 @@ impl Module for AssetsModule {
     }
 
     fn on_job(&mut self, job: JobId, outcome: JobOutcome, ctx: &mut Context) {
-        if let Some(place) = self.opening.jobs.remove(&job) {
+        if self.picking == Some(job) {
+            self.picking = None;
+            if let Some(Some(folder)) = outcome.take::<Option<PathBuf>>() {
+                self.folder = folder.display().to_string();
+                ctx.set_setting(CLIENT_FOLDER, serde_json::json!(self.folder));
+                self.open(&folder, ctx);
+            }
+        } else if let Some(place) = self.opening.jobs.remove(&job) {
             match outcome.take::<Result<Source, String>>() {
                 Some(Ok(source)) => self.opening.sources[place] = Some(source),
                 Some(Err(reason)) => {
