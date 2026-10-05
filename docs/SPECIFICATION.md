@@ -265,10 +265,10 @@ fills it, or *not planned* when no milestone does yet.
 | Sequences and their playback | `uniwow_api::sequence`; the objects `Sequence` and `Player` handed to the kernel with `Context::adopt_objects`, as the Timeline does | `Sequence`, `Player` | `uniwow::Sequence`, `uniwow::Player`; `Sequence`, `Player` | — milestones 10 and 11 |
 | The dopesheet | The service `dopesheet`; the objects `DopesheetView` and `CurveView`, as the Timeline does | `DopesheetView`; `CurveView` showing a `Sequence` | `uniwow::DopesheetView`; `DopesheetView` | — milestones 10 and 11 |
 | Tree, table, property grid | egui; the service `property-grid` | `TreeView`, `TableView`, with `set_cell`, `insert_rows`, `remove_rows`; `PropertyGrid` | `uniwow::TreeView`, `uniwow::TableView`, `uniwow::PropertyGrid`; `TreeView`, `TableView`, `PropertyGrid` | — milestones 10 and 11 |
-| Drawing in the 3D view | The service `viewport` and its layers | — not planned (an other 3D access of step 8.3) | — | — |
+| Drawing in the 3D view | The service `viewport`: its layers (`prepare`, a version to keep their bundle) and its frame signal (`wait_frame`) | — not planned (an other 3D access of step 8.3) | — | — |
 | The client's files, read from its archives, and their formats | The services `vfs` and `formats` of the module `assets` — step 9.1 | — not planned yet | — | — |
 | The live world: entities of the server around a point, their moves | Inside the module `live-world` | — step 9.3 (commands and events) | — step 9.3 | — milestones 10 and 11 |
-| Splitting work over the cores, `parallel_for` | `uniwow_api::parallel_for` — step 9.2a | — not planned; compiled modules run threads of their own (T7) | — | — |
+| Splitting work over the cores, `parallel_for` | `uniwow_api::parallel_for` (step 9.2a) | — not planned; compiled modules run threads of their own (T7) | — | — |
 | Picking in the 3D view, the selection shown in 3D | — designed in milestone 9, not built | — | — | — |
 | Editing the world: terrain, painting, objects and creatures placed | — designed in milestone 9, not built | — | — | — |
 | Unsaved changes, asked about when the editor closes | `Module::unsaved`, `save_unsaved` | — not planned | — | — |
@@ -395,7 +395,7 @@ Threads:
 | Id | Rule |
 |---|---|
 | T1 | The interface thread draws, applies the undoable commands and owns the state of each module. It never waits for slow work. |
-| T2 | The kernel keeps a pool of worker threads, one per processor core, for computations. `Context::spawn` runs a job there, with progress and cancel; its result comes back to the module on the interface thread. Work that waits, such as a script, runs with `Context::spawn_thread` on a thread of its own, so that waiting never holds a thread of the pool; it is otherwise a job like the others. A job of the pool never waits without a time limit, for instance in `next_event` without a timeout. A Jobs panel lists the jobs running. |
+| T2 | The kernel keeps a pool of worker threads, one per processor core, for computations. `Context::spawn` runs a job there, with progress and cancel; its result comes back to the module on the interface thread. Work that waits, such as a script, runs with `Context::spawn_thread` on a thread of its own, so that waiting never holds a thread of the pool; it is otherwise a job like the others. A job of the pool never waits without a time limit, for instance in `next_event` without a timeout; waiting in `parallel_for` for its slices, which the workers of the pool share with it, is not waiting without a limit. A Jobs panel lists the jobs running. |
 | T3 | Service interfaces are shared between threads (`Send + Sync`, held in an `Arc`), so that jobs, scripts and compiled modules call them directly. An interface tied to the interface thread says so explicitly. |
 | T4 | Each named command declares where it runs: on the interface thread when it changes a module's state (through an undoable command), or on the calling thread when it only reads or synchronises itself. The second kind answers at once, without waiting for a frame; called from the interface thread, a compiled module's command runs on the module's own thread and answers later. |
 | T5 | The GPU device and queue can be used from any thread: jobs create and upload buffers and textures; only drawing happens on the interface thread. |
@@ -426,8 +426,8 @@ Who runs what, and how the threads reach each other:
 | Thread | Owns | Runs |
 |---|---|---|
 | Interface | Every module's state, the history and the open groups, the views of the interface objects, the kernel's state | The `Module` methods of every module, the undoable commands, Undo and Redo, the requests of the queue, the drawing |
-| Worker of the pool | Nothing | Jobs of `Context::spawn` (T2); the sorts of large tables of the interface objects |
-| Thread of its own | Nothing | Scripts and jobs that wait (`Context::spawn_thread`) |
+| Worker of the pool | Nothing | Jobs of `Context::spawn` (T2); the sorts of large tables of the interface objects; the slices of `parallel_for`, after any job waiting |
+| Thread of its own | Nothing | Scripts and jobs that wait (`Context::spawn_thread`), among them the threads of modules waiting for the frame signal of the viewport |
 | Thread of a compiled module | The module's data, by its own rules | Its slots, paintings and `apply_change`, and its commands called from the interface thread |
 | Any thread | — | Commands running on the caller (T4), the reading and writing of animatable properties, the C functions (T7) |
 
@@ -439,7 +439,7 @@ Shared state and locks:
 | Events and failures from other threads | Lock of the bridge | Pushed by any thread, taken by the interface thread at each frame |
 | Subscriptions | Lock of the bridge, then one queue per subscription | Delivered by the interface thread, read by the subscriber's thread |
 | Interface objects of a compiled module | One lock per module | The interface thread while it draws them, any thread in the C functions. Never held while module code runs: slots, paintings and replies are called once it is released. In C++ and C#, the lock of the classes' connections is taken before it, never after |
-| Queue of the pool | One lock | Released before a job runs |
+| Queues of the pool: the jobs and the kernel's work, then the slices | One lock | Released before a job or a slice runs; the count of jobs waiting is read without it between two slices |
 
 No lock is held while the kernel calls a module.
 
@@ -471,9 +471,9 @@ milestone 9 takes up those that concern it.
   all of it, and the start grows with the number of modules.
 - The files of the Timeline: listed, read, parsed and written on the interface thread when a
   sequence is opened or saved; a large sequence would freeze the editor while it loads or saves.
-- The 3D view: each layer records its render bundle again at every frame on the interface thread,
-  and creates its GPU resources there when it first draws; large data (terrain, models) uploaded
-  that way would stall frames.
+- The 3D view: a layer without a version records its render bundle again at every frame on the
+  interface thread (since step 9.2a, a layer with one keeps it), and creates its GPU resources
+  there when it first draws; large data (terrain, models) uploaded that way would stall frames.
 
 ---
 
@@ -2133,6 +2133,42 @@ Where the work of the second part is done:
 | A FileDataID turned into a path | The thread calling `path_of`, any | The state of the service, to take the client; none while reading |
 | A DBC read and its rows made | The first thread asking for it; the others asking meanwhile wait | The cell of the table (`OnceLock`), until it is read |
 | The folder picker shown | A thread of its own (T2), while the user chooses | None |
+
+Step 9.2a, the additions to the core:
+
+- `uniwow_api::parallel_for(count, slice, work)`: `work` over `0..count` in slices of `slice`
+  indices, on the workers of the pool and the calling thread, which takes slices while it waits
+  and nothing else; `uniwow_api::parallel::Workers` gives the same on a pool of one's own, as the
+  kernel's tests do. The kernel sets the workers when it starts (`parallel::set_workers`); before,
+  the slices run on the calling thread. The work borrows the caller's data; once a slice panicked,
+  the slices left are skipped, and the first panic is resumed in the caller once every slice has
+  ended. A slice may call it in turn.
+- The pool has two queues under one lock: the jobs and the kernel's work, then the helpers of the
+  slices. A worker takes a job before any helper; a helper leaves between two slices when a job
+  waits, a count read without the lock. In the test, a job of another module started while every
+  thread ran slices of 10 ms ended within 100 ms.
+- The layers of the viewport: `Layer::prepare(gpu, view)`, run at each frame before any bundle is
+  drawn, and `Layer::version()`, none by default. A layer with a version keeps its bundle while the
+  version stays the same; it is recorded again when the version changes or when the device
+  changes, the device of the bundles kept being compared at each frame. `prepare` and `version`
+  run inside a validation error scope and `catch_unwind`: a layer failing there is removed and its
+  module reported. The cube and the faulty sample have no version: recorded at every frame, as
+  before.
+- The frame signal: `Viewport::wait_frame(after, timeout)` gives the frame to come (`Frame`: its
+  number, from 1, and its time, estimated from an average of the frames before, a pause of more
+  than a second not counted) once its number is past `after`, waiting `MAX_FRAME_WAIT` (100 ms) at
+  most at a time. It is given after each submission of the view, so not while it is not drawn.
+- Tests: the slices cover every index once on several threads, and nest; a panic comes back once
+  every slice has ended, the slices left skipped; a job started while every thread runs slices
+  waits for about one slice; a bundle kept while its version stays, recorded again once it changes
+  or for a device created again, and a layer failing in `prepare` removed, on the software adapter
+  of Windows (WARP), skipped where there is none; the frame signal waking a waiting thread, never
+  holding it more than 100 ms, and the time of the frame to come. Each of 13 changes made on
+  purpose to `parallel_for`, the queues of the pool, the bundles kept and the frame signal made a
+  test fail; the comparison of devices in the drawing of the view, which no test draws, is checked
+  by reading.
+- Not in this step: the jobs that create and upload GPU resources (9.2). No layer uses a version
+  or the frame signal yet.
 
 #### Tests
 

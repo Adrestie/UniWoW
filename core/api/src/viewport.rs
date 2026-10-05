@@ -1,6 +1,7 @@
 //! Interface of the "viewport" service: a 3D view to which modules add their drawing.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::{ServiceKey, egui_wgpu, glam, wgpu};
 
@@ -19,6 +20,25 @@ pub trait Viewport: Send + Sync {
 
     /// Formats of the render target, for modules that build their pipelines ahead, in a job.
     fn target(&self) -> Target;
+
+    /// Waits for the frame signal of a frame after `after`, the number of the last one seen, for
+    /// `timeout` at most and never more than `MAX_FRAME_WAIT`, so that a waiting thread checks its
+    /// cancellation: the frame to come, or none. The signal is given once the viewport has
+    /// submitted a frame, so that what a thread writes then is drawn by the next one; it is not
+    /// given while the view is not drawn.
+    fn wait_frame(&self, after: u64, timeout: Duration) -> Option<Frame>;
+}
+
+/// The longest a thread waits for the frame signal at a time.
+pub const MAX_FRAME_WAIT: Duration = Duration::from_millis(100);
+
+/// The frame to come, as the frame signal gives it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frame {
+    /// Counted from 1, the first frame drawn.
+    pub number: u64,
+    /// Seconds since the viewport started, as `View::time`, estimated from the frames before.
+    pub time: f32,
 }
 
 /// Formats of the render target a layer draws into; its pipelines must match them.
@@ -45,6 +65,22 @@ pub struct View {
 
 /// Drawn on the interface thread, but may be created on any thread.
 pub trait Layer: Send {
+    /// Writes what the layer draws with the view of this frame, such as its buffers of camera and
+    /// instances, before any bundle is drawn, recording nothing. It runs at each frame, as `draw`
+    /// does, inside a validation error scope: a layer that panics or fails here is removed and its
+    /// module reported. Nothing by default.
+    fn prepare(&mut self, gpu: &egui_wgpu::RenderState, view: &View) {
+        let _ = (gpu, view);
+    }
+
+    /// The version of what the layer records: its bundle is kept from frame to frame while the
+    /// version stays the same, and recorded again when it changes, or when the device is created
+    /// again. None, by default, records it at every frame. A layer whose bundle is kept changes
+    /// what it draws through its buffers, written in `prepare`, or by a new version.
+    fn version(&self) -> Option<u64> {
+        None
+    }
+
     /// Records the layer's drawing into its own render bundle, created by the viewport with the
     /// formats and sample count of `target`; create pipelines lazily from `gpu.device` to match.
     ///

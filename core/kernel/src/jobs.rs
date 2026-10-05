@@ -1,9 +1,12 @@
-//! The pool of worker threads that runs the jobs of the modules (rule T2).
+//! The pool of worker threads that runs the jobs of the modules (rule T2), and the slices of
+//! their `parallel_for`: a worker takes a job, or the kernel's own work, before any slice.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
+use uniwow_api::parallel::{Helper, Workers};
 use uniwow_api::{Editor, JobContext, JobFn, JobId, JobOutcome, egui};
 
 use crate::guard::guarded_as;
@@ -38,8 +41,70 @@ pub struct Finished {
     pub outcome: JobOutcome,
 }
 
+/// What the workers take: the jobs and the kernel's own work first, then the helpers of the slices.
+#[derive(Default)]
+struct Waiting {
+    jobs: VecDeque<Task>,
+    helpers: VecDeque<Helper>,
+    /// Set when the pool is dropped: the workers end once nothing waits.
+    closed: bool,
+}
+
+#[derive(Default)]
+struct Queue {
+    waiting: Mutex<Waiting>,
+    ready: Condvar,
+    /// The jobs waiting, read without the lock by a worker between two slices.
+    jobs: AtomicUsize,
+}
+
+impl Queue {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Waiting> {
+        self.waiting.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Queues a job or the kernel's work; false once the pool is gone.
+    fn push_job(&self, task: Task) -> bool {
+        let mut waiting = self.lock();
+        if waiting.closed {
+            return false;
+        }
+        waiting.jobs.push_back(task);
+        self.jobs.fetch_add(1, Ordering::Release);
+        self.ready.notify_one();
+        true
+    }
+
+    /// Queues a helper of slices; dropped once the pool is gone, the caller doing the slices.
+    fn push_helper(&self, helper: Helper) {
+        let mut waiting = self.lock();
+        if !waiting.closed {
+            waiting.helpers.push_back(helper);
+            self.ready.notify_one();
+        }
+    }
+
+    /// What a worker runs: a job, else a helper; none once the pool is gone and nothing waits.
+    fn take(&self) -> Option<Result<Task, Helper>> {
+        let mut waiting = self.lock();
+        loop {
+            if let Some(task) = waiting.jobs.pop_front() {
+                self.jobs.fetch_sub(1, Ordering::Release);
+                return Some(Ok(task));
+            }
+            if let Some(helper) = waiting.helpers.pop_front() {
+                return Some(Err(helper));
+            }
+            if waiting.closed {
+                return None;
+            }
+            waiting = self.ready.wait(waiting).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
 pub struct Pool {
-    sender: mpsc::Sender<Task>,
+    queue: Arc<Queue>,
     threads: usize,
     finished: Arc<Mutex<Vec<Finished>>>,
     running: Vec<Running>,
@@ -51,21 +116,21 @@ pub struct Pool {
 }
 
 impl Pool {
-    /// Starts `threads` workers. They end with the process; a job running at exit is abandoned.
+    /// Starts `threads` workers. They end with the process, or once the pool is dropped and nothing
+    /// waits; a job running at exit is abandoned.
     pub fn new(threads: usize, wake: Option<egui::Context>, bridge: Option<Arc<Bridge>>) -> Self {
-        let (sender, receiver) = mpsc::channel::<Task>();
-        let receiver = Arc::new(Mutex::new(receiver));
+        let queue = Arc::new(Queue::default());
         for index in 0..threads {
-            let receiver = receiver.clone();
+            let queue = queue.clone();
             let spawned = std::thread::Builder::new()
                 .name(format!("uniwow-worker-{index}"))
                 .spawn(move || {
-                    loop {
-                        // The lock is released before the task runs.
-                        let task = receiver.lock().unwrap_or_else(|e| e.into_inner()).recv();
-                        match task {
+                    // The lock is released before the work runs.
+                    while let Some(work) = queue.take() {
+                        match work {
                             Ok(task) => task(),
-                            Err(_) => return,
+                            // Between two slices, a job waiting takes the worker back.
+                            Err(helper) => helper(&|| queue.jobs.load(Ordering::Acquire) > 0),
                         }
                     }
                 });
@@ -74,7 +139,7 @@ impl Pool {
             }
         }
         Self {
-            sender,
+            queue,
             threads,
             finished: Arc::default(),
             running: Vec::new(),
@@ -91,12 +156,21 @@ impl Pool {
     /// Runs work on the workers outside the jobs of the modules: the long work of the objects of
     /// the core, such as the sort of a large table.
     pub fn background(&self) -> uniwow_api::ui::Background {
-        let sender = self.sender.clone();
+        let queue = self.queue.clone();
         Arc::new(move |task| {
-            if sender.send(task).is_err() {
+            if !queue.push_job(task) {
                 uniwow_api::log::error!("the work of the objects could not be queued: no worker thread");
             }
         })
+    }
+
+    /// The workers, for the slices of `parallel_for`.
+    pub fn workers(&self) -> Workers {
+        let queue = self.queue.clone();
+        Workers {
+            threads: self.threads,
+            queue: Arc::new(move |helper| queue.push_helper(helper)),
+        }
     }
 
     pub fn running(&self) -> &[Running] {
@@ -167,7 +241,7 @@ impl Pool {
                     outcome: JobOutcome::Panicked(format!("its thread could not start: {error}")),
                 });
             }
-        } else if self.sender.send(task).is_err() {
+        } else if !self.queue.push_job(task) {
             uniwow_api::log::error!("job '{job_label}' of '{job_owner}' could not be queued: no worker thread");
         }
         id
@@ -198,9 +272,18 @@ impl Pool {
     }
 }
 
+impl Drop for Pool {
+    fn drop(&mut self) {
+        self.queue.lock().closed = true;
+        self.queue.ready.notify_all();
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Barrier};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier, Mutex};
     use std::time::{Duration, Instant};
 
     use uniwow_api::{CommandInfo, Editor, EditorBackend, JobOutcome, serde_json::Value};
@@ -390,6 +473,88 @@ mod tests {
         );
         pool.cancel_owner("notes");
         wait_for(&mut pool, 1);
+    }
+
+    #[test]
+    fn parallel_for_runs_every_index_once_on_several_threads_and_nests() {
+        let pool = Pool::new(4, None, None);
+        let workers = pool.workers();
+        let seen: Vec<AtomicUsize> = (0..1000).map(|_| AtomicUsize::new(0)).collect();
+        let threads = Mutex::new(std::collections::HashSet::new());
+        workers.parallel_for(1000, 7, |range| {
+            threads.lock().unwrap().insert(std::thread::current().id());
+            std::thread::sleep(Duration::from_micros(200));
+            for index in range {
+                seen[index].fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        assert!(seen.iter().all(|count| count.load(Ordering::Relaxed) == 1));
+        assert!(threads.lock().unwrap().len() > 1, "the workers took slices");
+        let total = AtomicUsize::new(0);
+        workers.parallel_for(10, 1, |outer| {
+            workers.parallel_for(10, 2, |inner| {
+                total.fetch_add(outer.len() * inner.len(), Ordering::Relaxed);
+            });
+        });
+        assert_eq!(total.load(Ordering::Relaxed), 100);
+    }
+
+    #[test]
+    fn a_panic_in_a_slice_comes_back_to_the_caller_once_every_slice_ended() {
+        let pool = Pool::new(3, None, None);
+        let workers = pool.workers();
+        let running = AtomicUsize::new(0);
+        let ran = AtomicUsize::new(0);
+        let caught = catch_unwind(AssertUnwindSafe(|| {
+            workers.parallel_for(40, 1, |range| {
+                ran.fetch_add(1, Ordering::SeqCst);
+                running.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(5));
+                running.fetch_sub(1, Ordering::SeqCst);
+                if range.start == 3 {
+                    panic!("slice 3 failed");
+                }
+            });
+        }));
+        assert_eq!(running.load(Ordering::SeqCst), 0, "no slice runs after the call");
+        assert!(
+            ran.load(Ordering::SeqCst) < 40,
+            "the slices left after the panic are skipped"
+        );
+        let payload = caught.expect_err("the panic comes back");
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"slice 3 failed"));
+    }
+
+    #[test]
+    fn a_job_started_while_every_thread_runs_slices_waits_for_one_slice() {
+        let mut pool = Pool::new(2, None, None);
+        let workers = pool.workers();
+        let slices = pool.spawn(
+            "terrain",
+            "slices",
+            Box::new(move |_| {
+                workers.parallel_for(100, 1, |_| std::thread::sleep(Duration::from_millis(10)));
+                Box::new(Instant::now())
+            }),
+            editor(),
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        let started = Instant::now();
+        let job = pool.spawn("notes", "add", Box::new(|_| Box::new(Instant::now())), editor());
+        let finished = wait_for(&mut pool, 2);
+        let ended = |id| {
+            finished
+                .iter()
+                .find(|f| f.id == id)
+                .and_then(|f| match &f.outcome {
+                    JobOutcome::Done(value) => value.downcast_ref::<Instant>().copied(),
+                    _ => None,
+                })
+                .expect("ended")
+        };
+        let waited = ended(job) - started;
+        assert!(waited < Duration::from_millis(100), "waited {waited:?}");
+        assert!(ended(job) < ended(slices), "the job ended before the slices");
     }
 
     #[test]
