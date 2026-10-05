@@ -5,7 +5,8 @@
 use std::sync::{Arc, OnceLock};
 
 use uniwow_api::formats::{
-    AreaRecord, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, GameObjectDisplay, HairGeoset, MapRecord,
+    AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, GameObjectDisplay, HairGeoset,
+    MapRecord,
 };
 
 use crate::chain::Chain;
@@ -97,6 +98,7 @@ pub struct Tables {
     hairs: Rows<HairGeoset>,
     facial_hairs: Rows<FacialHair>,
     objects: Rows<GameObjectDisplay>,
+    sections: Rows<CharSection>,
 }
 
 impl Tables {
@@ -114,6 +116,7 @@ impl Tables {
             hairs: OnceLock::new(),
             facial_hairs: OnceLock::new(),
             objects: OnceLock::new(),
+            sections: OnceLock::new(),
         }
     }
 
@@ -245,6 +248,32 @@ impl Tables {
         };
         self.objects
             .get_or_init(|| read(chain, "GameObjectDisplayInfo.dbc", 19, row, |object| object.id))
+            .clone()
+    }
+
+    pub fn char_sections(&self, chain: &Chain) -> Result<Arc<Vec<CharSection>>, String> {
+        let row = |dbc: &Dbc, row| {
+            Ok(CharSection {
+                race: dbc.u32(row, 1),
+                sex: dbc.u32(row, 2),
+                section: dbc.u32(row, 3),
+                textures: [dbc.string(row, 4)?, dbc.string(row, 5)?, dbc.string(row, 6)?],
+                variation: dbc.u32(row, 8),
+                colour: dbc.u32(row, 9),
+            })
+        };
+        self.sections
+            .get_or_init(|| {
+                read(chain, "CharSections.dbc", 10, row, |section| {
+                    (
+                        section.race,
+                        section.sex,
+                        section.section,
+                        section.variation,
+                        section.colour,
+                    )
+                })
+            })
             .clone()
     }
 }

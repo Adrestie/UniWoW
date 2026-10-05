@@ -18,10 +18,6 @@ use crate::mesh;
 use crate::model::{TILE, TileId};
 use crate::textures::SLOTS;
 
-/// The light of the sun, and the colour of the fog and the sky, until the lights of the map come.
-const SUN: [f32; 3] = [0.4, 0.3, 0.85];
-pub const FOG: [f32; 3] = [0.36, 0.43, 0.52];
-
 /// What the module hands to its layer: the tiles, the horizon and the map shown, and what its
 /// statistics say.
 #[derive(Default)]
@@ -71,7 +67,7 @@ pub fn tiles_away(eye: Vec3, bounds: [[f32; 3]; 2]) -> f32 {
 }
 
 /// The farthest corner of `map` from `eye`, on the ground.
-fn farthest(eye: Vec3, map: [[f32; 2]; 2]) -> f32 {
+pub fn farthest(eye: Vec3, map: [[f32; 2]; 2]) -> f32 {
     (0..4)
         .map(|corner| {
             let x = map[corner & 1][0] - eye.x;
@@ -79,6 +75,19 @@ fn farthest(eye: Vec3, map: [[f32; 2]; 2]) -> f32 {
             (x * x + y * y).sqrt()
         })
         .fold(0.0, f32::max)
+}
+
+/// The camera of the shaders: the view, the sun and the fog of `view`.
+pub fn camera_values(view: &View) -> [f32; CAMERA] {
+    let mut values = [0f32; CAMERA];
+    values[..16].copy_from_slice(&view.view_proj.to_cols_array());
+    values[16..19].copy_from_slice(&view.sun.direction);
+    values[20..23].copy_from_slice(&view.sun.colour);
+    values[24..27].copy_from_slice(&view.sun.ambient);
+    values[28..31].copy_from_slice(&view.eye.to_array());
+    values[32..35].copy_from_slice(&view.fog.colour);
+    values[36..39].copy_from_slice(&[view.fog.start, view.fog.middle, view.fog.end]);
+    values
 }
 
 pub struct TerrainLayer {
@@ -191,15 +200,8 @@ impl Layer for TerrainLayer {
         }
         self.horizon = scene.horizon.clone();
         self.sky = scene.map.is_some();
-        let far = scene.map.map_or(scene.reach * 2.0, |map| farthest(view.eye, map));
-        let mut values = [0f32; CAMERA];
-        values[..16].copy_from_slice(&view.view_proj.to_cols_array());
-        values[16..19].copy_from_slice(&Vec3::from(SUN).normalize().to_array());
-        values[20..23].copy_from_slice(&view.eye.to_array());
-        values[23] = scene.reach;
-        values[24..27].copy_from_slice(&FOG);
-        values[27] = far;
-        gpu.queue.write_buffer(camera, 0, bytemuck::cast_slice(&values));
+        gpu.queue
+            .write_buffer(camera, 0, bytemuck::cast_slice(&camera_values(view)));
 
         let recorded = (
             scene.generation,

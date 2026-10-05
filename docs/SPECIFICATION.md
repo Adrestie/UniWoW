@@ -3358,6 +3358,116 @@ of displays (a creature, a character, a variant), the cache of textures shared, 
 shared, a module's instances cleared when it fails; on the software adapter, models drawn and read
 back as the markers were.
 
+Added by the review of the proposal, before the service is written:
+
+- **A set kept**: `place(owner, instances)` keeps `owner`'s set until it gives another, not for
+  the next frame only. An owner that moves its instances (`live-world`) gives them again at each
+  frame signal; one that does not (the doodads of the terrain in 9.6, tens of thousands) gives
+  them once, then when they change. **A partial update**, `change(owner, changed, removed)`: each
+  instance carries an id of its owner's; those given replace the ones of the same id or join the
+  set, the ids removed leave it.
+- **Groups per owner**: a group is an owner, a look and a tile, and its buffers are written by the
+  thread of its owner only: two modules placing the same look from two threads never write the
+  same buffer. Each owner has its buffer of instances, its groups ranges in it.
+- **A buffer never drawn half written**: a set whose groups keep their places in the buffer, as
+  moving instances do, is written in place, out of the lock; one whose groups change is written
+  into a new buffer created filled, then published with its groups under the lock, so that no
+  frame draws new groups over an old layout or an empty buffer (the lesson of step 9.3c). A
+  buffer grown is such a new buffer.
+- **The blended batches**: their order, the farthest first, changes as the camera moves; it is
+  sorted again only when two of them cross by more than a margin, and the statistics count the
+  bundles recorded a second.
+- Also needed by `display`, found while writing it: `CharSections`, for the texture of a
+  character's hair (kind 6), by its race, sex, style and colour.
+
+#### Step 9.4c1, as built
+
+- **The service `models`**, `uniwow_api::models`: `Look` (a model by its file, the textures its
+  display fills by kind, the submeshes it shows: all, the default ones, a creature's variants, a
+  character's hair and facial hair), `LookId`, `Instance` (an id of its owner's, a look, a
+  transform with its scale, an alpha), `LookState` (waiting, loading, drawn, refused with why),
+  and `Models`: `look`, `display`, `place`, `change`, `clear`, `state`, as proposed with the
+  additions of its review.
+- **`display`**, in the module (`src/display.rs`), from a job: a creature's look, its skins in
+  the folder of its model, its variants or all its submeshes, its scale that of the display times
+  that of its model, a scale of 0 in a table read as 1 (the client's table has some); a
+  character's look, whose display names the model of its race and sex itself, as all the 15,451
+  of the client do (`ChrRaces`, proposed, is not needed), its baked skin in
+  `Textures\BakedNpcTextures`, the texture of its hair from `CharSections` (its section 3 of its
+  style and colour, read in `formats` for this), its hair and facial hair from their tables.
+- **Loading** (`src/cache.rs`, `src/loading.rs`, `src/gpu.rs`), by jobs of the pool:
+  - the models and the textures in two caches shared between threads, by their file (a path in
+    lower case, `.mdx` and `.mdl` as `.m2`; a FileDataID by its number): a load in flight shared,
+    a value kept while a look holds it, read again once none does, one refused not read again, a
+    load that fails letting those waiting for it go;
+  - a model's vertices in a buffer (position, normal, first coordinates, 32 bytes), each skin's
+    indices in one of 16 bits when its vertices fit, 32 otherwise, made filled; a texture as BC
+    when the device takes it, filled by a copy the job submits, its levels larger than the device
+    takes left out (the terrain reduces none, against what the proposal said);
+  - a look's batches: those of the submeshes it shows (`formats`' rules) and seen at rest (alpha
+    times weight above 0), the planes of priority first, then their order in the skin; each with
+    its first texture (a file, the one its display fills, or white; one unreadable drawn white
+    and said once), its sampler by the wrapping of its texture, its colour at rest, its flags and
+    the radius of its model in a uniform; the pipelines of the states of the materials (blending,
+    two-sided, depth test, depth write) made by the first job needing each.
+- **The owners' sets** (`src/groups.rs`), as the additions say: kept until replaced; `change`
+  merges by id and groups the whole set again on the caller's thread, its cost growing with the
+  set, to measure with the doodads of step 9.6; written in place when the groups keep their
+  places, into a new buffer made filled and published with its groups under the lock otherwise;
+  none before the view has its device, the set kept and written by its next change.
+- **Steering**, on the interface thread at each frame while the view is drawn: the nearest group
+  of each look placed, by its bounds; the looks wanted within the distance the budget gives for
+  the loads, the nearest first, at most *cores − 1* loads at once; a load no longer wanted
+  cancelled; a look released, by a job that drops it and purges the caches, beyond the distance
+  kept or once no instance of it is placed. The demand told to the budget counts each model and
+  texture once, in the band of the nearest look holding it, a look wanted at the mean of those
+  held (1 MB before any).
+- **Drawing** (`src/layer.rs`, `src/models.wgsl`): a group drawn when in sight and within its
+  reach, at the skin of its distance in radii (limits 40, 80 and 160, kept 10 % past them); an
+  instance drawn up to `reach` times its radius times its scale, at least 1 yard (`reach`, the
+  setting of the panel, 100 by default, from 10 to 1,000), the vertex shader dropping those
+  beyond and those of alpha 0; the materials of step 9.4 but the second texture: the eight
+  blendings, the alpha key at 224/255 of the texel, unlit, unfogged, two-sided, without depth
+  test or write, a blended batch never writing the depth, mod and mod2x unlit, the fog black,
+  white or grey for the added, mod and mod2x ones; opaque and alpha-keyed batches first, then the
+  groups with blended ones, the farthest first, sorted again only when two cross by 2 yards or
+  5 % of their distance. Its statistics: draws, triangles, looks on the GPU and their MB,
+  loading, waiting, the models and textures held, those unreadable, the instances and groups in
+  sight, the levels, the bundles recorded in the last second.
+- **Fog and sun**: `View` has `fog` (its colour, start, middle and end) and `sun` (direction,
+  colour, ambient, those of the terrain before); the viewport holds the fog, the terrain sets it
+  by `Viewport::set_fog` at each frame from its reach as before (more than half at the reach of
+  its tiles, all at the farthest of the map); the terrain's shaders and the models' read them.
+- **The preview**: the panel takes a display and a count, *Show* and *Clear*, and the command
+  `models.preview` (`display`, `count`, 0 to clear); a job reads the display and its model, then
+  places the instances as the owner `models`, the first twice its height before the camera, its
+  middle at the height of the eye, facing it, a grid of its size between them, the alpha of the
+  display applied. Its size is that of its vertices at rest: the bounds of a model hold its
+  animations too (5.5 yards high for `HumanMale`).
+- **Measured on the user's machine** (RTX 3080 Ti): Marshal Dughan (display 1985) drawn at
+  Goldshire with his baked skin and tabard, his hair 3 and the moustache 302 of the rule group +
+  value, a goatee in his baked skin (captures `c1_dughan6_view.png`, `c1_dughan6_face.png` in the
+  work folder); an iron dwarf (display 25748) with its variants and its runes; a grid of 1,000
+  Marshal Dughans: 60 frames a second, 14 draws, 7.28 M triangles, the GPU 2.8 to 3.0 ms a frame,
+  the interface thread 0.15 to 0.23 ms, still or flying, the bundle recorded 0 times a second while
+  flying over them. The terrain looks as before under the fog of the view.
+- **Tests**: the cache (a load in flight shared by eight threads, a value read again once
+  released, one refused not read again, a failed load letting its waiter go); the grouping, the
+  partial update, the places kept; the service (ids, states, a set kept, an owner cleared, the
+  instances of a failed module cleared); the levels and their margin, the blended order and its
+  margin, the nearest point and the sight; the states and flags of the materials; the looks of a
+  creature, a variant, a character; the submeshes shown; the fog set given with the view; the
+  table `CharSections`, written by the test and the client's (10,060 rows, a hair for each of the
+  20 bodies); and on
+  the software adapter, a model drawn where its instance stands, lit and one-sided, from behind
+  when two-sided, an instance beyond its reach not drawn nor one beyond its own reach in a group
+  drawn, an alpha-keyed texel under 224 not drawn, a blended instance letting what is behind
+  through, the batches a look keeps, the buffers written in place or made new. Each of 16 changes
+  made on purpose to the module made a test fail.
+- Open: the facial hair, settled with the user's captures; a group's skin follows its nearest
+  instance, so that the far instances of a near group are drawn at the finest (7.28 M triangles
+  for the grid), to revisit with the doodads; the second texture and the combiners in 9.4c2.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

@@ -91,6 +91,19 @@ pub struct FacialHair {
     pub geosets: [u32; 5],
 }
 
+/// A section of a character's textures, `CharSections.dbc`: its skin (0), face (1), facial hair
+/// (2), hair (3) or underwear (4), of a variation and a colour.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CharSection {
+    pub race: u32,
+    pub sex: u32,
+    pub section: u32,
+    pub variation: u32,
+    pub colour: u32,
+    /// Its textures, by path; empty where none.
+    pub textures: [String; 3],
+}
+
 /// What a game object looks like, `GameObjectDisplayInfo.dbc`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GameObjectDisplay {
@@ -422,6 +435,8 @@ pub trait Formats: Send + Sync {
     fn facial_hairs(&self) -> Result<Arc<Vec<FacialHair>>, String>;
     /// The looks of game objects, by increasing id.
     fn game_object_displays(&self) -> Result<Arc<Vec<GameObjectDisplay>>, String>;
+    /// The sections of the characters' textures, by race, sex, section, variation and colour.
+    fn char_sections(&self) -> Result<Arc<Vec<CharSection>>, String>;
     /// The M2 `file`, with its skins: of 3.3.5a, its path as a table names it (`.mdx` and `.mdl`
     /// read as `.m2`) and its skins beside it; modern, its skins named by its chunk `SFID`.
     fn model(&self, file: &FileRef) -> Result<Model, String>;

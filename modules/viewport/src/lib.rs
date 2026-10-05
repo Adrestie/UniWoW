@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::hotkey::{Hotkey, HotkeyKind, Keys};
 use uniwow_api::serde_json::{Value, json};
-use uniwow_api::viewport::{self, Allowance, Demand, Frame, Label, Layer, MAX_FRAME_WAIT, Target, View};
+use uniwow_api::viewport::{self, Allowance, Demand, Fog, Frame, Label, Layer, MAX_FRAME_WAIT, Sun, Target, View};
 use uniwow_api::{
     Context, DockArea, Event, MODULE_FAILED_TOPIC, Module, PropertyKind, PropertyValue, Registrar, egui, egui_wgpu,
     wgpu,
@@ -113,8 +113,8 @@ fn point_argument(arguments: &Value, name: &str, reach: f64) -> Result<Vec3, Str
     }
 }
 
-/// The camera and frame drawn, the camera locked once.
-fn view(shared: &Camera, size: [u32; 2], time: f32) -> View {
+/// The camera and frame drawn, the camera locked once, with the fog set last.
+fn view(shared: &Camera, size: [u32; 2], time: f32, fog: Fog) -> View {
     let mut camera = camera(shared);
     let aspect = size[0] as f32 / size[1] as f32;
     // Kept for viewport.frame, which fits a box in the width as in the height.
@@ -124,6 +124,8 @@ fn view(shared: &Camera, size: [u32; 2], time: f32) -> View {
         eye: camera.eye(),
         size,
         time,
+        fog,
+        sun: Sun::default(),
     }
 }
 
@@ -250,6 +252,7 @@ struct Service {
     layers: Layers,
     frames: Arc<FrameSignal>,
     budget: Budget,
+    fog: Arc<Mutex<Fog>>,
 }
 
 impl viewport::Viewport for Service {
@@ -293,6 +296,10 @@ impl viewport::Viewport for Service {
         state.bytes = bytes;
         state.unsaved = Some(bytes);
         state.allow();
+    }
+
+    fn set_fog(&self, fog: Fog) {
+        *self.fog.lock().unwrap_or_else(|e| e.into_inner()) = fog;
     }
 }
 
@@ -393,6 +400,8 @@ struct ViewportModule {
     /// What the layers wrote over the view at the last frame, with the transform it was drawn with.
     labels: (Mat4, Vec<Label>),
     budget: Budget,
+    /// The fog the layers draw with, as the terrain sets it.
+    fog: Arc<Mutex<Fog>>,
 }
 
 impl Default for ViewportModule {
@@ -416,6 +425,7 @@ impl Default for ViewportModule {
             show_stats: false,
             labels: (Mat4::IDENTITY, Vec::new()),
             budget: Arc::default(),
+            fog: Arc::default(),
         }
     }
 }
@@ -426,6 +436,7 @@ impl Module for ViewportModule {
             layers: self.layers.clone(),
             frames: self.frames.clone(),
             budget: self.budget.clone(),
+            fog: self.fog.clone(),
         });
         reg.panel("view", "3D View", DockArea::Center)
             .provide(viewport::SERVICE, service)
@@ -688,7 +699,12 @@ impl ViewportModule {
     }
 
     fn render(&mut self, gpu: &egui_wgpu::RenderState, size: [u32; 2], ctx: &mut Context) {
-        let view = view(&self.camera, size, self.start.elapsed().as_secs_f32());
+        let view = view(
+            &self.camera,
+            size,
+            self.start.elapsed().as_secs_f32(),
+            *self.fog.lock().unwrap_or_else(|e| e.into_inner()),
+        );
         let new_device = self.device.as_ref() != Some(&gpu.device);
         if new_device {
             self.device = Some(gpu.device.clone());
@@ -1100,7 +1116,7 @@ mod tests {
         every.version.store(u64::MAX, Ordering::Relaxed);
         add(&layers, "terrain", &kept, false);
         add(&layers, "cube", &every, false);
-        let view = view(&Camera::default(), [64, 64], 0.0);
+        let view = view(&Camera::default(), [64, 64], 0.0, viewport::Fog::default());
         let frames = |new_device| {
             let (bundles, failures, timings, labels) = draw_layers(&layers, &gpu, &view, new_device);
             assert!(failures.is_empty(), "{failures:?}");
@@ -1146,6 +1162,32 @@ mod tests {
     }
 
     #[test]
+    fn the_fog_set_is_given_to_every_layer_with_the_view_of_the_next_frame() {
+        let fog = Arc::new(std::sync::Mutex::new(viewport::Fog::default()));
+        let service = super::Service {
+            layers: Layers::default(),
+            frames: Arc::default(),
+            budget: Default::default(),
+            fog: fog.clone(),
+        };
+        use uniwow_api::viewport::Viewport as _;
+        let set = viewport::Fog {
+            colour: [1.0, 0.0, 0.0],
+            start: 10.0,
+            middle: 20.0,
+            end: 30.0,
+        };
+        service.set_fog(set);
+        let view = super::view(&Camera::default(), [64, 64], 0.0, *fog.lock().unwrap());
+        assert_eq!(view.fog, set);
+        assert_eq!(
+            view.sun,
+            viewport::Sun::default(),
+            "the sun of before, until the lights of the maps"
+        );
+    }
+
+    #[test]
     fn the_budget_of_the_view_is_half_the_memory_of_the_gpu_by_default_and_follows_what_is_told() {
         assert_eq!(super::default_budget(Some(12 << 30)), 6144, "a GPU of 12 GB");
         assert_eq!(super::default_budget(None), 1024, "not told");
@@ -1157,6 +1199,7 @@ mod tests {
             layers: Layers::default(),
             frames: Arc::default(),
             budget: shared.clone(),
+            fog: Arc::default(),
         };
         use uniwow_api::viewport::Viewport as _;
         service.set_budget(100 << 20);
@@ -1186,7 +1229,7 @@ mod tests {
     #[test]
     fn a_label_is_written_where_its_point_falls_in_the_view_and_not_behind_the_eye() {
         let shared = Camera::default();
-        let view = view(&shared, [200, 100], 0.0);
+        let view = view(&shared, [200, 100], 0.0, viewport::Fog::default());
         let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(200.0, 100.0));
         let target = camera(&shared).target();
         let centre = project(&view.view_proj, rect, target).expect("the point looked at");
@@ -1283,7 +1326,7 @@ mod tests {
     fn a_frame_locks_the_camera_once() {
         let shared = Camera::default();
         // A second lock while the first is held would never return.
-        let drawn = view(&shared, [640, 480], 0.0);
+        let drawn = view(&shared, [640, 480], 0.0, viewport::Fog::default());
         assert_eq!(drawn.eye, camera(&shared).eye());
     }
 

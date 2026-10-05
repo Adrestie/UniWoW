@@ -753,6 +753,23 @@ fn sample_tables() -> Vec<(&'static str, Vec<u8>)> {
             dbc(19, &[&[(0, Int(31)), (1, Text("World\\Generic\\Chest.mdx"))]]),
         ),
         (
+            "CharSections.dbc",
+            dbc(
+                10,
+                &[
+                    &[
+                        (0, Int(2)),
+                        (1, Int(1)),
+                        (3, Int(3)),
+                        (4, Text("Hair02_04.blp")),
+                        (8, Int(2)),
+                        (9, Int(4)),
+                    ],
+                    &[(0, Int(1)), (1, Int(1)), (3, Int(0)), (5, Text("Skin.blp"))],
+                ],
+            ),
+        ),
+        (
             "CreatureModelData.dbc",
             dbc(
                 28,
@@ -831,6 +848,23 @@ fn the_tables_of_3_3_5a_read_their_rows_in_the_client_s_locale() {
     );
     let object = &tables.game_object_displays(&chain).unwrap()[0];
     assert_eq!((object.id, object.path.as_str()), (31, "World\\Generic\\Chest.mdx"));
+    let sections = tables.char_sections(&chain).unwrap();
+    assert_eq!(
+        sections
+            .iter()
+            .map(|section| (
+                section.section,
+                section.variation,
+                section.colour,
+                section.textures.clone()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (0, 0, 0, [String::new(), "Skin.blp".to_owned(), String::new()]),
+            (3, 2, 4, ["Hair02_04.blp".to_owned(), String::new(), String::new()]),
+        ],
+        "by race, sex, section, variation and colour"
+    );
     assert_eq!(
         display.textures,
         ["WolfSkinGrey".to_owned(), String::new(), "WolfSkinBlack".to_owned()]
@@ -969,6 +1003,7 @@ fn the_client_s_tables_read_as_the_client_shows_them() {
     let hairs = tables.hair_geosets(&chain).unwrap();
     let facials = tables.facial_hairs(&chain).unwrap();
     let objects = tables.game_object_displays(&chain).unwrap();
+    let sections = tables.char_sections(&chain).unwrap();
     let read = start.elapsed();
     // The looks of characters the displays name, but a few; hairs and facial hairs for the 20 bodies.
     let named: Vec<_> = displays.iter().filter(|display| display.extra != 0).collect();
@@ -985,6 +1020,10 @@ fn the_client_s_tables_read_as_the_client_shows_them() {
         for sex in [0, 1] {
             assert!(hairs.iter().any(|hair| (hair.race, hair.sex) == (race, sex)));
             assert!(facials.iter().any(|facial| (facial.race, facial.sex) == (race, sex)));
+            // The texture of a hair, its section 3.
+            assert!(sections.iter().any(|section| {
+                (section.race, section.sex, section.section) == (race, sex, 3) && !section.textures[0].is_empty()
+            }));
         }
     }
     let kinds: Vec<&str> = objects
@@ -1044,7 +1083,7 @@ fn the_client_s_tables_read_as_the_client_shows_them() {
     let (ids, refused) = FileIds::load(&folder, &chain);
     eprintln!(
         "{locale}: {} maps, {} areas, {} looks, {} models, {} looks of characters, {} hairs, {} facial hairs, \
-         {} looks of objects read in {read:?}; {found} models found; {missing} of {} looks of characters named \
+         {} looks of objects, {} sections of characters read in {read:?}; {found} models found; {missing} of {} looks of characters named \
          missing; {} FileDataIDs named, refused {refused:?}; the map 0 is named {:?}",
         maps.len(),
         areas.len(),
@@ -1054,6 +1093,7 @@ fn the_client_s_tables_read_as_the_client_shows_them() {
         hairs.len(),
         facials.len(),
         objects.len(),
+        sections.len(),
         named.len(),
         ids.len(),
         map(0).name

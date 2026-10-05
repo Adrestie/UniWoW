@@ -1,0 +1,19 @@
+[package]
+name = "uniwow-module-models"
+description = "The M2 models other modules place in the 3D view through the service models: loaded once in jobs, drawn instanced"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+uniwow-api.workspace = true
+
+[package.metadata.uniwow]
+id = "models"
+name = "Models"
+category = "World"
+# Services the module cannot work without, and services it uses when present.
+requires = []
+uses = ["viewport", "formats"]

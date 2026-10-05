@@ -28,8 +28,8 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread::ThreadId;
 
 use uniwow_api::formats::{
-    self, AreaRecord, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef, Formats, GameObjectDisplay,
-    HairGeoset, MapRecord, Model, Texture, Tile, Wdl, Wdt,
+    self, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef, Formats,
+    GameObjectDisplay, HairGeoset, MapRecord, Model, Texture, Tile, Wdl, Wdt,
 };
 use uniwow_api::vfs::{self, Vfs, VfsState};
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, Registrar, egui, log, rfd, serde_json};
@@ -277,6 +277,12 @@ impl Formats for Files {
         self.check_thread("GameObjectDisplayInfo.dbc");
         let client = self.client()?;
         client.tables.game_object_displays(&client.chain)
+    }
+
+    fn char_sections(&self) -> Result<Arc<Vec<CharSection>>, String> {
+        self.check_thread("CharSections.dbc");
+        let client = self.client()?;
+        client.tables.char_sections(&client.chain)
     }
 
     fn model(&self, file: &FileRef) -> Result<Model, String> {

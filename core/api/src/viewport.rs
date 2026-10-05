@@ -38,6 +38,54 @@ pub trait Viewport: Send + Sync {
 
     /// Sets the budget of the view, in bytes; kept in the settings of the view.
     fn set_budget(&self, bytes: u64);
+
+    /// Sets the fog every layer draws with from the next frame, as the layer that knows how far the
+    /// world is drawn says: the terrain, by its reach.
+    fn set_fog(&self, fog: Fog);
+}
+
+/// The share of the fog at its middle distance.
+pub const NEAR_FOG: f32 = 0.55;
+
+/// The fog of the view, by the distance on the ground from the eye: none up to `start`, `NEAR_FOG`
+/// of it at `middle`, all of it from `end`; and its colour, that of the sky.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fog {
+    pub colour: [f32; 3],
+    pub start: f32,
+    pub middle: f32,
+    pub end: f32,
+}
+
+impl Default for Fog {
+    /// No fog within any map, until a layer sets it.
+    fn default() -> Self {
+        Self {
+            colour: [0.36, 0.43, 0.52],
+            start: 1.0e9,
+            middle: 2.0e9,
+            end: 4.0e9,
+        }
+    }
+}
+
+/// The light of the sun: the direction towards it, its colour, and the light everywhere.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sun {
+    pub direction: [f32; 3],
+    pub colour: [f32; 3],
+    pub ambient: [f32; 3],
+}
+
+impl Default for Sun {
+    /// The light the terrain had before the lights of the maps come.
+    fn default() -> Self {
+        Self {
+            direction: glam::Vec3::new(0.4, 0.3, 0.85).normalize().to_array(),
+            colour: [0.55; 3],
+            ambient: [0.45; 3],
+        }
+    }
 }
 
 /// The width of a band of distance of the budget, in yards: a quarter of a tile.
@@ -183,6 +231,8 @@ pub struct View {
     pub size: [u32; 2],
     /// Seconds since the viewport started.
     pub time: f32,
+    pub fog: Fog,
+    pub sun: Sun,
 }
 
 /// Drawn on the interface thread, but may be created on any thread.

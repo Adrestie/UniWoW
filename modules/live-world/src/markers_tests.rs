@@ -216,6 +216,8 @@ fn render(gpu: &egui_wgpu::RenderState, layer: &mut Markers, eye: Vec3, look: Ve
         eye,
         size: [64, 64],
         time: 0.0,
+        fog: Default::default(),
+        sun: Default::default(),
     };
     // Twice: the first frame makes the resources, which the second writes its camera to.
     let mut bundle = None;

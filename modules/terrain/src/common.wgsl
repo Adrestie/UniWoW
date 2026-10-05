@@ -1,28 +1,33 @@
-// What the shaders of the terrain share: the camera and the fog, until the lights of the map come.
+// What the shaders of the terrain share: the camera, the sun and the fog of the view.
 
 struct Camera {
     view_proj: mat4x4<f32>,
+    // The direction towards the sun, its colour, and the light everywhere.
     sun: vec4<f32>,
-    // The eye, and the reach of the tiles loaded around it, on the ground.
+    sun_colour: vec4<f32>,
+    ambient: vec4<f32>,
     eye: vec4<f32>,
-    // The colour of the fog and of the sky, and the farthest of the map from the eye, on the ground.
+    // The colour of the fog and of the sky; where it starts, its middle and where it covers all,
+    // on the ground.
+    fog_colour: vec4<f32>,
     fog: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
-// The fog by the distance on the ground, as the client hides its limits: half of it at the reach
-// of the tiles loaded, where the horizon starts, all of it at the farthest of the map.
+// The share of the fog at its middle.
+const NEAR_FOG: f32 = 0.55;
+
+// The fog by the distance on the ground, as the client hides its limits.
 fn fog_amount(position: vec3<f32>) -> f32 {
     let distance = length(position.xy - camera.eye.xy);
-    let reach = camera.eye.w;
-    return 0.55 * smoothstep(0.5 * reach, reach, distance)
-        + 0.45 * smoothstep(reach, max(camera.fog.w, reach * 1.01), distance);
+    return NEAR_FOG * smoothstep(camera.fog.x, camera.fog.y, distance)
+        + (1.0 - NEAR_FOG) * smoothstep(camera.fog.y, camera.fog.z, distance);
 }
 
 fn fogged(colour: vec3<f32>, position: vec3<f32>) -> vec3<f32> {
-    return mix(colour, camera.fog.rgb, fog_amount(position));
+    return mix(colour, camera.fog_colour.rgb, fog_amount(position));
 }
 
-fn light(normal: vec3<f32>) -> f32 {
-    return 0.45 + 0.55 * max(dot(normalize(normal), camera.sun.xyz), 0.0);
+fn light(normal: vec3<f32>) -> vec3<f32> {
+    return camera.ambient.rgb + camera.sun_colour.rgb * max(dot(normalize(normal), camera.sun.xyz), 0.0);
 }

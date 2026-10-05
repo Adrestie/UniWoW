@@ -22,7 +22,7 @@ const TILES_SHADER: &str = concat!(include_str!("common.wgsl"), include_str!("te
 const HORIZON_SHADER: &str = concat!(include_str!("common.wgsl"), include_str!("horizon.wgsl"));
 
 /// Floats of the shaders' `Camera`.
-pub const CAMERA: usize = 28;
+pub const CAMERA: usize = 40;
 
 /// What the tiles, the horizon and the sky share: the device, the layouts and the pipelines, the
 /// samplers, an empty array for the slots without one, and the arrays of textures.

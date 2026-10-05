@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use uniwow_api::formats::{
-    AreaRecord, Chunk, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef, Formats, GameObjectDisplay,
-    HairGeoset, Layer, MapRecord, Model, Texture, TextureFormat, Tile, Wdl, Wdt,
+    AreaRecord, CharSection, Chunk, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef, Formats,
+    GameObjectDisplay, HairGeoset, Layer, MapRecord, Model, Texture, TextureFormat, Tile, Wdl, Wdt,
 };
 use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::viewport::{self, Allowance, Layer as _, Target, View};
@@ -732,6 +732,9 @@ impl Formats for Fake {
     fn game_object_displays(&self) -> Result<Arc<Vec<GameObjectDisplay>>, String> {
         Err("no looks".to_owned())
     }
+    fn char_sections(&self) -> Result<Arc<Vec<CharSection>>, String> {
+        Err("no sections".to_owned())
+    }
     fn model(&self, _file: &FileRef) -> Result<Model, String> {
         Err("no model".to_owned())
     }
@@ -1027,6 +1030,8 @@ fn render(gpu: &egui_wgpu::RenderState, layer: &mut TerrainLayer, target: &Targe
         eye,
         size,
         time: 0.0,
+        fog: Default::default(),
+        sun: Default::default(),
     };
     layer.prepare(gpu, &view);
     let mut bundle = gpu

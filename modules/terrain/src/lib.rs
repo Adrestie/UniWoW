@@ -20,8 +20,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use uniwow_api::formats::{self, Formats, Wdt};
+use uniwow_api::glam::Vec3;
 use uniwow_api::vfs::{self, VfsState};
-use uniwow_api::viewport::{Allowance, Demand};
+use uniwow_api::viewport::{Allowance, Demand, Fog};
 use uniwow_api::{
     Context, DockArea, JobContext, JobId, JobOutcome, Module, PropertyValue, Registrar, egui, log, serde_json, viewport,
 };
@@ -415,6 +416,10 @@ impl TerrainModule {
         }
         let fixed = self.fixed();
         let ready: u64 = self.ready.iter().map(|(_, gpu)| gpu.bytes).sum();
+        let eye = match ctx.read_property("viewport/camera_position") {
+            Ok(PropertyValue::Vector([x, y, z])) => Some(Vec3::new(x as f32, y as f32, z as f32)),
+            _ => None,
+        };
         let mut scene = lock(&self.scene);
         let used = fixed + ready + scene.tiles.iter().map(|tile| tile.bytes).sum::<u64>();
         // The fog follows the reach the budget leaves.
@@ -424,6 +429,17 @@ impl TerrainModule {
         scene.reach = (reach + 0.5) * TILE;
         scene.bytes = used;
         scene.models = self.models_bytes;
+        // The fog of the view: more than half of it at the reach of the tiles loaded, where the
+        // horizon starts, all of it at the farthest of the map.
+        if let (Some(view), Some(eye)) = (&self.view, eye) {
+            let far = scene.map.map_or(scene.reach * 2.0, |map| layer::farthest(eye, map));
+            view.set_fog(Fog {
+                start: 0.5 * scene.reach,
+                middle: scene.reach,
+                end: far.max(scene.reach * 1.01),
+                ..Fog::default()
+            });
+        }
         scene.steering = start.elapsed();
     }
 

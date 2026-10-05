@@ -3517,6 +3517,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "uniwow-module-models"
+version = "0.1.0"
+dependencies = [
+ "uniwow-api",
+]
+
+[[package]]
 name = "uniwow-module-properties"
 version = "0.1.0"
 dependencies = [

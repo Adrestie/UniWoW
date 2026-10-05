@@ -40,7 +40,7 @@ fn vs_horizon(in: HorizonIn) -> HorizonOut {
 @fragment
 fn fs_horizon(in: HorizonOut) -> @location(0) vec4<f32> {
     let amount = max(fog_amount(in.world), in.fade);
-    return vec4<f32>(mix(GROUND * light(in.normal), camera.fog.rgb, amount), 1.0);
+    return vec4<f32>(mix(GROUND * light(in.normal), camera.fog_colour.rgb, amount), 1.0);
 }
 
 struct SkyOut {
@@ -59,5 +59,5 @@ fn vs_sky(@builtin(vertex_index) index: u32) -> SkyOut {
 
 @fragment
 fn fs_sky() -> @location(0) vec4<f32> {
-    return vec4<f32>(camera.fog.rgb, 1.0);
+    return vec4<f32>(camera.fog_colour.rgb, 1.0);
 }
