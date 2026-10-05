@@ -1967,7 +1967,11 @@ Each step is reviewed before the next one; the milestone is delivered once all a
 | 9.3a | The protocol, written down; the observer on the server, built in the user's AzerothCore and checked there with a small probe: the zone kept alive, its cost, the bytes a second in a city |
 | 9.3b | The editor's side: the client of the protocol in `libs/server-link`, tested against a fake server; the module `live-world`, its connection thread, its snapshot, its settings and states; the commands and events of L4 |
 | 9.3c | The entities as markers moving in real time, interpolated on the frame signal; accepted on the user's machine with the server running |
-| 9.4 | Still M2 models, of 3.3.5a and modern: from the display id to the model, its skin, its textures and its scale |
+| 9.4 | Still M2 models, of 3.3.5a and modern: from the display id to the model, its skin, its textures and its scale. In four parts (*Step 9.4, proposed*, below): |
+| 9.4a | The GPU budget of the view, shared, as designed in step 9.2f; the terrain on it |
+| 9.4b | Reading M2 and skins, of 3.3.5a and modern, in `assets`; the tables of the displays of creatures and game objects; checked over every model of the client |
+| 9.4c | The module `models` and its service: instances given by the modules, models loaded once by jobs, drawn instanced by model and batch, their levels of detail and their reach by size, on the shared budget |
+| 9.4d | The live world as models: creatures and game objects by their display, the markers kept for what has no model; accepted on the user's machine in a city |
 | 9.5 | M2 animations, of 3.3.5a and modern (`.anim` files): *Stand*, *Walk*, *Run* chosen by the movement received, on the animation thread |
 | 9.6 | Buildings (WMO, of 3.3.5a and modern), doodads and water |
 | 9.7 | Optional, proposed apart: light and sky (`Light.dbc`), the server's time of day |
@@ -2983,6 +2987,57 @@ The parts:
     window the neighbours of its ends, two points more a spline, rather than the editor estimating
     a yard back the way the entity heads (`initialOrientation` is not sent): the curve would be
     exact, the edges of a window included.
+
+#### Step 9.4, proposed
+
+What is there: `formats` reads `CreatureDisplayInfo` and `CreatureModelData` (step 9.1b), not yet
+the models; the verifications of step 9.1 found the reading of M2 of warcraft-rs wrong for 3.3.5a
+(the particles, ribbons, cameras and lights of version 264 described wrongly, the skins read empty)
+and two modern models (MD21) among the 23,155 of the user's client. The terrain keeps its own
+budget (step 9.2f), and *GPU memory* above designs the one the view will share. The markers of
+step 9.3c stand where the models will.
+
+- **9.4a, the shared budget.** The service `viewport` holds the one budget of the view, its setting
+  half the memory of the GPU's own by default (the terrain's `gpu_budget_mb` becomes it, read once
+  from the terrain's settings when the view's is not set). At each frame, on the interface thread,
+  each layer keeping resources on the GPU tells it what it takes outside its items and the bytes of
+  its items held and wanted by distance, in quarters of a tile up to 64 tiles; the service gives
+  back, at the next frame, the distance the loads fill 90 % of the budget to and the one all of it
+  is kept to, and the reach the budget leaves. The planner of the terrain (`loading::plan`) takes
+  those distances instead of computing them from its own budget; its tests and its behaviour at 64
+  (step 9.2f) are checked again, alone on the budget. The statistics of the view give the budget,
+  what each layer takes of it, and the reach left.
+- **9.4b, the models read.** In `assets`, the M2 of 3.3.5a (version 264) and their skins
+  (`00.skin` to `03.skin`): the parts of warcraft-rs copied and corrected where step 9.1 found
+  them wrong; the modern ones WarcraftXL loads (`MD21` with `SFID`, `TXID`), translated from
+  wow.export. `formats` gains a model as plain data: its vertices in the pose at rest, its skins
+  (indices, submeshes, batches with their texture and blending), its textures (a file, or a type
+  the display fills: the skins of a creature), its bounds; and the tables `GameObjectDisplayInfo`
+  and `CreatureDisplayInfoExtra` (the baked skin of a character's look). Bones and animations come
+  with step 9.5. Checked over every M2 of the client, as the terrain was over its tiles: how many
+  read, how many refused and why, the time; and over the two modern ones.
+- **9.4c, the module `models`.** Its service, in `core/api`: a module gives its instances (an id,
+  a model by its file, the textures a display fills, a transform) and takes them back; nothing of
+  the live world in it. A model is loaded once, by a job, whoever asks (a load in flight shared),
+  its textures by a cache shared between threads, its resources created and uploaded by the job
+  (T5), by copies a job submits where a texture may be drawn (the rule of step 9.2f). Drawn by the
+  rules of *Drawing many models*: a draw per model and batch for all its instances, the instances
+  in buffers written from a thread at the frame signal as the markers are; a skin by the distance,
+  changing past a margin; each instance drawn up to a distance by its size; opaque and alpha-tested
+  batches first, blended ones after, nearest last. On the shared budget: the models nearest kept,
+  the farthest given back, the statistics of the layer (draws, triangles, models, instances).
+- **9.4d, the live world as models.** `live-world` gives its creatures and game objects to `models`:
+  a creature by `CreatureDisplayInfo` (its model of `CreatureModelData`, its three skins, its scale
+  by both tables and by the entity); a character's look (`CreatureDisplayInfoExtra`) by its race's
+  model and its baked skin, without its equipment; a game object by `GameObjectDisplayInfo` when
+  its model is an M2 (a WMO waits for step 9.6). What has no model loaded, and the players, stay
+  markers; the names stay over all of them. Accepted on the user's machine, the worldserver of `E:`
+  started and stopped as for step 9.3a: Orgrimmar and Dalaran, the frames a second, the interface
+  thread, the draws, what the budget gives the terrain and the models.
+
+Risks, verified at the start of their part: how many M2 of the client the copy reads right (9.4b);
+how many distinct models and batches a city draws, and the draws it makes (9.4c, 9.4d); whether the
+terrain keeps its behaviour at 64 on the shared budget (9.4a).
 
 #### Tests
 
