@@ -299,6 +299,42 @@ impl TerrainModule {
         horizon + self.shared.as_ref().map_or(0, |shared| shared.textures.bytes())
     }
 
+    /// Takes the outcome of the job `job` if it loaded a tile: only the load the plan still waits
+    /// for counts. One cancelled once done, one of a kind no longer wanted or for a map left is
+    /// dropped, its model freed by a job.
+    fn tile_loaded(&mut self, job: JobId, outcome: JobOutcome) {
+        let Some((showing, tile, kind)) = self.jobs.remove(&job) else {
+            return;
+        };
+        if showing != self.showing || self.loading.get(&tile) != Some(&(job, kind)) {
+            if let Some(Ok(Some((model, _)))) = outcome.take::<Loaded>() {
+                self.dropped.extend(model);
+            }
+            return;
+        }
+        self.loading.remove(&tile);
+        let refusal = match outcome {
+            JobOutcome::Panicked(message) => Some(message),
+            JobOutcome::Cancelled => None,
+            outcome => match outcome.take::<Loaded>() {
+                Some(Ok(Some(loaded))) => {
+                    self.ready.push_back(loaded);
+                    None
+                }
+                Some(Err(reason)) => Some(reason),
+                _ => None,
+            },
+        };
+        if let Some(reason) = refusal {
+            log::warn!("the tile {} {} is not drawn: {reason}", tile.x, tile.y);
+            self.refused.insert(tile);
+            self.refusals.push_back(format!("Tile {} {}: {reason}", tile.x, tile.y));
+            if self.refusals.len() > REFUSALS {
+                self.refusals.pop_front();
+            }
+        }
+    }
+
     /// Keeps `model` as the model of the tile `id`, or none, counting what the models take.
     fn keep_model(&mut self, id: TileId, model: Option<TileModel>) {
         if let Some(model) = &model {
@@ -661,33 +697,8 @@ impl Module for TerrainModule {
                 Ok(_) => {}
                 Err(reason) => log::warn!("the horizon of the map is not drawn: {reason}"),
             }
-        } else if let Some((showing, tile, kind)) = self.jobs.remove(&job) {
-            if self.loading.get(&tile) == Some(&(job, kind)) {
-                self.loading.remove(&tile);
-            }
-            if showing != self.showing {
-                return;
-            }
-            let refusal = match outcome {
-                JobOutcome::Panicked(message) => Some(message),
-                JobOutcome::Cancelled => None,
-                outcome => match outcome.take::<Loaded>() {
-                    Some(Ok(Some(loaded))) => {
-                        self.ready.push_back(loaded);
-                        None
-                    }
-                    Some(Err(reason)) => Some(reason),
-                    _ => None,
-                },
-            };
-            if let Some(reason) = refusal {
-                log::warn!("the tile {} {} is not drawn: {reason}", tile.x, tile.y);
-                self.refused.insert(tile);
-                self.refusals.push_back(format!("Tile {} {}: {reason}", tile.x, tile.y));
-                if self.refusals.len() > REFUSALS {
-                    self.refusals.pop_front();
-                }
-            }
+        } else {
+            self.tile_loaded(job, outcome);
         }
     }
 }

@@ -13,7 +13,7 @@ use uniwow_api::formats::{
 };
 use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::viewport::{Layer as _, Target, View};
-use uniwow_api::{bytemuck, egui, egui_wgpu, wgpu};
+use uniwow_api::{JobId, JobOutcome, bytemuck, egui, egui_wgpu, wgpu};
 
 use crate::gpu::{self, Shared};
 use crate::horizon;
@@ -1228,4 +1228,52 @@ fn a_texture_refused_for_want_of_room_is_placed_once_room_is_made_and_one_unread
     assert!(shared.textures.get(&formats, &missing).is_none());
     assert_eq!(formats.stored.load(Ordering::Relaxed), reads, "not read again");
     assert_eq!(shared.textures.counts().unreadable, 1);
+}
+
+#[test]
+fn a_load_the_plan_no_longer_waits_for_is_dropped_once_done_its_model_freed_apart() {
+    let Some(gpu) = device() else {
+        eprintln!("skipped: no software adapter for a device");
+        return;
+    };
+    let shared = Shared::new(&gpu, &TARGET).unwrap();
+    let formats = Fake::default();
+    let tile = id(32, 32);
+    let built = || {
+        let model = TileModel::new(tile, crate::tests::tile());
+        let built = gpu::build_tile(&shared, &formats, &model, &|| false).unwrap().unwrap();
+        let loaded: crate::Loaded = Ok(Some((Some(model), built)));
+        JobOutcome::Done(Box::new(loaded))
+    };
+    let mut module = crate::TerrainModule::default();
+    let start = |module: &mut crate::TerrainModule, job, kind| {
+        module.loading.insert(tile, (JobId(job), kind));
+        module.jobs.insert(JobId(job), (module.showing, tile, kind));
+    };
+
+    // Cancelled by the plan, done meanwhile.
+    start(&mut module, 1, Kind::Full);
+    module.loading.remove(&tile);
+    module.tile_loaded(JobId(1), built());
+    assert!(module.ready.is_empty());
+    assert_eq!(module.dropped.len(), 1, "its model freed by a job");
+
+    // Full, done after the plan chose light: the light one is still waited for.
+    start(&mut module, 2, Kind::Full);
+    start(&mut module, 3, Kind::Light);
+    module.tile_loaded(JobId(2), built());
+    assert!(module.ready.is_empty());
+    assert_eq!(module.loading.get(&tile), Some(&(JobId(3), Kind::Light)));
+
+    // For a map left.
+    module.showing += 1;
+    module.tile_loaded(JobId(3), built());
+    assert!(module.ready.is_empty());
+    assert_eq!(module.dropped.len(), 3);
+
+    // The one waited for is handed over.
+    start(&mut module, 4, Kind::Full);
+    module.tile_loaded(JobId(4), built());
+    assert_eq!(module.ready.len(), 1);
+    assert!(module.loading.is_empty() && module.jobs.is_empty());
 }

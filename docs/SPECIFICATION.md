@@ -1817,7 +1817,9 @@ chunk made the frames late and a draw per tile left the interface thread nearly 
   holding a lock the interface thread takes: wgpu-core 30 holds the state of initialisation of the
   texture written while it takes the trackers of the device, a submission takes them the other way
   round, and the two lock each other (found in step 9.2f). A job fills a shared texture, an array
-  of textures of the models for instance, by a copy from a buffer of its own that it submits.
+  of textures of the models for instance, by a copy from a buffer of its own that it submits. The
+  lock is checked again in the sources of wgpu at each new version, and the work-around removed
+  once it is fixed.
 
 Additions to the core this milestone needs, specified and reviewed with step 9.2a:
 
@@ -2588,6 +2590,29 @@ all of Kalimdor at 64 did not fit 1.5 GB.
   starts above.
 - Not in this part: an occlusion on the GPU, kept for the models (*Drawing many models*); the
   budget shared by the view, designed above and built with 9.4.
+- After the review of step 9.2f:
+  - a load the plan no longer waits for, cancelled once done, of a kind no longer wanted or for a
+    map left, is dropped when it ends, its model freed by a job; only the load waited for is handed
+    over;
+  - the private memory of the process, measured at a distance of 64, the maps changed by the
+    panel, each measure once its tiles are loaded:
+
+    | Shown | Private | In memory |
+    |---|---|---|
+    | No map | 663 MB | 441 MB |
+    | Kalimdor, Northrend, Azeroth | 2,894, 3,179, 2,841 MB | 1,253, 1,258, 1,170 MB |
+    | Kalimdor, Northrend, Azeroth again | 2,982, 3,202, 2,871 MB | 1,315, 1,274, 1,193 MB |
+    | Kalimdor a third time | 2,984 MB | 1,310 MB |
+
+    It does not grow at each change of map: no leak. What it holds on Kalimdor, from the regions of
+    the process and the report of wgpu's allocator: 1,602 MB of pages write-combined, 158 MB of them
+    in memory, which is the memory of the GPU Windows charges to the process, the 1,600 MB of the
+    blocks of wgpu's allocator (8 blocks of 64 to 256 MB, 1,288 MB used in them; 1,614 MB dedicated
+    by the counters of Windows); then 1,242 MB of the heap, 1,150 MB in memory, the models of the
+    full tiles (556 MB) and the rest of the editor (366 MB before a map). The blocks, partly used,
+    are kept when the map changes: that part stays as the first map left it;
+  - left as the review allows: a texture waiting for room leaves the chunks of a tile already built
+    white until the tile is loaded again (none measured).
 
 Where the work of the terrain is done, since step 9.2f:
 
