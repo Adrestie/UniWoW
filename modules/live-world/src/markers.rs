@@ -140,28 +140,34 @@ struct State {
 }
 
 impl Drawing {
-    /// Writes `instances` for the next frame, the buffer grown when they no longer fit; those drawn
-    /// before and not now are given a size of 0.
+    /// Writes `instances` for the next frame; those drawn before and not now are given a size of 0.
+    /// A buffer grown, when they no longer fit, is made with them, then put in place: no frame
+    /// draws it empty. Only this thread writes the markers; the layer only reads them.
     pub fn write(&self, device: &wgpu::Device, queue: &wgpu::Queue, instances: &[Instance], labels: Vec<Label>) {
         let needed = instances.len() as u32;
-        let (buffer, before) = {
-            let mut state = lock(&self.state);
-            if state.buffer.is_none() || needed > state.capacity {
+        let (buffer, capacity, before) = {
+            let state = lock(&self.state);
+            (state.buffer.clone(), state.capacity, state.count)
+        };
+        let buffer = match buffer {
+            Some(buffer) if needed <= capacity => buffer,
+            _ => {
                 let capacity = needed.next_power_of_two().max(CAPACITY);
-                state.buffer = Some(Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+                let mut data = instances.to_vec();
+                data.resize(capacity as usize, Instance::default());
+                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("live-world markers"),
-                    size: u64::from(capacity) * size_of::<Instance>() as u64,
+                    contents: bytemuck::cast_slice(&data),
                     usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
-                    mapped_at_creation: false,
-                })));
+                });
+                let mut state = lock(&self.state);
+                state.buffer = Some(Arc::new(buffer));
                 state.capacity = capacity;
                 state.version += 1;
-                state.count = 0;
+                state.count = needed;
+                state.labels = labels;
+                return;
             }
-            let before = state.count;
-            state.count = needed;
-            state.labels = labels;
-            (state.buffer.clone().expect("made above"), before)
         };
         // Out of the lock: the layer never waits for the queue of the GPU.
         let mut data = instances.to_vec();
@@ -171,6 +177,9 @@ impl Drawing {
         if !data.is_empty() {
             queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&data));
         }
+        let mut state = lock(&self.state);
+        state.count = needed;
+        state.labels = labels;
     }
 
     pub fn eye(&self) -> Option<Vec3> {

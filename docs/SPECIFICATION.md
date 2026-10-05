@@ -2974,6 +2974,15 @@ The parts:
   player connected: over Orgrimmar, 548 to 567 markers and 48 names, the creatures walking from one
   capture to the next; 60 frames a second still and flying; the layer of `live-world` 0.02 ms on the
   interface thread, 0.07 at most, the view 0.21 to 0.23 ms; one draw.
+- After the review of step 9.3c (step 9.3 validated):
+  - a buffer of the markers grown is made with its markers, then put in place, so that no frame
+    draws it empty (by construction: the buffer is published only once filled; the test checks what
+    it holds once grown);
+  - point to revisit, when the protocol changes next: the observer could send the points of control
+    beyond each end of a spline, `getPoint(first() - 1)` and `getPoint(last() + 1)`, and for a
+    window the neighbours of its ends, two points more a spline, rather than the editor estimating
+    a yard back the way the entity heads (`initialOrientation` is not sent): the curve would be
+    exact, the edges of a window included.
 
 #### Tests
 

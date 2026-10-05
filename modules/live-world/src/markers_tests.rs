@@ -342,11 +342,20 @@ fn the_markers_are_written_by_their_thread_to_a_buffer_that_grows_and_drawn_in_o
     assert_eq!(layer.stats().draws, 1);
     assert_eq!(layer.stats().triangles, 8);
 
-    // 300 markers do not fit 256: a buffer twice as large, recorded again.
+    // 300 markers do not fit 256: a buffer twice as large, recorded again, made with its markers
+    // before any frame can draw it.
     let many = vec![marker; 300];
     drawing.write(&gpu.device, &gpu.queue, &many, Vec::new());
     assert_ne!(layer.version(), version);
     assert_eq!(layer.stats().bytes, 512 * size_of::<Instance>() as u64);
+    let grown: Vec<Instance> = bytemuck::cast_slice(&read_back(
+        &gpu,
+        &layer.buffer().unwrap(),
+        512 * size_of::<Instance>() as u64,
+    ))
+    .to_vec();
+    assert!(grown[..300].iter().all(|instance| *instance == marker));
+    assert!(grown[300..].iter().all(|instance| instance.size == 0.0));
 
     // Fewer again: those drawn before and not now have no size.
     drawing.write(&gpu.device, &gpu.queue, &[marker], Vec::new());
