@@ -4026,11 +4026,21 @@ submit.
   | The GPU | 1.61 to 2.21 ms a frame; the models drawing 0.52 to 0.96 ms | 1.43 to 3.10 ms; the models drawing 0.56 to 1.03 ms |
   | The pool | 47 to 50 models in arenas of 28 MB (18 used); 189 to 224 textures in 22 to 26 arrays, 189 to 224 layers held of 284 to 324 | 184 models in arenas of 55 to 75 MB (43 to 46 used); 599 to 608 textures in 33 arrays, 599 to 608 layers held of 756 to 760 |
 
-  The GPU of the machine was busier in these runs than before: the terrain, unchanged, drew in
-  1.18 ms what it drew in 0.80 in Orgrimmar, and from 0.76 to 2.13 ms in Dalaran with the same
-  draws. Before the fix of the edge above, with the GPU as in 9.4e1, the models drew in 0.46 to
-  0.61 ms still and 0.30 to 0.58 flying in Orgrimmar (9.4e1: 0.69 and 0.37 to 0.54), 0.38 to 0.65
-  in Dalaran, the frame 1.0 to 1.8 ms. The arrays reserve a quarter more layers than they hold in
+  The GPU stays at a low clock while it draws a view this light (P8 mostly, 270 to 430 MHz on
+  average of 2,145, read by `nvidia-smi` during the runs), and its times follow that clock from
+  one run to the next: the terrain, unchanged, drew the same tiles in 0.82 to 2.26 ms. Compared
+  in the same conditions, run after run (the pool, the path of 9.4c forced, the pool again; the
+  same clocks on average within each city), against the path of 9.4c:
+
+  | | Orgrimmar | Dalaran |
+  |---|---|---|
+  | The models on the GPU, still | 0.78 to 0.83 ms; 0.83 to 0.84 | 0.75 to 0.84 ms; 0.86 |
+  | The models on the GPU, flying | 0.48 to 0.95 ms; 0.47 to 0.93 | 0.22 to 0.89 ms; 0.16 to 0.95, the same share of the terrain's time |
+  | The view on the interface thread | 0.34 to 0.44 ms, 0.62 at most; 0.51 to 0.70, 1.15 at most | 0.61 to 0.83 ms, 1.34 at most; 1.48 to 2.16, 3.08 at most, once 9.13 |
+
+  The GPU draws the models from the pool as fast as on the path of 9.4c, a few hundredths of a
+  millisecond slower with few draws; the interface thread spends half as long. The arrays reserve
+  a quarter more layers than they hold in
   Dalaran (608 of 756): no `binding_array` needed. Seen the same on both paths, drawn from the
   pool and forced on that of 9.4c: the Orc Tent once fixed, and the white parts of some guards of
   Orgrimmar, which are not of this step.
