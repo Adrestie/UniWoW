@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use uniwow_api::glam::{Mat4, Vec3, Vec4};
 use uniwow_api::models::LookId;
-use uniwow_api::viewport::{Drawing, Layer, LayerStats, Target, View};
+use uniwow_api::viewport::{Drawing, Layer, LayerStats, Phase, Target, View};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
 use crate::animator::{Animated, AnimationStats};
@@ -529,6 +529,7 @@ impl Layer for ModelsLayer {
         _gpu: &egui_wgpu::RenderState,
         _target: &Target,
         _view: &View,
+        phase: Phase,
         bundle: &mut wgpu::RenderBundleEncoder<'a>,
     ) {
         let Some((_, camera)) = &self.camera else {
@@ -541,9 +542,13 @@ impl Layer for ModelsLayer {
             .enumerate()
             .map(|(index, group)| (group.key, index))
             .collect();
-        let opaque = self.drawn.iter().map(|group| (group, false));
-        let blended = self.order.iter().map(|key| (&self.drawn[at[key]], true));
-        for (group, pass) in opaque.chain(blended) {
+        let pass = phase == Phase::Blended;
+        let groups: Vec<&Drawn> = if pass {
+            self.order.iter().map(|key| &self.drawn[at[key]]).collect()
+        } else {
+            self.drawn.iter().collect()
+        };
+        for group in groups {
             let Ready::Own(look) = &*group.look else {
                 continue;
             };
@@ -572,6 +577,7 @@ impl Layer for ModelsLayer {
         _gpu: &egui_wgpu::RenderState,
         _target: &Target,
         _view: &View,
+        phase: Phase,
         pass: &mut wgpu::RenderPass<'_>,
     ) {
         let (Some((_, camera)), Some(pool)) = (&self.camera, self.pool()) else {
@@ -597,7 +603,8 @@ impl Layer for ModelsLayer {
             }
             _ => None,
         };
-        for blended in [false, true] {
+        let blended = phase == Phase::Blended;
+        {
             if let Some((choice, group, skin, vertices, indices)) = &pooled {
                 pass.set_bind_group(0, camera, &[]);
                 pass.set_bind_group(1, *group, &[]);

@@ -12,7 +12,7 @@ use uniwow_api::formats::{
     Formats, GameObjectDisplay, HairGeoset, Layer, MapRecord, Model, Texture, TextureFormat, Tile, Wdl, Wdt,
 };
 use uniwow_api::glam::{Mat4, Vec3};
-use uniwow_api::viewport::{self, Allowance, Layer as _, Stage, Target, View};
+use uniwow_api::viewport::{self, Allowance, Layer as _, Phase, Stage, Target, View};
 use uniwow_api::{JobId, JobOutcome, bytemuck, egui, egui_wgpu, wgpu};
 
 use crate::gpu::{self, Shared};
@@ -1028,6 +1028,18 @@ fn two_textures() -> Tile {
 /// What the layer draws seen from `eye` looking at `target`, into 64 × 64 pixels of RGBA, cleared to
 /// black: the pixels, a row after the other.
 fn render(gpu: &egui_wgpu::RenderState, layer: &mut TerrainLayer, target: &Target, eye: Vec3, look: Vec3) -> Vec<u8> {
+    render_in(gpu, layer, target, eye, look, &Phase::ALL)
+}
+
+/// What `render` draws, of the phases `phases` only.
+fn render_in(
+    gpu: &egui_wgpu::RenderState,
+    layer: &mut TerrainLayer,
+    target: &Target,
+    eye: Vec3,
+    look: Vec3,
+    phases: &[Phase],
+) -> Vec<u8> {
     let size = [64u32, 64];
     let view = View {
         view_proj: Mat4::perspective_infinite_reverse_rh(90f32.to_radians(), 1.0, 0.1)
@@ -1040,21 +1052,25 @@ fn render(gpu: &egui_wgpu::RenderState, layer: &mut TerrainLayer, target: &Targe
         sun: Default::default(),
     };
     layer.prepare(gpu, &view);
-    let mut bundle = gpu
-        .device
-        .create_render_bundle_encoder(&wgpu::RenderBundleEncoderDescriptor {
-            label: None,
-            color_formats: &[Some(target.color_format)],
-            depth_stencil: Some(wgpu::RenderBundleDepthStencil {
-                format: target.depth_format,
-                depth_read_only: false,
-                stencil_read_only: true,
-            }),
-            sample_count: 1,
-            multiview: None,
-        });
-    layer.draw(gpu, target, &view, &mut bundle);
-    let bundle = bundle.finish(&wgpu::RenderBundleDescriptor { label: None });
+    // A bundle for each phase, run in their order.
+    let mut bundles = Vec::new();
+    for phase in phases.iter().copied() {
+        let mut bundle = gpu
+            .device
+            .create_render_bundle_encoder(&wgpu::RenderBundleEncoderDescriptor {
+                label: None,
+                color_formats: &[Some(target.color_format)],
+                depth_stencil: Some(wgpu::RenderBundleDepthStencil {
+                    format: target.depth_format,
+                    depth_read_only: false,
+                    stencil_read_only: true,
+                }),
+                sample_count: 1,
+                multiview: None,
+            });
+        layer.draw(gpu, target, &view, phase, &mut bundle);
+        bundles.push(bundle.finish(&wgpu::RenderBundleDescriptor { label: None }));
+    }
     let texture = |format, usage| {
         gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: None,
@@ -1103,7 +1119,7 @@ fn render(gpu: &egui_wgpu::RenderState, layer: &mut TerrainLayer, target: &Targe
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.execute_bundles([&bundle]);
+        pass.execute_bundles(&bundles);
     }
     gpu.queue.submit([encoder.finish()]);
     read_layer(gpu, &colour, 0)
@@ -1212,6 +1228,17 @@ fn a_tile_is_one_draw_its_chunks_textured_from_two_arrays_and_the_horizon_beyond
     );
     let [_, _, blue, _, black] = counts(&sky);
     assert!(blue > 500 && black == 0, "sky {blue}, black {black}");
+    // The sky in the blended phase, where nothing opaque was drawn: none in the opaque one.
+    let opaque = render_in(
+        &gpu,
+        &mut layer,
+        &target,
+        Vec3::new(x, y, 50.0),
+        Vec3::new(x + 100.0, y, 60.0),
+        &[Phase::Opaque],
+    );
+    let [_, _, blue, _, black] = counts(&opaque);
+    assert!(blue == 0 && black > 500, "sky {blue}, black {black}");
     assert_eq!(layer.stats().draws, 3, "and the sky");
     assert_eq!(layer.stage(), Stage::Ground, "drawn with its sky before the scene");
 }

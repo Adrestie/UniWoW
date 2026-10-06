@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use uniwow_api::viewport::{self, Layer, Target, View};
+use uniwow_api::viewport::{self, Layer, Phase, Target, View};
 use uniwow_api::{Context, DockArea, Module, Registrar, bytemuck, egui, egui_wgpu, log, wgpu};
 
 const SHADER: &str = r#"
@@ -105,8 +105,13 @@ impl Layer for FaultyLayer {
         gpu: &egui_wgpu::RenderState,
         target: &Target,
         view: &View,
+        phase: Phase,
         bundle: &mut wgpu::RenderBundleEncoder<'a>,
     ) {
+        // Nothing blended.
+        if phase != Phase::Opaque {
+            return;
+        }
         let resources = &*self.gpu.get_or_insert_with(|| create(&gpu.device, target));
         gpu.queue.write_buffer(
             &resources.globals,

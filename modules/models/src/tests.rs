@@ -16,7 +16,7 @@ use uniwow_api::formats::{
 };
 use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::models::{Extent, Geosets, Instance, Look, LookId, LookState, Models, Motion};
-use uniwow_api::viewport::{Drawing, Layer, Target, View};
+use uniwow_api::viewport::{Drawing, Layer, Phase, Target, View};
 use uniwow_api::{Event, MODULE_FAILED_TOPIC, bytemuck, egui, egui_wgpu, serde_json, wgpu};
 
 use crate::cache::Cache;
@@ -808,23 +808,27 @@ pub fn render(bench: &mut Bench, eye: Vec3, look: Vec3) -> Vec<u8> {
     let in_pass = bench.layer.drawing() == Drawing::Pass;
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     bench.layer.compute(&gpu, &view, &mut encoder);
-    let mut bundle = gpu
-        .device
-        .create_render_bundle_encoder(&wgpu::RenderBundleEncoderDescriptor {
-            label: None,
-            color_formats: &[Some(TARGET.color_format)],
-            depth_stencil: Some(wgpu::RenderBundleDepthStencil {
-                format: TARGET.depth_format,
-                depth_read_only: false,
-                stencil_read_only: true,
-            }),
-            sample_count: 1,
-            multiview: None,
-        });
-    if !in_pass {
-        bench.layer.draw(&gpu, &TARGET, &view, &mut bundle);
+    // A bundle for each phase, run in their order with what the layer draws in the pass.
+    let mut bundles = Vec::new();
+    for phase in Phase::ALL {
+        let mut bundle = gpu
+            .device
+            .create_render_bundle_encoder(&wgpu::RenderBundleEncoderDescriptor {
+                label: None,
+                color_formats: &[Some(TARGET.color_format)],
+                depth_stencil: Some(wgpu::RenderBundleDepthStencil {
+                    format: TARGET.depth_format,
+                    depth_read_only: false,
+                    stencil_read_only: true,
+                }),
+                sample_count: 1,
+                multiview: None,
+            });
+        if !in_pass {
+            bench.layer.draw(&gpu, &TARGET, &view, phase, &mut bundle);
+        }
+        bundles.push(bundle.finish(&wgpu::RenderBundleDescriptor { label: None }));
     }
-    let bundle = bundle.finish(&wgpu::RenderBundleDescriptor { label: None });
     let texture = |format, usage| {
         gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: None,
@@ -876,9 +880,11 @@ pub fn render(bench: &mut Bench, eye: Vec3, look: Vec3) -> Vec<u8> {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.execute_bundles([&bundle]);
-        if in_pass {
-            bench.layer.draw_pass(&gpu, &TARGET, &view, &mut pass);
+        for (phase, bundle) in Phase::ALL.into_iter().zip(&bundles) {
+            pass.execute_bundles([bundle]);
+            if in_pass {
+                bench.layer.draw_pass(&gpu, &TARGET, &view, phase, &mut pass);
+            }
         }
     }
     encoder.copy_texture_to_buffer(

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
-use uniwow_api::viewport::{self, Allowance, LayerStats};
+use uniwow_api::viewport::{self, Allowance, LayerStats, Phase};
 use uniwow_api::wgpu;
 
 /// What the samples cover.
@@ -234,9 +234,23 @@ const MAPPED: u8 = 2;
 
 /// The layers whose computing and drawing a frame times apart, at most.
 pub const TIMED_LAYERS: usize = 16;
-/// The timestamps of a frame: its pass, then four for each layer timed (its computing begun and
-/// ended, its drawing begun and ended).
-const QUERIES: u32 = 2 + 4 * TIMED_LAYERS as u32;
+/// The timestamps of a frame: its pass, then six for each layer timed (its computing begun and
+/// ended, its drawing of each phase begun and ended).
+const QUERIES: u32 = 2 + PER_LAYER * TIMED_LAYERS as u32;
+const PER_LAYER: u32 = 6;
+
+/// The milliseconds of the pass of a frame from its timestamps `ticks`, of `period` nanoseconds,
+/// and of each of its `layers` layers timed: its computing, and its drawing in both phases.
+pub(crate) fn spans(ticks: &[u64], layers: usize, period: f64) -> (f64, Vec<(f64, f64)>) {
+    let span = |start: usize| ticks[start + 1].saturating_sub(ticks[start]) as f64 * period / 1e6;
+    let timed = (0..layers)
+        .map(|layer| {
+            let at = 2 + PER_LAYER as usize * layer;
+            (span(at), span(at + 2) + span(at + 4))
+        })
+        .collect();
+    (span(0), timed)
+}
 
 /// Times the frames of the view on the GPU: the pass by its timestamps at its start and its end,
 /// and, where the device writes timestamps inside encoders and passes, each layer's computing and
@@ -326,18 +340,19 @@ impl GpuTimer {
 
     /// Writes the beginning or the end of the computing of the layer `layer` into `encoder`.
     pub fn computing(&self, encoder: &mut wgpu::CommandEncoder, layer: u32, end: bool) {
-        encoder.write_timestamp(&self.set, 2 + 4 * layer + u32::from(end));
+        encoder.write_timestamp(&self.set, 2 + PER_LAYER * layer + u32::from(end));
     }
 
-    /// Writes the beginning or the end of the drawing of the layer `layer` into the pass.
-    pub fn drawing(&self, pass: &mut wgpu::RenderPass<'_>, layer: u32, end: bool) {
-        pass.write_timestamp(&self.set, 2 + 4 * layer + 2 + u32::from(end));
+    /// Writes the beginning or the end of the drawing of the layer `layer` in `phase` into the pass.
+    pub fn drawing(&self, pass: &mut wgpu::RenderPass<'_>, layer: u32, phase: Phase, end: bool) {
+        let phase = Phase::ALL.iter().position(|each| *each == phase).unwrap_or(0) as u32;
+        pass.write_timestamp(&self.set, 2 + PER_LAYER * layer + 2 + 2 * phase + u32::from(end));
     }
 
     /// After the pass: the timestamps written copied to the buffer of this frame.
     pub fn resolve(&self, encoder: &mut wgpu::CommandEncoder) {
         if let Some(current) = self.current {
-            let written = 2 + 4 * self.owners.len() as u32;
+            let written = 2 + PER_LAYER * self.owners.len() as u32;
             encoder.resolve_query_set(&self.set, 0..written, &self.resolve, 0);
             encoder.copy_buffer_to_buffer(
                 &self.resolve,
@@ -375,7 +390,7 @@ impl GpuTimer {
                 data.as_chunks::<8>()
                     .0
                     .iter()
-                    .take(2 + 4 * readback.owners.len())
+                    .take(2 + PER_LAYER as usize * readback.owners.len())
                     .map(|bytes| u64::from_le_bytes(*bytes))
                     .collect()
             });
@@ -384,14 +399,14 @@ impl GpuTimer {
             let Some(ticks) = ticks else {
                 continue;
             };
-            let span = |start: usize| ticks[start + 1].saturating_sub(ticks[start]) as f64 * self.period / 1e6;
+            let (total, layers) = spans(&ticks, readback.owners.len(), self.period);
             frames.push(GpuFrame {
-                total: span(0),
+                total,
                 layers: readback
                     .owners
                     .iter()
-                    .enumerate()
-                    .map(|(layer, owner)| (owner.clone(), span(2 + 4 * layer), span(4 + 4 * layer)))
+                    .zip(layers)
+                    .map(|(owner, (computing, drawing))| (owner.clone(), computing, drawing))
                     .collect(),
             });
         }

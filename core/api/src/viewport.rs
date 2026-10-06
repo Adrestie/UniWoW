@@ -248,9 +248,8 @@ pub enum Drawing {
     Pass,
 }
 
-/// When a layer is drawn among the others: the ground with its sky first, so that what the scene
-/// draws over them without writing the depth, such as a blended batch, is not drawn over again;
-/// then the scene. Layers of one stage are drawn in the order they were added.
+/// When a layer is drawn among the others in each phase: the ground first, then the scene. Layers
+/// of one stage are drawn in the order they were added.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Stage {
     /// The terrain and its sky.
@@ -258,6 +257,21 @@ pub enum Stage {
     /// What stands on the ground, by default.
     #[default]
     Scene,
+}
+
+/// The phases a frame is drawn in: what every layer draws opaque, writing the depth, then what
+/// every layer blends over it, so that a blended batch of a layer is drawn over the opaque ones of
+/// every other, whatever their order. The sky of the ground begins the blended phase, where
+/// nothing opaque is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    Opaque,
+    Blended,
+}
+
+impl Phase {
+    /// The phases, in the order they are drawn.
+    pub const ALL: [Phase; 2] = [Phase::Opaque, Phase::Blended];
 }
 
 /// Drawn on the interface thread, but may be created on any thread.
@@ -289,45 +303,49 @@ pub trait Layer: Send {
         Stage::Scene
     }
 
-    /// The version of what the layer records: its bundle is kept from frame to frame while the
+    /// The version of what the layer records: its bundles are kept from frame to frame while the
     /// version stays the same, and recorded again when it changes, or when the device is created
-    /// again. None, by default, records it at every frame. A layer whose bundle is kept changes
-    /// what it draws through its buffers, written in `prepare`, or by a new version.
+    /// again. None, by default, records them at every frame. A layer whose bundles are kept
+    /// changes what it draws through its buffers, written in `prepare`, or by a new version.
     fn version(&self) -> Option<u64> {
         None
     }
 
-    /// Records the layer's drawing into its own render bundle, created by the viewport with the
-    /// formats and sample count of `target`; create pipelines lazily from `gpu.device` to match.
-    /// Called for a layer drawing in a bundle; nothing by default.
+    /// Records what the layer draws in `phase` into its own render bundle of that phase, created by
+    /// the viewport with the formats and sample count of `target`; create pipelines lazily from
+    /// `gpu.device` to match. Called for a layer drawing in bundles, once for each phase; nothing
+    /// by default.
     ///
-    /// The viewport validates the bundle on its own: a layer that panics or records an invalid
+    /// The viewport validates the bundles on its own: a layer that panics or records an invalid
     /// command is removed and its module reported as failed, without affecting the others.
     fn draw<'a>(
         &'a mut self,
         gpu: &egui_wgpu::RenderState,
         target: &Target,
         view: &View,
+        phase: Phase,
         bundle: &mut wgpu::RenderBundleEncoder<'a>,
     ) {
-        let _ = (gpu, target, view, bundle);
+        let _ = (gpu, target, view, phase, bundle);
     }
 
-    /// Draws the layer in the pass of the view at each frame, for a layer drawing in the pass, in
-    /// the order of the layers, the bundles of the others run between. The pass is in no known
-    /// state: the layer before may have left its own, and running bundles resets it, so the layer
-    /// sets all it draws with (pipeline, bind groups, vertex and index buffers); a bundle never
-    /// sees what it leaves. A layer that panics here is removed and its module reported; a GPU
-    /// error in the pass, which the viewport learns only once the frame is finished, removes every
-    /// layer drawn in the pass that frame. Nothing by default.
+    /// Draws what the layer draws in `phase` in the pass of the view at each frame, for a layer
+    /// drawing in the pass, in the order of the layers, the bundles of the others run between. The
+    /// pass is in no known state: the layer before may have left its own, and running bundles
+    /// resets it, so the layer sets all it draws with (pipeline, bind groups, vertex and index
+    /// buffers); a bundle never sees what it leaves. A layer that panics here is removed and its
+    /// module reported, its other phase left; a GPU error in the pass, which the viewport learns
+    /// only once the frame is finished, removes every layer drawn in the pass that frame. Nothing
+    /// by default.
     fn draw_pass(
         &mut self,
         gpu: &egui_wgpu::RenderState,
         target: &Target,
         view: &View,
+        phase: Phase,
         pass: &mut wgpu::RenderPass<'_>,
     ) {
-        let _ = (gpu, target, view, pass);
+        let _ = (gpu, target, view, phase, pass);
     }
 
     /// What the layer drew with the view of the last frame, for the statistics of the view. Called

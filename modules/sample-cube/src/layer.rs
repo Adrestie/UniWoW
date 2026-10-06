@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use uniwow_api::glam::{Mat4, Vec3};
-use uniwow_api::viewport::{Layer, Target, View};
+use uniwow_api::viewport::{Layer, Phase, Target, View};
 use uniwow_api::wgpu::util::DeviceExt;
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
@@ -72,8 +72,13 @@ impl Layer for CubeLayer {
         gpu: &egui_wgpu::RenderState,
         _target: &Target,
         view: &View,
+        phase: Phase,
         bundle: &mut wgpu::RenderBundleEncoder<'a>,
     ) {
+        // Nothing blended.
+        if phase != Phase::Opaque {
+            return;
+        }
         if self.gpu.is_none() {
             self.gpu = lock(&self.incoming).take();
         }

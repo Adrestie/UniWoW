@@ -9,7 +9,7 @@ use uniwow_api::models::Motion;
 use uniwow_api::server_link::protocol::{
     CATMULL_ROM, CYCLIC, DEAD, Entity, GAME_MASTER, Kind, PathPoint, Spline, WALKING,
 };
-use uniwow_api::viewport::{Layer, Target, View};
+use uniwow_api::viewport::{Layer, Phase, Target, View};
 use uniwow_api::{bytemuck, egui, egui_wgpu, wgpu};
 
 use crate::markers::{self, Drawing, Instance, LABEL_REACH, LABELS, Markers, SIZE};
@@ -279,7 +279,7 @@ fn render(gpu: &egui_wgpu::RenderState, layer: &mut Markers, eye: Vec3, look: Ve
                 sample_count: 1,
                 multiview: None,
             });
-        layer.draw(gpu, &TARGET, &view, &mut encoder);
+        layer.draw(gpu, &TARGET, &view, Phase::Opaque, &mut encoder);
         bundle = Some(encoder.finish(&wgpu::RenderBundleDescriptor { label: None }));
     }
     let texture = |format, usage| {

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use uniwow_api::glam::{Mat4, Vec3, Vec4};
-use uniwow_api::viewport::{Layer, LayerStats, Stage, Target, View};
+use uniwow_api::viewport::{Layer, LayerStats, Phase, Stage, Target, View};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
 use crate::gpu::SLOTS;
@@ -259,6 +259,7 @@ impl Layer for TerrainLayer {
         _gpu: &egui_wgpu::RenderState,
         _target: &Target,
         _view: &View,
+        phase: Phase,
         bundle: &mut wgpu::RenderBundleEncoder<'a>,
     ) {
         let (Some(shared), Some((_, camera)), Some((_, mask)), Some((_, arrays))) =
@@ -266,6 +267,16 @@ impl Layer for TerrainLayer {
         else {
             return;
         };
+        // The ground first in each phase: the sky begins the blended one, where nothing opaque
+        // was drawn; the depth is still at infinity there only.
+        if phase == Phase::Blended {
+            if self.sky {
+                bundle.set_pipeline(&shared.sky_pipeline);
+                bundle.set_bind_group(0, camera, &[]);
+                bundle.draw(0..3, 0..1);
+            }
+            return;
+        }
         if !self.drawn.is_empty() {
             bundle.set_pipeline(&shared.pipeline);
             bundle.set_bind_group(0, camera, &[]);
@@ -284,12 +295,6 @@ impl Layer for TerrainLayer {
             bundle.set_vertex_buffer(0, horizon.vertices.slice(..));
             bundle.set_index_buffer(horizon.indices.slice(..), wgpu::IndexFormat::Uint32);
             bundle.draw_indexed(0..horizon.count, 0, 0..1);
-        }
-        // Last, where nothing was drawn: the depth is still at infinity there only.
-        if self.sky {
-            bundle.set_pipeline(&shared.sky_pipeline);
-            bundle.set_bind_group(0, camera, &[]);
-            bundle.draw(0..3, 0..1);
         }
     }
 

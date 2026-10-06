@@ -4641,6 +4641,33 @@ The plan and the decisions are validated, with these additions:
   two passes; and a point of computing between the passes in the interface of the layers. The cost
   of that cut alone is measured, so that the occlusion gains more than it costs.
 
+#### Step 9.6a, as built
+
+- **The phases** (`core/api`): `viewport::Phase`, the opaque then the blended. `Layer::draw` and
+  `Layer::draw_pass` take the phase: a layer draws, in each call, what it draws in that phase.
+- **The view** (`viewport`): it records two bundles for a layer drawing in bundles, one a phase,
+  kept together while its version stays; then in the pass, the grid, the opaque phase of every
+  layer, then the blended phase of every layer, by their stage within each, in the order they were
+  added within one. A layer that panics drawing in the first phase is not drawn in the second. The
+  GPU times each layer's drawing in both phases, six timestamps a layer.
+- **The layers**: the terrain draws its tiles and its horizon in the opaque phase, and its sky at
+  the beginning of the blended one, the ground drawn first there, where nothing opaque was drawn
+  (as the review of the proposal said, without a call of its own); the models their opaque states
+  then, in the blended phase, their blended ones, in the pool and on the path of 9.4c alike; the
+  markers of `live-world`, the cube and the faulty layer draw in the opaque phase only.
+- **Tests**, on the software adapter: half red blended, of a layer added first, in front of the
+  green opaque of a layer added after it, seen over it; behind it, hidden; the blended of the scene
+  over the ground and over the sky as in the review of 9.5c, the sky in the blended phase; the
+  terrain's sky absent from its opaque phase; a layer panicking in the first phase drawn once; a
+  layer timed drawing in both phases. Of 9 changes made on purpose to the view, its timer, the
+  terrain and the models, every one made a test fail.
+- **Accepted on the user's machine**, the worldserver of `E:` running, observed only, with the
+  script of 9.4d, run after run against the commit before (built apart): in Orgrimmar, the GPU at
+  210 to 225 MHz, the view on the interface thread 0.35 to 0.41 ms both, the frame on the GPU within
+  0.1 ms of the commit before (1.56 to 2.49 ms; the second run of 9.6a equal to it), the models
+  computing 0.40 to 0.44 ms and drawing 0.35 to 0.79 alike; in Dalaran, the GPU at 390 to 435 MHz,
+  the times as close within their noise. The two phases cost nothing that shows.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

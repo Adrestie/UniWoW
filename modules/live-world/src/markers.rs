@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::models::{Extent, Instance as Placed, LookId, Models};
 use uniwow_api::server_link::protocol::{DEAD, Entity, GAME_MASTER, Kind};
-use uniwow_api::viewport::{Handle, Label, Layer, LayerStats, MAX_FRAME_WAIT, Target, View};
+use uniwow_api::viewport::{Handle, Label, Layer, LayerStats, MAX_FRAME_WAIT, Phase, Target, View};
 use uniwow_api::wgpu::util::DeviceExt;
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
@@ -436,8 +436,13 @@ impl Layer for Markers {
         gpu: &egui_wgpu::RenderState,
         target: &Target,
         _view: &View,
+        phase: Phase,
         bundle: &mut wgpu::RenderBundleEncoder<'a>,
     ) {
+        // Nothing blended.
+        if phase != Phase::Opaque {
+            return;
+        }
         let resources = self.resources.get_or_insert_with(|| resources(&gpu.device, target));
         self.drawn = {
             let state = lock(&self.drawing.state);

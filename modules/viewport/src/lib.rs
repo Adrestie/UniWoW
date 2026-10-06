@@ -23,7 +23,7 @@ use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::hotkey::{Hotkey, HotkeyKind, Keys};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::viewport::{
-    self, Allowance, Demand, Drawing, Fog, Frame, Label, Layer, MAX_FRAME_WAIT, Sun, Target, View,
+    self, Allowance, Demand, Drawing, Fog, Frame, Label, Layer, MAX_FRAME_WAIT, Phase, Sun, Target, View,
 };
 use uniwow_api::{
     Context, DockArea, Event, MODULE_FAILED_TOPIC, Module, PropertyKind, PropertyValue, Registrar, egui, egui_wgpu,
@@ -55,7 +55,8 @@ const BACKGROUND: wgpu::Color = wgpu::Color {
 struct Entry {
     owner: String,
     layer: Box<dyn Layer>,
-    kept: Option<(u64, wgpu::RenderBundle)>,
+    /// Its bundles of the two phases, kept with the version they were recorded at.
+    kept: Option<(u64, [wgpu::RenderBundle; 2])>,
 }
 
 /// The layers, and the owners whose layers were removed while the list was out being drawn.
@@ -862,7 +863,8 @@ struct PassTargets<'a> {
 /// What a layer gives its frame: its bundle, or none for its drawing in the pass; what it computes;
 /// its number among the layers timed on the GPU; and what it cost.
 struct Prepared {
-    bundle: Option<wgpu::RenderBundle>,
+    /// Its bundles of the two phases, for a layer drawing in bundles.
+    bundles: Option<[wgpu::RenderBundle; 2]>,
     computed: Option<wgpu::CommandBuffer>,
     timed: Option<u32>,
     prepare: Duration,
@@ -887,10 +889,11 @@ fn project(view_proj: &Mat4, rect: egui::Rect, position: Vec3) -> Option<egui::P
 }
 
 /// Draws a frame: each layer prepared, its computing recorded into an encoder of its own and its
-/// bundle recorded, or kept for its version unless the device is `new_device`; then the pass into
-/// `targets`: `grid`, then the layers by their stage, in the order they were added within one,
-/// their bundles run or their drawing recorded in it; everything submitted, the computing first.
-/// The layers that panicked or failed are removed.
+/// bundles recorded, or kept for its version unless the device is `new_device`; then the pass into
+/// `targets`: `grid`, then in each phase, the opaque then the blended, the layers by their stage,
+/// in the order they were added within one, their bundles of the phase run or their drawing of the
+/// phase recorded in it; everything submitted, the computing first. The layers that panicked or
+/// failed are removed.
 fn draw_frame(
     layers: &Layers,
     gpu: &egui_wgpu::RenderState,
@@ -969,30 +972,36 @@ fn draw_frame(
         if let Some(grid) = grid {
             grid.draw(&mut pass);
         }
-        for ((entry, layer), panic) in entries.iter_mut().zip(&mut prepared).zip(&mut panicked) {
-            if let (Some(timer), Some(timed)) = (timer.as_deref(), layer.timed) {
-                timer.drawing(&mut pass, timed, false);
-            }
-            match &layer.bundle {
-                Some(bundle) => pass.execute_bundles([bundle]),
-                None => {
-                    let started = Instant::now();
-                    let drawn = catch_unwind(AssertUnwindSafe(|| {
-                        entry.layer.draw_pass(gpu, &TARGET, view, &mut pass);
-                    }));
-                    let took = started.elapsed();
-                    drawing_in_pass += took;
-                    layer.record = Some(took);
-                    if let Err(payload) = drawn {
-                        *panic = Some(format!(
-                            "its viewport layer panicked drawing in the pass: {}",
-                            panic_text(payload)
-                        ));
+        for (index, phase) in Phase::ALL.into_iter().enumerate() {
+            for ((entry, layer), panic) in entries.iter_mut().zip(&mut prepared).zip(&mut panicked) {
+                // A layer that panicked in the first phase is not drawn in the second.
+                if panic.is_some() {
+                    continue;
+                }
+                if let (Some(timer), Some(timed)) = (timer.as_deref(), layer.timed) {
+                    timer.drawing(&mut pass, timed, phase, false);
+                }
+                match &layer.bundles {
+                    Some(bundles) => pass.execute_bundles([&bundles[index]]),
+                    None => {
+                        let started = Instant::now();
+                        let drawn = catch_unwind(AssertUnwindSafe(|| {
+                            entry.layer.draw_pass(gpu, &TARGET, view, phase, &mut pass);
+                        }));
+                        let took = started.elapsed();
+                        drawing_in_pass += took;
+                        layer.record = Some(layer.record.unwrap_or_default() + took);
+                        if let Err(payload) = drawn {
+                            *panic = Some(format!(
+                                "its viewport layer panicked drawing in the pass: {}",
+                                panic_text(payload)
+                            ));
+                        }
                     }
                 }
-            }
-            if let (Some(timer), Some(timed)) = (timer.as_deref(), layer.timed) {
-                timer.drawing(&mut pass, timed, true);
+                if let (Some(timer), Some(timed)) = (timer.as_deref(), layer.timed) {
+                    timer.drawing(&mut pass, timed, phase, true);
+                }
             }
         }
     }
@@ -1035,7 +1044,7 @@ fn draw_frame(
     entries.retain_mut(|entry| {
         let (layer, panic) = (&prepared[index], panicked[index].take());
         index += 1;
-        let failure = panic.or_else(|| failed_pass.clone().filter(|_| layer.bundle.is_none()));
+        let failure = panic.or_else(|| failed_pass.clone().filter(|_| layer.bundles.is_none()));
         if let Some(message) = failure {
             failures.push((entry.owner.clone(), message));
             return false;
@@ -1102,24 +1111,27 @@ fn prepare_layer(
     if drawing == Drawing::Pass {
         entry.kept = None;
         return Ok(Prepared {
-            bundle: None,
+            bundles: None,
             computed: Some(computed),
             timed,
             prepare,
             record: None,
         });
     }
-    let (bundle, record) = match (version, &entry.kept) {
-        (Some(version), Some((kept, bundle))) if *kept == version => (bundle.clone(), None),
+    let (bundles, record) = match (version, &entry.kept) {
+        (Some(version), Some((kept, bundles))) if *kept == version => (bundles.clone(), None),
         _ => {
             let recording = Instant::now();
-            let bundle = record(&entry.owner, entry.layer.as_mut(), gpu, view)?;
-            entry.kept = version.map(|version| (version, bundle.clone()));
-            (bundle, Some(recording.elapsed()))
+            let bundles = [
+                record(&entry.owner, entry.layer.as_mut(), gpu, view, Phase::Opaque)?,
+                record(&entry.owner, entry.layer.as_mut(), gpu, view, Phase::Blended)?,
+            ];
+            entry.kept = version.map(|version| (version, bundles.clone()));
+            (bundles, Some(recording.elapsed()))
         }
     };
     Ok(Prepared {
-        bundle: Some(bundle),
+        bundles: Some(bundles),
         computed: Some(computed),
         timed,
         prepare,
@@ -1196,6 +1208,7 @@ fn record(
     layer: &mut dyn Layer,
     gpu: &egui_wgpu::RenderState,
     view: &View,
+    phase: Phase,
 ) -> Result<wgpu::RenderBundle, String> {
     let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut encoder = gpu
@@ -1215,7 +1228,7 @@ fn record(
     // Moved into the closure: the encoder borrows the layer's resources until it is finished.
     let drawn = catch_unwind(AssertUnwindSafe(move || {
         let layer = layer;
-        layer.draw(gpu, &TARGET, view, recording)
+        layer.draw(gpu, &TARGET, view, phase, recording)
     }));
     // wgpu 30 validates the recorded commands here and panics on an invalid one instead of
     // reporting it to the error scope, so the panic is caught too.
@@ -1263,7 +1276,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use uniwow_api::serde_json::json;
-    use uniwow_api::viewport::{self, Allowance, Drawing, Frame, Label, Layer, LayerStats, Stage, Target, View};
+    use uniwow_api::viewport::{self, Allowance, Drawing, Frame, Label, Layer, LayerStats, Phase, Stage, Target, View};
     use uniwow_api::{egui, egui_wgpu, wgpu};
 
     use uniwow_api::egui::{Event, Key, Modifiers, PointerButton, Pos2, vec2};
@@ -1336,9 +1349,13 @@ mod tests {
             _gpu: &egui_wgpu::RenderState,
             _target: &Target,
             _view: &View,
+            phase: Phase,
             _bundle: &mut wgpu::RenderBundleEncoder<'a>,
         ) {
-            self.counts.drawn.fetch_add(1, Ordering::Relaxed);
+            // Once a recording, of its two bundles.
+            if phase == Phase::Opaque {
+                self.counts.drawn.fetch_add(1, Ordering::Relaxed);
+            }
         }
 
         fn stats(&self) -> LayerStats {
@@ -1878,11 +1895,15 @@ fn cs_main() {
 
     /// A layer painting the whole view with one colour, in a bundle or in the pass; or with the colour
     /// its computing writes, in the same frame. At the depth 0.5, tested always and not written, its
-    /// colour replacing what is under it, in the scene; or as `at`, `deep` and `blended` say.
+    /// colour replacing what is under it, in the scene, in the opaque phase; or as `at`, `deep`,
+    /// `blended` and `in_phase` say.
     struct Painter {
         drawing: Drawing,
         colour: [f32; 4],
         stage: Stage,
+        phase: Phase,
+        /// How many times it was drawn in the pass, whatever the phase.
+        calls: Arc<AtomicUsize>,
         depth: (f32, bool, wgpu::CompareFunction),
         blended: bool,
         computes: bool,
@@ -1902,6 +1923,8 @@ fn cs_main() {
                 drawing,
                 colour,
                 stage: Stage::Scene,
+                phase: Phase::Opaque,
+                calls: Arc::default(),
                 depth: (0.5, false, wgpu::CompareFunction::Always),
                 blended: false,
                 computes: false,
@@ -1912,6 +1935,11 @@ fn cs_main() {
 
         fn at(mut self, stage: Stage) -> Self {
             self.stage = stage;
+            self
+        }
+
+        fn in_phase(mut self, phase: Phase) -> Self {
+            self.phase = phase;
             self
         }
 
@@ -2056,8 +2084,12 @@ fn cs_main() {
             gpu: &egui_wgpu::RenderState,
             _target: &Target,
             _view: &View,
+            phase: Phase,
             bundle: &mut wgpu::RenderBundleEncoder<'a>,
         ) {
+            if phase != self.phase {
+                return;
+            }
             let (pipeline, group, ..) = self.made(gpu);
             bundle.set_pipeline(pipeline);
             bundle.set_bind_group(0, group, &[]);
@@ -2069,8 +2101,13 @@ fn cs_main() {
             gpu: &egui_wgpu::RenderState,
             _target: &Target,
             _view: &View,
+            phase: Phase,
             pass: &mut wgpu::RenderPass<'_>,
         ) {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if phase != self.phase {
+                return;
+            }
             assert!(self.fault != Fault::PanicDrawing, "its draws could not be made");
             let fault = self.fault;
             let (pipeline, group, ..) = self.made(gpu);
@@ -2245,7 +2282,9 @@ fn cs_main() {
         let half_red = [1.0, 0.0, 0.0, 0.5];
         let greater = wgpu::CompareFunction::Greater;
         let ground = Painter::new(Drawing::Bundle, GREEN).deep(0.25, true, greater);
-        let sky = Painter::new(Drawing::Bundle, [0.0, 0.0, 1.0, 1.0]).deep(0.0, false, wgpu::CompareFunction::Equal);
+        let sky = Painter::new(Drawing::Bundle, [0.0, 0.0, 1.0, 1.0])
+            .deep(0.0, false, wgpu::CompareFunction::Equal)
+            .in_phase(Phase::Blended);
         for (under, channel) in [(ground, 1), (sky, 2)] {
             let layers = Layers::default();
             put(
@@ -2253,13 +2292,51 @@ fn cs_main() {
                 "models",
                 Painter::new(Drawing::Pass, half_red)
                     .deep(0.5, false, greater)
-                    .blended(),
+                    .blended()
+                    .in_phase(Phase::Blended),
             );
             put(&layers, "terrain", under.at(Stage::Ground));
             let drawn = targets.draw(&layers, &gpu, &view, false, None);
             assert!(drawn.failures.is_empty(), "{:?}", drawn.failures);
             let seen = targets.middle(&gpu);
             assert!(seen[0] > 100 && seen[channel] > 100, "both seen: {seen:?}");
+        }
+    }
+
+    #[test]
+    fn a_blended_batch_of_a_layer_is_drawn_over_the_opaque_ones_of_a_later_layer_and_hidden_behind() {
+        let Some(gpu) = gpu() else {
+            eprintln!("skipped: no software adapter for a device");
+            return;
+        };
+        let view = view(&Camera::default(), [8, 8], 0.0, viewport::Fog::default());
+        let targets = Targets::new(&gpu);
+        let greater = wgpu::CompareFunction::Greater;
+        // Half red blended, of a layer added first; green opaque, writing its depth at 0.5, of a
+        // layer added after it: in front of the green (nearer, 0.75), then behind it (0.25).
+        for (depth, both) in [(0.75, true), (0.25, false)] {
+            let layers = Layers::default();
+            put(
+                &layers,
+                "first",
+                Painter::new(Drawing::Bundle, [1.0, 0.0, 0.0, 0.5])
+                    .deep(depth, false, greater)
+                    .blended()
+                    .in_phase(Phase::Blended),
+            );
+            put(
+                &layers,
+                "second",
+                Painter::new(Drawing::Pass, GREEN).deep(0.5, true, greater),
+            );
+            let drawn = targets.draw(&layers, &gpu, &view, false, None);
+            assert!(drawn.failures.is_empty(), "{:?}", drawn.failures);
+            let seen = targets.middle(&gpu);
+            if both {
+                assert!(seen[0] > 100 && seen[1] > 100, "seen over the green: {seen:?}");
+            } else {
+                assert_eq!(seen, [0, 255, 0, 255], "hidden behind it");
+            }
         }
     }
 
@@ -2325,8 +2402,13 @@ fn cs_main() {
         ] {
             let layers = Layers::default();
             put(&layers, "kept", Painter::new(Drawing::Bundle, GREEN));
-            put(&layers, "faulty", Painter::new(Drawing::Pass, RED).faulty(fault));
+            let faulty = Painter::new(Drawing::Pass, RED).faulty(fault);
+            let calls = faulty.calls.clone();
+            put(&layers, "faulty", faulty);
             let drawn = targets.draw(&layers, &gpu, &view, false, None);
+            if fault == Fault::PanicDrawing {
+                assert_eq!(calls.load(Ordering::Relaxed), 1, "not drawn again in the blended phase");
+            }
             assert_eq!(drawn.failures.len(), 1, "{:?}", drawn.failures);
             assert_eq!(drawn.failures[0].0, "faulty");
             assert!(drawn.failures[0].1.contains(said), "{}", drawn.failures[0].1);
@@ -2336,6 +2418,14 @@ fn cs_main() {
             assert!(drawn.failures.is_empty(), "{:?}", drawn.failures);
             assert_eq!(targets.middle(&gpu), [0, 255, 0, 255], "the next frame drawn");
         }
+    }
+
+    #[test]
+    fn a_layer_is_timed_drawing_in_both_phases() {
+        // The pass, then a layer: its computing 2 ticks, its opaque drawing 3, its blended 5.
+        let ticks = [0, 100, 10, 12, 20, 23, 30, 35];
+        let (total, layers) = crate::stats::spans(&ticks, 1, 1e6);
+        assert_eq!((total, layers), (100.0, vec![(2.0, 8.0)]));
     }
 
     #[test]
