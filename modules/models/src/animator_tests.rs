@@ -4,12 +4,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use uniwow_api::bytemuck;
 use uniwow_api::formats::{
     Animation, Bone, FileRef, Interpolation, Keys, Model, ModelTextureSource, ModelVertex, Sequence, Track,
 };
 use uniwow_api::glam::{Mat4, Quat, Vec3};
-use uniwow_api::models::{Geosets, Instance, Look, Models, Motion};
+use uniwow_api::models::{Geosets, Instance, Look, LookId, Models, Motion};
+use uniwow_api::{JobOutcome, bytemuck};
 
 use crate::animator::{Animator, Playing, advance, choose, facing, scaled, start, wanted};
 use crate::gpu::{Vertex, moving_radius};
@@ -121,7 +121,7 @@ fn a_sequence_plays_at_the_speed_of_its_instance_and_picks_a_variation_again_at_
         sequence(4, 1000, 2.0, 0x7FFF, true),
     ]);
     let none = HashMap::new();
-    let mut playing = start(&animation, Motion::Walking(4.0), 7, &none).unwrap();
+    let mut playing = start(LookId(0), &animation, Motion::Walking(4.0), 7, &none).unwrap();
     playing.time = 0.0;
     advance(&mut playing, &animation, Motion::Walking(4.0), 100.0, 7, &none);
     assert_eq!(playing.time, 200.0, "twice as fast as its sequence");
@@ -134,7 +134,7 @@ fn a_sequence_plays_at_the_speed_of_its_instance_and_picks_a_variation_again_at_
     }
     assert_eq!(played, HashSet::from([1, 2]), "both variations");
     // Standing, at the pace of its sequence.
-    let mut standing = start(&animation, Motion::Standing, 7, &none).unwrap();
+    let mut standing = start(LookId(0), &animation, Motion::Standing, 7, &none).unwrap();
     let before = standing.time;
     advance(&mut standing, &animation, Motion::Standing, 100.0, 7, &none);
     assert_eq!(standing.time, (before + 100.0) % 1000.0);
@@ -146,12 +146,13 @@ fn a_new_motion_starts_its_sequence_blending_the_one_before_out_for_its_time_of_
     walk.blend = [150, 150];
     let animation = of(vec![sequence(0, 1000, 0.0, 0x7FFF, true), walk]);
     let none = HashMap::new();
-    let mut playing = start(&animation, Motion::Standing, 3, &none).unwrap();
+    let mut playing = start(LookId(0), &animation, Motion::Standing, 3, &none).unwrap();
     let stood = playing.time;
     advance(&mut playing, &animation, Motion::Walking(2.5), 50.0, 3, &none);
     assert_eq!(
         playing,
         Playing {
+            look: LookId(0),
             wanted: 4,
             sequence: 1,
             time: 50.0,
@@ -168,16 +169,35 @@ fn a_new_motion_starts_its_sequence_blending_the_one_before_out_for_its_time_of_
 }
 
 #[test]
+fn the_loops_of_any_length_are_counted_at_once() {
+    // A sequence of no length, held to a millisecond, played for a day and more.
+    let animation = of(vec![
+        sequence(0, 0, 0.0, 0x7FFF, true),
+        sequence(4, 1000, 2.5, 0x7FFF, true),
+    ]);
+    let none = HashMap::new();
+    let mut playing = start(LookId(0), &animation, Motion::Standing, 1, &none).unwrap();
+    playing.time = 0.0;
+    let started = std::time::Instant::now();
+    advance(&mut playing, &animation, Motion::Standing, 1e8, 1, &none);
+    assert_eq!((playing.loops, playing.time), (100_000_000, 0.0));
+    // Walking at no speed its sequence can count.
+    advance(&mut playing, &animation, Motion::Walking(f32::INFINITY), 10.0, 1, &none);
+    assert_eq!(playing.time, 0.0, "started again");
+    assert!(started.elapsed().as_secs_f32() < 1.0);
+}
+
+#[test]
 fn instances_start_apart_the_same_at_every_run() {
     let animation = of(vec![sequence(0, 1000, 0.0, 0x7FFF, true)]);
     let none = HashMap::new();
     let times: HashSet<u32> = (0..20)
-        .map(|id| start(&animation, Motion::Standing, id, &none).unwrap().time as u32)
+        .map(|id| start(LookId(0), &animation, Motion::Standing, id, &none).unwrap().time as u32)
         .collect();
     assert!(times.len() > 15, "{times:?}");
     assert_eq!(
-        start(&animation, Motion::Standing, 7, &none),
-        start(&animation, Motion::Standing, 7, &none)
+        start(LookId(0), &animation, Motion::Standing, 7, &none),
+        start(LookId(0), &animation, Motion::Standing, 7, &none)
     );
 }
 
@@ -497,4 +517,104 @@ fn a_billboard_faces_the_camera_whatever_the_turn_of_its_instance() {
     for (seen, wanted) in [(back, Vec3::NEG_Y), (left, Vec3::NEG_X), (up, Vec3::Z)] {
         assert!(seen.distance(wanted) < 1e-5, "{seen} for {wanted}");
     }
+}
+
+#[test]
+fn an_instance_whose_look_changes_while_it_blends_starts_again_in_its_new_model() {
+    // Its first model runs, then walks blending its run out; its second has no run.
+    let mut first = moving([0.0, 3.0, 0.0]);
+    first.animation.sequences[1].blend = [150, 150];
+    first.animation.sequences[2].blend = [150, 150];
+    let mut second = moving([0.0, 3.0, 0.0]);
+    second.animation.sequences.truncate(2);
+    let Some((mut pooled, mut animator)) = bench(&[("first.m2", first), ("second.m2", second)]) else {
+        return;
+    };
+    let at = |look, motion| Instance {
+        motion,
+        ..instance(1, look, Vec3::ZERO, 0.5)
+    };
+    pooled.bench.service.place("a", &[at(0, Motion::Moving(3.5))]);
+    render(&mut pooled.bench, FRONT, AIM);
+    step(&pooled, &mut animator, 0.0);
+    assert_eq!(animator.playing(0, 1).unwrap().sequence, 2, "running");
+    pooled.bench.service.place("a", &[at(0, Motion::Moving(0.5))]);
+    step(&pooled, &mut animator, 0.05);
+    let blending = animator.playing(0, 1).unwrap();
+    assert_eq!(
+        (blending.sequence, blending.before.map(|before| before.0)),
+        (1, Some(2))
+    );
+    // A morph: the same id, the second look.
+    pooled.bench.service.place("a", &[at(1, Motion::Moving(0.5))]);
+    step(&pooled, &mut animator, 0.1);
+    let playing = animator.playing(0, 1).unwrap();
+    assert_eq!(
+        (playing.look, playing.sequence, playing.before),
+        (LookId(1), 1, None),
+        "walking in its new model"
+    );
+    let seen = |image: &[u8]| [LEFT, MIDDLE, RIGHT].map(|(row, column)| only(pixel(image, row, column), 0));
+    assert_eq!(
+        seen(&render(&mut pooled.bench, FRONT, AIM)),
+        [false, true, false],
+        "its walk at rest"
+    );
+}
+
+#[test]
+fn once_the_thread_ends_each_owner_is_drawn_from_its_last_publication() {
+    let Some((mut pooled, mut animator)) = bench(&[("moving.m2", moving([0.0, 3.0, 0.0]))]) else {
+        return;
+    };
+    pooled.bench.service.place("a", &[instance(1, 0, Vec3::ZERO, 0.5)]);
+    settled(&mut pooled.bench, FRONT, AIM);
+    step(&pooled, &mut animator, 0.0);
+    // Regrouped after the last step of the thread.
+    let added = [
+        instance(1, 0, Vec3::ZERO, 0.5),
+        instance(4, 0, Vec3::new(0.0, 1.5, 0.0), 0.5),
+    ];
+    pooled.bench.service.place("a", &added);
+    let seen = |image: &[u8]| [LEFT, MIDDLE, RIGHT].map(|(row, column)| only(pixel(image, row, column), 0));
+    assert_eq!(
+        seen(&render(&mut pooled.bench, FRONT, AIM)),
+        [false, false, true],
+        "as the thread saw it, posed"
+    );
+    crate::animations_ended(&pooled.bench.scene, JobOutcome::Panicked("a test".to_owned()));
+    assert_eq!(
+        seen(&render(&mut pooled.bench, FRONT, AIM)),
+        [false, true, true],
+        "its last set, at rest"
+    );
+}
+
+#[test]
+fn an_instance_back_to_its_look_after_one_playing_nothing_starts_afresh() {
+    // Its second look has no sequence for its motion, nor a fallback.
+    let mut silent = moving([0.0, 3.0, 0.0]);
+    silent.animation.sequences = vec![sequence(69, 1000, 0.0, 0x7FFF, true)];
+    let Some((mut pooled, mut animator)) = bench(&[("moving.m2", moving([0.0, 3.0, 0.0])), ("silent.m2", silent)])
+    else {
+        return;
+    };
+    pooled.bench.service.place("a", &[instance(1, 0, Vec3::ZERO, 0.5)]);
+    render(&mut pooled.bench, FRONT, AIM);
+    for frame in 0..3 {
+        step(&pooled, &mut animator, frame as f32 * 0.4);
+    }
+    pooled.bench.service.place("a", &[instance(1, 1, Vec3::ZERO, 0.5)]);
+    step(&pooled, &mut animator, 1.2);
+    assert_eq!(animator.playing(0, 1), None, "nothing played");
+    pooled.bench.service.place("a", &[instance(1, 0, Vec3::ZERO, 0.5)]);
+    step(&pooled, &mut animator, 1.6);
+    let fresh = start(
+        LookId(0),
+        &moving([0.0; 3]).animation,
+        Motion::Standing,
+        1,
+        &HashMap::new(),
+    );
+    assert_eq!(animator.playing(0, 1), fresh);
 }

@@ -181,6 +181,15 @@ fn forget_failed(service: &Service, event: &Event) {
     }
 }
 
+/// The thread of the animations ended, as `outcome` says: the bones it published last forgotten,
+/// so that each owner is drawn from its last publication, at rest.
+fn animations_ended(scene: &Mutex<Scene>, outcome: JobOutcome) {
+    lock(scene).animated = None;
+    if let JobOutcome::Panicked(message) = outcome {
+        log::error!("the animations of the models stopped: {message}");
+    }
+}
+
 /// The preview of the panel: a display, or a model when its path is given.
 struct Preview {
     display: u32,
@@ -658,9 +667,7 @@ impl Module for ModelsModule {
             }
         } else if self.animating == Some(job) {
             self.animating = None;
-            if let JobOutcome::Panicked(message) = outcome {
-                log::error!("the animations of the models stopped: {message}");
-            }
+            animations_ended(&self.scene, outcome);
         } else if self.preview.job == Some(job) {
             self.preview.job = None;
             if let Some(said) = outcome.take::<Result<String, String>>() {

@@ -4157,6 +4157,12 @@ Step 9.4e is done. **Points to revisit with step 9.6**, its doodads adding insta
 - **Should it still weigh** with the doodads: go over the records of the looks with instances in
   sight only (an indirect dispatch over a list of the looks seen), or skip the blocks of the prefix
   sum without instances.
+- **The writing of the bones** (the review of 9.5b): about 40 % of the thread (0.35 to 0.54 ms
+  in Orgrimmar), after the computing, in one piece: the bones kept from a frame to the next, then
+  copied into the view of `Queue::write_buffer_with`. Each slice could write its own into its part
+  of the view: one copy less, the writing spread. In wgpu 30, `WriteOnly<[u8]>` is not `Send` (its
+  implementation asks for a type of known size): the view is to be shared among the slices another
+  way, without `unsafe`.
 
 #### Step 9.5, proposed: the animations of the models
 
@@ -4415,6 +4421,21 @@ The proposal is validated, with these additions, for 9.5b:
   jobs, as the review allowed; under 2 ms on average in both cities, the fallbacks are not built.
   Seen from four yards: Kruban Darkblade and a Troll Roof Stalker walking along their waypoints,
   their legs at another stride from a capture to the next.
+
+#### Step 9.5b, after its review
+
+- An instance keeps the look whose sequences it counts: when its look changes under the same id
+  (a mount, a morph), it starts again in the model of its new look. Before, a blend toward a model
+  of fewer sequences stopped the thread, and a sequence past them left the instance at rest.
+- When the thread ends, whatever the cause, the bones it published last are forgotten: each owner
+  is drawn from its last publication, at rest, not frozen as the thread last saw it.
+- The loops a step goes over are counted at once, a variation picked once for the last; a
+  sequence of no length, or the speed of a stretch of a millisecond, made hundreds a frame. A time
+  beyond counting starts the sequence again.
+- Tests: an instance changing look while it blends, toward a model without its run; one back to
+  its look after one playing nothing, started afresh; an owner drawn from its last publication
+  once the thread ends; a hundred million loops counted at once. Of 5 changes made on purpose,
+  every one made a test fail.
 
 #### Tests
 

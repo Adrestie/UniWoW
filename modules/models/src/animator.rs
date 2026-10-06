@@ -67,11 +67,12 @@ pub struct AnimationStats {
     pub longest: Duration,
 }
 
-/// What an instance plays: the animation wanted, the sequence and the milliseconds into it, the
-/// loops done; while it blends, the sequence before, its time, and the milliseconds of blending
-/// left of the whole.
+/// What an instance plays: the look whose sequences it counts, the animation wanted, the sequence
+/// and the milliseconds into it, the loops done; while it blends, the sequence before, its time,
+/// and the milliseconds of blending left of the whole.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Playing {
+    pub look: LookId,
     pub wanted: u16,
     pub sequence: usize,
     pub time: f32,
@@ -200,23 +201,35 @@ pub fn advance(
     };
     playing.time += elapsed * rate;
     let duration = sequence.duration.max(1) as f32;
-    while playing.time >= duration {
-        playing.time -= duration;
-        playing.loops += 1;
+    if !playing.time.is_finite() {
+        playing.time = 0.0;
+    }
+    // The loops ended counted at once, a variation picked once for the last.
+    if playing.time >= duration {
+        let ended = (playing.time / duration).floor();
+        playing.time -= ended * duration;
+        playing.loops = playing.loops.wrapping_add(ended as u32);
         if let Some(next) = choose(animation, playing.wanted, roll(id, playing.loops), fallbacks) {
             playing.sequence = next;
         }
     }
 }
 
-/// What the instance `id` of `animation` plays when it is first seen, moving as `motion`, in yards
-/// of the model: its animation from a moment of its own; none when it has no sequence for it, nor a
-/// fallback.
-pub fn start(animation: &Animation, motion: Motion, id: u64, fallbacks: &HashMap<u16, u16>) -> Option<Playing> {
+/// What the instance `id` of `look`, whose model moves as `animation`, plays when it is first seen
+/// with it, moving as `motion`, in yards of the model: its animation from a moment of its own; none
+/// when it has no sequence for it, nor a fallback.
+pub fn start(
+    look: LookId,
+    animation: &Animation,
+    motion: Motion,
+    id: u64,
+    fallbacks: &HashMap<u16, u16>,
+) -> Option<Playing> {
     let (want, _) = wanted(animation, motion);
     let sequence = choose(animation, want, roll(id, 0), fallbacks)?;
     let duration = animation.sequences[sequence].duration.max(1);
     Some(Playing {
+        look,
         wanted: want,
         sequence,
         time: (roll(id, u32::MAX) % duration) as f32,
@@ -342,16 +355,22 @@ impl Animator {
                     let key = (slot.number, instance.id);
                     seen.insert(key);
                     let motion = scaled(instance.motion, instance.transform.x_axis.truncate().length());
+                    // Started again when its look changes, a mount or a morph keeping its id: its
+                    // sequences counted in the model of its look.
                     let playing = match self.playing.get_mut(&key) {
-                        Some(playing) => {
-                            if playing.sequence < animation.sequences.len() {
-                                advance(playing, animation, motion, elapsed, instance.id, &fallbacks);
-                            }
+                        Some(playing) if playing.look == group.look => {
+                            advance(playing, animation, motion, elapsed, instance.id, &fallbacks);
                             *playing
                         }
-                        None => match start(animation, motion, instance.id, &fallbacks) {
-                            Some(playing) => *self.playing.entry(key).or_insert(playing),
-                            None => continue,
+                        _ => match start(group.look, animation, motion, instance.id, &fallbacks) {
+                            Some(playing) => {
+                                self.playing.insert(key, playing);
+                                playing
+                            }
+                            None => {
+                                self.playing.remove(&key);
+                                continue;
+                            }
                         },
                     };
                     if !shown {
