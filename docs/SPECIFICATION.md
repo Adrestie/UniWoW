@@ -4145,6 +4145,19 @@ submit.
   at these clocks, as much as the path of 9.4c to 0.3 ms more. Seen from five yards: an Orgrimmar
   Grunt and Kaja with their skins whole (the extra of 9.4e2, after its review).
 
+#### Step 9.4e3, after its review
+
+Step 9.4e is done. **Points to revisit with step 9.6**, its doodads adding instances and looks:
+
+- **The cost of the choice on the GPU** is mostly fixed: the prefix sum goes over every record
+  of every look held, about 20,000 in Dalaran, most of them without instances. It was measured at
+  the low clock the GPU keeps for a view this light (300 to 490 MHz of 2,145); measure it once at a
+  high clock (the RTX 3080 Ti held at its highest performance, or a scene that loads it), to know
+  its true cost.
+- **Should it still weigh** with the doodads: go over the records of the looks with instances in
+  sight only (an indirect dispatch over a list of the looks seen), or skip the blocks of the prefix
+  sum without instances.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around
