@@ -4612,6 +4612,35 @@ of detail of the ground (`MCLY` ground effects), the destructible buildings.
 - The two phases (9.6a) before anything else, so that the water and the glass of the buildings are
   drawn over what stands behind them whatever the layer.
 
+#### Step 9.6, added by the review of the proposal
+
+The plan and the decisions are validated, with these additions:
+
+- **9.6b: the cost of a frame follows all that is loaded, not only what is in sight.** On the
+  interface thread, `ModelsLayer::prepare` goes at each frame over every group (owner, look, tile)
+  of every owner: the look looked up, the box, the test of the view; the looks with blended
+  batches add work for each instance (its distance, the candidates, a map, the order). On the
+  thread of the animations, `Animator::step` advances every animated instance loaded, in sight or
+  not, and inserts it into the set of those seen. With the doodads, a group is nearly a doodad: up
+  to 3,576 doodads of 3,102 models on a tile of Northrend, so that a few tiles loaded make tens of
+  thousands of groups a frame on the interface thread. Measured besides the cities and one tile:
+  the densest area of Northrend at the greatest distance of the module, its interface thread, its
+  thread of the animations, the groups and the animated instances loaded. Remedies ready should
+  the measure ask:
+  - the bounds of each owner (a tile) tested before its groups;
+  - an animated instance out of sight not advanced at each frame: it catches up its time by the
+    clock when it comes back in sight.
+- **9.6a: no call of its own for the sky.** The ground comes first in each phase, so that the
+  terrain draws its sky at the beginning of its blended phase, where nothing opaque is drawn.
+- **9.6e: the water is of the ground, drawn before all the blended of the scene**, so that a
+  blended batch under its surface would be drawn over it. The rule is fixed with the part, whether
+  the water writes the depth or not, and tested.
+- **9.6f: the pyramid of depth cuts the pass.** The target is multisampled four times
+  (`Depth32Float`, a `RENDER_ATTACHMENT` only): the depth needs `TEXTURE_BINDING` and a reading as
+  `texture_depth_multisampled_2d`; the colour and the depth stored, then loaded again, between the
+  two passes; and a point of computing between the passes in the interface of the layers. The cost
+  of that cut alone is measured, so that the occlusion gains more than it costs.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around
