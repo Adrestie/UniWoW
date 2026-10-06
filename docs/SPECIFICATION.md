@@ -4269,6 +4269,49 @@ The proposal is validated, with these additions, for 9.5b:
   animated less often or the bones computed by the GPU from keys uploaded once, on the measure
   only.
 
+#### Step 9.5a, as built
+
+- **`formats`** (`core/api`): `Model::animation`, an `Animation` as plain data:
+  - its sequences: the animation played, its variation, its length, the speed it moves at, its
+    flags, how often among its variations, its replays, its times of blending in and out (one
+    field in 3.3.5a, given twice), the bounds and radius it moves in, its next variation, the
+    sequence it is an alias of, and whether its keys are kept;
+  - the lengths of its global sequences;
+  - its bones (key bone, flags, parent, pivot, and the tracks of their translation, rotation and
+    scale, the compressed quaternions of 3.3.5a made whole) and the order they are computed in,
+    each after its parent;
+  - the tracks of its colours and alphas, of its weights and of its texture transforms;
+  - a `Track`: how it goes from a key to the next (in steps, in a line, along a Bézier or a Hermite
+    curve), the global sequence it loops on, and its keys in each sequence (times, values, and the
+    tangents in and out of each on a curve).
+  `Formats::animations` gives `AnimationData.dbc`: each animation's id, name and fallback.
+- **Read** (`assets/src/animation.rs`), the same in 3.3.5a and in the modern models: the keys kept
+  for *Stand*, *Walk* and *Run*, through their aliases, when held in the model, and for the global
+  sequences; the other sequences named, their keys left; the `.anim` files not read. A track whose
+  times and values do not match, or of an interpolation unknown, is left at rest; a parent past
+  the bones is left out; the parent closing a loop of parents is cut; each said in the faults of
+  the model (`its animation: …`). What lies out of the file refuses the model.
+- **Against the proposal**: the fallbacks of the playable animations are not in the models of
+  3.3.5a; their table ends with Burning Crusade (wowdev: the header of version 264 has no such
+  array). The client takes them from `AnimationData.dbc`, its sixth field, read by
+  `Formats::animations`: *Walk* and *Run* fall back on *Stand*, *Stand* on *Closed* (147), the
+  state of a door.
+- **Checked over the client** (`every_animation_of_the_client_is_read_its_played_keys_kept`,
+  ignored, run on `E:`): 23,190 models read in 0.9 s (1.0 s before, without them), 10,292 with
+  bones that move, 315 at most; 30,409 sequences kept and 14.2 million keys of bones; their tracks
+  linear (141,694) or in steps (7,518), none on a curve; 3 tracks left at rest in 2 models
+  (`ValkierDark`, a scale of 0 times and 1 value; `10hgl_tundrasky04`, 1 time and 10 values);
+  `AnimationData.dbc`, 506 animations. The two modern creatures of wow.export keep their *Stand*.
+- **Tests**, on models the tests write: the sequences kept (*Stand*; what *Walk* is an alias of;
+  not an emote, nor *Run* in an `.anim` file), their fields, the global sequence; three bones
+  given a child before its parent, computed in the order of their parents; the keys of a kept
+  sequence read, the others left; a rotation made whole; a Bézier track with its tangents, on a
+  global sequence; a colour in a sequence not kept left; a weight on a global sequence; a texture
+  transform; a track whose times and values differ left at rest, a parent past the bones left
+  out, a loop of parents cut, each said; an animated model cut anywhere refused. Of 13 changes
+  made on purpose to the reading, every one made a test fail, the field of the fallback that over
+  the client.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

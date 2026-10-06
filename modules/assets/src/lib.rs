@@ -5,6 +5,7 @@
 //! paths read by another; the interface thread only hands the client over. Its panel chooses the
 //! folder of the client in the folder picker of the system and says how far its files are.
 
+mod animation;
 mod blp;
 mod chain;
 mod db2;
@@ -28,8 +29,8 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread::ThreadId;
 
 use uniwow_api::formats::{
-    self, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef, Formats,
-    GameObjectDisplay, HairGeoset, MapRecord, Model, Texture, Tile, Wdl, Wdt,
+    self, AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef,
+    Formats, GameObjectDisplay, HairGeoset, MapRecord, Model, Texture, Tile, Wdl, Wdt,
 };
 use uniwow_api::vfs::{self, Vfs, VfsState};
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, Registrar, egui, log, rfd, serde_json};
@@ -283,6 +284,12 @@ impl Formats for Files {
         self.check_thread("CharSections.dbc");
         let client = self.client()?;
         client.tables.char_sections(&client.chain)
+    }
+
+    fn animations(&self) -> Result<Arc<Vec<AnimationRecord>>, String> {
+        self.check_thread("AnimationData.dbc");
+        let client = self.client()?;
+        client.tables.animations(&client.chain)
     }
 
     fn model(&self, file: &FileRef) -> Result<Model, String> {

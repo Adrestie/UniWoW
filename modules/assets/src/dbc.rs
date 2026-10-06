@@ -5,8 +5,8 @@
 use std::sync::{Arc, OnceLock};
 
 use uniwow_api::formats::{
-    AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, GameObjectDisplay, HairGeoset,
-    MapRecord,
+    AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair,
+    GameObjectDisplay, HairGeoset, MapRecord,
 };
 
 use crate::chain::Chain;
@@ -99,6 +99,7 @@ pub struct Tables {
     facial_hairs: Rows<FacialHair>,
     objects: Rows<GameObjectDisplay>,
     sections: Rows<CharSection>,
+    animations: Rows<AnimationRecord>,
 }
 
 impl Tables {
@@ -117,7 +118,21 @@ impl Tables {
             facial_hairs: OnceLock::new(),
             objects: OnceLock::new(),
             sections: OnceLock::new(),
+            animations: OnceLock::new(),
         }
+    }
+
+    pub fn animations(&self, chain: &Chain) -> Result<Arc<Vec<AnimationRecord>>, String> {
+        let row = |dbc: &Dbc, row| {
+            Ok(AnimationRecord {
+                id: dbc.u32(row, 0),
+                name: dbc.string(row, 1)?,
+                fallback: dbc.u32(row, 5),
+            })
+        };
+        self.animations
+            .get_or_init(|| read(chain, "AnimationData.dbc", 8, row, |animation| animation.id))
+            .clone()
     }
 
     pub fn maps(&self, chain: &Chain) -> Result<Arc<Vec<MapRecord>>, String> {

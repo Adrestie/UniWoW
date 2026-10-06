@@ -5,8 +5,8 @@
 //! refers to is checked here, once, so that its readers index without a check: a batch referring
 //! to what its model does not have is left out, a skin that does not hold together too, with the
 //! next ones, and said in `Model::faults`; the combos of coordinates a model lacks for the next
-//! textures of a batch are completed with the first set, and said too. The bones and the
-//! animations wait for step 9.5.
+//! textures of a batch are completed with the first set, and said too. What moves in it is read by
+//! `animation`.
 //!
 //! Corrected from warcraft-rs: the triangles of a skin index its list of vertices, which indexes
 //! those of the model, where warcraft-rs takes them for the model's; a submesh starts at its
@@ -17,6 +17,7 @@ use uniwow_api::formats::{
     Batch, FileRef, Material, Model, ModelTexture, ModelTextureSource, ModelVertex, Skin, Submesh,
 };
 
+use crate::animation;
 use crate::terrain::{f32_at, f32s, u16_at, u32_at};
 
 /// The versions read: 264 that of 3.3.5a, the next ones modern.
@@ -127,12 +128,17 @@ fn complete_coordinates(model: &mut Model, skin: &Skin) -> usize {
 }
 
 /// An `M2Array`: how many, and where, from the start of its model or skin.
-fn array(bytes: &[u8], at: usize) -> Result<(usize, usize), String> {
+pub(crate) fn array(bytes: &[u8], at: usize) -> Result<(usize, usize), String> {
     Ok((u32_at(bytes, at)? as usize, u32_at(bytes, at + 4)? as usize))
 }
 
 /// The bytes of `count` items of `size` bytes at `offset`.
-fn items<'a>(bytes: &'a [u8], (count, offset): (usize, usize), size: usize, what: &str) -> Result<&'a [u8], String> {
+pub(crate) fn items<'a>(
+    bytes: &'a [u8],
+    (count, offset): (usize, usize),
+    size: usize,
+    what: &str,
+) -> Result<&'a [u8], String> {
     count
         .checked_mul(size)
         .and_then(|length| bytes.get(offset..offset.checked_add(length)?))
@@ -266,6 +272,8 @@ pub fn model(bytes: &[u8]) -> Result<Parsed, String> {
         })
         .collect();
     let bounds = f32s::<6>(data, 0xA0)?;
+    let mut faults = Vec::new();
+    let animation = animation::animation(data, &mut faults)?;
     let model = Model {
         version,
         flags,
@@ -284,8 +292,12 @@ pub fn model(bytes: &[u8]) -> Result<Parsed, String> {
         weights,
         bounds: [[bounds[0], bounds[1], bounds[2]], [bounds[3], bounds[4], bounds[5]]],
         radius: f32_at(data, 0xB8)?,
+        animation,
         skins: Vec::new(),
-        faults: Vec::new(),
+        faults: faults
+            .into_iter()
+            .map(|fault| format!("its animation: {fault}"))
+            .collect(),
     };
     Ok(Parsed { model, views, skin_ids })
 }

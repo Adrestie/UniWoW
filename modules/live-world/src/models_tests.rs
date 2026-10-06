@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use uniwow_api::formats::{
-    AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef, Formats,
-    GameObjectDisplay, HairGeoset, MapRecord, Model, Texture, Tile, Wdl, Wdt,
+    AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef,
+    Formats, GameObjectDisplay, HairGeoset, MapRecord, Model, Texture, Tile, Wdl, Wdt,
 };
 use uniwow_api::glam::{Mat4, Quat, Vec3};
 use uniwow_api::models::{Extent, Geosets, Instance, Look, LookId, LookState, Models};
@@ -115,6 +115,9 @@ impl Formats for Tables {
     }
     fn char_sections(&self) -> Result<Arc<Vec<CharSection>>, String> {
         Err("no sections".to_owned())
+    }
+    fn animations(&self) -> Result<Arc<Vec<AnimationRecord>>, String> {
+        Err("no animations".to_owned())
     }
     fn model(&self, _file: &FileRef) -> Result<Model, String> {
         Err("no model".to_owned())

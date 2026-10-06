@@ -91,6 +91,16 @@ pub struct FacialHair {
     pub geosets: [u32; 5],
 }
 
+/// An animation of `AnimationData.dbc`: its id, as the sequences of a model name it, its name, and
+/// the animation played in its place by a model that lacks it (*Walk* and *Run* fall back on
+/// *Stand*, 0; *Stand* on *Closed*, 147, the state of a door).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnimationRecord {
+    pub id: u32,
+    pub name: String,
+    pub fallback: u32,
+}
+
 /// A section of a character's textures, `CharSections.dbc`: its skin (0), face (1), facial hair
 /// (2), hair (3) or underwear (4), of a variation and a colour.
 #[derive(Clone, Debug, PartialEq)]
@@ -294,6 +304,94 @@ pub struct Submesh {
     pub radius: f32,
 }
 
+/// How a track goes from a key to the next: holding it, in a line (a rotation normalised), or along
+/// a Bézier or a Hermite curve by the tangents of its keys.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Interpolation {
+    Step,
+    #[default]
+    Linear,
+    Bezier,
+    Hermite,
+}
+
+/// The keys of a track in one sequence: their times, in milliseconds from its start, and their
+/// values; on a curve, the tangents in and out of each.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Keys<T> {
+    pub times: Vec<u32>,
+    pub values: Vec<T>,
+    pub tangents: Vec<[T; 2]>,
+}
+
+/// A value that changes with time: how it goes from a key to the next, the global sequence it
+/// loops on, and its keys in each sequence of its model, by their place (none for a sequence not
+/// kept), or in its global sequence alone.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Track<T> {
+    pub interpolation: Interpolation,
+    pub global: Option<u16>,
+    pub keys: Vec<Keys<T>>,
+}
+
+/// A bone of a model: its flags (0x08 to 0x40 a billboard), its parent, the point it turns about,
+/// and its translation, rotation (a quaternion x, y, z, w) and scale.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Bone {
+    pub key_bone: i32,
+    pub flags: u32,
+    pub parent: Option<u16>,
+    pub pivot: [f32; 3],
+    pub translation: Track<[f32; 3]>,
+    pub rotation: Track<[f32; 4]>,
+    pub scale: Track<[f32; 3]>,
+}
+
+/// A sequence of a model: the animation it plays (`AnimationRecord::id`), which of its variations,
+/// its length in milliseconds, the speed it moves at in yards a second, its flags (0x20 its keys in
+/// the model, 0x40 an alias), how often among its variations, how many times it plays again, its
+/// times of blending in and out, the bounds it moves in, its next variation and the sequence it is
+/// an alias of; and whether its keys are kept.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sequence {
+    pub id: u16,
+    pub variation: u16,
+    pub duration: u32,
+    pub speed: f32,
+    pub flags: u32,
+    pub frequency: i16,
+    pub replay: [u32; 2],
+    pub blend: [u16; 2],
+    pub bounds: [[f32; 3]; 2],
+    pub radius: f32,
+    pub next: Option<u16>,
+    pub alias: Option<u16>,
+    pub kept: bool,
+}
+
+/// How a texture's coordinates move: their translation, rotation and scale.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TextureTransform {
+    pub translation: Track<[f32; 3]>,
+    pub rotation: Track<[f32; 4]>,
+    pub scale: Track<[f32; 3]>,
+}
+
+/// What moves in a model: its sequences, the lengths of its global sequences, its bones and the
+/// order they are computed in (each after its parent), the colours and alphas, weights and
+/// transforms its batches refer to. The keys are kept only for the sequences played (*Stand*,
+/// *Walk*, *Run*, held in the model) and the global sequences.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Animation {
+    pub sequences: Vec<Sequence>,
+    pub globals: Vec<u32>,
+    pub bones: Vec<Bone>,
+    pub order: Vec<u16>,
+    pub colours: Vec<(Track<[f32; 3]>, Track<f32>)>,
+    pub weights: Vec<Track<f32>>,
+    pub transforms: Vec<TextureTransform>,
+}
+
 /// A batch of a skin: a submesh drawn with a material and its textures, as the `.skin` says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Batch {
@@ -351,6 +449,7 @@ pub struct Model {
     pub weights: Vec<f32>,
     pub bounds: [[f32; 3]; 2],
     pub radius: f32,
+    pub animation: Animation,
     /// Its levels of detail, the finest first.
     pub skins: Vec<Skin>,
     /// What was left out of it, and why: its batches referring to what it does not have, its
@@ -438,6 +537,8 @@ pub trait Formats: Send + Sync {
     fn game_object_displays(&self) -> Result<Arc<Vec<GameObjectDisplay>>, String>;
     /// The sections of the characters' textures, by race, sex, section, variation and colour.
     fn char_sections(&self) -> Result<Arc<Vec<CharSection>>, String>;
+    /// The animations, by increasing id.
+    fn animations(&self) -> Result<Arc<Vec<AnimationRecord>>, String>;
     /// The M2 `file`, with its skins: of 3.3.5a, its path as a table names it (`.mdx` and `.mdl`
     /// read as `.m2`) and its skins beside it; modern, its skins named by its chunk `SFID`.
     fn model(&self, file: &FileRef) -> Result<Model, String>;

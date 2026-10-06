@@ -10,9 +10,9 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use uniwow_api::formats::{
-    AreaRecord, Batch, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef, Formats,
-    GameObjectDisplay, HairGeoset, MapRecord, Material, Model, ModelTexture, ModelTextureSource, ModelVertex, Skin,
-    Submesh, Texture, TextureFormat, Tile, Wdl, Wdt,
+    AnimationRecord, AreaRecord, Batch, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef,
+    Formats, GameObjectDisplay, HairGeoset, MapRecord, Material, Model, ModelTexture, ModelTextureSource, ModelVertex,
+    Skin, Submesh, Texture, TextureFormat, Tile, Wdl, Wdt,
 };
 use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::models::{Extent, Geosets, Instance, Look, LookId, LookState, Models};
@@ -73,6 +73,9 @@ impl Formats for Fake {
     }
     fn char_sections(&self) -> Result<Arc<Vec<CharSection>>, String> {
         Ok(Arc::new(self.sections.clone()))
+    }
+    fn animations(&self) -> Result<Arc<Vec<AnimationRecord>>, String> {
+        Err("no animations".to_owned())
     }
     fn model(&self, file: &FileRef) -> Result<Model, String> {
         if let FileRef::Path(path) = file
@@ -696,6 +699,7 @@ pub fn square(flags: u16, blending: u16) -> Model {
         weights: vec![1.0],
         bounds: [[0.0, -1.0, 0.0], [0.0, 1.0, 2.0]],
         radius: 1.5,
+        animation: Default::default(),
         skins: vec![Skin {
             triangles: vec![0, 1, 2, 0, 2, 3],
             submeshes: vec![Submesh {

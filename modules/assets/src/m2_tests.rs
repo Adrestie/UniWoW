@@ -244,6 +244,11 @@ fn the_modern_models_exported_by_wow_export_are_read_whole() {
         .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         assert!(model.faults.is_empty(), "{}: {:?}", path.display(), model.faults);
         index_everything(&model);
+        // A creature keeps the keys of its Stand, held in the model as in 3.3.5a.
+        if path.to_string_lossy().to_ascii_lowercase().contains("creature") {
+            let stand = model.animation.sequences.iter().find(|sequence| sequence.id == 0);
+            assert!(stand.is_some_and(|stand| stand.kept), "{}", path.display());
+        }
         assert!(
             model.version > 264 && !model.skins.is_empty(),
             "{}: version {}, {} skins",
@@ -337,13 +342,17 @@ impl Writer {
     }
 
     /// Appends the keys of a track at rest, of its global sequence `global`: its one key `value`
-    /// of its first sequence, unless none; the track.
+    /// of its first sequence, at its start, unless none; the track.
     fn track(&mut self, global: u16, value: Option<&[u8]>) -> Vec<u8> {
         let mut track = vec![0; 20];
         track[2..4].copy_from_slice(&global.to_le_bytes());
         if let Some(value) = value {
+            let time = self.append(&0u32.to_le_bytes()) as u32;
+            let times = self.append(&[1u32.to_le_bytes(), time.to_le_bytes()].concat()) as u32;
             let key = self.append(value) as u32;
             let first = self.append(&[1u32.to_le_bytes(), key.to_le_bytes()].concat()) as u32;
+            track[4..8].copy_from_slice(&1u32.to_le_bytes());
+            track[8..12].copy_from_slice(&times.to_le_bytes());
             track[12..16].copy_from_slice(&1u32.to_le_bytes());
             track[16..20].copy_from_slice(&first.to_le_bytes());
         }
@@ -804,4 +813,327 @@ fn marshal_dughan_shows_his_hair_and_facial_hair() {
     assert!(shown.contains(&hair) && shown.iter().filter(|id| **id < 100).count() == 2);
     assert!([0, 401, 501, 702, 1301].iter().all(|id| shown.contains(id)));
     assert!(one_a_group(&ids, &drawn));
+}
+
+// What moves.
+
+impl Writer {
+    /// Appends a track of `interpolation` on the global sequence `global` (0xFFFF none), in each
+    /// sequence its times, the bytes of its values and how many values they are; the track.
+    fn keyed(&mut self, interpolation: u16, global: u16, lists: &[(Vec<u32>, Vec<u8>, u32)]) -> Vec<u8> {
+        let mut times = Vec::new();
+        let mut values = Vec::new();
+        for (at, bytes, count) in lists {
+            let written: Vec<u8> = at.iter().flat_map(|time| time.to_le_bytes()).collect();
+            let time_offset = self.append(&written) as u32;
+            let value_offset = self.append(bytes) as u32;
+            times.extend([at.len() as u32, time_offset]);
+            values.extend([*count, value_offset]);
+        }
+        let as_bytes = |words: &[u32]| -> Vec<u8> { words.iter().flat_map(|word| word.to_le_bytes()).collect() };
+        let time_lists = self.append(&as_bytes(&times)) as u32;
+        let value_lists = self.append(&as_bytes(&values)) as u32;
+        [
+            u16_bytes(&[interpolation, global]),
+            as_bytes(&[lists.len() as u32, time_lists, lists.len() as u32, value_lists]),
+        ]
+        .concat()
+    }
+}
+
+/// A sequence of `id` and `variation`, of `flags`, an alias of `alias`.
+fn written_sequence(id: u16, variation: u16, flags: u32, alias: u16) -> Vec<u8> {
+    [
+        u16_bytes(&[id, variation]),
+        1000u32.to_le_bytes().to_vec(),
+        2.5f32.to_le_bytes().to_vec(),
+        flags.to_le_bytes().to_vec(),
+        u16_bytes(&[32767, 0]),
+        [0u32, 0, 150].iter().flat_map(|word| word.to_le_bytes()).collect(),
+        f32_bytes(&[-1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 2.0]),
+        u16_bytes(&[0xFFFF, alias]),
+    ]
+    .concat()
+}
+
+/// A bone of `parent` and its three tracks.
+fn written_bone(parent: i16, tracks: [Vec<u8>; 3]) -> Vec<u8> {
+    [
+        (-1i32).to_le_bytes().to_vec(),
+        0u32.to_le_bytes().to_vec(),
+        parent.to_le_bytes().to_vec(),
+        0u16.to_le_bytes().to_vec(),
+        0u32.to_le_bytes().to_vec(),
+        tracks.concat(),
+        f32_bytes(&[0.5, 0.0, 1.0]),
+    ]
+    .concat()
+}
+
+/// The model of `written_model` with five sequences (an emote held; *Stand* held; *Walk* an alias
+/// of the fifth; *Run* in an `.anim` file; another emote held), a global sequence, three bones
+/// given in an order where a child comes before its parent, and a texture transform.
+fn animated_model() -> Vec<u8> {
+    let mut w = Writer {
+        bytes: written_model(264, 0, true),
+    };
+    let sequences = [
+        written_sequence(60, 0, 0x20, 0),
+        written_sequence(0, 0, 0x20, 0),
+        written_sequence(4, 0, 0x40, 4),
+        written_sequence(5, 0, 0, 0),
+        written_sequence(61, 0, 0x20, 0),
+    ]
+    .concat();
+    w.array(0x1C, 5, &sequences);
+    w.array(0x14, 1, &1000u32.to_le_bytes());
+    let none = |w: &mut Writer| w.keyed(1, 0xFFFF, &[]);
+    let empty = || (Vec::new(), Vec::new(), 0);
+    let translation = w.keyed(
+        1,
+        0xFFFF,
+        &[
+            (vec![0], f32_bytes(&[9.0, 9.0, 9.0]), 1),
+            (vec![0, 500], f32_bytes(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), 2),
+            empty(),
+            empty(),
+            (vec![0], f32_bytes(&[7.0, 8.0, 9.0]), 1),
+        ],
+    );
+    let (rotation, scale) = (none(&mut w), none(&mut w));
+    let child = written_bone(2, [translation, rotation, scale]);
+    // The identity, as stored, in Stand.
+    let identity: Vec<u8> = [32767i16, 32767, 32767, -1]
+        .iter()
+        .flat_map(|part| part.to_le_bytes())
+        .collect();
+    let (translation, scale) = (none(&mut w), none(&mut w));
+    let rotation = w.keyed(1, 0xFFFF, &[empty(), (vec![0], identity, 1)]);
+    let root = written_bone(-1, [translation, rotation, scale]);
+    // A Bezier scale on the global sequence: each key its value, then its tangents in and out.
+    let curve = f32_bytes(&[
+        1.0, 1.0, 1.0, 0.5, 0.5, 0.5, 2.0, 2.0, 2.0, 4.0, 4.0, 4.0, 3.0, 3.0, 3.0, 5.0, 5.0, 5.0,
+    ]);
+    let (translation, rotation) = (none(&mut w), none(&mut w));
+    let scale = w.keyed(2, 0, &[(vec![0, 1000], curve, 2)]);
+    let middle = written_bone(1, [translation, rotation, scale]);
+    w.array(0x2C, 3, &[child, root, middle].concat());
+    let transform = [
+        w.keyed(
+            1,
+            0xFFFF,
+            &[
+                empty(),
+                empty(),
+                empty(),
+                empty(),
+                (vec![0, 2000], f32_bytes(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0]), 2),
+            ],
+        ),
+        w.keyed(1, 0xFFFF, &[]),
+        w.keyed(1, 0xFFFF, &[]),
+    ]
+    .concat();
+    w.array(0x60, 1, &transform);
+    w.bytes
+}
+
+#[test]
+fn the_sequences_and_bones_of_a_model_are_read_their_keys_kept_for_those_played() {
+    let model = m2::model(&animated_model()).unwrap().model;
+    assert!(model.faults.is_empty(), "{:?}", model.faults);
+    let animation = &model.animation;
+    let kept: Vec<(u16, bool)> = animation
+        .sequences
+        .iter()
+        .map(|sequence| (sequence.id, sequence.kept))
+        .collect();
+    assert_eq!(
+        kept,
+        [(60, false), (0, true), (4, false), (5, false), (61, true)],
+        "Stand, and what Walk is an alias of; not the first emote, nor Run in its .anim file"
+    );
+    let walk = &animation.sequences[2];
+    assert_eq!(
+        (walk.alias, walk.duration, walk.speed, walk.blend),
+        (Some(4), 1000, 2.5, [150, 150])
+    );
+    assert_eq!(
+        (walk.bounds, walk.radius, walk.next),
+        ([[-1.0; 3], [1.0; 3]], 2.0, None)
+    );
+    assert_eq!(animation.globals, [1000]);
+    // The first bone, a child of the third whose parent is the second: computed after both.
+    let parents: Vec<Option<u16>> = animation.bones.iter().map(|bone| bone.parent).collect();
+    assert_eq!(parents, [Some(2), None, Some(1)]);
+    assert_eq!(animation.order, [1, 2, 0]);
+    let child = &animation.bones[0];
+    assert_eq!(child.pivot, [0.5, 0.0, 1.0]);
+    let keys = &child.translation.keys;
+    assert_eq!(
+        (keys[1].times.clone(), keys[1].values.clone()),
+        (vec![0, 500], vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    );
+    assert!(
+        keys[0].times.is_empty() && keys[2].times.is_empty() && keys[3].times.is_empty(),
+        "not kept"
+    );
+    assert_eq!(keys[4].values, [[7.0, 8.0, 9.0]]);
+    let rotation = animation.bones[1].rotation.keys[1].values[0];
+    assert!(
+        rotation
+            .iter()
+            .zip([0.0, 0.0, 0.0, 1.0])
+            .all(|(read, wanted)| (read - wanted).abs() < 1e-4),
+        "{rotation:?}"
+    );
+    // On the global sequence, read whatever the sequence of its list.
+    let scale = &animation.bones[2].scale;
+    assert_eq!(
+        (scale.interpolation, scale.global),
+        (formats::Interpolation::Bezier, Some(0))
+    );
+    assert_eq!(scale.keys[0].values, [[1.0; 3], [4.0; 3]]);
+    assert_eq!(scale.keys[0].tangents, [[[0.5; 3], [2.0; 3]], [[3.0; 3], [5.0; 3]]]);
+    // The colour of `written_model` in the first emote, not kept; its weight on a global sequence.
+    assert!(animation.colours[0].0.keys[0].times.is_empty());
+    assert_eq!(animation.weights[0].global, Some(0));
+    assert!((animation.weights[0].keys[0].values[0] - 0.5).abs() < 1e-4);
+    assert!(animation.weights[1].keys.is_empty());
+    assert_eq!(
+        animation.transforms[0].translation.keys[4].values,
+        [[0.0; 3], [1.0, 0.0, 0.0]]
+    );
+}
+
+#[test]
+fn a_track_or_a_bone_that_does_not_hold_together_is_left_at_rest_and_said() {
+    let mut w = Writer {
+        bytes: written_model(264, 0, true),
+    };
+    w.array(0x1C, 1, &written_sequence(0, 0, 0x20, 0));
+    let none = |w: &mut Writer| w.keyed(1, 0xFFFF, &[]);
+    // Two times for one value; a parent past the bones; two bones each the parent of the other.
+    let short = w.keyed(1, 0xFFFF, &[(vec![0, 500], f32_bytes(&[1.0, 2.0, 3.0]), 1)]);
+    let (rotation, scale) = (none(&mut w), none(&mut w));
+    let first = written_bone(9, [short, rotation, scale]);
+    let tracks = |w: &mut Writer| [none(w), none(w), none(w)];
+    let second = written_bone(2, tracks(&mut w));
+    let third = written_bone(1, tracks(&mut w));
+    w.array(0x2C, 3, &[first, second, third].concat());
+    let model = m2::model(&w.bytes).unwrap().model;
+    let animation = &model.animation;
+    assert!(animation.bones[0].translation.keys[0].times.is_empty(), "left at rest");
+    let parents: Vec<Option<u16>> = animation.bones.iter().map(|bone| bone.parent).collect();
+    assert_eq!(parents, [None, Some(2), None], "past the bones; the loop cut");
+    assert_eq!(animation.order, [0, 2, 1]);
+    assert_eq!(
+        model.faults,
+        [
+            "its animation: its bone 0: its parent 9 of 3 bones left out",
+            "its animation: a translation: 2 times and 1 values in its sequence 0, left at rest there",
+            "its animation: its bone 2: its parent closes a loop, left without one",
+        ]
+    );
+}
+
+#[test]
+fn an_animated_model_cut_anywhere_is_refused_and_never_panics() {
+    let bytes = animated_model();
+    // Past the header, a model cut short of what it points to is refused.
+    for length in 0x138..bytes.len() {
+        assert!(m2::model(&bytes[..length]).is_err(), "cut at {length}");
+    }
+}
+
+/// Run on demand: `cargo test -p uniwow-module-assets every_animation -- --ignored --nocapture`.
+#[test]
+#[ignore = "reads the animations of every model of the client named by UNIWOW_CLIENT"]
+fn every_animation_of_the_client_is_read_its_played_keys_kept() {
+    let Some(client) = client() else { return };
+    let models: Vec<String> = client
+        .chain
+        .files_under("")
+        .into_iter()
+        .filter(|name| name.to_ascii_lowercase().ends_with(".m2"))
+        .collect();
+    let next = AtomicUsize::new(0);
+    let (animated, kept, keys, most) = (
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+    );
+    let interpolations = Mutex::new(BTreeMap::<String, usize>::new());
+    let started = Instant::now();
+    std::thread::scope(|scope| {
+        for _ in 0..16 {
+            scope.spawn(|| {
+                while let Some(name) = models.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    let Ok(model) = client.model(&FileRef::Path(name.clone())) else {
+                        continue;
+                    };
+                    let animation = &model.animation;
+                    if animation.bones.len() > 1 {
+                        animated.fetch_add(1, Ordering::Relaxed);
+                    }
+                    most.fetch_max(animation.bones.len(), Ordering::Relaxed);
+                    assert_eq!(animation.order.len(), animation.bones.len(), "{name}");
+                    kept.fetch_add(
+                        animation.sequences.iter().filter(|sequence| sequence.kept).count(),
+                        Ordering::Relaxed,
+                    );
+                    let mut found = interpolations.lock().unwrap();
+                    for bone in &animation.bones {
+                        for (kind, count) in [
+                            (
+                                bone.translation.interpolation,
+                                bone.translation.keys.iter().map(|k| k.times.len()).sum::<usize>(),
+                            ),
+                            (
+                                bone.rotation.interpolation,
+                                bone.rotation.keys.iter().map(|k| k.times.len()).sum(),
+                            ),
+                            (
+                                bone.scale.interpolation,
+                                bone.scale.keys.iter().map(|k| k.times.len()).sum(),
+                            ),
+                        ] {
+                            keys.fetch_add(count, Ordering::Relaxed);
+                            if count > 0 {
+                                *found.entry(format!("{kind:?}")).or_default() += 1;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+    let animations = client.tables.animations(&client.chain).unwrap();
+    let fallback = |id: u32| {
+        animations
+            .iter()
+            .find(|animation| animation.id == id)
+            .map(|animation| (animation.name.clone(), animation.fallback))
+    };
+    eprintln!(
+        "{} models read in {:.1} s: {} with bones that move, {} bones at most; {} sequences kept, {} keys of bones kept; tracks of bones with keys by interpolation {:?}",
+        models.len(),
+        started.elapsed().as_secs_f64(),
+        animated.load(Ordering::Relaxed),
+        most.load(Ordering::Relaxed),
+        kept.load(Ordering::Relaxed),
+        keys.load(Ordering::Relaxed),
+        interpolations.into_inner().unwrap()
+    );
+    eprintln!(
+        "{} animations; Stand {:?}, Walk {:?}, Run {:?}",
+        animations.len(),
+        fallback(0),
+        fallback(4),
+        fallback(5)
+    );
+    assert_eq!(fallback(0), Some(("Stand".to_owned(), 147)));
+    assert_eq!(fallback(4), Some(("Walk".to_owned(), 0)));
+    assert_eq!(fallback(5), Some(("Run".to_owned(), 0)));
 }
