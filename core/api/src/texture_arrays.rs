@@ -21,11 +21,15 @@ use crate::{log, wgpu};
 /// What a texture without a layer has in its place, as a code: drawn white by its shader.
 pub const NONE: u32 = u32::MAX;
 
-/// Where a texture is: the slot of its array and its layer there.
+/// Where a texture is: the slot of its array and its layer there, the size of its class, and the
+/// bytes of its layer.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Placed {
     pub slot: u32,
     pub layer: u32,
+    pub width: u32,
+    pub height: u32,
+    pub bytes: u64,
 }
 
 impl Placed {
@@ -86,8 +90,8 @@ pub type Views = Arc<Vec<Option<wgpu::TextureView>>>;
 enum Entry {
     Unread,
     Placed(Arc<Placed>),
-    /// It could not be read: not read again.
-    Unreadable,
+    /// It could not be read, and why: not read again.
+    Unreadable(String),
     /// Every slot held a full array: tried again when asked again.
     NoRoom,
 }
@@ -95,8 +99,9 @@ enum Entry {
 /// A texture of the cache; the job reading it holds its lock, the others asking wait for it.
 type Cell = Arc<Mutex<Entry>>;
 
-/// Why a texture is not placed.
-enum Failure {
+/// Why a texture is not placed: it could not be read, or every slot holds a full array.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refused {
     Unreadable(String),
     NoRoom(String),
 }
@@ -223,9 +228,15 @@ impl TextureArrays {
     }
 
     /// The texture `file`, placed in an array; none when it cannot be read, or placed for want of
-    /// room, which is said in the log the first time. The first job asking reads it, the others
-    /// asking meanwhile wait for it; one refused for want of room is read again when asked again.
+    /// room, which is said in the log the first time.
     pub fn get(&self, formats: &dyn Formats, file: &FileRef) -> Option<Arc<Placed>> {
+        self.fetch(formats, file).ok()
+    }
+
+    /// The texture `file`, placed in an array, or why not, which is said in the log the first time.
+    /// The first job asking reads it, the others asking meanwhile wait for it; one refused for want
+    /// of room is read again when asked again, one unreadable never.
+    pub fn fetch(&self, formats: &dyn Formats, file: &FileRef) -> Result<Arc<Placed>, Refused> {
         // The cell is held from the lock of the cache on, so that a purge leaves it meanwhile.
         let cell = lock(&self.entries)
             .entry(file.clone())
@@ -233,8 +244,8 @@ impl TextureArrays {
             .clone();
         let mut entry = lock(&cell);
         match &*entry {
-            Entry::Placed(placed) => return Some(placed.clone()),
-            Entry::Unreadable => return None,
+            Entry::Placed(placed) => return Ok(placed.clone()),
+            Entry::Unreadable(reason) => return Err(Refused::Unreadable(reason.clone())),
             Entry::Unread | Entry::NoRoom => {}
         }
         let waited = matches!(*entry, Entry::NoRoom);
@@ -246,37 +257,37 @@ impl TextureArrays {
                 if waited {
                     self.no_room.fetch_sub(1, Ordering::AcqRel);
                 }
-                Some(placed)
+                Ok(placed)
             }
-            Err(Failure::Unreadable(reason)) => {
+            Err(Refused::Unreadable(reason)) => {
                 log::warn!("a texture of {} is left out: {reason}", self.owner);
-                *entry = Entry::Unreadable;
+                *entry = Entry::Unreadable(reason.clone());
                 self.unreadable.fetch_add(1, Ordering::AcqRel);
-                None
+                Err(Refused::Unreadable(reason))
             }
-            Err(Failure::NoRoom(reason)) => {
+            Err(Refused::NoRoom(reason)) => {
                 if !waited {
                     log::warn!("a texture of {} waits for room: {reason}", self.owner);
                     self.no_room.fetch_add(1, Ordering::AcqRel);
                 }
                 *entry = Entry::NoRoom;
-                None
+                Err(Refused::NoRoom(reason))
             }
         }
     }
 
     /// The texture `file` read, as BC when the device takes it and the file stores it so, else as
     /// RGBA, then written to a layer of the array of its class.
-    fn load(&self, formats: &dyn Formats, file: &FileRef) -> Result<Placed, Failure> {
+    fn load(&self, formats: &dyn Formats, file: &FileRef) -> Result<Placed, Refused> {
         let mut texture = if self.block_compression {
-            formats.texture(file).map_err(Failure::Unreadable)?
+            formats.texture(file).map_err(Refused::Unreadable)?
         } else {
-            formats.texture_rgba(file).map_err(Failure::Unreadable)?
+            formats.texture_rgba(file).map_err(Refused::Unreadable)?
         };
         if texture.format != TextureFormat::Rgba8 && (texture.width % 4 != 0 || texture.height % 4 != 0) {
-            texture = formats.texture_rgba(file).map_err(Failure::Unreadable)?;
+            texture = formats.texture_rgba(file).map_err(Refused::Unreadable)?;
         }
-        self.place(&texture).map_err(Failure::NoRoom)
+        self.place(&texture).map_err(Refused::NoRoom)
     }
 
     /// Writes `texture` to a free layer of an array of its class, growing one or making one when
@@ -363,6 +374,9 @@ impl TextureArrays {
         Ok(Placed {
             slot: slot as u32,
             layer,
+            width: class.width,
+            height: class.height,
+            bytes: class.layer_bytes(),
         })
     }
 

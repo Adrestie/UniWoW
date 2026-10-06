@@ -1,0 +1,169 @@
+// What the shaders of the models share: the camera, a vertex placed by its instance, the
+// environment mapped as WotLK maps it, the pixel shaders of WotLK, which combine the textures in
+// gamma, and the end of a pixel: its alpha tested as WotLK tests it, then lit by the sun and fogged
+// as the view says, in its linear space.
+
+struct Camera {
+    view_proj: mat4x4<f32>,
+    // The direction towards the sun, its colour, and the light everywhere.
+    sun: vec4<f32>,
+    sun_colour: vec4<f32>,
+    ambient: vec4<f32>,
+    // The eye, and how far an instance is drawn: this many times its radius.
+    eye: vec4<f32>,
+    // The colour of the fog; where it starts, its middle and where it covers all, on the ground.
+    fog_colour: vec4<f32>,
+    fog: vec4<f32>,
+    // The axes of the camera, across, up and back.
+    across: vec4<f32>,
+    up: vec4<f32>,
+    back: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> camera: Camera;
+
+// The share of the fog at its middle; the least radius an instance's reach counts; the alpha under
+// which a pixel of a batch without an alpha key is not drawn.
+const NEAR_FOG: f32 = 0.55;
+const LEAST_RADIUS: f32 = 1.0;
+const LEAST_ALPHA: f32 = 1.0 / 255.0;
+
+// The coordinates of the environment, as WotLK maps them (wowdev, M2/.skin): the position and the
+// normal in the space of the camera, its depth growing away from the eye.
+fn sphere_map(position: vec3<f32>, normal: vec3<f32>) -> vec2<f32> {
+    let towards = position - camera.eye.xyz;
+    let vertex = vec3<f32>(
+        dot(towards, camera.across.xyz),
+        dot(towards, camera.up.xyz),
+        -dot(towards, camera.back.xyz)
+    );
+    let turned = normalize(vec3<f32>(
+        dot(normal, camera.across.xyz),
+        dot(normal, camera.up.xyz),
+        -dot(normal, camera.back.xyz)
+    ));
+    let from_eye = -normalize(vertex);
+    var reflected = from_eye - turned * (2.0 * dot(from_eye, turned));
+    reflected.z = reflected.z + 1.0;
+    return normalize(reflected).xy * 0.5 + vec2<f32>(0.5);
+}
+
+// A vertex placed in the world.
+struct Placed {
+    clip: vec4<f32>,
+    world: vec3<f32>,
+    normal: vec3<f32>,
+    env: vec2<f32>,
+};
+
+// The vertex at `position` with `normal` of a model of `radius`, placed by the rows of its
+// instance's transform: at one point with every other, drawing nothing, when its instance is
+// beyond the reach of its size or of `alpha` 0.
+fn place(
+    row0: vec4<f32>,
+    row1: vec4<f32>,
+    row2: vec4<f32>,
+    alpha: f32,
+    radius: f32,
+    position: vec3<f32>,
+    normal: vec3<f32>,
+) -> Placed {
+    let at = vec4<f32>(position, 1.0);
+    let world = vec3<f32>(dot(row0, at), dot(row1, at), dot(row2, at));
+    let origin = vec3<f32>(row0.w, row1.w, row2.w);
+    let scale = length(vec3<f32>(row0.x, row1.x, row2.x));
+    let reach = camera.eye.w * max(radius * scale, LEAST_RADIUS);
+    var placed: Placed;
+    if distance(origin, camera.eye.xyz) > reach || alpha <= 0.0 {
+        placed.clip = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    } else {
+        placed.clip = camera.view_proj * vec4<f32>(world, 1.0);
+    }
+    let direction = vec4<f32>(normal, 0.0);
+    placed.normal = vec3<f32>(dot(row0, direction), dot(row1, direction), dot(row2, direction));
+    placed.env = sphere_map(world, placed.normal);
+    placed.world = world;
+    return placed;
+}
+
+fn fog_amount(position: vec3<f32>) -> f32 {
+    let distance = length(position.xy - camera.eye.xy);
+    return NEAR_FOG * smoothstep(camera.fog.x, camera.fog.y, distance)
+        + (1.0 - NEAR_FOG) * smoothstep(camera.fog.y, camera.fog.z, distance);
+}
+
+// The colour of the fog of a batch but a mod2x one: the view's, black, or white.
+fn fog_colour(mode: f32) -> vec3<f32> {
+    if mode > 1.5 {
+        return vec3<f32>(1.0);
+    }
+    if mode > 0.5 {
+        return vec3<f32>(0.0);
+    }
+    return camera.fog_colour.rgb;
+}
+
+// The pixel shaders of WotLK (wowdev, M2/Rendering), by their number in `shaders.rs`: `colour`
+// coming in, `one` and `two` the textures.
+fn combine(shader: u32, colour: vec4<f32>, one: vec4<f32>, two: vec4<f32>) -> vec4<f32> {
+    switch shader {
+        case 0u: { return vec4<f32>(colour.rgb * one.rgb, colour.a); }
+        case 1u: { return colour * one; }
+        case 2u: { return vec4<f32>(mix(colour.rgb, one.rgb, colour.a), colour.a); }
+        case 3u: { return colour + one; }
+        case 4u: { return colour * one * 2.0; }
+        case 5u: { return vec4<f32>(mix(one.rgb, colour.rgb, colour.a), colour.a); }
+        case 6u: { return vec4<f32>(colour.rgb * one.rgb * two.rgb, colour.a); }
+        case 7u: { return vec4<f32>(colour.rgb * one.rgb * two.rgb, colour.a * two.a); }
+        case 8u: { return vec4<f32>(colour.rgb * one.rgb + two.rgb, colour.a + two.a); }
+        case 9u: { return vec4<f32>(colour.rgb * one.rgb * two.rgb * 2.0, colour.a * two.a * 2.0); }
+        case 10u: { return vec4<f32>(colour.rgb * one.rgb * two.rgb * 2.0, colour.a); }
+        case 11u: { return vec4<f32>(colour.rgb * one.rgb + two.rgb, colour.a); }
+        case 12u: { return vec4<f32>(colour.rgb * one.rgb * two.rgb, colour.a * one.a); }
+        case 13u: { return vec4<f32>(colour.rgb * one.rgb + two.rgb, colour.a * one.a + two.a); }
+        case 14u: { return vec4<f32>(colour.rgb * one.rgb * two.rgb * 2.0, colour.a * one.a * two.a * 2.0); }
+        case 15u: { return vec4<f32>(colour.rgb * one.rgb * two.rgb * 2.0, colour.a * one.a); }
+        case 16u: { return vec4<f32>(colour.rgb * one.rgb + two.rgb, colour.a * one.a); }
+        case 17u: { return colour * one * two; }
+        case 18u: { return (colour + one) * two; }
+        case 19u: { return vec4<f32>(colour.rgb * one.rgb * two.rgb * 4.0, one.a * two.a * 4.0); }
+        case 20u: {
+            return vec4<f32>(colour.rgb * one.rgb * mix(two.rgb * 2.0, vec3<f32>(1.0), one.a), colour.a);
+        }
+        case 21u: { return vec4<f32>(colour.rgb * one.rgb + two.rgb * two.a, colour.a); }
+        case 22u: { return vec4<f32>(colour.rgb * one.rgb + two.rgb * two.a * one.a, colour.a); }
+        default: { return vec4<f32>(colour.rgb * one.rgb, colour.a); }
+    }
+}
+
+// The linear value of a value in gamma, as an sRGB target encodes it back.
+fn linear(gamma: vec3<f32>) -> vec3<f32> {
+    let low = gamma / 12.92;
+    let high = pow((gamma + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return select(high, low, gamma <= vec3<f32>(0.04045));
+}
+
+// The pixel of a batch whose textures are `combined` in gamma, `element` the alpha of the batch and
+// its instance; `flags` its alpha key (0 for none), whether unlit and unfogged, and the colour of its
+// fog (0 the view's, 1 black, 2 white, 3 grey for mod2x). Not drawn under its alpha as WotLK tests
+// it: the alpha key times `element`, or 1/255.
+fn shade(combined: vec4<f32>, element: f32, flags: vec4<f32>, normal: vec3<f32>, world: vec3<f32>) -> vec4<f32> {
+    let alpha = clamp(combined.a, 0.0, 1.0);
+    let reference = select(LEAST_ALPHA, flags.x * element, flags.x > 0.0);
+    if alpha < reference {
+        discard;
+    }
+    let fog = select(fog_amount(world), 0.0, flags.z > 0.5);
+    // A mod2x batch doubles what is drawn in gamma: its colour, grey in the fog, made such that the
+    // target's own doubling in linear gives the same, as far as a colour of 1 reaches.
+    if flags.w > 2.5 {
+        let gamma = mix(combined.rgb, vec3<f32>(0.5), fog);
+        return vec4<f32>(pow(gamma * 2.0, vec3<f32>(2.2)) * 0.5, alpha);
+    }
+    // In the linear space of the view, as the terrain: lit, then fogged.
+    var rgb = linear(clamp(combined.rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
+    if flags.y < 0.5 {
+        let lit = max(dot(normalize(normal), camera.sun.xyz), 0.0);
+        rgb = rgb * (camera.ambient.rgb + camera.sun_colour.rgb * lit);
+    }
+    return vec4<f32>(mix(rgb, fog_colour(flags.w), fog), alpha);
+}

@@ -1,8 +1,10 @@
-//! A look made ready to draw, in a job: its model from the cache of models, read once whoever asks,
-//! its vertices and the indices of each skin in buffers; its batches, those of the submeshes it
-//! shows and seen at rest, but the layers merged into their first, each with its pipeline, the
-//! shader WotLK chooses for it (`shaders`), its one or two textures from the cache of textures
-//! with their samplers, and its colour; all created and filled from the job.
+//! A look made ready to draw, in a job. Its batches are planned once whichever way it is drawn:
+//! those of the submeshes it shows and seen at rest, but the layers merged into their first, each
+//! with the state of its pipeline, the shader WotLK chooses for it (`shaders`), its one or two
+//! textures and its colour. Drawn from the pool (`pooled`), or with buffers and textures of its own,
+//! the path of step 9.4c: its model from the cache of models, read once whoever asks, its vertices
+//! and the indices of each skin in buffers, each batch with its pipeline and its textures from the
+//! cache of textures with their samplers; all created and filled from the job.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -14,6 +16,7 @@ use uniwow_api::{bytemuck, wgpu};
 
 use crate::cache::Cache;
 use crate::gpu::{BatchParams, Shared, State, TextureGpu, Vertex, flags};
+use crate::pooled::{ArenaModel, PooledLook};
 use crate::shaders;
 
 /// The vertices and skins of a model on the GPU, and what of the model its looks read: its
@@ -54,25 +57,67 @@ impl LookGpu {
     pub fn radius(&self) -> f32 {
         self.model.model.radius
     }
+}
+
+/// A look ready to draw: from the pool, or with buffers and textures of its own.
+pub enum Ready {
+    Pooled(PooledLook),
+    Own(LookGpu),
+}
+
+impl Ready {
+    pub fn radius(&self) -> f32 {
+        match self {
+            Ready::Pooled(look) => look.model.model.radius,
+            Ready::Own(look) => look.radius(),
+        }
+    }
 
     /// What it is made of, with the setting `reach`.
     pub fn extent(&self, reach: f32) -> Extent {
-        let [low, high] = self.model.rest;
+        let (rest, batches) = match self {
+            Ready::Pooled(look) => (look.model.rest, look.skins.first().map_or(0, Vec::len)),
+            Ready::Own(look) => (look.model.rest, look.skins.first().map_or(0, Vec::len)),
+        };
         Extent {
-            low,
-            high,
+            low: rest[0],
+            high: rest[1],
             radius: self.radius(),
-            batches: self.skins.first().map_or(0, Vec::len),
+            batches,
             reach,
+        }
+    }
+
+    /// Its levels of detail, its skins.
+    pub fn levels(&self) -> usize {
+        match self {
+            Ready::Pooled(look) => look.skins.len(),
+            Ready::Own(look) => look.skins.len(),
+        }
+    }
+
+    /// The state of each batch of the level `level`, and its indices.
+    pub fn batches(&self, level: usize) -> Vec<(State, u32)> {
+        match self {
+            Ready::Pooled(look) => look.skins[level]
+                .iter()
+                .map(|record| (record.state, record.count))
+                .collect(),
+            Ready::Own(look) => look.skins[level]
+                .iter()
+                .map(|batch| (batch.state, batch.indices.len() as u32))
+                .collect(),
         }
     }
 }
 
-/// What the looks share: the models and the textures, by their files.
+/// What the looks share: the models and the textures of their own, by their files, and the models
+/// in the pool.
 #[derive(Default)]
 pub struct Caches {
     pub models: Cache<String, ModelGpu>,
     pub textures: Cache<String, TextureGpu>,
+    pub pooled: Cache<String, ArenaModel>,
 }
 
 /// The key of `file` in the caches: a path in lower case with backslashes, `.mdx` and `.mdl` read
@@ -214,57 +259,38 @@ fn sampler<'a>(shared: &'a Shared, texture: &Bound) -> &'a wgpu::Sampler {
     &shared.samplers[texture.as_ref().map_or(0, |(_, wrap)| *wrap)]
 }
 
-/// `look` ready to draw; the textures that could not be read drawn white, said once each in
-/// `refused`.
-pub fn look(
-    shared: &Shared,
-    formats: &dyn Formats,
-    caches: &Caches,
-    look: &Look,
-    refused: &mut Vec<String>,
-) -> Result<LookGpu, String> {
-    let model = caches
-        .models
-        .get(&key(&look.model), || self::model(shared, formats, &look.model))?;
-    let data = &model.model;
-    let mut held: Vec<Arc<TextureGpu>> = Vec::new();
-    let mut bytes = 0;
-    // The texture of the model `index` on the GPU, with how it wraps: a file, one its display
-    // fills, or none for white.
-    let mut texture_of = |index: usize, refused: &mut Vec<String>| -> Bound {
-        let file = match &data.textures[index].source {
-            ModelTextureSource::File(file) => file.clone(),
-            ModelTextureSource::Filled(kind) => look
-                .textures
-                .iter()
-                .find(|(filled, _)| filled == kind)
-                .map(|(_, file)| file.clone())?,
-            ModelTextureSource::Unnamed => return None,
-        };
-        match caches.textures.get(&key(&file), || texture(shared, formats, &file)) {
-            Ok(texture) => {
-                if !held.iter().any(|kept| Arc::ptr_eq(kept, &texture)) {
-                    held.push(texture.clone());
-                }
-                Some((texture, (data.textures[index].flags & 3) as usize))
-            }
-            Err(why) => {
-                let why = format!("{file:?}: {why}");
-                if !refused.contains(&why) {
-                    refused.push(why);
-                }
-                None
-            }
-        }
+/// A batch of a look before it goes to the GPU: its range of indices in its skin, the state of its
+/// pipeline, what its shader reads, and its one or two textures with how each wraps (across 1, up
+/// and down 2), none drawn white.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Planned {
+    pub indices: Range<u32>,
+    pub state: State,
+    pub params: BatchParams,
+    pub textures: [Option<(FileRef, u32)>; 2],
+}
+
+/// The batches `look` draws of each skin of its model `data`, in the order they are drawn: those
+/// of the submeshes it shows and seen at rest, but the layers merged into their first, each with
+/// the shader WotLK chooses for it.
+pub fn plan(data: &Model, look: &Look) -> Vec<Vec<Planned>> {
+    // The file of the texture `index` of the model: a file, one the display fills, or none.
+    let file_of = |index: usize| match &data.textures[index].source {
+        ModelTextureSource::File(file) => Some(file.clone()),
+        ModelTextureSource::Filled(kind) => look
+            .textures
+            .iter()
+            .find(|(filled, _)| filled == kind)
+            .map(|(_, file)| file.clone()),
+        ModelTextureSource::Unnamed => None,
     };
-    let skins = data
-        .skins
+    data.skins
         .iter()
         .map(|skin| {
             let ids: Vec<u16> = skin.submeshes.iter().map(|submesh| submesh.id).collect();
             let shown = shown(&ids, look.geosets);
             let shaders = shaders::select(data, skin);
-            let mut batches: Vec<(i8, usize, BatchGpu)> = Vec::new();
+            let mut batches: Vec<(i8, usize, Planned)> = Vec::new();
             for (order, (batch, shader)) in skin.batches.iter().zip(shaders).enumerate() {
                 let colour = colour(data, batch);
                 // A layer merged into its first is drawn by it.
@@ -276,56 +302,28 @@ pub fn look(
                 }
                 let submesh = &skin.submeshes[usize::from(batch.submesh)];
                 let material = &data.materials[usize::from(batch.material)];
-                let state = State::of(material);
-                let [one, two] =
-                    [0, 1].map(|slot| shader.textures.get(slot).and_then(|index| texture_of(*index, refused)));
-                let params = BatchParams {
-                    colour,
-                    flags: flags(material),
-                    model: [data.radius, 0.0, 0.0, 0.0],
-                    combine: [
-                        shader.combiner as u32,
-                        shader.coords[0] as u32,
-                        shader.coords[1] as u32,
-                        0,
-                    ],
-                };
-                let uniform = shared.buffer("models batch", bytemuck::bytes_of(&params), wgpu::BufferUsages::UNIFORM);
-                bytes += size_of::<BatchParams>() as u64;
-                let group = shared.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("models batch"),
-                    layout: &shared.batch_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: uniform.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(view(shared, &one)),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(sampler(shared, &one)),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: wgpu::BindingResource::TextureView(view(shared, &two)),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 4,
-                            resource: wgpu::BindingResource::Sampler(sampler(shared, &two)),
-                        },
-                    ],
+                let textures = [0, 1].map(|slot| {
+                    let index = *shader.textures.get(slot)?;
+                    file_of(index).map(|file| (file, data.textures[index].flags & 3))
                 });
                 batches.push((
                     batch.priority,
                     order,
-                    BatchGpu {
+                    Planned {
                         indices: submesh.start..submesh.start + submesh.count,
-                        state,
-                        pipeline: shared.pipeline(state),
-                        group,
+                        state: State::of(material),
+                        params: BatchParams {
+                            colour,
+                            flags: flags(material),
+                            model: [data.radius, 0.0, 0.0, 0.0],
+                            combine: [
+                                shader.combiner as u32,
+                                shader.coords[0] as u32,
+                                shader.coords[1] as u32,
+                                0,
+                            ],
+                        },
+                        textures,
                     },
                 ));
             }
@@ -333,6 +331,90 @@ pub fn look(
             // layers after it.
             batches.sort_by_key(|(priority, order, _)| (*priority, *order));
             batches.into_iter().map(|(_, _, batch)| batch).collect()
+        })
+        .collect()
+}
+
+/// `look` ready to draw with buffers and textures of its own; the textures that could not be read
+/// drawn white, said once each in `refused`.
+pub fn look(
+    shared: &Shared,
+    formats: &dyn Formats,
+    caches: &Caches,
+    look: &Look,
+    refused: &mut Vec<String>,
+) -> Result<LookGpu, String> {
+    let model = caches
+        .models
+        .get(&key(&look.model), || self::model(shared, formats, &look.model))?;
+    let mut held: Vec<Arc<TextureGpu>> = Vec::new();
+    let mut bytes = 0;
+    // A texture on the GPU, with how it wraps; none for white.
+    let mut texture_of = |texture: &Option<(FileRef, u32)>, refused: &mut Vec<String>| -> Bound {
+        let (file, wrap) = texture.as_ref()?;
+        match caches.textures.get(&key(file), || self::texture(shared, formats, file)) {
+            Ok(texture) => {
+                if !held.iter().any(|kept| Arc::ptr_eq(kept, &texture)) {
+                    held.push(texture.clone());
+                }
+                Some((texture, *wrap as usize))
+            }
+            Err(why) => {
+                let why = format!("{file:?}: {why}");
+                if !refused.contains(&why) {
+                    refused.push(why);
+                }
+                None
+            }
+        }
+    };
+    let skins = plan(&model.model, look)
+        .into_iter()
+        .map(|batches| {
+            batches
+                .into_iter()
+                .map(|planned| {
+                    let [one, two] = [0, 1].map(|slot| texture_of(&planned.textures[slot], refused));
+                    let uniform = shared.buffer(
+                        "models batch",
+                        bytemuck::bytes_of(&planned.params),
+                        wgpu::BufferUsages::UNIFORM,
+                    );
+                    bytes += size_of::<BatchParams>() as u64;
+                    let group = shared.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("models batch"),
+                        layout: &shared.batch_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: uniform.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(view(shared, &one)),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::Sampler(sampler(shared, &one)),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::TextureView(view(shared, &two)),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::Sampler(sampler(shared, &two)),
+                            },
+                        ],
+                    });
+                    BatchGpu {
+                        indices: planned.indices,
+                        state: planned.state,
+                        pipeline: shared.pipeline(planned.state),
+                        group,
+                    }
+                })
+                .collect()
         })
         .collect();
     Ok(LookGpu {

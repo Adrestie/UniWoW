@@ -3941,6 +3941,100 @@ submit.
   run in a pass of one sample, refused at every frame, said once, given up at the thirtieth, no
   layer removed; the watch begun again by a frame drawn; the line of the statistics.
 
+#### Step 9.4e2, as built
+
+- **The pool** (`models/src/pool.rs`, `arena.rs`), made when the module starts if the device offers
+  the first instance of an indirect draw, storage buffers read by the vertices (three a stage) and
+  64 sampled textures a stage; otherwise the whole module draws on the path of 9.4c, as the tests
+  force it:
+  - three arenas: the vertices of every model (40 bytes each), their indices (32 bits), the
+    materials of every look (96 bytes each). A range is taken from the first hole holding it and
+    given back merged with its neighbours. A buffer too small is replaced by one twice as large,
+    the one before copied into it, so that every range keeps its place. Each range is written by a
+    copy the job submits under the lock of the arena, after any copy into a larger buffer;
+  - the textures of the looks in the arrays of `core/api`, 64 slots, read as stored, as in 9.4c;
+    `TextureArrays::fetch` tells an unreadable texture from one without room;
+  - a pipeline for each state (blending, two sides, depth), made by the job loading the first look
+    that needs it, on one shader: `common.wgsl` (shared with `models.wgsl` of 9.4c: the placing of
+    an instance, the combiners, the alpha test, the light and the fog) and `pool.wgsl`, its 64
+    arrays read by a `switch` written with them;
+  - one sampler, repeating. A texture is held to its edge by the shader on the axes its flags do
+    not wrap: the point read is kept inside by half of what the filter reads around it, the texel
+    of the coarsest level its gradients can choose and their spread for the anisotropy. Found by
+    the acceptance: held by half a texel of the first level only, the coarse levels of the hide of
+    the Orc Tent (opaque at its top, clear at its bottom) mixed its bottom into its top edge, and
+    the alpha test left dark dots along it. Tried and not kept: four samplers, chosen by the shader
+    by how the texture wraps, exact but four times the reads in the shader (the tests on the
+    software adapter from 5 to 29 seconds); their cost on the GPU of the user could not be told
+    from a change of its load meanwhile.
+- **A look from the pool** (`pooled.rs`):
+  - its model in the arenas once for all its looks (`Caches::pooled`): held while a look holds it,
+    its ranges given back with its last look;
+  - for each batch of each level of skin, a record: its first index in the arena, its count, its
+    first vertex, its material, its state;
+  - its materials written to their arena and given back when the look is released. A material
+    holds what a batch gives the shader in 9.4c, then its two textures (their slot and layer), how
+    each wraps, and the sizes of their classes;
+  - a texture without room: the look falls back on the path of 9.4c (`Ready::Own`), said in the
+    log; an unreadable texture is drawn white, as before.
+- **Drawn in the pass** (`layer.rs`), with the pool:
+  - in `compute`, the instances of every owner are copied by the GPU into one buffer of the frame,
+    each owner at its base;
+  - for each batch of each group in sight (chosen as in 9.4c), the CPU writes its entries (an
+    instance of the buffer of the frame and its material, 8 bytes each) and its arguments. They are
+    gathered by state: the opaque ones, then the blended ones, the blended groups the farthest first
+    within each state, the states in a fixed order (alpha, blend add, add without alpha, add, mod,
+    mod2x);
+  - in the pass, one `multi_draw_indexed_indirect` a state, `first_instance` pointing at the batch's
+    first entry;
+  - the looks on the path of 9.4c are drawn in the same pass after those of the pool, opaque then
+    blended, as their bundle drew them;
+  - the buffers of the frame grow to twice what they need; the bind group is made again when they,
+    the arrays or the buffer of the materials change. No bundle is recorded with the pool; a
+    device without it keeps the bundle of 9.4c.
+- **The statistics**: `N commands in the pass` replaces the bundle recorded; the summary gives the
+  looks on the path of 9.4c and, for the pool, its models, the bytes of its arenas and those used,
+  its textures in how many arrays, the layers held of their capacity, the textures waiting for room
+  and the unreadable ones. The budget counts a model or a texture once, whichever path holds it.
+- **Tests**, on the software adapter: the holes of an arena taken, given back and merged, grown;
+  an arena grown keeping its ranges, a range given back taken again; three looks of one model,
+  each with its own skin as a layer of one array, their instances from two owners, drawn by one
+  command, each where it stands and in its own colour; two models sharing the arenas, the second
+  drawn from its own vertices and triangle; a look of a new class made after the first frame, its
+  array bound by a new bind group, then instances enough to grow the buffer of the frame; a look
+  without room drawn on the path of 9.4c in the same pass (two commands); released looks giving
+  back their materials, the model with its last look, their textures when the arrays are purged,
+  the pipeline of a look made by its load. Every test of the shaders draws its model on both paths
+  and asks for the same pixel within 2; three of them are new: a texture held to its edge unless
+  its flags wrap it, one held to its edge never reading the other at a coarse level (the hide of
+  the Orc Tent), and an alpha layer drawn before a mod layer. The tests of 9.4c draw with the pool,
+  as the editor does. Of 33 changes made on purpose to the arenas, the pool, its shader, the looks
+  from it and the layer, 31 made a test fail; the two others are checked by the acceptance only:
+  the module set up with the pool, and the purge of `Caches::pooled` when looks are released
+  (nearly without effect: the cache holds its models weakly, given back with their last look).
+- **Accepted on the user's machine** (RTX 3080 Ti), the worldserver of `E:` running, observed only,
+  with the script of 9.4d over Orgrimmar and Dalaran (still 25 seconds, then flying 400 yards in
+  20 seconds), every look drawn from the pool, none on the path of 9.4c nor waiting for room. Read
+  from the statistics of the view, against 9.4d:
+
+  | | Orgrimmar | Dalaran |
+  |---|---|---|
+  | Models: draws, commands | 992 to 1,013 still; 375 to 813 flying; 6 commands | 2,961 to 2,985 still; 1,536 to 2,765 flying over the city, 14 to 177 past it; 6 to 9 commands |
+  | The view on the interface thread | 0.43 to 0.44 ms still (submitting 0.18), 0.33 to 0.42 flying, 0.76 at most (9.4d: 0.51 to 0.74, 1.23 at most) | 0.78 to 0.79 ms still (submitting 0.21 to 0.22), 0.58 to 0.71 flying over the city, 0.94 at most (9.4d: 1.46 to 2.12, 3.10 at most, once 7.25) |
+  | The models on the interface thread | 0.19 to 0.28 ms | 0.52 to 0.69 ms; the steering of the module once 3.53 ms |
+  | The bundle of the models recorded | never (9.4d: up to 10 times a second) | never (9.4d: 14 to 22 times a second) |
+  | The GPU | 1.61 to 2.21 ms a frame; the models drawing 0.52 to 0.96 ms | 1.43 to 3.10 ms; the models drawing 0.56 to 1.03 ms |
+  | The pool | 47 to 50 models in arenas of 28 MB (18 used); 189 to 224 textures in 22 to 26 arrays, 189 to 224 layers held of 284 to 324 | 184 models in arenas of 55 to 75 MB (43 to 46 used); 599 to 608 textures in 33 arrays, 599 to 608 layers held of 756 to 760 |
+
+  The GPU of the machine was busier in these runs than before: the terrain, unchanged, drew in
+  1.18 ms what it drew in 0.80 in Orgrimmar, and from 0.76 to 2.13 ms in Dalaran with the same
+  draws. Before the fix of the edge above, with the GPU as in 9.4e1, the models drew in 0.46 to
+  0.61 ms still and 0.30 to 0.58 flying in Orgrimmar (9.4e1: 0.69 and 0.37 to 0.54), 0.38 to 0.65
+  in Dalaran, the frame 1.0 to 1.8 ms. The arrays reserve a quarter more layers than they hold in
+  Dalaran (608 of 756): no `binding_array` needed. Seen the same on both paths, drawn from the
+  pool and forced on that of 9.4c: the Orc Tent once fixed, and the white parts of some guards of
+  Orgrimmar, which are not of this step.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

@@ -5,12 +5,17 @@
 //! per group of instances and batch. Its panel sets how far an instance is drawn and previews a
 //! display before the camera. Nothing is changed: no undo entry, no file written.
 
+mod arena;
 mod cache;
 mod display;
 mod gpu;
 mod groups;
 mod layer;
 mod loading;
+mod pool;
+#[cfg(test)]
+mod pool_tests;
+mod pooled;
 mod service;
 #[cfg(test)]
 mod shader_tests;
@@ -33,7 +38,7 @@ use uniwow_api::{
 
 use gpu::Shared;
 use layer::{ModelsLayer, Scene};
-use loading::{Caches, LookGpu};
+use loading::{Caches, Ready};
 use service::Service;
 
 pub fn lock<T>(shared: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -51,13 +56,31 @@ const EXPECTED: u64 = 1 << 20;
 const MB: f64 = 1024.0 * 1024.0;
 
 /// What a load ends with: the look on the GPU or why not, and the textures drawn white.
-type Loaded = Option<(Result<LookGpu, String>, Vec<String>)>;
+type Loaded = Option<(Result<Ready, String>, Vec<String>)>;
 
 /// What a preview shows: a creature display, or a model by its path with its default submeshes.
 #[derive(Clone, Debug, PartialEq)]
 enum Shown {
     Display(u32),
     Model(String),
+}
+
+/// `look` made ready: from the pool when there is one, with buffers and textures of its own when
+/// there is none or it finds no room there.
+fn load(
+    shared: &Shared,
+    formats: &dyn Formats,
+    caches: &Caches,
+    look: &Look,
+    refused: &mut Vec<String>,
+) -> Result<Ready, String> {
+    if let Some(pool) = &shared.pool {
+        match pooled::look(pool, formats, caches, look, refused) {
+            Ok(pooled) => return Ok(Ready::Pooled(pooled)),
+            Err(why) => log::info!("models: {:?} drawn on the path of 9.4c: {why}", look.model),
+        }
+    }
+    loading::look(shared, formats, caches, look, refused).map(Ready::Own)
 }
 
 /// The instances of a preview of `shown`: `count` of them in a grid before the camera at `eye`
@@ -177,7 +200,7 @@ struct ModelsModule {
     view: Option<viewport::Handle>,
     caches: Arc<Caches>,
     /// The looks on the GPU, those loading by their job, and the jobs by look.
-    held: HashMap<LookId, Arc<LookGpu>>,
+    held: HashMap<LookId, Arc<Ready>>,
     loading: HashMap<LookId, JobId>,
     jobs: HashMap<JobId, LookId>,
     generation: u64,
@@ -275,16 +298,20 @@ impl ModelsModule {
             .copied()
             .collect();
         if !released.is_empty() {
-            let gone: Vec<Arc<LookGpu>> = released.iter().filter_map(|id| self.held.remove(id)).collect();
+            let gone: Vec<Arc<Ready>> = released.iter().filter_map(|id| self.held.remove(id)).collect();
             for id in &released {
                 self.service.set_state(*id, LookState::Waiting);
             }
             self.publish();
-            let caches = self.caches.clone();
+            let (caches, pool) = (self.caches.clone(), shared.pool.clone());
             ctx.spawn("Free the models left", move |_| {
                 drop(gone);
                 caches.models.purge();
                 caches.textures.purge();
+                caches.pooled.purge();
+                if let Some(pool) = pool {
+                    pool.arrays.purge();
+                }
             });
         }
         // Loads no longer wanted are cancelled.
@@ -324,8 +351,7 @@ impl ModelsModule {
                         return None;
                     }
                     let mut refused = Vec::new();
-                    let result = loading::look(&shared, &*formats, &caches, &look, &mut refused);
-                    Some((result, refused))
+                    Some((load(&shared, &*formats, &caches, &look, &mut refused), refused))
                 });
                 self.loading.insert(id, job);
                 self.jobs.insert(job, id);
@@ -335,6 +361,11 @@ impl ModelsModule {
         self.tell_budget(&view, &nearest);
         let mut scene = lock(&self.scene);
         let (models, textures) = (self.caches.models.counts(), self.caches.textures.counts());
+        let own = self
+            .held
+            .values()
+            .filter(|look| matches!(***look, Ready::Own(_)))
+            .count();
         let waiting = nearest
             .keys()
             .filter(|id| !self.held.contains_key(id) && !self.loading.contains_key(id))
@@ -343,8 +374,27 @@ impl ModelsModule {
         scene.reach = self.reach;
         self.service.set_reach(self.reach);
         scene.bytes = bytes;
+        let drawn = match &shared.pool {
+            Some(pool) => {
+                let arrays = pool.arrays.counts();
+                let (held, used) = pool.arenas();
+                format!(
+                    "{own} on the path of 9.4c; pooled: {} models in arenas of {:.0} MB ({:.0} used), {} textures in {} arrays, {} layers held of {}, {} waiting for room, {} unreadable",
+                    self.caches.pooled.counts().0,
+                    held as f64 / MB,
+                    used as f64 / MB,
+                    arrays.placed,
+                    arrays.arrays,
+                    arrays.layers,
+                    arrays.capacity,
+                    arrays.no_room,
+                    arrays.unreadable
+                )
+            }
+            None => "every look on the path of 9.4c".to_owned(),
+        };
         scene.summary = format!(
-            "{} looks on the GPU ({:.0} MB), {} loading, {waiting} waiting; {} models and {} textures held, {} textures unreadable",
+            "{} looks on the GPU ({:.0} MB), {} loading, {waiting} waiting; {} models and {} textures held, {} textures unreadable\n  {drawn}",
             self.held.len(),
             bytes as f64 / MB,
             self.loading.len(),
@@ -360,7 +410,7 @@ impl ModelsModule {
     fn tell_budget(&mut self, view: &viewport::Handle, nearest: &HashMap<LookId, f32>) {
         let mut demand = Demand::default();
         let mut counted: HashSet<usize> = HashSet::new();
-        let mut held: Vec<(f32, &Arc<LookGpu>)> = self
+        let mut held: Vec<(f32, &Arc<Ready>)> = self
             .held
             .iter()
             .map(|(id, look)| (nearest.get(id).copied().unwrap_or(f32::INFINITY), look))
@@ -368,13 +418,26 @@ impl ModelsModule {
         held.sort_by(|a, b| a.0.total_cmp(&b.0));
         let mut total = 0;
         for (distance, look) in &held {
-            let mut bytes = look.bytes;
-            if counted.insert(Arc::as_ptr(&look.model) as usize) {
-                bytes += look.model.bytes;
-            }
-            for texture in &look.textures {
-                if counted.insert(Arc::as_ptr(texture) as usize) {
-                    bytes += texture.bytes;
+            let mut bytes = 0;
+            let mut once = |pointer: usize, more: u64| {
+                if counted.insert(pointer) {
+                    bytes += more;
+                }
+            };
+            match &***look {
+                Ready::Pooled(look) => {
+                    once(Arc::as_ptr(&look.model) as usize, look.model.bytes);
+                    for texture in &look.textures {
+                        once(Arc::as_ptr(texture) as usize, texture.bytes);
+                    }
+                    bytes += look.bytes;
+                }
+                Ready::Own(look) => {
+                    once(Arc::as_ptr(&look.model) as usize, look.model.bytes);
+                    for texture in &look.textures {
+                        once(Arc::as_ptr(texture) as usize, texture.bytes);
+                    }
+                    bytes += look.bytes;
                 }
             }
             demand.held[Demand::band(*distance)] += bytes;
@@ -468,7 +531,7 @@ impl Module for ModelsModule {
         let target = view.target();
         self.view = Some(view);
         self.setup = Some(ctx.spawn("Build the pipelines of the models", move |_| {
-            Arc::new(Shared::new(&gpu, &target))
+            Arc::new(Shared::new(&gpu, &target, Some(pool::SLOTS)))
         }));
     }
 

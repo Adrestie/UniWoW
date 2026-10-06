@@ -12,7 +12,8 @@ use uniwow_api::viewport::View;
 
 use crate::gpu::{Shared, camera_values};
 use crate::layer::{ModelsLayer, Scene};
-use crate::loading::{self, Caches};
+use crate::loading::Caches;
+use crate::pool;
 use crate::service::Service;
 use crate::shaders::{self, Combiner, Coords};
 use crate::tests::{AIM, Bench, FRONT, Fake, TARGET, device, middle, plain, render, square};
@@ -210,9 +211,28 @@ fn grey(value: u8, alpha: u8) -> Texture {
 }
 
 /// The pixel at the middle of what `model` draws with `textures`, its instance turned `turn`
-/// radians about the vertical, seen from `FRONT` towards `AIM`.
+/// radians about the vertical, seen from `FRONT` towards `AIM`: the same, within 2, from the pool
+/// and on the path of step 9.4c.
 fn drawn(gpu: &egui_wgpu::RenderState, model: &Model, textures: &[(&str, Texture)], turn: f32) -> [u8; 4] {
-    let shared = Arc::new(Shared::new(gpu, &TARGET));
+    let pooled = drawn_on(gpu, model, textures, turn, Some(pool::SLOTS));
+    let own = drawn_on(gpu, model, textures, turn, None);
+    assert!(
+        pooled.iter().zip(own).all(|(a, b)| a.abs_diff(b) <= 2),
+        "from the pool {pooled:?}, on the path of 9.4c {own:?}"
+    );
+    pooled
+}
+
+/// The pixel of `drawn`, with the pool of `slots` arrays when given.
+fn drawn_on(
+    gpu: &egui_wgpu::RenderState,
+    model: &Model,
+    textures: &[(&str, Texture)],
+    turn: f32,
+    slots: Option<usize>,
+) -> [u8; 4] {
+    let shared = Arc::new(Shared::new(gpu, &TARGET, slots));
+    assert_eq!(shared.pool.is_some(), slots.is_some());
     let service = Arc::new(Service::default());
     let _ = service.gpu.set((gpu.device.clone(), gpu.queue.clone()));
     let fake = Fake {
@@ -230,7 +250,7 @@ fn drawn(gpu: &egui_wgpu::RenderState, model: &Model, textures: &[(&str, Texture
     };
     let id = service.look(&look);
     let mut refused = Vec::new();
-    let ready = loading::look(&shared, &fake, &Caches::default(), &look, &mut refused).unwrap();
+    let ready = crate::load(&shared, &fake, &Caches::default(), &look, &mut refused).unwrap();
     assert!(refused.is_empty(), "{refused:?}");
     let scene = Arc::new(Mutex::new(Scene {
         looks: Arc::new(HashMap::from([(id, Arc::new(ready))])),
@@ -310,6 +330,90 @@ fn a_mod2x_layer_doubles_what_is_under_it_in_gamma() {
         0.0,
     );
     assert!(near(seen, [62.0; 3], 4.0), "{seen:?}");
+}
+
+#[test]
+fn an_alpha_layer_then_a_mod_layer_are_drawn_in_that_order() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    // An opaque grey of 128, then a red alpha layer of half its alpha, then a mod layer of a grey
+    // of 128, each apart: the pool gathers the draws by state, alpha before mod as their batches
+    // come. Mixed then darkened, a red of about 100; darkened then mixed, about 190.
+    let batches = [[0, 0, 1, 0, 0, 0], [1, 1, 1, 1, 0, 0], [2, 2, 1, 2, 0, 0]];
+    let model = named(
+        shaded(&[(PLAIN, 0), (PLAIN, 2), (PLAIN, 5)], &batches, &[0], &[]),
+        &["one.blp", "two.blp", "three.blp"],
+    );
+    assert!(selected(&model).iter().all(Option::is_some));
+    let textures = [
+        ("one.blp", grey(128, 255)),
+        ("two.blp", plain([255, 0, 0, 128])),
+        ("three.blp", grey(128, 255)),
+    ];
+    let seen = drawn(&gpu, &model, &textures, 0.0);
+    assert!(seen[0] > 70 && seen[0] < 130 && seen[1] < 60, "{seen:?}");
+}
+
+#[test]
+fn a_texture_is_held_to_its_edge_on_the_axes_its_flags_do_not_wrap() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    // The coordinates of the square doubled across: 1.09 at its middle. A texture of two columns
+    // of red, then two of blue.
+    let mut model = square(0, 0);
+    for vertex in &mut model.vertices {
+        vertex.uv[0][0] *= 2.0;
+    }
+    let halves = Texture {
+        width: 4,
+        height: 4,
+        format: TextureFormat::Rgba8,
+        levels: vec![
+            [[255, 0, 0, 255], [255, 0, 0, 255], [0, 0, 255, 255], [0, 0, 255, 255]]
+                .concat()
+                .repeat(4),
+        ],
+    };
+    let textures = [("red.blp", halves)];
+    // Held, its last column; wrapped, mostly its first.
+    let held = drawn(&gpu, &model, &textures, 0.0);
+    assert!(held[2] > 100 && held[0] < 30, "{held:?}");
+    model.textures[0].flags = 0x01;
+    let wrapped = drawn(&gpu, &model, &textures, 0.0);
+    assert!(wrapped[0] > 100 && wrapped[2] < 60, "{wrapped:?}");
+}
+
+#[test]
+fn a_texture_held_to_its_edge_never_reads_the_other_at_a_coarse_level() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    // As the hide of the Orc Tent: alpha keyed, held to its edges, opaque at the top and clear at
+    // the bottom, its levels made down to one texel; the coordinates moved up so that the middle
+    // reads just past the top edge, at a level of about 6 texels a pixel.
+    let mut model = shaded(&[(PLAIN, 1)], &[[0, 0, 1, 0, 0, 0]], &[0], &[]);
+    for vertex in &mut model.vertices {
+        vertex.uv[0][1] -= 0.57;
+    }
+    let side = 64usize;
+    let levels = (0..7)
+        .map(|level| {
+            let side = side >> level;
+            let opaque = [255u8, 0, 0, 255].repeat(side * side.div_ceil(2));
+            let clear = [0u8; 4].repeat(side * (side / 2));
+            [opaque, clear].concat()
+        })
+        .collect();
+    let hide = Texture {
+        width: side as u32,
+        height: side as u32,
+        format: TextureFormat::Rgba8,
+        levels,
+    };
+    let seen = drawn(&gpu, &model, &[("red.blp", hide)], 0.0);
+    assert!(seen[0] > 100, "the top edge, not mixed with the bottom one: {seen:?}");
 }
 
 #[test]

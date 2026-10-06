@@ -16,7 +16,7 @@ use uniwow_api::formats::{
 };
 use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::models::{Extent, Geosets, Instance, Look, LookId, LookState, Models};
-use uniwow_api::viewport::{Layer, Target, View};
+use uniwow_api::viewport::{Drawing, Layer, Target, View};
 use uniwow_api::{Event, MODULE_FAILED_TOPIC, bytemuck, egui, egui_wgpu, serde_json, wgpu};
 
 use crate::cache::Cache;
@@ -24,7 +24,8 @@ use crate::display::{self, CHARACTER_SKIN, CREATURE_SKIN, HAIR};
 use crate::gpu::{self, ALPHA_KEY, InstanceGpu, Shared, State};
 use crate::groups::{self, Group, TILE};
 use crate::layer::{self, LIMITS, MARGIN, ModelsLayer, Scene};
-use crate::loading::{self, Caches};
+use crate::loading::{self, Caches, Ready};
+use crate::pool;
 use crate::service::Service;
 use crate::{forget_failed, lock};
 
@@ -39,6 +40,8 @@ pub struct Fake {
     pub sections: Vec<CharSection>,
     pub objects: Vec<GameObjectDisplay>,
     pub model: Option<Model>,
+    /// The models of the files they name, `model` for the others.
+    pub files: HashMap<String, Model>,
     pub textures: HashMap<String, Texture>,
 }
 
@@ -70,7 +73,12 @@ impl Formats for Fake {
     fn char_sections(&self) -> Result<Arc<Vec<CharSection>>, String> {
         Ok(Arc::new(self.sections.clone()))
     }
-    fn model(&self, _file: &FileRef) -> Result<Model, String> {
+    fn model(&self, file: &FileRef) -> Result<Model, String> {
+        if let FileRef::Path(path) = file
+            && let Some(model) = self.files.get(path)
+        {
+            return Ok(model.clone());
+        }
         self.model.clone().ok_or_else(|| "no model".to_owned())
     }
     fn wdt(&self, _directory: &str) -> Result<Arc<Wdt>, String> {
@@ -589,14 +597,16 @@ fn a_look_drawn_tells_its_extent_until_it_is_released() {
     let Some(gpu) = device() else {
         return;
     };
-    let shared = Shared::new(&gpu, &TARGET);
     let fake = Fake {
         model: Some(square(0, 0)),
         textures: HashMap::from([("red.blp".to_owned(), plain([255, 0, 0, 255]))]),
         ..Fake::default()
     };
-    let ready = loading::look(&shared, &fake, &Caches::default(), &plain_look, &mut Vec::new()).unwrap();
-    assert_eq!(ready.extent(100.0), Extent { reach: 100.0, ..extent });
+    for slots in [None, Some(pool::SLOTS)] {
+        let shared = Shared::new(&gpu, &TARGET, slots);
+        let ready = crate::load(&shared, &fake, &Caches::default(), &plain_look, &mut Vec::new()).unwrap();
+        assert_eq!(ready.extent(100.0), Extent { reach: 100.0, ..extent }, "{slots:?}");
+    }
 }
 
 // Drawn on the software adapter.
@@ -616,7 +626,16 @@ pub fn device() -> Option<egui_wgpu::RenderState> {
         ..Default::default()
     }))?
     .ok()?;
-    let (device, queue) = resolved(adapter.request_device(&wgpu::DeviceDescriptor::default()))?.ok()?;
+    // What the pool needs, as the editor asks for it.
+    let mut limits = wgpu::Limits::default();
+    limits.max_sampled_textures_per_shader_stage = adapter.limits().max_sampled_textures_per_shader_stage.min(128);
+    let (device, queue) = resolved(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features: adapter.features()
+            & (wgpu::Features::INDIRECT_FIRST_INSTANCE | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT),
+        required_limits: limits,
+        ..Default::default()
+    }))?
+    .ok()?;
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let renderer = egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
     Some(egui_wgpu::RenderState {
@@ -709,8 +728,14 @@ pub struct Bench {
 }
 
 fn bench(model: Model, red: [u8; 4]) -> Option<Bench> {
+    bench_on(model, red, true)
+}
+
+/// The bench of `bench`, with the pool when `pooled` says, on the path of step 9.4c otherwise.
+pub fn bench_on(model: Model, red: [u8; 4], pooled: bool) -> Option<Bench> {
     let gpu = device()?;
-    let shared = Arc::new(Shared::new(&gpu, &TARGET));
+    let shared = Arc::new(Shared::new(&gpu, &TARGET, pooled.then_some(pool::SLOTS)));
+    assert_eq!(shared.pool.is_some(), pooled, "the device of the tests offers the pool");
     let service = Arc::new(Service::default());
     let _ = service.gpu.set((gpu.device.clone(), gpu.queue.clone()));
     let fake = Fake {
@@ -725,8 +750,9 @@ fn bench(model: Model, red: [u8; 4]) -> Option<Bench> {
     };
     let id = service.look(&look);
     let mut refused = Vec::new();
-    let ready = loading::look(&shared, &fake, &Caches::default(), &look, &mut refused).unwrap();
+    let ready = crate::load(&shared, &fake, &Caches::default(), &look, &mut refused).unwrap();
     assert!(refused.is_empty(), "{refused:?}");
+    assert_eq!(matches!(ready, Ready::Pooled(_)), pooled);
     let scene = Arc::new(Mutex::new(Scene {
         looks: Arc::new(HashMap::from([(id, Arc::new(ready))])),
         generation: 1,
@@ -743,7 +769,7 @@ fn bench(model: Model, red: [u8; 4]) -> Option<Bench> {
 }
 
 /// The first `size` bytes of `buffer`, copied back from the GPU.
-fn read_back(gpu: &egui_wgpu::RenderState, buffer: &wgpu::Buffer, size: u64) -> Vec<u8> {
+pub fn read_back(gpu: &egui_wgpu::RenderState, buffer: &wgpu::Buffer, size: u64) -> Vec<u8> {
     let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("read back"),
         size,
@@ -773,6 +799,9 @@ pub fn render(bench: &mut Bench, eye: Vec3, look: Vec3) -> Vec<u8> {
         sun: Default::default(),
     };
     bench.layer.prepare(&gpu, &view);
+    let in_pass = bench.layer.drawing() == Drawing::Pass;
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    bench.layer.compute(&gpu, &view, &mut encoder);
     let mut bundle = gpu
         .device
         .create_render_bundle_encoder(&wgpu::RenderBundleEncoderDescriptor {
@@ -786,7 +815,9 @@ pub fn render(bench: &mut Bench, eye: Vec3, look: Vec3) -> Vec<u8> {
             sample_count: 1,
             multiview: None,
         });
-    bench.layer.draw(&gpu, &TARGET, &view, &mut bundle);
+    if !in_pass {
+        bench.layer.draw(&gpu, &TARGET, &view, &mut bundle);
+    }
     let bundle = bundle.finish(&wgpu::RenderBundleDescriptor { label: None });
     let texture = |format, usage| {
         gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -815,7 +846,6 @@ pub fn render(bench: &mut Bench, eye: Vec3, look: Vec3) -> Vec<u8> {
         usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let mut encoder = gpu.device.create_command_encoder(&Default::default());
     {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: None,
@@ -841,6 +871,9 @@ pub fn render(bench: &mut Bench, eye: Vec3, look: Vec3) -> Vec<u8> {
             multiview_mask: None,
         });
         pass.execute_bundles([&bundle]);
+        if in_pass {
+            bench.layer.draw_pass(&gpu, &TARGET, &view, &mut pass);
+        }
     }
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
@@ -1023,7 +1056,7 @@ fn a_look_keeps_the_batches_of_the_submeshes_it_shows_and_seen_at_rest() {
     let Some(gpu) = device() else {
         return;
     };
-    let shared = Shared::new(&gpu, &TARGET);
+    let shared = Shared::new(&gpu, &TARGET, None);
     let mut model = square(0, 0);
     let skin = &mut model.skins[0];
     skin.submeshes.push(Submesh {

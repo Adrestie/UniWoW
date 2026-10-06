@@ -12,6 +12,7 @@ use uniwow_api::wgpu::util::DeviceExt;
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
 use crate::lock;
+use crate::pool::Pool;
 
 /// A vertex of a model as the shader reads it: position, normal, its two sets of coordinates.
 #[repr(C)]
@@ -99,6 +100,60 @@ impl State {
 
     pub fn blended(&self) -> bool {
         self.blending > ALPHA_KEYED
+    }
+
+    /// The pipeline of this state drawing into `target`, by `shader` laid out by `layout`, its
+    /// vertices read from `buffers`.
+    pub fn pipeline(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::PipelineLayout,
+        shader: &wgpu::ShaderModule,
+        target: &Target,
+        buffers: &[Option<wgpu::VertexBufferLayout>],
+    ) -> wgpu::RenderPipeline {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("models"),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers,
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: (!self.two_sided).then_some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: target.depth_format,
+                depth_write_enabled: Some(self.depth_write),
+                // Or equal, as the client tests the depth: the layers of a submesh lie on its first.
+                depth_compare: Some(if self.depth_test {
+                    or_equal(target.depth_compare)
+                } else {
+                    wgpu::CompareFunction::Always
+                }),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: target.sample_count,
+                ..Default::default()
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target.color_format,
+                    blend: self.blend(),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
     }
 
     fn blend(&self) -> Option<wgpu::BlendState> {
@@ -189,10 +244,15 @@ pub struct Shared {
     pub white: wgpu::TextureView,
     pub block_compression: bool,
     pipelines: Mutex<HashMap<State, Arc<wgpu::RenderPipeline>>>,
+    /// What the looks drawn by a few commands share; none on a device without what it needs, or
+    /// when not asked for.
+    pub pool: Option<Arc<Pool>>,
 }
 
 impl Shared {
-    pub fn new(gpu: &egui_wgpu::RenderState, target: &Target) -> Self {
+    /// What the models share on the device of `gpu`, drawing into `target`; the pool with `slots`
+    /// arrays of textures when they are given and the device offers what it needs.
+    pub fn new(gpu: &egui_wgpu::RenderState, target: &Target, slots: Option<usize>) -> Self {
         let device = gpu.device.clone();
         let uniform = |visibility| wgpu::BindGroupLayoutEntry {
             binding: 0,
@@ -253,7 +313,7 @@ impl Shared {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("models"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("models.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(concat!(include_str!("common.wgsl"), include_str!("models.wgsl")).into()),
         });
         let address = |wrap: bool| {
             if wrap {
@@ -283,8 +343,12 @@ impl Shared {
         let white = upload(&device, &gpu.queue, &white)
             .expect("a texture of one texel is taken")
             .view;
+        let pool = slots
+            .and_then(|slots| Pool::new(&gpu.adapter, &device, &gpu.queue, &camera_layout, target, slots))
+            .map(Arc::new);
         Self {
             block_compression: device.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
+            pool,
             device,
             queue: gpu.queue.clone(),
             camera_layout,
@@ -308,64 +372,28 @@ impl Shared {
     }
 
     fn make_pipeline(&self, state: State) -> wgpu::RenderPipeline {
-        let target = &self.target;
-        self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("models"),
-            layout: Some(&self.layout),
-            vertex: wgpu::VertexState {
-                module: &self.shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[
-                    Some(wgpu::VertexBufferLayout {
-                        array_stride: size_of::<Vertex>() as u64,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![
-                            0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2
-                        ],
-                    }),
-                    Some(wgpu::VertexBufferLayout {
-                        array_stride: size_of::<InstanceGpu>() as u64,
-                        step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &wgpu::vertex_attr_array![
-                            4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4
-                        ],
-                    }),
-                ],
-            },
-            primitive: wgpu::PrimitiveState {
-                cull_mode: (!state.two_sided).then_some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: target.depth_format,
-                depth_write_enabled: Some(state.depth_write),
-                // Or equal, as the client tests the depth: the layers of a submesh lie on its first.
-                depth_compare: Some(if state.depth_test {
-                    or_equal(target.depth_compare)
-                } else {
-                    wgpu::CompareFunction::Always
+        state.pipeline(
+            &self.device,
+            &self.layout,
+            &self.shader,
+            &self.target,
+            &[
+                Some(wgpu::VertexBufferLayout {
+                    array_stride: size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2
+                    ],
                 }),
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: target.sample_count,
-                ..Default::default()
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &self.shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target.color_format,
-                    blend: state.blend(),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        })
+                Some(wgpu::VertexBufferLayout {
+                    array_stride: size_of::<InstanceGpu>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![
+                        4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4
+                    ],
+                }),
+            ],
+        )
     }
 
     /// A buffer of `usage` made with `contents`.
