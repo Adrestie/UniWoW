@@ -25,11 +25,11 @@ const BUILDING_BY_ID: u16 = 0x8;
 const BUILDING_SCALED: u16 = 0x4;
 
 /// The chunks of a file: the name of each, as the format writes it, and its bytes.
-type Chunks<'a> = Vec<([u8; 4], &'a [u8])>;
+pub(crate) type Chunks<'a> = Vec<([u8; 4], &'a [u8])>;
 
 /// The chunks of a file in their order; the file holds their names reversed. Fewer bytes than a
 /// header at the end, as some files of the client have, are not a chunk.
-fn chunks(bytes: &[u8]) -> Result<Chunks<'_>, String> {
+pub(crate) fn chunks(bytes: &[u8]) -> Result<Chunks<'_>, String> {
     let mut found = Vec::new();
     let mut at = 0;
     while let Some(header) = bytes.get(at..at + 8) {
@@ -154,7 +154,7 @@ fn names(bytes: &[u8]) -> Vec<String> {
 }
 
 /// The name at `offset` in a block of strings.
-fn name_at(bytes: &[u8], offset: u32) -> Result<String, String> {
+pub(crate) fn name_at(bytes: &[u8], offset: u32) -> Result<String, String> {
     let rest = bytes
         .get(offset as usize..)
         .ok_or_else(|| format!("a name at {offset}, out of its block"))?;

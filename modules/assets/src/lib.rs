@@ -21,6 +21,9 @@ mod terrain;
 mod terrain_tests;
 #[cfg(test)]
 mod tests;
+mod wmo;
+#[cfg(test)]
+mod wmo_tests;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -30,7 +33,7 @@ use std::thread::ThreadId;
 
 use uniwow_api::formats::{
     self, AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef,
-    Formats, GameObjectDisplay, HairGeoset, MapRecord, Model, Placements, Texture, Tile, Wdl, Wdt,
+    Formats, GameObjectDisplay, HairGeoset, MapRecord, Model, Placements, Texture, Tile, Wdl, Wdt, Wmo,
 };
 use uniwow_api::vfs::{self, Vfs, VfsState};
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, Registrar, egui, log, rfd, serde_json};
@@ -164,6 +167,26 @@ impl Client {
         m2::read(&bytes, &path, |skin| {
             // By its FileDataID first, then by the name of the model.
             let named = skin.id.and_then(|id| self.file_ids.path_of(id)).unwrap_or(skin.path);
+            self.chain
+                .read(&named)?
+                .ok_or_else(|| format!("{named}: not in the client"))
+        })
+        .map_err(|e| format!("{path}: {e}"))
+    }
+
+    /// The building `file`, its groups beside it by its name or named by FileDataID.
+    fn wmo(&self, file: &FileRef) -> Result<Wmo, String> {
+        let path = self.path(file)?;
+        let bytes = self
+            .chain
+            .read(&path)?
+            .ok_or_else(|| format!("{path}: not in the client"))?;
+        wmo::read(&bytes, &path, |group| {
+            // By its FileDataID first, then by the name of the building.
+            let named = group
+                .id
+                .and_then(|id| self.file_ids.path_of(id))
+                .unwrap_or_else(|| group.path.clone());
             self.chain
                 .read(&named)?
                 .ok_or_else(|| format!("{named}: not in the client"))
@@ -317,6 +340,11 @@ impl Formats for Files {
     fn model(&self, file: &FileRef) -> Result<Model, String> {
         self.check_thread("a model");
         self.client()?.model(file)
+    }
+
+    fn wmo(&self, file: &FileRef) -> Result<Wmo, String> {
+        self.check_thread("a building");
+        self.client()?.wmo(file)
     }
 
     fn wdt(&self, directory: &str) -> Result<Arc<Wdt>, String> {

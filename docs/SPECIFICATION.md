@@ -4735,6 +4735,62 @@ The plan and the decisions are validated, with these additions:
   built. The GPU stayed at its low clock throughout (425 to 555 MHz on average, of 2,145), the
   densest area not loading it enough: the choice by the GPU at a high clock is still to measure.
 
+#### Step 9.6b, after its review
+
+Validated, nothing to correct. The measure in the densest area of Northrend at 4 tiles (0.8 ms on
+the interface thread, 2.3 ms on the thread of the animations, about 4,800 groups) justifies leaving
+the remedies unbuilt. Kept for 9.6d:
+
+- **The memory of the process**: at 4 tiles, 0.9 to 1.5 GB more, for about 400 MB of looks on the
+  GPU. When the buildings come, the memory on the CPU is given by its parts (the models kept, the
+  animations, the caches), to know where the surplus comes from.
+- **The choice by the GPU at a high clock** is still to measure.
+
+#### Step 9.6c, as built
+
+- **The building as plain data** (`core/api`): `formats::Wmo`, its flags, ambient colour, id,
+  bounds and sky; its materials (`WmoMaterial`: flags, shader, blending, three textures, emissive,
+  diffuse and third colours, ground); its groups (`WmoGroup`: name, flags, bounds, portals, batches
+  by kind, fogs, type of liquid, id; vertices, normals, every set of coordinates and of vertex
+  colours, triangles, the flags and material of each, batches, doodads held, liquid); its portals
+  and their references, lights, doodad sets, doodads (a quaternion each) and fogs; its faults. Its
+  colours red, green, blue and alpha. `Formats::wmo` reads it with its groups at their finest
+  level.
+- **The reader** (`assets`, `wmo.rs`), from the public description of the format: the groups of
+  3.3.5a beside the root by its name and their index (`_000`), the modern ones by the first entries
+  of `GFID`, the finest level; the doodads by their place in `MODI` and the textures by FileDataID
+  when the root has no `MOTX`, as the loader of wow.export reads them; the triangles of `MPY2`; the
+  material of a batch past 255 in the last of its bounds when its flag 0x2 says so (wow.export reads
+  only its byte). The groups are read on the workers of the pool, a group a slice.
+- **Checked before building**, over the client: no `MOTX` begins with an empty name, so that the
+  offset 0 names the first texture (2,047 materials); a texture left out names an empty name; the
+  field of the third texture holds other data in 3.3.5a (0.1 in 14,459 materials), and its shaders
+  go to 6 only: a third texture is read only for the shaders of later clients. The groups of
+  Darnassus and of the World Trees declare their `MOGP` 44 to 128 bytes longer than their file,
+  the chunks inside ending with it: read to the end of the file, as the client reads it. The
+  headers count 259,338 doodads, the count of the proposal; their chunks hold 250,296, which the
+  sets fit in, and the chunks are read.
+- **What a building lacks**, said in its faults and kept in its places: a batch out of its
+  triangles or vertices or of a material it does not have drawn as nothing, a triangle of such a
+  material only collided with, a doodad held that it does not have left out, a set past its
+  doodads cut, a group missing kept empty with the flags and bounds of its root; a portal reference
+  or a range of portals past what it has said.
+- **Tests**, on buildings the tests write: one of 3.3.5a read whole, field by field (its second
+  texture an empty name, its third field 0.1, its liquid, both sets of coordinates and of colours);
+  a modern one, its groups asked by their finest FileDataIDs, its doodads and textures by
+  FileDataID, the third texture of a later shader, the large material of a batch, its empty sky;
+  what a building lacks, eight faults; a group longer in its header than its file; damaged at
+  random, refused or said and never a panic; read through an archive by the service. Over the
+  client, when `UNIWOW_CLIENT` names it: the 1,986 buildings without a fault, 9,347 groups,
+  31,712,510 triangles, 7,548 portals, 406 liquids; Stormwind as the proposal counted it (286
+  groups, 278 inside, 319 portals, 606 lights, 727,741 triangles, 2,754 batches, 192 groups
+  coloured, 5 liquids), its doodads 6,157. Over the exports of wow.export, when `UNIWOW_MODERN`
+  names them: the 7 modern buildings without a fault, their groups whole at their finest level,
+  their textures those wow.export wrote. Of 26 changes made on purpose to the reader, every one
+  made a test fail.
+- **Measured** on the user's machine: the 1,986 buildings in 0.65 s on 16 threads, the archives
+  read once already; Stormwind alone in 174 ms, its groups on one thread.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

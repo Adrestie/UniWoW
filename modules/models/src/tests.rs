@@ -85,6 +85,9 @@ impl Formats for Fake {
         }
         self.model.clone().ok_or_else(|| "no model".to_owned())
     }
+    fn wmo(&self, _file: &FileRef) -> Result<uniwow_api::formats::Wmo, String> {
+        Err("no building".to_owned())
+    }
     fn wdt(&self, _directory: &str) -> Result<Arc<Wdt>, String> {
         Err("no WDT".to_owned())
     }

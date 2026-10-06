@@ -244,6 +244,187 @@ pub struct Building {
     pub name_set: u16,
 }
 
+/// A building (WMO, of version 17) at rest: its root and its groups at their finest level. Its
+/// positions in its own axes, Z up, as those of a model; its colours red, green, blue and alpha.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Wmo {
+    /// 0x1 its vertex colours not attenuated by the portals, 0x2 lit as one, 0x4 the types of its
+    /// liquids those of `LiquidType.dbc`, 0x8 the alpha of its vertex colours not fixed, 0x10 its
+    /// groups in levels of detail.
+    pub flags: u16,
+    pub ambient: [u8; 4],
+    /// Its id in `WMOAreaTable.dbc`.
+    pub id: u32,
+    pub bounds: [[f32; 3]; 2],
+    /// The model of the sky seen from inside it; none when it names none.
+    pub skybox: Option<FileRef>,
+    pub materials: Vec<WmoMaterial>,
+    pub groups: Vec<WmoGroup>,
+    pub portals: Vec<Portal>,
+    pub portal_refs: Vec<PortalRef>,
+    pub lights: Vec<WmoLight>,
+    pub doodad_sets: Vec<DoodadSet>,
+    pub doodads: Vec<WmoDoodad>,
+    pub fogs: Vec<WmoFog>,
+    /// What was left out of it, and why: what refers to what it does not have, a group missing or
+    /// that does not hold together.
+    pub faults: Vec<String>,
+}
+
+/// A material of a building: its flags (0x01 unlit, 0x02 unfogged, 0x04 two-sided, 0x08 lit as
+/// outside, 0x10 its emissive colour lit at night, 0x20 a window, 0x40 clamped across, 0x80
+/// clamped up and down), its shader (0 diffuse, 1 specular, 2 metal, 3 environment, 4 opaque, 5
+/// environment metal, 6 two layers…), its blending (`EGxBlend`: 0 opaque, 1 alpha key, 2 alpha,
+/// 3 add, 4 mod, 5 mod2x…), its textures and its colours.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WmoMaterial {
+    pub flags: u32,
+    pub shader: u32,
+    pub blending: u32,
+    /// None where it names none.
+    pub textures: [Option<FileRef>; 3],
+    pub emissive: [u8; 4],
+    pub diffuse: [u8; 4],
+    /// Its third colour, of the shaders of later clients.
+    pub colour: [u8; 4],
+    /// Its ground, of `TerrainType.dbc`.
+    pub ground: u32,
+}
+
+/// A group of a building at its finest level: its name, its flags (0x1 a BSP tree, 0x4 vertex
+/// colours, 0x8 outside, 0x40 lit as outside, 0x200 lights, 0x800 doodads, 0x1000 a liquid,
+/// 0x2000 inside, 0x40000 the sky shown, 0x1000000 a second set of colours blending its textures,
+/// 0x2000000 a second set of coordinates), its bounds and its geometry.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WmoGroup {
+    pub name: String,
+    pub flags: u32,
+    pub bounds: [[f32; 3]; 2],
+    /// Its portals: `Wmo::portal_refs` from the first, so many.
+    pub portals: [u16; 2],
+    /// How many of its batches, in that order, are of a transition, inside and outside.
+    pub batch_counts: [u16; 3],
+    /// Its fogs, of `Wmo::fogs`.
+    pub fogs: [u8; 4],
+    /// The type of its liquid.
+    pub liquid_type: u32,
+    /// Its id in `WMOAreaTable.dbc`.
+    pub id: u32,
+    pub vertices: Vec<[f32; 3]>,
+    pub normals: Vec<[f32; 3]>,
+    /// Its sets of coordinates of textures, a pair a vertex each; one at least.
+    pub coordinates: Vec<Vec<[f32; 2]>>,
+    /// Its sets of vertex colours, a colour a vertex each: none, one, or a second that blends its
+    /// textures.
+    pub colours: Vec<Vec<[u8; 4]>>,
+    /// Three vertices a triangle.
+    pub triangles: Vec<u16>,
+    /// The flags and the material of each triangle.
+    pub faces: Vec<WmoFace>,
+    pub batches: Vec<WmoBatch>,
+    /// The doodads it holds, of `Wmo::doodads`.
+    pub doodad_refs: Vec<u16>,
+    pub liquid: Option<WmoLiquid>,
+}
+
+/// A triangle of a group: its flags, and its material, of `Wmo::materials`; none for a triangle
+/// only collided with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WmoFace {
+    pub flags: u16,
+    pub material: Option<u16>,
+}
+
+/// A batch of a group: its triangles, from the index `first` of `WmoGroup::triangles`, `count`
+/// indices; the first and the last vertex they use; its flags and its material.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WmoBatch {
+    pub first: u32,
+    pub count: u32,
+    pub vertices: [u16; 2],
+    pub flags: u8,
+    pub material: u16,
+}
+
+/// The liquid of a group: a grid of `size` vertices from its corner, `tiles` between them, its
+/// material; each vertex its height and its data (its flow for water, coordinates for magma),
+/// each tile its flags (its liquid in the low nibble, 0x0F not drawn).
+#[derive(Clone, Debug, PartialEq)]
+pub struct WmoLiquid {
+    pub size: [u32; 2],
+    pub tiles: [u32; 2],
+    pub corner: [f32; 3],
+    pub material: u16,
+    pub heights: Vec<f32>,
+    pub data: Vec<[u8; 4]>,
+    pub tile_flags: Vec<u8>,
+}
+
+/// A portal of a building: its polygon, and its plane (a normal, then its distance).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Portal {
+    pub vertices: Vec<[f32; 3]>,
+    pub plane: [f32; 4],
+}
+
+/// A portal seen from a group: the side of its plane the group lies on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortalRef {
+    pub portal: u16,
+    pub group: u16,
+    pub side: i16,
+}
+
+/// A light of a building: its kind (0 a point, 1 a spot, 2 directed, 3 ambient), whether it fades,
+/// and between which distances.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WmoLight {
+    pub kind: u8,
+    pub attenuated: bool,
+    pub colour: [u8; 4],
+    pub position: [f32; 3],
+    pub intensity: f32,
+    pub attenuation: [f32; 2],
+}
+
+/// A set of the doodads of a building: `Wmo::doodads` from the first, so many.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DoodadSet {
+    pub name: String,
+    pub first: u32,
+    pub count: u32,
+}
+
+/// A doodad of a building, in its axes: its model, its flags, its rotation (a quaternion x, y, z,
+/// w), its scale and its colour.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WmoDoodad {
+    pub file: FileRef,
+    pub flags: u8,
+    pub position: [f32; 3],
+    pub rotation: [f32; 4],
+    pub scale: f32,
+    pub colour: [u8; 4],
+}
+
+/// A fog of a building: where it lies, between two radii, its fog in the air and under water.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WmoFog {
+    pub flags: u32,
+    pub position: [f32; 3],
+    pub radii: [f32; 2],
+    pub fog: FogBand,
+    pub underwater: FogBand,
+}
+
+/// Where a fog ends, where it starts as a fraction of its end, and its colour.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FogBand {
+    pub end: f32,
+    pub start: f32,
+    pub colour: [u8; 4],
+}
+
 /// How the levels of a texture are stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextureFormat {
@@ -549,6 +730,9 @@ pub trait Formats: Send + Sync {
     /// The M2 `file`, with its skins: of 3.3.5a, its path as a table names it (`.mdx` and `.mdl`
     /// read as `.m2`) and its skins beside it; modern, its skins named by its chunk `SFID`.
     fn model(&self, file: &FileRef) -> Result<Model, String>;
+    /// The building `file` with its groups at their finest level: of 3.3.5a, its groups beside it
+    /// by its name and their index; modern, by its chunk `GFID`.
+    fn wmo(&self, file: &FileRef) -> Result<Wmo, String>;
     /// The WDT of the map whose folder, below `World\Maps`, is `directory`, read once.
     fn wdt(&self, directory: &str) -> Result<Arc<Wdt>, String>;
     /// The tile `<directory>_<x>_<y>`, of 3.3.5a, or split in a root, a `_tex0` and an `_obj0` as
