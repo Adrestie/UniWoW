@@ -12,7 +12,7 @@ use uniwow_api::glam::Vec3;
 use uniwow_api::models::Look;
 use uniwow_api::texture_arrays::{NONE, Placed, Refused};
 
-use crate::gpu::{State, Vertex};
+use crate::gpu::{State, Vertex, moving_radius};
 use crate::loading::{Caches, key, plan};
 use crate::pool::{MaterialGpu, Pool};
 
@@ -71,15 +71,9 @@ impl Drop for PooledLook {
 /// The model `file` in the arenas.
 pub fn model(pool: &Arc<Pool>, formats: &dyn Formats, file: &FileRef) -> Result<ArenaModel, String> {
     let mut model = formats.model(file)?;
-    let vertices: Vec<Vertex> = model
-        .vertices
-        .iter()
-        .map(|vertex| Vertex {
-            position: vertex.position,
-            normal: vertex.normal,
-            uv: vertex.uv,
-        })
-        .collect();
+    model.radius = moving_radius(&model);
+    let bones = model.animation.bones.len();
+    let vertices: Vec<Vertex> = model.vertices.iter().map(|vertex| Vertex::of(vertex, bones)).collect();
     let rest = if model.vertices.is_empty() {
         [Vec3::ZERO; 2]
     } else {

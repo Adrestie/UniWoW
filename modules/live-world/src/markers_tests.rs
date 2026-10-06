@@ -5,7 +5,10 @@ use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use uniwow_api::glam::{Mat4, Vec3};
-use uniwow_api::server_link::protocol::{CATMULL_ROM, CYCLIC, DEAD, Entity, GAME_MASTER, Kind, PathPoint, Spline};
+use uniwow_api::models::Motion;
+use uniwow_api::server_link::protocol::{
+    CATMULL_ROM, CYCLIC, DEAD, Entity, GAME_MASTER, Kind, PathPoint, Spline, WALKING,
+};
 use uniwow_api::viewport::{Layer, Target, View};
 use uniwow_api::{bytemuck, egui, egui_wgpu, wgpu};
 
@@ -98,6 +101,38 @@ fn a_catmull_rom_spline_is_followed_with_the_weights_and_the_ends_of_azerothcore
     // One sent by a window, which does not start at 0, stops at its end until it is sent again.
     let window = [([10.0, 0.0], 1000), ([10.0, 10.0], 2000)];
     assert!(close(at(path(&window, CYCLIC, 9000), 0), [10.0, 10.0, 0.0]));
+}
+
+#[test]
+fn an_entity_moves_at_the_speed_of_its_stretch_walking_as_its_flags_say_and_stands_at_its_end() {
+    let received = Instant::now();
+    let motion = |spline: Option<Spline>, flags: u8, after: u64| {
+        let mut moving = entity(1, Kind::Creature, [0.0; 3]);
+        moving.spline = spline;
+        moving.flags = flags;
+        Tracked {
+            entity: moving,
+            received,
+        }
+        .motion_at(received + Duration::from_millis(after))
+    };
+    // 10 yards in a second, then 30 in two.
+    let stretches = [([0.0, 0.0], 0), ([10.0, 0.0], 1000), ([10.0, 30.0], 3000)];
+    assert_eq!(motion(Some(path(&stretches, 0, 0)), 0, 500), Motion::Moving(10.0));
+    assert_eq!(motion(Some(path(&stretches, 0, 0)), 0, 2000), Motion::Moving(15.0));
+    assert_eq!(
+        motion(Some(path(&stretches, 0, 0)), WALKING, 500),
+        Motion::Walking(10.0)
+    );
+    assert_eq!(
+        motion(Some(path(&stretches, 0, 0)), 0, 5000),
+        Motion::Standing,
+        "at its end"
+    );
+    assert_eq!(motion(None, WALKING, 0), Motion::Standing, "without a spline");
+    // A cyclic one goes on past its last point.
+    let round = [([0.0, 0.0], 0), ([20.0, 0.0], 1000), ([0.0, 0.0], 2000)];
+    assert_eq!(motion(Some(path(&round, CYCLIC, 0)), 0, 2500), Motion::Moving(20.0));
 }
 
 #[test]

@@ -36,13 +36,13 @@ pub struct Group {
 }
 
 /// What the thread of an owner hands the layer: its buffer, its groups, the number of its layout,
-/// changed with the buffer, and the origin of each instance, in the order of the buffer.
+/// changed with the buffer, and its instances, in the order of the buffer.
 #[derive(Default)]
 pub struct Published {
     pub buffer: Option<Arc<wgpu::Buffer>>,
     pub groups: Vec<Group>,
     pub layout: u64,
-    pub origins: Vec<Vec3>,
+    pub instances: Vec<Instance>,
 }
 
 /// The tile of `position`.
@@ -174,11 +174,7 @@ impl Slot {
             return;
         };
         let data: Vec<InstanceGpu> = kept.instances.iter().map(as_gpu).collect();
-        let origins = kept
-            .instances
-            .iter()
-            .map(|instance| instance.transform.w_axis.truncate())
-            .collect();
+        let instances = kept.instances.clone();
         if let Some(buffer) = kept.buffer.clone().filter(|_| same_places(&kept.groups, &groups)) {
             // Out of the lock of the layer: it never waits for the queue of the GPU.
             if !data.is_empty() {
@@ -190,7 +186,7 @@ impl Slot {
                 buffer: Some(buffer),
                 groups,
                 layout,
-                origins,
+                instances,
             });
             return;
         }
@@ -210,7 +206,7 @@ impl Slot {
             buffer: Some(buffer),
             groups,
             layout,
-            origins,
+            instances,
         });
     }
 }

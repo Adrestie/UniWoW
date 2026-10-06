@@ -9,13 +9,15 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use uniwow_api::formats::{self, FacialHair, FileRef, Formats, HairGeoset, Model, ModelTextureSource, TextureFormat};
+use uniwow_api::formats::{
+    self, Animation, FacialHair, FileRef, Formats, HairGeoset, Model, ModelTextureSource, TextureFormat,
+};
 use uniwow_api::glam::Vec3;
 use uniwow_api::models::{Extent, Geosets, Look};
 use uniwow_api::{bytemuck, wgpu};
 
 use crate::cache::Cache;
-use crate::gpu::{BatchParams, Shared, State, TextureGpu, Vertex, flags};
+use crate::gpu::{BatchParams, Shared, State, TextureGpu, Vertex, flags, moving_radius};
 use crate::pooled::{ArenaModel, PooledLook};
 use crate::shaders;
 
@@ -85,6 +87,14 @@ impl Ready {
             radius: self.radius(),
             batches,
             reach,
+        }
+    }
+
+    /// What moves in its model.
+    pub fn animation(&self) -> &Animation {
+        match self {
+            Ready::Pooled(look) => &look.model.model.animation,
+            Ready::Own(look) => &look.model.model.animation,
         }
     }
 
@@ -172,15 +182,9 @@ pub fn colour(model: &Model, batch: &formats::Batch) -> [f32; 4] {
 /// The model `file` on the GPU.
 fn model(shared: &Shared, formats: &dyn Formats, file: &FileRef) -> Result<ModelGpu, String> {
     let mut model = formats.model(file)?;
-    let vertices: Vec<Vertex> = model
-        .vertices
-        .iter()
-        .map(|vertex| Vertex {
-            position: vertex.position,
-            normal: vertex.normal,
-            uv: vertex.uv,
-        })
-        .collect();
+    model.radius = moving_radius(&model);
+    let bones = model.animation.bones.len();
+    let vertices: Vec<Vertex> = model.vertices.iter().map(|vertex| Vertex::of(vertex, bones)).collect();
     let mut bytes = (vertices.len() * size_of::<Vertex>()) as u64;
     let vertex_buffer = shared.buffer(
         "models vertices",

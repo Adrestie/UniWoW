@@ -1,6 +1,7 @@
-// The models drawn with buffers and textures of their own (after common.wgsl): a batch of a model
-// for every instance of a group, its instances read as vertices, its one or two textures and what
-// its shader reads bound for it.
+// The models drawn with buffers and textures of their own (after common.wgsl, and skin.wgsl with
+// the pool or rest.wgsl without): a batch of a model for every instance of a group, its instances
+// read as vertices, its one or two textures and what its shader reads bound for it; with the pool,
+// its instances are those of the frame, its vertices posed by their bones.
 
 struct Batch {
     // Its colour and transparency at rest, its weight included.
@@ -29,6 +30,8 @@ struct VertexIn {
     @location(5) row1: vec4<f32>,
     @location(6) row2: vec4<f32>,
     @location(7) extra: vec4<f32>,
+    @location(8) bones: vec4<u32>,
+    @location(9) weights: vec4<f32>,
 };
 
 struct VertexOut {
@@ -42,8 +45,9 @@ struct VertexOut {
 };
 
 @vertex
-fn vs_main(in: VertexIn) -> VertexOut {
-    let placed = place(in.row0, in.row1, in.row2, in.extra.x, batch.model.x, in.position, in.normal);
+fn vs_main(in: VertexIn, @builtin(instance_index) index: u32) -> VertexOut {
+    let vertex = posed(first_bone(index), in.position, in.normal, in.bones, in.weights);
+    let placed = place(in.row0, in.row1, in.row2, in.extra.x, batch.model.x, vertex.position, vertex.normal);
     var out: VertexOut;
     out.clip = placed.clip;
     out.normal = placed.normal;

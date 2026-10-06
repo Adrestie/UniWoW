@@ -95,8 +95,8 @@ fn released_looks_give_their_ranges_back_and_their_textures_when_purged() {
         "the pipeline of its batch made by its load"
     );
     let second = crate::load(&shared, &fake, &caches, &look(Geosets::Default), &mut Vec::new()).unwrap();
-    // Four vertices of 40 bytes and six indices, shared; a material each.
-    let model = 4 * 40 + 6 * 4;
+    // Four vertices of 48 bytes and six indices, shared; a material each.
+    let model = 4 * 48 + 6 * 4;
     assert_eq!(pool.arenas().1, model + 2 * 96);
     drop(first);
     assert_eq!(pool.arenas().1, model + 96, "its material");
@@ -138,7 +138,7 @@ fn the_frame_reads_an_arena_while_a_job_holds_its_holes() {
 }
 
 /// A texture of `side` × `side` texels of `colour`.
-fn sized(side: u32, colour: [u8; 4]) -> Texture {
+pub(crate) fn sized(side: u32, colour: [u8; 4]) -> Texture {
     Texture {
         width: side,
         height: side,
@@ -224,7 +224,7 @@ pub(crate) fn only(pixel: [u8; 4], channel: usize) -> bool {
 /// Where a square of scale 0.5 stands at y = -1.5, 0 and 1.5 in an image of `render`, on its
 /// middle row.
 pub(crate) const LEFT: (usize, usize) = (18, 8);
-const MIDDLE: (usize, usize) = (18, 16);
+pub(crate) const MIDDLE: (usize, usize) = (18, 16);
 pub(crate) const RIGHT: (usize, usize) = (18, 24);
 
 /// The square of `square`, its texture given by each look, as the skin of a creature.

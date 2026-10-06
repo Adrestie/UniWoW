@@ -37,9 +37,11 @@ pub struct Service {
 }
 
 impl Service {
-    /// The owners, in no order.
+    /// The owners, by their number: the first given instances first.
     pub fn owners(&self) -> Vec<Arc<Slot>> {
-        lock(&self.owners).values().cloned().collect()
+        let mut owners: Vec<Arc<Slot>> = lock(&self.owners).values().cloned().collect();
+        owners.sort_by_key(|slot| slot.number);
+        owners
     }
 
     /// The look `id` and its state.

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use uniwow_api::egui_wgpu;
 use uniwow_api::formats::{Batch, FileRef, Material, Model, ModelTexture, ModelTextureSource, Texture, TextureFormat};
 use uniwow_api::glam::{Mat4, Vec2, Vec3};
-use uniwow_api::models::{Geosets, Instance, Look, Models};
+use uniwow_api::models::{Geosets, Instance, Look, Models, Motion};
 use uniwow_api::viewport::View;
 
 use crate::gpu::{Shared, camera_values};
@@ -268,6 +268,7 @@ fn drawn_on(
         look: id,
         transform: Mat4::from_rotation_z(turn),
         alpha: 1.0,
+        motion: Motion::Standing,
     };
     bench.service.place("test", &[placed]);
     middle(&render(&mut bench, FRONT, AIM))

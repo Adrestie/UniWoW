@@ -14,13 +14,45 @@ use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 use crate::lock;
 use crate::pool::Pool;
 
-/// A vertex of a model as the shader reads it: position, normal, its two sets of coordinates.
+/// A vertex of a model as the shader reads it: position, normal, its two sets of coordinates, and
+/// the four bones that move it with their weights.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub uv: [[f32; 2]; 2],
+    pub bones: [u8; 4],
+    pub weights: [u8; 4],
+}
+
+impl Vertex {
+    /// `vertex` of a model of `bones` bones: a bone past them weighs nothing.
+    pub fn of(vertex: &formats::ModelVertex, bones: usize) -> Self {
+        let mut weights = vertex.bone_weights;
+        for (weight, bone) in weights.iter_mut().zip(vertex.bone_indices) {
+            if usize::from(bone) >= bones {
+                *weight = 0;
+            }
+        }
+        Self {
+            position: vertex.position,
+            normal: vertex.normal,
+            uv: vertex.uv,
+            bones: vertex.bone_indices,
+            weights,
+        }
+    }
+}
+
+/// The radius `model` moves in: that of its header, or of a sequence kept when larger.
+pub fn moving_radius(model: &formats::Model) -> f32 {
+    model
+        .animation
+        .sequences
+        .iter()
+        .filter(|sequence| sequence.kept)
+        .fold(model.radius, |radius, sequence| radius.max(sequence.radius))
 }
 
 /// An instance as the shader reads it: the rows of its transform, then its alpha.
@@ -306,14 +338,28 @@ impl Shared {
                 },
             ],
         });
+        let pool = slots
+            .and_then(|slots| Pool::new(&gpu.adapter, &device, &gpu.queue, &camera_layout, target, slots))
+            .map(Arc::new);
+        // With the pool, the vertices posed by their bones; at rest without.
+        let skin = pool.as_ref().map(|pool| &pool.skin_layout);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("models"),
-            bind_group_layouts: &[Some(&camera_layout), Some(&batch_layout)],
+            bind_group_layouts: &[Some(&camera_layout), Some(&batch_layout), skin],
             immediate_size: 0,
         });
+        let posing = if skin.is_some() {
+            include_str!("skin.wgsl")
+        } else {
+            include_str!("rest.wgsl")
+        };
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("models"),
-            source: wgpu::ShaderSource::Wgsl(concat!(include_str!("common.wgsl"), include_str!("models.wgsl")).into()),
+            source: wgpu::ShaderSource::Wgsl(
+                [include_str!("common.wgsl"), posing, include_str!("models.wgsl")]
+                    .concat()
+                    .into(),
+            ),
         });
         let address = |wrap: bool| {
             if wrap {
@@ -343,9 +389,6 @@ impl Shared {
         let white = upload(&device, &gpu.queue, &white)
             .expect("a texture of one texel is taken")
             .view;
-        let pool = slots
-            .and_then(|slots| Pool::new(&gpu.adapter, &device, &gpu.queue, &camera_layout, target, slots))
-            .map(Arc::new);
         Self {
             block_compression: device.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
             pool,
@@ -382,7 +425,7 @@ impl Shared {
                     array_stride: size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2
+                        0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 8 => Uint8x4, 9 => Unorm8x4
                     ],
                 }),
                 Some(wgpu::VertexBufferLayout {

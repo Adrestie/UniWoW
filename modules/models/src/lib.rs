@@ -2,9 +2,13 @@
 //! look of a model at a transform, kept until its owner gives others. The looks wanted are loaded
 //! by jobs of the pool, the nearest first, as many as the shared budget of the view holds, their
 //! models and textures read once whoever asks; drawn by the layer of the module instanced, a draw
-//! per group of instances and batch. Its panel sets how far an instance is drawn and previews a
-//! display before the camera. Nothing is changed: no undo entry, no file written.
+//! per group of instances and batch, their bones posed by a thread of their own at each frame. Its
+//! panel sets how far an instance is drawn and previews a display before the camera. Nothing is
+//! changed: no undo entry, no file written.
 
+mod animator;
+#[cfg(test)]
+mod animator_tests;
 mod arena;
 mod cache;
 mod choice;
@@ -19,6 +23,9 @@ mod pool;
 #[cfg(test)]
 mod pool_tests;
 mod pooled;
+mod pose;
+#[cfg(test)]
+mod pose_tests;
 mod service;
 #[cfg(test)]
 mod shader_tests;
@@ -32,7 +39,7 @@ use std::time::{Duration, Instant};
 
 use uniwow_api::formats::{self, FileRef, Formats};
 use uniwow_api::glam::{Mat4, Quat, Vec3};
-use uniwow_api::models::{self, Geosets, Instance, Look, LookId, LookState, Models};
+use uniwow_api::models::{self, Geosets, Instance, Look, LookId, LookState, Models, Motion};
 use uniwow_api::viewport::Demand;
 use uniwow_api::{
     Context, DockArea, Event, JobId, JobOutcome, MODULE_FAILED_TOPIC, Module, PropertyValue, Registrar, egui, log,
@@ -154,6 +161,7 @@ fn preview(
                     at + offset,
                 ),
                 alpha,
+                motion: Motion::Standing,
             }
         })
         .collect();
@@ -201,6 +209,8 @@ struct ModelsModule {
     incoming: Arc<Mutex<Option<Arc<Shared>>>>,
     shared: Option<Arc<Shared>>,
     setup: Option<JobId>,
+    /// The thread of the animations, once the pool is made.
+    animating: Option<JobId>,
     view: Option<viewport::Handle>,
     caches: Arc<Caches>,
     /// The looks on the GPU, those loading by their job, and the jobs by look.
@@ -225,6 +235,7 @@ impl Default for ModelsModule {
             incoming: Arc::default(),
             shared: None,
             setup: None,
+            animating: None,
             view: None,
             caches: Arc::default(),
             held: HashMap::new(),
@@ -635,7 +646,20 @@ impl Module for ModelsModule {
             self.setup = None;
             if let Some(shared) = outcome.take::<Arc<Shared>>() {
                 *lock(&self.incoming) = Some(shared.clone());
+                if let (Some(view), Some(_)) = (self.view.clone(), &shared.pool) {
+                    let (scene, service, shared) = (self.scene.clone(), self.service.clone(), shared.clone());
+                    self.animating = Some(ctx.spawn_thread("Animate the models at each frame", move |job| {
+                        animator::run(&view, &scene, &service, &shared.device, &shared.queue, &|| {
+                            job.is_cancelled()
+                        });
+                    }));
+                }
                 self.shared = Some(shared);
+            }
+        } else if self.animating == Some(job) {
+            self.animating = None;
+            if let JobOutcome::Panicked(message) = outcome {
+                log::error!("the animations of the models stopped: {message}");
             }
         } else if self.preview.job == Some(job) {
             self.preview.job = None;

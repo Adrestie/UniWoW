@@ -8,6 +8,12 @@
 //! had no room for, and every look without a pool, are drawn as in step 9.4c, each group at its
 //! level, with their own buffers and textures: without a pool, in a bundle kept while the groups
 //! drawn, their skins and their order stay the same.
+//!
+//! The vertices of the pool are posed by the bones the thread of the animations wrote (`animator`):
+//! the owners it animated are drawn as it saw them, so that the table of their bones fits their
+//! instances; the camera of each frame is handed to it for the next. The looks of their own, in the
+//! pass, read their instances from the buffer of the frame, where the table of the bones finds
+//! them; without the pool, they stay at rest.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -18,7 +24,8 @@ use uniwow_api::models::LookId;
 use uniwow_api::viewport::{Drawing, Layer, LayerStats, Target, View};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
-use crate::choice::{Blended, Choice, GroupOfFrame, Section, Tables};
+use crate::animator::{Animated, AnimationStats};
+use crate::choice::{Blended, Choice, GroupOfFrame, Move, Section, Tables};
 use crate::gpu::{CAMERA, Shared, State, camera_values};
 use crate::loading::{LookGpu, Ready};
 use crate::lock;
@@ -48,6 +55,11 @@ pub struct Scene {
     pub summary: String,
     pub bytes: u64,
     pub steering: Duration,
+    /// The bones the thread of the animations published last, and what it did.
+    pub animated: Option<Arc<Animated>>,
+    pub animation: AnimationStats,
+    /// The camera of the last frame prepared: its view and projection, its view alone, its eye.
+    pub camera: Option<(Mat4, Mat4, Vec3)>,
 }
 
 /// A group, by its owner's number, its look and its tile.
@@ -101,6 +113,8 @@ struct Drawn {
     look: Arc<Ready>,
     buffer: Arc<wgpu::Buffer>,
     instances: std::ops::Range<u32>,
+    /// Where its owner's instances begin in the buffer of the frame.
+    base: u32,
     level: usize,
     distance: f32,
     blended: bool,
@@ -149,6 +163,8 @@ pub struct ModelsLayer {
     /// the generation of the pool it was made at, and the blended instances in the order drawn last.
     choice: Option<Choice>,
     pool_group: Option<(wgpu::BindGroup, (u64, u64))>,
+    /// The bind group of the bones, and the bones it was made with.
+    skin_group: Option<(wgpu::BindGroup, Option<Arc<Animated>>)>,
     blended: Vec<BlendedKey>,
     stats: LayerStats,
 }
@@ -169,6 +185,7 @@ impl ModelsLayer {
             recordings: VecDeque::new(),
             choice: None,
             pool_group: None,
+            skin_group: None,
             blended: Vec::new(),
             stats: LayerStats::default(),
         }
@@ -216,8 +233,9 @@ impl Layer for ModelsLayer {
         let Some(shared) = self.shared.clone() else {
             return;
         };
-        let (looks, generation, tables, reach, summary, bytes, steering) = {
-            let scene = lock(&self.scene);
+        let (looks, generation, tables, reach, summary, bytes, steering, animated, animation) = {
+            let mut scene = lock(&self.scene);
+            scene.camera = Some((view.view_proj, view.view, view.eye));
             (
                 scene.looks.clone(),
                 scene.generation,
@@ -226,6 +244,8 @@ impl Layer for ModelsLayer {
                 scene.summary.clone(),
                 scene.bytes,
                 scene.steering,
+                scene.animated.clone(),
+                scene.animation.clone(),
             )
         };
         let (camera, _) = self.camera.get_or_insert_with(|| {
@@ -263,12 +283,22 @@ impl Layer for ModelsLayer {
         let mut drawn = Vec::new();
         let mut layouts = Vec::new();
         let mut owners: Vec<(Arc<wgpu::Buffer>, Section)> = Vec::new();
+        let mut bone_moves: Vec<Move> = Vec::new();
         let mut chosen = Vec::new();
         let mut candidates: Vec<(f32, BlendedKey, Blended)> = Vec::new();
         let (mut instances, mut groups, mut seen) = (0u64, 0usize, 0usize);
         let mut base = 0u32;
+        // The owners animated as the thread saw them, with where the table of their bones begins.
+        let snapshots: HashMap<u32, (&Arc<crate::groups::Published>, u32, u32)> = animated
+            .iter()
+            .flat_map(|animated| &animated.owners)
+            .map(|(number, published, at, count)| (*number, (published, *at, *count)))
+            .collect();
         for slot in self.service.owners() {
-            let published = slot.published();
+            let (published, table) = match snapshots.get(&slot.number) {
+                Some((published, at, count)) => ((*published).clone(), Some((*at, *count))),
+                None => (slot.published(), None),
+            };
             let Some(buffer) = published.buffer.clone() else {
                 continue;
             };
@@ -280,6 +310,11 @@ impl Layer for ModelsLayer {
                 .max()
                 .unwrap_or(0);
             owners.push((buffer.clone(), (slot.number, published.layout, base, used)));
+            if let Some((at, count)) = table
+                && count.min(used) > 0
+            {
+                bone_moves.push((u64::from(at) * 4, u64::from(base) * 4, u64::from(count.min(used)) * 4));
+            }
             for group in &published.groups {
                 let Some(look) = looks.get(&group.look) else {
                     continue;
@@ -308,7 +343,10 @@ impl Layer for ModelsLayer {
                     });
                     if blends {
                         for at in group.first..group.first + group.count {
-                            let origin = published.origins.get(at as usize).copied().unwrap_or(group.low);
+                            let origin = published
+                                .instances
+                                .get(at as usize)
+                                .map_or(group.low, |instance| instance.transform.w_axis.truncate());
                             candidates.push((
                                 view.eye.distance(origin),
                                 (slot.number, published.layout, at),
@@ -331,6 +369,7 @@ impl Layer for ModelsLayer {
                     look: look.clone(),
                     buffer: buffer.clone(),
                     instances: group.first..group.first + group.count,
+                    base,
                     level,
                     distance,
                 });
@@ -381,13 +420,34 @@ impl Layer for ModelsLayer {
         }
         let drawing = match (&pool, &mut self.choice) {
             (Some(pool), Some(choice)) => {
-                let made = choice.frame(&gpu.queue, &owners, &chosen, &blended, view.view_proj, view.eye, reach);
+                let bones = animated.as_ref().map(|animated| (animated.buffer.clone(), bone_moves));
+                let made = choice.frame(
+                    &gpu.queue,
+                    &owners,
+                    bones,
+                    &chosen,
+                    &blended,
+                    view.view_proj,
+                    view.eye,
+                    reach,
+                );
                 let made_at = pool.generation();
                 if made || self.pool_group.as_ref().is_none_or(|(_, at)| *at != made_at) {
                     self.pool_group = choice
                         .buffers()
                         .and_then(|(instances, entries)| pool.bind_group(instances, entries))
                         .map(|group| (group, made_at));
+                }
+                let same_bones = |kept: &Option<Arc<Animated>>| match (kept, &animated) {
+                    (Some(kept), Some(new)) => Arc::ptr_eq(kept, new),
+                    (None, None) => true,
+                    _ => false,
+                };
+                if made || self.skin_group.as_ref().is_none_or(|(_, kept)| !same_bones(kept)) {
+                    self.skin_group = choice.bone_table().map(|table| {
+                        let bones = animated.as_ref().map(|animated| (&*animated.buffer, animated.bones_at));
+                        (pool.skin_group(table, bones), animated.clone())
+                    });
                 }
                 let commands = choice.tables.as_ref().map_or(0, |tables| tables.regions.len())
                     + choice.blended_regions.len()
@@ -426,11 +486,21 @@ impl Layer for ModelsLayer {
         {
             self.recordings.pop_front();
         }
+        let animations = format!(
+            "animated: {} instances, {} bones, {:.1} MB a frame, the thread {:.2} ms on average and {:.2} at most",
+            animation.instances,
+            animation.bones,
+            animation.bytes as f64 / (1024.0 * 1024.0),
+            animation.spent.as_secs_f64() * 1000.0,
+            animation.longest.as_secs_f64() * 1000.0,
+        );
         self.stats = LayerStats {
             draws,
             triangles,
             bytes,
-            items: format!("{summary}\n  {instances} instances in {seen} groups in sight of {groups}; {drawing}"),
+            items: format!(
+                "{summary}\n  {instances} instances in {seen} groups in sight of {groups}; {drawing}\n  {animations}"
+            ),
             steering,
         };
     }
@@ -506,21 +576,31 @@ impl Layer for ModelsLayer {
         let (Some((_, camera)), Some(pool)) = (&self.camera, self.pool()) else {
             return;
         };
+        // The looks of their own posed from the instances of the frame and its table of bones, once
+        // made; at rest from their owner's buffer before.
+        let frame = match (&self.choice, &self.skin_group) {
+            (Some(choice), Some((skin, _))) if choice.tables.is_some() => {
+                choice.buffers().map(|(instances, _)| (instances, skin))
+            }
+            _ => None,
+        };
         let pooled = match (
             &self.choice,
             &self.pool_group,
+            &self.skin_group,
             pool.vertices.buffer(),
             pool.indices.buffer(),
         ) {
-            (Some(choice), Some((group, _)), Some((vertices, _)), Some((indices, _))) => {
-                Some((choice, group, vertices, indices))
+            (Some(choice), Some((group, _)), Some((skin, _)), Some((vertices, _)), Some((indices, _))) => {
+                Some((choice, group, skin, vertices, indices))
             }
             _ => None,
         };
         for blended in [false, true] {
-            if let Some((choice, group, vertices, indices)) = &pooled {
+            if let Some((choice, group, skin, vertices, indices)) = &pooled {
                 pass.set_bind_group(0, camera, &[]);
                 pass.set_bind_group(1, *group, &[]);
+                pass.set_bind_group(2, *skin, &[]);
                 pass.set_vertex_buffer(0, vertices.slice(..));
                 pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
                 choice.draw(pass, blended, &|state| pool.pipeline(state));
@@ -537,13 +617,26 @@ impl Layer for ModelsLayer {
                     if !bound {
                         pass.set_bind_group(0, camera, &[]);
                         pass.set_vertex_buffer(0, model.vertices.slice(..));
-                        pass.set_vertex_buffer(1, group.buffer.slice(..));
+                        match frame {
+                            Some((instances, posing)) => {
+                                pass.set_vertex_buffer(1, instances.slice(..));
+                                pass.set_bind_group(2, posing, &[]);
+                            }
+                            None => {
+                                pass.set_vertex_buffer(1, group.buffer.slice(..));
+                                pass.set_bind_group(2, &pool.rest, &[]);
+                            }
+                        }
                         pass.set_index_buffer(skin.indices.slice(..), skin.format);
                         bound = true;
                     }
+                    let instances = match frame {
+                        Some(_) => group.base + group.instances.start..group.base + group.instances.end,
+                        None => group.instances.clone(),
+                    };
                     pass.set_pipeline(&batch.pipeline);
                     pass.set_bind_group(1, &batch.group, &[]);
-                    pass.draw_indexed(batch.indices.clone(), 0, group.instances.clone());
+                    pass.draw_indexed(batch.indices.clone(), 0, instances);
                 }
             }
         }

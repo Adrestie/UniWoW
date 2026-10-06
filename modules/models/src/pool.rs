@@ -2,7 +2,8 @@
 //! one arena and their indices in another, the materials of every look in a table, their textures
 //! in arrays of `core/api` by class, read as stored; and the pipelines of the states of their
 //! materials, whose shader reads, for each instance drawn, its entry (the instance among those of
-//! the frame, and its material), its instance and its material from storage buffers. Made only on a
+//! the frame, and its material), its instance and its material from storage buffers, and where its
+//! bones begin among those the thread of the animations wrote, posing its vertices. Made only on a
 //! device that offers what it needs (`Pool::new`): the path of step 9.4c draws the models otherwise.
 
 use std::collections::HashMap;
@@ -43,10 +44,11 @@ unsafe impl bytemuck::Pod for MaterialGpu {}
 pub const INSTANCE: u64 = 64;
 pub const ENTRY: u64 = 8;
 
-/// The shader of the pool, after `common.wgsl`: its bindings, its arrays read by slot, its entry
-/// points.
+/// The shader of the pool, after `common.wgsl` and `skin.wgsl`: its bindings, its arrays read by
+/// slot, its entry points.
 fn shader(slots: usize) -> String {
     let mut source = String::from(include_str!("common.wgsl"));
+    source.push_str(include_str!("skin.wgsl"));
     source.push_str(include_str!("pool.wgsl"));
     for slot in 0..slots {
         let _ = writeln!(
@@ -69,6 +71,33 @@ fn shader(slots: usize) -> String {
     source
 }
 
+/// The bind group of `layout` binding `table` and the bones of `bones` from its offset.
+fn skin_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    table: &wgpu::Buffer,
+    (bones, offset): (&wgpu::Buffer, u64),
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("models bones"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: table.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: bones,
+                    offset,
+                    size: None,
+                }),
+            },
+        ],
+    })
+}
+
 pub struct Pool {
     pub device: wgpu::Device,
     pub vertices: Arena,
@@ -76,6 +105,14 @@ pub struct Pool {
     pub materials: Arena,
     pub arrays: TextureArrays,
     pub layout: wgpu::BindGroupLayout,
+    /// The bones of a frame: where those of each instance begin, and the bones; the looks of their
+    /// own read them too.
+    pub skin_layout: wgpu::BindGroupLayout,
+    /// What the bones bind before the thread of the animations writes any.
+    no_bones: wgpu::Buffer,
+    /// Every instance at rest: a table of zeros, what a look of its own binds before the frame
+    /// has its table.
+    pub rest: wgpu::BindGroup,
     pipeline_layout: wgpu::PipelineLayout,
     shader: wgpu::ShaderModule,
     target: Target,
@@ -146,11 +183,25 @@ impl Pool {
             label: Some("models pool"),
             entries: &entries,
         });
+        let skin_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("models bones"),
+            entries: &[storage(0), storage(1)],
+        });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("models pool"),
-            bind_group_layouts: &[Some(camera), Some(&layout)],
+            bind_group_layouts: &[Some(camera), Some(&layout), Some(&skin_layout)],
             immediate_size: 0,
         });
+        let zeros = |label, size| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            })
+        };
+        let no_bones = zeros("models no bones", 48);
+        let rest = skin_group(device, &skin_layout, &zeros("models at rest", 4), (&no_bones, 0));
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("models pool"),
             source: wgpu::ShaderSource::Wgsl(shader(slots).into()),
@@ -204,6 +255,9 @@ impl Pool {
             arrays: TextureArrays::new(device, queue, "the models", slots, false),
             device: device.clone(),
             layout,
+            skin_layout,
+            no_bones,
+            rest,
             pipeline_layout,
             shader,
             target: *target,
@@ -231,7 +285,9 @@ impl Pool {
             &[Some(wgpu::VertexBufferLayout {
                 array_stride: size_of::<Vertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2],
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Uint8x4, 5 => Unorm8x4
+                ],
             })],
         ));
         lock(&self.pipelines).entry(state).or_insert(pipeline).clone()
@@ -269,6 +325,17 @@ impl Pool {
             layout: &self.layout,
             entries: &bound,
         }))
+    }
+
+    /// The bind group of the bones of a frame: `table`, where those of each instance begin, and the
+    /// bones of `bones` from its offset; none written yet, every instance at rest.
+    pub fn skin_group(&self, table: &wgpu::Buffer, bones: Option<(&wgpu::Buffer, u64)>) -> wgpu::BindGroup {
+        skin_group(
+            &self.device,
+            &self.skin_layout,
+            table,
+            bones.unwrap_or((&self.no_bones, 0)),
+        )
     }
 
     /// What changes the bind group of a frame: the buffer of the materials and the arrays.

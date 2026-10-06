@@ -210,8 +210,8 @@ pub struct Blended {
 /// many.
 pub type Section = (u32, u64, u32, u32);
 
-/// Where an owner's levels move, in bytes: from, to, how many.
-type Move = (u64, u64, u64);
+/// Where an owner's levels or the table of its bones move, in bytes: from, to, how many.
+pub type Move = (u64, u64, u64);
 
 const FREE: u8 = 0;
 const COPIED: u8 = 1;
@@ -270,6 +270,10 @@ pub struct Choice {
     pub packed: bool,
     pub tables: Option<Arc<Tables>>,
     instances: Option<wgpu::Buffer>,
+    /// For each instance of the frame, its first bone plus one, 0 at rest: copied from the tables
+    /// of the owners the thread of the animations wrote, from its buffer.
+    bone_table: Option<wgpu::Buffer>,
+    bones: Option<(Arc<wgpu::Buffer>, Vec<Move>)>,
     frames: Option<wgpu::Buffer>,
     work: Option<wgpu::Buffer>,
     entries: Option<wgpu::Buffer>,
@@ -371,6 +375,8 @@ impl Choice {
             packed,
             tables: None,
             instances: None,
+            bone_table: None,
+            bones: None,
             frames: None,
             work: None,
             entries: None,
@@ -450,15 +456,22 @@ impl Choice {
         Some((self.instances.as_ref()?, self.entries.as_ref()?))
     }
 
+    /// Where the bones of each instance of the frame begin, plus one.
+    pub fn bone_table(&self) -> Option<&wgpu::Buffer> {
+        self.bone_table.as_ref()
+    }
+
     /// The frame: the owners' instances (each its buffer and its section) to copy into one buffer,
-    /// the groups in sight, the instances of looks with blended batches in the order they are
-    /// drawn; its tables of the frame and its parameters written. Whether a buffer the vertex shader
-    /// reads was made again.
+    /// and the tables of their bones from the buffer of the animations (where each owner's begins,
+    /// where it goes, its bytes), the groups in sight, the instances of looks with blended batches
+    /// in the order they are drawn; its tables of the frame and its parameters written. Whether a
+    /// buffer the vertex shader reads was made again.
     #[allow(clippy::too_many_arguments)]
     pub fn frame(
         &mut self,
         queue: &wgpu::Queue,
         owners: &[(Arc<wgpu::Buffer>, Section)],
+        bones: Option<(Arc<wgpu::Buffer>, Vec<Move>)>,
         groups: &[GroupOfFrame],
         blended: &[Blended],
         view_proj: Mat4,
@@ -570,7 +583,7 @@ impl Choice {
             &device,
             &mut self.instances,
             u64::from(instances.max(1)) * INSTANCE,
-            storage,
+            storage | wgpu::BufferUsages::VERTEX,
             "models instances of the frame",
         ) | sized(
             &device,
@@ -578,7 +591,14 @@ impl Choice {
             entries.max(1) * ENTRY,
             storage,
             "models entries of the frame",
+        ) | sized(
+            &device,
+            &mut self.bone_table,
+            u64::from(instances.max(1)) * 4,
+            storage,
+            "models bone table of the frame",
         );
+        self.bones = bones;
         let mut made = read;
         made |= sized(
             &device,
@@ -734,6 +754,14 @@ impl Choice {
         for (buffer, bytes, at) in &self.copies {
             if *bytes > 0 {
                 encoder.copy_buffer_to_buffer(buffer, 0, &instances, *at, *bytes);
+            }
+        }
+        if let Some(table) = &self.bone_table {
+            encoder.clear_buffer(table, 0, None);
+            if let Some((buffer, moves)) = &self.bones {
+                for (from, to, bytes) in moves {
+                    encoder.copy_buffer_to_buffer(buffer, *from, table, *to, *bytes);
+                }
             }
         }
         // The buffer written by the frame before is read; when the owners moved, it is first made

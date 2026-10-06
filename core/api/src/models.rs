@@ -44,6 +44,17 @@ pub enum Geosets {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LookId(pub u32);
 
+/// How an instance moves, which chooses the animation it plays: standing; walking, as its flags
+/// say, at a speed in yards a second; or moving at a speed without saying how, its walk or its run
+/// then chosen by that speed.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Motion {
+    #[default]
+    Standing,
+    Walking(f32),
+    Moving(f32),
+}
+
 /// An instance an owner places.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Instance {
@@ -54,6 +65,7 @@ pub struct Instance {
     pub transform: glam::Mat4,
     /// Its opacity, from 0 to 1: the alpha of a creature's display, for one.
     pub alpha: f32,
+    pub motion: Motion,
 }
 
 /// Where a look stands.

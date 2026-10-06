@@ -10,8 +10,8 @@ use uniwow_api::formats::{
     Formats, GameObjectDisplay, HairGeoset, MapRecord, Model, Texture, Tile, Wdl, Wdt,
 };
 use uniwow_api::glam::{Mat4, Quat, Vec3};
-use uniwow_api::models::{Extent, Geosets, Instance, Look, LookId, LookState, Models};
-use uniwow_api::server_link::protocol::{Entity, Kind};
+use uniwow_api::models::{Extent, Geosets, Instance, Look, LookId, LookState, Models, Motion};
+use uniwow_api::server_link::protocol::{Entity, Kind, WALKING};
 
 use crate::looks::{self, Looks, Resolved};
 use crate::markers::{self, Drawn, Frame, SIZE};
@@ -269,6 +269,25 @@ fn an_entity_seen_as_its_model_has_no_marker_and_its_name_over_its_model() {
     // A model drawing nothing at rest, as the triggers': a marker.
     fake.extents.lock().unwrap().insert(look, extent(0));
     assert_eq!(frame(&world, now, Vec3::ZERO, &looks, &fake).markers.len(), 4);
+}
+
+#[test]
+fn an_entity_moving_along_its_spline_is_placed_walking_as_its_flags_say() {
+    let now = Instant::now();
+    let (fake, looks) = (Fake::default(), Looks::default());
+    looks.insert(looks::read(&fake, &Tables, &[(Kind::Creature, 7)]));
+    let mut walker = entity(1, Kind::Creature, [0.0; 3]);
+    (walker.display, walker.flags) = (7, WALKING);
+    walker.spline = Some(path(&[([0.0, 0.0], 0), ([10.0, 0.0], 1000)], 0, 0));
+    let mut standing = entity(2, Kind::Creature, [5.0, 0.0, 0.0]);
+    standing.display = 7;
+    let world = world(vec![walker, standing], now);
+    let placed = frame(&world, now, Vec3::ZERO, &looks, &fake).placed;
+    let motions: HashMap<u64, Motion> = placed.iter().map(|placed| (placed.id, placed.motion)).collect();
+    assert_eq!(
+        motions,
+        HashMap::from([(1, Motion::Walking(10.0)), (2, Motion::Standing)])
+    );
 }
 
 #[test]

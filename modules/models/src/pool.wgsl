@@ -1,8 +1,9 @@
-// The models drawn from what they share (after common.wgsl): for each instance drawn, by the number
-// of its draw (`instance_index`, its first instance pointing into the entries of the frame), its
-// entry gives its instance among those of the frame and its material; its textures are read from
-// the arrays by slot (the bindings of the arrays and `sampled` follow, written for the count of
-// slots).
+// The models drawn from what they share (after common.wgsl and skin.wgsl): for each instance
+// drawn, by the number of its draw (`instance_index`, its first instance pointing into the entries
+// of the frame), its entry gives its instance among those of the frame and its material; its
+// vertices are posed by its bones when the thread of the animations wrote them; its textures are
+// read from the arrays by slot (the bindings of the arrays and `sampled` follow, written for the
+// count of slots).
 
 struct Instance {
     row0: vec4<f32>,
@@ -41,6 +42,8 @@ struct VertexIn {
     @location(1) normal: vec3<f32>,
     @location(2) uv1: vec2<f32>,
     @location(3) uv2: vec2<f32>,
+    @location(4) bones: vec4<u32>,
+    @location(5) weights: vec4<f32>,
 };
 
 struct VertexOut {
@@ -59,7 +62,8 @@ fn vs_main(in: VertexIn, @builtin(instance_index) drawn: u32) -> VertexOut {
     let entry = entries[drawn];
     let instance = instances[entry.x];
     let material = materials[entry.y];
-    let placed = place(instance.row0, instance.row1, instance.row2, instance.extra.x, material.model.x, in.position, in.normal);
+    let vertex = posed(first_bone(entry.x), in.position, in.normal, in.bones, in.weights);
+    let placed = place(instance.row0, instance.row1, instance.row2, instance.extra.x, material.model.x, vertex.position, vertex.normal);
     var out: VertexOut;
     out.clip = placed.clip;
     out.normal = placed.normal;

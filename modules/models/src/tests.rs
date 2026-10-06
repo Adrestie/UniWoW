@@ -15,7 +15,7 @@ use uniwow_api::formats::{
     Skin, Submesh, Texture, TextureFormat, Tile, Wdl, Wdt,
 };
 use uniwow_api::glam::{Mat4, Vec3};
-use uniwow_api::models::{Extent, Geosets, Instance, Look, LookId, LookState, Models};
+use uniwow_api::models::{Extent, Geosets, Instance, Look, LookId, LookState, Models, Motion};
 use uniwow_api::viewport::{Drawing, Layer, Target, View};
 use uniwow_api::{Event, MODULE_FAILED_TOPIC, bytemuck, egui, egui_wgpu, serde_json, wgpu};
 
@@ -124,6 +124,7 @@ pub fn instance(id: u64, look: u32, at: Vec3, scale: f32) -> Instance {
         look: LookId(look),
         transform: Mat4::from_scale_rotation_translation(Vec3::splat(scale), Default::default(), at),
         alpha: 1.0,
+        motion: Motion::Standing,
     }
 }
 

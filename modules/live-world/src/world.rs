@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use uniwow_api::glam::{Quat, Vec3};
-use uniwow_api::server_link::protocol::{CATMULL_ROM, CYCLIC, Entity, Kind, Spline};
+use uniwow_api::models::Motion;
+use uniwow_api::server_link::protocol::{CATMULL_ROM, CYCLIC, Entity, Kind, Spline, WALKING};
 
 /// An entity and when it was received, from which the time along its spline counts on.
 #[derive(Debug)]
@@ -41,6 +42,36 @@ impl Tracked {
             time %= u64::from(last.time);
         }
         Some(time.clamp(u64::from(first.time), u64::from(last.time)) as u32)
+    }
+
+    /// How it moves at `now`: along its spline, at the speed of the stretch it is on, walking when
+    /// its flags say so; standing without one, or at its end. A creature walking along its
+    /// waypoints is not flagged: AzerothCore gives it the speed of walking alone, and the spline of
+    /// 3.3.5a carries no flag of walking.
+    pub fn motion_at(&self, now: Instant) -> Motion {
+        let (Some(spline), Some(time)) = (&self.entity.spline, self.time_at(now)) else {
+            return Motion::Standing;
+        };
+        let points = &spline.points;
+        if time >= points[points.len() - 1].time && !cyclic(spline) {
+            return Motion::Standing;
+        }
+        let next = points
+            .iter()
+            .position(|point| point.time > time)
+            .unwrap_or(points.len() - 1)
+            .max(1);
+        let (a, b) = (points[next - 1], points[next]);
+        let seconds = b.time.saturating_sub(a.time) as f32 / 1000.0;
+        if seconds <= 0.0 {
+            return Motion::Standing;
+        }
+        let speed = Vec3::from(b.position).distance(Vec3::from(a.position)) / seconds;
+        if self.entity.flags & WALKING != 0 {
+            Motion::Walking(speed)
+        } else {
+            Motion::Moving(speed)
+        }
     }
 
     /// How it is turned at `now`: a game object by its quaternion; a creature along its spline

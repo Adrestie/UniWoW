@@ -4312,6 +4312,110 @@ The proposal is validated, with these additions, for 9.5b:
   made on purpose to the reading, every one made a test fail, the field of the fallback that over
   the client.
 
+#### Step 9.5b, as built
+
+- **The motion** (`core/api`): `models::Motion`, carried by each `Instance`: standing; walking at
+  a speed in yards a second; or moving at a speed without saying how. `live-world` gives it from
+  the spline of each entity: along it, at the speed of the stretch it is on (its length over its
+  time), walking when its flag 0x04 says so, moving otherwise; standing without a spline, or at its
+  end unless the spline is cyclic.
+- **Against the proposal, found while preparing the acceptance**: the observer sends no creature
+  walking. AzerothCore gives a creature walking along its waypoints the speed of walking alone,
+  not the flag of the unit (`MoveSplineInit::Launch`), and the spline of a monster in 3.3.5a has no
+  flag of walking (`MoveSplineFlag`): of 19 creatures moving in Orgrimmar, none flagged, all at 2.2
+  to 2.5 yards a second, the speed of walking. So a creature moving without the flag plays *Walk*
+  or *Run*, whichever of their speeds is nearer its own, in yards of its model (its speed over its
+  scale); *Walk* when the model has no *Run*.
+- **The thread of the animations** (`models/src/animator.rs`), started once the pool is made and
+  woken at each frame by the frame signal (*Threads*, above):
+  - it keeps, for each instance of a look whose bones move (keys in a sequence kept or a global
+    one), by its owner and id: the animation its motion asks for (*Stand*, *Walk*, *Run*); a
+    variation picked by their frequencies, by its id and its loop, the same at every run; the
+    sequence its alias leads to, whose keys are kept; through the fallbacks of `AnimationData.dbc`
+    when the model has none (*Walk* and *Run* to *Stand*, *Stand* to *Closed*), at rest when none
+    at all. It plays it at the speed of the instance over that of the sequence at the scale of the
+    instance, so that the feet do not slide; standing, at the pace of its sequence; each instance
+    from a moment of its own, by its id; a new animation from its start, the one before blended out
+    over the time of blending of the new; a variation picked again at each loop;
+  - it computes the bones of the instances of the groups in sight of the camera of the frame
+    before, handed by the layer, their box widened by 8 yards and the view by a quarter on each
+    side, so that what the camera turns or moves into sight between two frames is posed; within the
+    reach of their size. Each bone turns about its pivot (moved to it, translated, rotated, scaled,
+    moved back), placed by its parent, the parents first; two sequences mixed while one blends into
+    the next; a billboard (flags 0x08 to 0x40, all taken as facing the camera whole) turned to the
+    axes of the camera brought into the space of its instance, its scale kept. Split with
+    `parallel_for`, four instances a slice, each into its own part of the bones kept from a frame
+    to the next (their memory not taken again at each frame);
+  - **the rotations by a slerp**, by the shorter arc, between two keys and between two sequences
+    blending: the client of 3.3.5a interpolates its quaternions so, and a normalised lerp bends the
+    arc between keys far apart (at a quarter of the way between keys 160 degrees apart, it turns
+    by 31.6 degrees instead of 40, the test). The curves of rotation, which no bone of the client
+    has (9.5a), are taken as slerps between their keys;
+  - an instance out of sight goes on in time, its bones not computed: not drawn, it needs none;
+    back in sight, it is posed at its time;
+  - it writes one buffer: for each owner with an instance animated in sight, a table of a `u32` a
+    instance in the order of its set, the first bone of the instance plus one, 0 for none; from the
+    next multiple of 256 bytes, the bones, three rows of four floats each. Three buffers written in
+    turn, straight into the staging memory of the queue (`Queue::write_buffer_with`); one grown is
+    made mapped and filled, with room for a quarter more. Published at once with, for each owner,
+    what it had published when its bones were computed (`Animated`). An instance whose bones have
+    no keys, or a static one, costs nothing.
+- **Drawn** (`layer.rs`, `choice.rs`, `skin.wgsl`):
+  - the owners animated are drawn as the thread saw them, so that the table of their bones fits
+    their instances when an owner regroups between the thread and the frame (an instance added is
+    drawn a frame later); the others as they published last; the owners in the order of their
+    numbers;
+  - the GPU clears the table of the bones of the frame, then copies the table of each owner at the
+    base of its instances, beside their copy of 9.4e;
+  - the vertices gain their four bones and weights (48 bytes); a bone past those of its model
+    weighs nothing. The vertex shaders of the pool and of the looks of their own pose each vertex
+    by its four bones, each by its share of their weights, and leave it at rest for an instance
+    without bones written. The looks of their own, in the pass, read their instances from the
+    buffer of the frame, where the table finds them. On a device without the pool, their shader is
+    made without storage buffers, every model at rest, as proposed;
+  - an instance is chosen, drawn and reached by the larger of the radius of its model and those of
+    its sequences kept.
+- **Tests**, on the software adapter for what is drawn: the sequence of a motion through its
+  aliases, its variations by their frequencies and the fallbacks, a loop of fallbacks ended; *Walk*
+  or *Run* by the nearer speed at the scale of the instance; the time at the speed of the instance,
+  a variation picked again at each loop; a new animation from its start, the one before blended
+  out for its time; instances started apart, the same at every run; the tables, the bones aligned
+  and their rows written for the instances in sight only, one past the side of the view within the
+  view widened, the time of one out of sight going on, a buffer written again through the queue at
+  the fourth step; vertices posed on the GPU from two owners, each from its base, a still one where
+  it stands, at rest again once out of the thread's sight; an owner regrouping drawn as the thread
+  saw it until its next step; a look of its own posed from the instances of the frame; a vertex
+  moved by two bones by its share of their weights whatever their sum; a bone past the model
+  weighing nothing, the radius of the sequences kept; a billboard facing the camera whatever the
+  turn of its instance; and, in `pose`, the interpolations, a global sequence, the slerp, a child
+  turning with its parent, two sequences blending. In `live-world`: the motion along a spline, and
+  placed with its instance. Of 41 changes made on purpose to the thread, the shaders, the layer, the
+  loading and `live-world`, every one made a test fail.
+- **Accepted on the user's machine** (RTX 3080 Ti, Vulkan), the worldserver of `E:` running,
+  observed only, with the script of 9.4d, run after run against 9.4e3 (the commit before, built
+  apart) at the same clocks; the thread measured again once its memory was kept from a frame to the
+  next (*final*):
+
+  | | Orgrimmar: 9.5b; 9.4e3 | Dalaran: 9.5b; 9.4e3 |
+  |---|---|---|
+  | Animated, still | 236 to 241 instances, 41,200 to 42,400 bones, 1.9 MB a frame | 390 to 394 instances, 61,000 to 61,800 bones, 2.8 MB a frame |
+  | Animated, flying | 187 to 288 instances, 23,600 to 52,300 bones, 1.1 to 2.4 MB | 21 to 348 instances, 2,100 to 53,200 bones, 0.1 to 2.4 MB |
+  | The thread, final, on average over a second | 1.15 ms still, 0.94 to 1.36 flying; 1.39 at most still, 3.59 flying | 1.58 to 1.62 ms still, 1.19 to 1.53 flying; 1.97 at most still, 9.07 flying while loading |
+  | The thread before | 1.42 to 1.86 ms still | 2.03 to 2.24 ms still |
+  | Draws, still | 865 to 907; 902 to 910 | 2,942 to 2,990; 2,949 to 2,981 |
+  | The view on the interface thread | 0.33 to 0.39 ms; 0.31 to 0.33 | 0.36 to 0.53 ms; 0.34 to 0.44 |
+  | The models on the GPU, still | computing 0.22 to 0.32 ms, drawing 0.38 to 1.24; 0.28 to 0.29, 0.51 to 0.80 | computing 0.17 to 0.27 ms, drawing 0.59 to 1.37; 0.24 to 0.25, 0.49 to 0.60 |
+
+  The thread split by a probe not kept, in Orgrimmar: 0.06 ms finding the instances, 0.55 to 0.88
+  computing (6 to 10 of the 32 workers taking slices, the others coming after the last), 0.35 to
+  0.54 writing. At a distance of 64 over Orgrimmar, the 988 tiles of Kalimdor loaded in 1.5 s, then
+  flying 2,000 yards across the city in 20 seconds and back: the thread 0.34 to 1.78 ms a second
+  on average, 4.84 at most; once 33.8 ms, its first step with instances (their states started, its
+  buffers made). It never passed a frame: the helpers of `parallel_for` keep their turn after the
+  jobs, as the review allowed; under 2 ms on average in both cities, the fallbacks are not built.
+  Seen from four yards: Kruban Darkblade and a Troll Roof Stalker walking along their waypoints,
+  their legs at another stride from a capture to the next.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around
