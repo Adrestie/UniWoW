@@ -30,7 +30,7 @@ use std::thread::ThreadId;
 
 use uniwow_api::formats::{
     self, AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef,
-    Formats, GameObjectDisplay, HairGeoset, MapRecord, Model, Texture, Tile, Wdl, Wdt,
+    Formats, GameObjectDisplay, HairGeoset, MapRecord, Model, Placements, Texture, Tile, Wdl, Wdt,
 };
 use uniwow_api::vfs::{self, Vfs, VfsState};
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, Registrar, egui, log, rfd, serde_json};
@@ -100,6 +100,28 @@ impl Client {
             None => None,
         };
         terrain::tile(&root, tex.as_deref(), obj.as_deref(), wdt.flags)
+            .map(Some)
+            .map_err(|e| format!("{root_path}: {e}"))
+    }
+
+    fn placements(&self, directory: &str, x: u32, y: u32) -> Result<Option<Placements>, String> {
+        let wdt = self.wdt(directory)?;
+        if x > 63 || y > 63 || !wdt.tiles[(y * 64 + x) as usize] {
+            return Ok(None);
+        }
+        let stem = format!("World\\Maps\\{directory}\\{directory}_{x}_{y}");
+        let read = |path: &str| self.chain.read(path).map_err(|e| format!("{path}: {e}"));
+        // Split as `tile` reads it, when its `_tex0` exists: its placements in its `_obj0`.
+        if self.chain.exists(&format!("{stem}_tex0.adt")) {
+            let obj_path = format!("{stem}_obj0.adt");
+            let obj = read(&obj_path)?;
+            return terrain::placements(&[], Some(obj.as_deref().unwrap_or_default()))
+                .map(Some)
+                .map_err(|e| format!("{obj_path}: {e}"));
+        }
+        let root_path = format!("{stem}.adt");
+        let root = read(&root_path)?.ok_or_else(|| format!("{root_path}: named by its WDT, not in the client"))?;
+        terrain::placements(&root, None)
             .map(Some)
             .map_err(|e| format!("{root_path}: {e}"))
     }
@@ -305,6 +327,11 @@ impl Formats for Files {
     fn tile(&self, directory: &str, x: u32, y: u32) -> Result<Option<Tile>, String> {
         self.check_thread("a tile");
         self.client()?.tile(directory, x, y)
+    }
+
+    fn placements(&self, directory: &str, x: u32, y: u32) -> Result<Option<Placements>, String> {
+        self.check_thread("the placements of a tile");
+        self.client()?.placements(directory, x, y)
     }
 
     fn wdl(&self, directory: &str) -> Result<Option<Wdl>, String> {

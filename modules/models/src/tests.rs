@@ -288,6 +288,8 @@ fn the_same_look_has_the_same_id_and_an_owner_keeps_its_set_until_it_gives_anoth
 fn the_instances_of_a_module_that_fails_are_cleared() {
     let service = Service::default();
     service.place("live-world", &[]);
+    service.place("live-world/tile", &[]);
+    service.place("live-worlds", &[]);
     service.place("other", &[]);
     let event = |topic: &str| Event {
         topic: topic.to_owned(),
@@ -295,9 +297,9 @@ fn the_instances_of_a_module_that_fails_are_cleared() {
         payload: serde_json::json!({ "id": "live-world" }),
     };
     forget_failed(&service, &event("another.topic"));
-    assert_eq!(service.owners().len(), 2);
+    assert_eq!(service.owners().len(), 4);
     forget_failed(&service, &event(MODULE_FAILED_TOPIC));
-    assert_eq!(service.owners().len(), 1);
+    assert_eq!(service.owners().len(), 2, "its own owners only");
 }
 
 // The layer's rules.

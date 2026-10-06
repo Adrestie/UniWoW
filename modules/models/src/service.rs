@@ -67,6 +67,12 @@ impl Service {
         }
     }
 
+    /// Removes the owners of the module `id`: the one its id names, and those it names `<id>/…`.
+    pub fn forget_module(&self, id: &str) {
+        let prefix = format!("{id}/");
+        lock(&self.owners).retain(|owner, _| owner != id && !owner.starts_with(&prefix));
+    }
+
     pub fn set_reach(&self, reach: f32) {
         self.reach.store(reach.to_bits(), Ordering::Relaxed);
     }

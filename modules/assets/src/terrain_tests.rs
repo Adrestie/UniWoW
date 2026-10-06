@@ -119,6 +119,8 @@ fn the_client_s_tiles_read_whole_and_hold_together() {
     let misplaced = Mutex::new(Vec::new());
     let agreement = Mutex::new([0.0f64; 2]);
     let (normals_up, normals) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    // The microseconds spent reading the tiles whole and their placements alone.
+    let (whole, alone) = (AtomicUsize::new(0), AtomicUsize::new(0));
     for map in ["Azeroth", "Kalimdor", "Expansion01", "Northrend"] {
         let wdt = client.wdt(map).unwrap();
         let tiles: Vec<(u32, u32)> = (0..4096u32)
@@ -130,10 +132,19 @@ fn the_client_s_tiles_read_whole_and_hold_together() {
             for _ in 0..16 {
                 scope.spawn(|| {
                     while let Some((x, y)) = tiles.get(next.fetch_add(1, Ordering::Relaxed)).copied() {
+                        let reading = Instant::now();
                         let tile = client
                             .tile(map, x, y)
                             .unwrap_or_else(|e| panic!("{map} {x} {y}: {e}"))
                             .unwrap_or_else(|| panic!("{map} {x} {y}: none"));
+                        whole.fetch_add(reading.elapsed().as_micros() as usize, Ordering::Relaxed);
+                        let reading = Instant::now();
+                        let placements = client.placements(map, x, y).unwrap().unwrap();
+                        alone.fetch_add(reading.elapsed().as_micros() as usize, Ordering::Relaxed);
+                        assert!(
+                            placements.doodads == tile.doodads && placements.buildings == tile.buildings,
+                            "{map}_{x}_{y}: the placements read alone"
+                        );
                         if let Some(fault) = check(&tile) {
                             panic!("{map}_{x}_{y}: {fault}");
                         }
@@ -197,11 +208,14 @@ fn the_client_s_tiles_read_whole_and_hold_together() {
     let misplaced = misplaced.into_inner().unwrap();
     eprintln!(
         "{} tiles read in {elapsed:?}, {:.1} % of the normals up; {} whose chunks give another position \
-         than their place: {misplaced:?}; {decoded} textures of Azeroth decoded in {:?}, refused {refused:?}",
+         than their place: {misplaced:?}; {decoded} textures of Azeroth decoded in {:?}, refused {refused:?}; \
+         a tile read whole in {:.2} ms on average, its placements alone in {:.2} ms",
         read.load(Ordering::Relaxed),
         up * 100.0,
         misplaced.len(),
-        started.elapsed()
+        started.elapsed(),
+        whole.load(Ordering::Relaxed) as f64 / 1e3 / read.load(Ordering::Relaxed) as f64,
+        alone.load(Ordering::Relaxed) as f64 / 1e3 / read.load(Ordering::Relaxed) as f64
     );
 }
 
@@ -642,6 +656,28 @@ fn a_split_tile_reads_its_root_tex0_and_obj0_as_warcraftxl_loads_them() {
 }
 
 #[test]
+fn the_placements_of_a_tile_are_its_doodads_and_buildings_read_alone() {
+    let (monolithic, _) = write_adt(Alphas::Compressed, false);
+    let ([root, tex, obj], _) = write_split(Alphas::Compressed, true);
+    for (placements, tile) in [
+        (
+            terrain::placements(&monolithic, None).unwrap(),
+            terrain::tile(&monolithic, None, None, 0).unwrap(),
+        ),
+        (
+            terrain::placements(&[], Some(&obj)).unwrap(),
+            terrain::tile(&root, Some(&tex), Some(&obj), 0).unwrap(),
+        ),
+    ] {
+        assert_eq!(placements.doodads.len(), 2);
+        assert_eq!(
+            (placements.doodads, placements.buildings),
+            (tile.doodads, tile.buildings)
+        );
+    }
+}
+
+#[test]
 fn a_tile_damaged_is_refused_and_never_panics() {
     let (bytes, _) = write_adt(Alphas::Compressed, false);
     assert!(terrain::tile(&bytes[..bytes.len() / 2], None, None, 0).is_err());
@@ -824,13 +860,16 @@ fn the_service_reads_the_tiles_its_wdt_names_split_when_their_tex0_exists() {
     let names = [
         format!("{maps}.wdt"),
         format!("{maps}_32_48.adt"),
+        format!("{maps}_32_48_obj0.adt"),
         format!("{maps}_33_48.adt"),
         format!("{maps}_33_48_tex0.adt"),
         format!("{maps}_33_48_obj0.adt"),
         format!("{maps}_34_48.adt"),
         "tileset\\a.blp".to_owned(),
     ];
-    let contents = [&wdt, &monolithic, &root, &tex, &obj, &monolithic, &texture];
+    // An `_obj0` without its `_tex0`, unread as the whole tile leaves it.
+    let orphan = tagged(b"MVER", &words(&[18]));
+    let contents = [&wdt, &monolithic, &orphan, &root, &tex, &obj, &monolithic, &texture];
     let files: Vec<_> = names
         .iter()
         .zip(contents)
@@ -854,6 +893,17 @@ fn the_service_reads_the_tiles_its_wdt_names_split_when_their_tex0_exists() {
         "a tile its WDT does not name"
     );
     assert_eq!(client.tile("Test", 64, 0).unwrap(), None);
+    for x in [32, 33] {
+        let placements = client.placements("Test", x, 48).unwrap().unwrap();
+        let tile = client.tile("Test", x, 48).unwrap().unwrap();
+        assert_eq!(placements.doodads.len(), 2, "tile {x}");
+        assert_eq!(
+            (placements.doodads, placements.buildings),
+            (tile.doodads, tile.buildings)
+        );
+    }
+    assert_eq!(client.placements("Test", 34, 48).unwrap(), None);
+    assert_eq!(client.placements("Test", 64, 0).unwrap(), None);
     assert!(
         client
             .tile("Missing", 0, 0)

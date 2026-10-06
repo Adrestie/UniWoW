@@ -4668,6 +4668,73 @@ The plan and the decisions are validated, with these additions:
   computing 0.40 to 0.44 ms and drawing 0.35 to 0.79 alike; in Dalaran, the GPU at 390 to 435 MHz,
   the times as close within their noise. The two phases cost nothing that shows.
 
+#### Step 9.6b, as built
+
+- **The placements of a tile** (`core/api`, `assets`): `Formats::placements`, its doodads and its
+  buildings (`formats::Placements`), by default from the whole tile. `assets` reads them alone: the
+  `_obj0` of a tile split, as the whole tile is read (when its `_tex0` exists), else its root; of
+  its chunks, those of the names and the placements only. Over the four continents of the client,
+  the 3,672 tiles give the same doodads and buildings as the whole tiles, read in 4.2 ms on average
+  instead of 6.4 (16 threads at once).
+- **Checked before building**, by probes not kept: a doodad near the border of its tile is listed
+  by the tiles its bounds reach, under the same unique id, its data the same (7,593 in Azeroth,
+  11,715 in Kalimdor, 9,344 in Outland, 10,637 in Northrend, up to 16 tiles for one); in Kalimdor,
+  the birds of the tile 39_23 list again, under the ids of their neighbours', other positions, and
+  33 doodads in all are listed only by a tile they do not stand in. A doodad is therefore kept by
+  its unique id, as the client keeps it, not by the tile it stands in.
+- **The module `doodads`** (category World, using `viewport`, `models` and `formats`): at each frame
+  it reads the map the terrain shows by the command `terrain.map`, and the WDT of that map by a
+  job; at each frame signal, the tiles whose centre lies within its distance and half a tile of the
+  camera, as the terrain chooses its own, those placed kept within a whole tile more. It starts the
+  reads of the nearest first, as many at once as the workers but one: a job reads the placements
+  of a tile, makes its instances and places them. Its panel sets the distance (2 tiles by default,
+  1 to 4) and tells the tiles placed, read, refused, the doodads placed and listed, and how long
+  all took once the map or the distance changed (said in the log too).
+- **An instance a doodad**: its look the model of its file with its own textures and all its
+  submeshes; its id its unique id, the first of an id a tile lists twice; its transform from the
+  axes of its file (the world's X `32·TILE` less its Z, its Y `32·TILE` less its X, its Z its Y), its
+  rotation in degrees as Noggit applies it, `Rz(Y − 90°)·Rx(X)·Ry(−Z)·Rz(−90°)` in the world's axes,
+  and its scale.
+- **The owners** (`doodads/<map>/<x>_<y>`): what the jobs share is kept under a lock, so that a
+  tile is placed only while wanted, and taken away by a job once it is not. A doodad listed by
+  several tiles is placed by the first of them placed; when that tile is left, it goes to the
+  first by its place of the tiles placed that list it, by `Models::change`. Another map takes the
+  tiles of the one before away at once.
+- **A module that fails** (`models`): the owners it names `<id>/…` are cleared with the owner its id
+  names.
+- **Tests**: the placements of a tile of 3.3.5a and of a split one, the same as the doodads and
+  buildings of the whole tile; the service reading them from the `_obj0` of a split tile, an
+  `_obj0` without its `_tex0` left unread as the whole tile leaves it, none for a tile its WDT does
+  not name; over the client, when `UNIWOW_CLIENT` names it, those of every tile of the four
+  continents the same as the whole tile's. The tiles wanted around the camera (their axes, the
+  nearest first, those held within a tile more, none the WDT does not name); the transform against
+  Noggit's, built in its axes, for seven rotations, and the position; the instances of a tile once
+  each by their id, with their look; a doodad listed by three tiles placed once and handed on; a
+  tile placed only while wanted, another map taking all away; the owners of a failed module cleared,
+  not those of a module whose id begins the same. Of 18 changes made on purpose to the doodads,
+  the models and the reading of the placements, every one made a test fail.
+- **Accepted on the user's machine**, the worldserver of `E:` running, observed only, with the
+  script of 9.4d, run after run with the module, without it, with it again (the commit before
+  without its doodads): the doodads turned as the client turns them, two lines of fences of Elwynn
+  joined along their path and the rows of the vines of Brackwell along the fence of their field. At
+  2 tiles, with the doodads against without, the view on the interface thread 0.46 to 0.53 ms
+  against 0.37 to 0.40 in Orgrimmar, 0.54 to 0.61 against 0.40 to 0.47 in Dalaran, 0.42 to 0.45
+  against 0.34 to 0.35 in Stormwind, 0.53 to 0.62 against 0.36 to 0.38 in Shattrath, 0.50 to 0.53
+  against 0.33 to 0.35 on the tile of most doodads (Northrend 23_21); the models on that thread
+  0.37 to 0.86 ms against 0.14 to 0.42; their groups 1,081 to 2,224 against 32 to 515, their looks
+  on the GPU 429 to 1,126 against 26 to 461; the frame on the GPU alike within its noise (0.7 to
+  2.2 ms both), the choice by the GPU 0.03 to 0.3 ms more; the memory of the process 0.1 to 0.5 GB
+  more. In the densest area of Northrend within 4 tiles (around 21_24, 68 tiles placed, 73,061
+  doodads of 75,103 listed): the view on the interface thread 0.73 to 0.81 ms against 0.35, the
+  models there 1.04 to 1.13 ms (their steering 0.57 to 0.63) against 0.15, 4,297 to 4,832 groups
+  against 66 to 77, 1,361 to 1,450 looks on the GPU (396 to 413 MB) against 52 to 67; the thread of
+  the animations 1.93 to 2.31 ms on average and 3.13 at most, over 2,125 to 3,711 instances, against
+  0.44 to 0.60; the choice by the GPU 0.60 to 0.70 ms against 0.21 to 0.27; the memory of the
+  process 3.5 to 4.1 GB against 2.6. The 18 to 61 tiles around the middle of a map placed in 0.1
+  to 0.2 s. Every cost stays far within a frame: the remedies of the review of the proposal are not
+  built. The GPU stayed at its low clock throughout (425 to 555 MHz on average, of 2,145), the
+  densest area not loading it enough: the choice by the GPU at a high clock is still to measure.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

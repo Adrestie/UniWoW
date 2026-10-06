@@ -3503,6 +3503,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "uniwow-module-doodads"
+version = "0.1.0"
+dependencies = [
+ "uniwow-api",
+]
+
+[[package]]
 name = "uniwow-module-dopesheet"
 version = "0.1.0"
 dependencies = [

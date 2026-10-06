@@ -180,7 +180,7 @@ fn forget_failed(service: &Service, event: &Event) {
     if event.topic == MODULE_FAILED_TOPIC
         && let Some(id) = event.payload["id"].as_str()
     {
-        service.clear(id);
+        service.forget_module(id);
     }
 }
 

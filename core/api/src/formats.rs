@@ -223,6 +223,13 @@ pub struct Doodad {
     pub flags: u16,
 }
 
+/// What stands on a tile: its doodads and its buildings, without its terrain.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Placements {
+    pub doodads: Vec<Doodad>,
+    pub buildings: Vec<Building>,
+}
+
 /// A building placed on a tile, in the axes of `Doodad`, with its bounds in them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Building {
@@ -547,6 +554,14 @@ pub trait Formats: Send + Sync {
     /// The tile `<directory>_<x>_<y>`, of 3.3.5a, or split in a root, a `_tex0` and an `_obj0` as
     /// WarcraftXL loads it; none when the WDT of its map has no such tile.
     fn tile(&self, directory: &str, x: u32, y: u32) -> Result<Option<Tile>, String>;
+    /// What stands on the tile `<directory>_<x>_<y>`, its terrain left unread; none when the WDT of
+    /// its map has no such tile. By default, from the whole tile.
+    fn placements(&self, directory: &str, x: u32, y: u32) -> Result<Option<Placements>, String> {
+        Ok(self.tile(directory, x, y)?.map(|tile| Placements {
+            doodads: tile.doodads,
+            buildings: tile.buildings,
+        }))
+    }
     /// The WDL of the map whose folder is `directory`; none when the client has none.
     fn wdl(&self, directory: &str) -> Result<Option<Wdl>, String>;
     /// The BLP `file`, its levels as they are stored: DXT kept, the others as `Rgba8`.

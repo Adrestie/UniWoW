@@ -4,7 +4,7 @@
 //! wow.export (MIT, see THIRD_PARTY.md). A tile of 3.3.5a finds the parts of its chunks by the
 //! offsets of their header, as the client does; a split tile by walking them, as wow.export does.
 
-use uniwow_api::formats::{Building, Chunk, Doodad, FileRef, Layer, Tile, Wdl, Wdt};
+use uniwow_api::formats::{Building, Chunk, Doodad, FileRef, Layer, Placements, Tile, Wdl, Wdt};
 
 /// The flags of `MPHD` that make the alpha maps 8 bits a texel, as wow.export reads them.
 const BIG_ALPHA: u32 = 0x4 | 0x80;
@@ -181,16 +181,7 @@ pub fn tile<'a>(root: &'a [u8], tex: Option<&'a [u8]>, obj: Option<&'a [u8]>, wd
             .map(FileRef::Path)
             .collect(),
     };
-    let doodads = doodads(
-        named(b"MDDF", &obj_chunks).unwrap_or_default(),
-        named(b"MMDX", &obj_chunks).unwrap_or_default(),
-        &u32s(named(b"MMID", &obj_chunks).unwrap_or_default()),
-    )?;
-    let buildings = buildings(
-        named(b"MODF", &obj_chunks).unwrap_or_default(),
-        named(b"MWMO", &obj_chunks).unwrap_or_default(),
-        &u32s(named(b"MWID", &obj_chunks).unwrap_or_default()),
-    )?;
+    let Placements { doodads, buildings } = placed(&|name| named(name, &obj_chunks))?;
 
     let cells = |list: &[([u8; 4], &'a [u8])]| -> Vec<&'a [u8]> {
         list.iter()
@@ -223,6 +214,29 @@ pub fn tile<'a>(root: &'a [u8], tex: Option<&'a [u8]>, obj: Option<&'a [u8]>, wd
         doodads,
         buildings,
     })
+}
+
+/// What stands on a tile, from its chunk of each name as `named` finds it.
+fn placed<'a>(named: &dyn Fn(&[u8; 4]) -> Option<&'a [u8]>) -> Result<Placements, String> {
+    Ok(Placements {
+        doodads: doodads(
+            named(b"MDDF").unwrap_or_default(),
+            named(b"MMDX").unwrap_or_default(),
+            &u32s(named(b"MMID").unwrap_or_default()),
+        )?,
+        buildings: buildings(
+            named(b"MODF").unwrap_or_default(),
+            named(b"MWMO").unwrap_or_default(),
+            &u32s(named(b"MWID").unwrap_or_default()),
+        )?,
+    })
+}
+
+/// What stands on the tile of `root` and, split, of `obj`, its `_obj0`: its chunks of terrain not
+/// parsed.
+pub fn placements(root: &[u8], obj: Option<&[u8]>) -> Result<Placements, String> {
+    let found = chunks(obj.unwrap_or(root))?;
+    placed(&|name| found.iter().find(|(found, _)| found == name).map(|(_, data)| *data))
 }
 
 fn doodads(entries: &[u8], names: &[u8], offsets: &[u32]) -> Result<Vec<Doodad>, String> {

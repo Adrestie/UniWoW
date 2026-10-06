@@ -129,7 +129,8 @@ pub trait Models: Send + Sync {
     /// the set, the ids `removed` leave it.
     fn change(&self, owner: &str, changed: &[Instance], removed: &[u64]);
 
-    /// Removes every instance of `owner`; done for a module that fails.
+    /// Removes every instance of `owner`. Done for a module that fails, for the owner its id names
+    /// and those it names `<id>/…`.
     fn clear(&self, owner: &str);
 
     fn state(&self, look: LookId) -> LookState;
