@@ -12,6 +12,7 @@ use uniwow_api::glam::Vec3;
 use uniwow_api::models::Look;
 use uniwow_api::texture_arrays::{NONE, Placed, Refused};
 
+use crate::dress::Moving;
 use crate::gpu::{State, Vertex, moving_radius};
 use crate::loading::{Caches, key, plan};
 use crate::pool::{MaterialGpu, Pool};
@@ -56,6 +57,8 @@ pub struct PooledLook {
     pub model: Arc<ArenaModel>,
     pub textures: Vec<Arc<Placed>>,
     pub skins: Vec<Vec<Record>>,
+    /// The slots of its materials that move.
+    pub moving: Vec<Moving>,
     materials: Range<u64>,
     pool: Arc<Pool>,
     /// The bytes of its materials.
@@ -127,7 +130,8 @@ pub fn look(
     let mut held: Vec<Arc<Placed>> = Vec::new();
     let mut materials: Vec<MaterialGpu> = Vec::new();
     let mut planned_skins = Vec::new();
-    for batches in plan(&model.model, look) {
+    let (planned, moving) = plan(&model.model, look);
+    for batches in planned {
         let mut planned_skin = Vec::with_capacity(batches.len());
         for planned in batches {
             let mut codes = [NONE; 2];
@@ -197,6 +201,7 @@ pub fn look(
         model,
         textures: held,
         skins,
+        moving,
         bytes: (materials.len() * size_of::<MaterialGpu>()) as u64,
         materials: range,
         pool: pool.clone(),

@@ -17,6 +17,7 @@ use uniwow_api::models::{Extent, Geosets, Look};
 use uniwow_api::{bytemuck, wgpu};
 
 use crate::cache::Cache;
+use crate::dress::{self, Moving};
 use crate::gpu::{BatchParams, Shared, State, TextureGpu, Vertex, flags, moving_radius};
 use crate::pooled::{ArenaModel, PooledLook};
 use crate::shaders;
@@ -51,6 +52,8 @@ pub struct LookGpu {
     pub model: Arc<ModelGpu>,
     pub textures: Vec<Arc<TextureGpu>>,
     pub skins: Vec<Vec<BatchGpu>>,
+    /// The slots of its materials that move.
+    pub moving: Vec<Moving>,
     /// The bytes of its own, outside its model and textures.
     pub bytes: u64,
 }
@@ -87,6 +90,22 @@ impl Ready {
             radius: self.radius(),
             batches,
             reach,
+        }
+    }
+
+    /// The slots of its materials that move (`dress`).
+    pub fn moving(&self) -> &[Moving] {
+        match self {
+            Ready::Pooled(look) => &look.moving,
+            Ready::Own(look) => &look.moving,
+        }
+    }
+
+    /// The model it draws.
+    pub fn model(&self) -> &Model {
+        match self {
+            Ready::Pooled(look) => &look.model.model,
+            Ready::Own(look) => &look.model.model,
         }
     }
 
@@ -275,9 +294,10 @@ pub struct Planned {
 }
 
 /// The batches `look` draws of each skin of its model `data`, in the order they are drawn: those
-/// of the submeshes it shows and seen at rest, but the layers merged into their first, each with
-/// the shader WotLK chooses for it.
-pub fn plan(data: &Model, look: &Look) -> Vec<Vec<Planned>> {
+/// of the submeshes it shows, seen at rest or whose material moves, but the layers merged into
+/// their first, each with the shader WotLK chooses for it; and the slots of the materials that
+/// move, which their batches point to (`dress`).
+pub fn plan(data: &Model, look: &Look) -> (Vec<Vec<Planned>>, Vec<Moving>) {
     // The file of the texture `index` of the model: a file, one the display fills, or none.
     let file_of = |index: usize| match &data.textures[index].source {
         ModelTextureSource::File(file) => Some(file.clone()),
@@ -288,7 +308,9 @@ pub fn plan(data: &Model, look: &Look) -> Vec<Vec<Planned>> {
             .map(|(_, file)| file.clone()),
         ModelTextureSource::Unnamed => None,
     };
-    data.skins
+    let mut slots: Vec<Moving> = Vec::new();
+    let skins = data
+        .skins
         .iter()
         .map(|skin| {
             let ids: Vec<u16> = skin.submeshes.iter().map(|submesh| submesh.id).collect();
@@ -301,9 +323,18 @@ pub fn plan(data: &Model, look: &Look) -> Vec<Vec<Planned>> {
                 let Some(shader) = shader else {
                     continue;
                 };
-                if !shown[usize::from(batch.submesh)] || colour[3] <= 0.0 {
+                let moving = dress::moving(data, batch, shader.textures.len());
+                if !shown[usize::from(batch.submesh)] || (colour[3] <= 0.0 && moving.is_none()) {
                     continue;
                 }
+                // Its slot plus one, 0 for a material that does not move.
+                let slot = moving.map_or(0, |moving| {
+                    let at = slots.iter().position(|kept| *kept == moving).unwrap_or_else(|| {
+                        slots.push(moving);
+                        slots.len() - 1
+                    });
+                    at as u32 + 1
+                });
                 let submesh = &skin.submeshes[usize::from(batch.submesh)];
                 let material = &data.materials[usize::from(batch.material)];
                 let textures = [0, 1].map(|slot| {
@@ -324,7 +355,7 @@ pub fn plan(data: &Model, look: &Look) -> Vec<Vec<Planned>> {
                                 shader.combiner as u32,
                                 shader.coords[0] as u32,
                                 shader.coords[1] as u32,
-                                0,
+                                slot,
                             ],
                         },
                         textures,
@@ -336,7 +367,8 @@ pub fn plan(data: &Model, look: &Look) -> Vec<Vec<Planned>> {
             batches.sort_by_key(|(priority, order, _)| (*priority, *order));
             batches.into_iter().map(|(_, _, batch)| batch).collect()
         })
-        .collect()
+        .collect();
+    (skins, slots)
 }
 
 /// `look` ready to draw with buffers and textures of its own; the textures that could not be read
@@ -372,7 +404,8 @@ pub fn look(
             }
         }
     };
-    let skins = plan(&model.model, look)
+    let (planned_skins, moving) = plan(&model.model, look);
+    let skins = planned_skins
         .into_iter()
         .map(|batches| {
             batches
@@ -425,6 +458,7 @@ pub fn look(
         model,
         textures: held,
         skins,
+        moving,
         bytes,
     })
 }

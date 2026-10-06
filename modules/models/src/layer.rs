@@ -487,9 +487,10 @@ impl Layer for ModelsLayer {
             self.recordings.pop_front();
         }
         let animations = format!(
-            "animated: {} instances, {} bones, {:.1} MB a frame, the thread {:.2} ms on average and {:.2} at most",
+            "animated: {} instances, {} bones, {} slots of materials, {:.1} MB a frame, the thread {:.2} ms on average and {:.2} at most",
             animation.instances,
             animation.bones,
+            animation.slots,
             animation.bytes as f64 / (1024.0 * 1024.0),
             animation.spent.as_secs_f64() * 1000.0,
             animation.longest.as_secs_f64() * 1000.0,

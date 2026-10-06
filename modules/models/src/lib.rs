@@ -15,6 +15,9 @@ mod choice;
 #[cfg(test)]
 mod choice_tests;
 mod display;
+mod dress;
+#[cfg(test)]
+mod dress_tests;
 mod gpu;
 mod groups;
 mod layer;

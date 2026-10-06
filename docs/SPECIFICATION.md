@@ -4437,6 +4437,56 @@ The proposal is validated, with these additions, for 9.5b:
   once the thread ends; a hundred million loops counted at once. Of 5 changes made on purpose,
   every one made a test fail.
 
+#### Step 9.5c, as built
+
+- **What moves in a material** (`models/src/dress.rs`): the colour of its batch (red, green, blue
+  and alpha), its weight, and the transform of the coordinates of each texture it reads. A batch
+  moves when one of its colour tracks or its weight takes more than one value through the keys
+  kept, or when one of its textures has a transform, even holding one value (9.4 drew them
+  unmoved). Each combination that moves is a slot of its look, the same for the batch at every
+  level; the material of each batch points to its slot (the fourth number of its combination, 0
+  for none). A batch unseen at rest (no alpha) is kept when it moves, and a material of no alpha
+  draws nothing, as WotLK leaves it out.
+- **A slot at a moment**: the colour of its track, else of the model at rest; its alpha times its
+  weight; the rows of each transform: translated, then turned and scaled about the middle of the
+  texture, as WMV reads them; at the moment of the instance's sequence, or of the global sequence
+  of the track. While two sequences blend, the materials follow the sequence played.
+- **Written with the bones**: a look whose bones or materials move is animated. The thread writes
+  for each instance in sight its slots, four vectors each (its colour, then the two rows of each
+  transform), just before its bones, its first slot nearest; the table of an owner now gives where
+  the first bone of each instance begins, in vectors of four floats, plus one.
+- **Read by the shaders** (`skin.wgsl`, `common.wgsl`): the vertex shader of the pool and of the
+  looks of their own reads the slot of its material before the first bone of its instance; it
+  passes on the colour and the coordinates of each texture, chosen (first set, second, or the
+  environment) and moved by their transform, at the vertex rather than at the pixel. At rest,
+  without a slot or without bones written, the colour of the material and the coordinates
+  unmoved, as before; on a device without the pool, every material at rest.
+- **Checked over the client**, by probes not kept: of 23,190 models, 1,144 have a texture
+  transform, 796 a colour that moves and 937 a weight that moves. The falls of Coilfang
+  (`Coilfang_waterfall_Type1`, 88 yards high) have 13 transforms, translations each on a global
+  sequence of 0.7 to 3.8 seconds, and weights holding 0, 1, 0.59 and 0.25.
+- **Tests**: a material moving by its colour, its weight or a transform, even holding one value,
+  for the textures it reads only, and not when its tracks hold one value; a slot at a moment: its
+  colour halfway between two keys, its alpha times its weight, a translation, a quarter turn and a
+  scale about the middle, a sequence without keys at rest, a global sequence by the clock; the
+  batches of two levels pointing to one slot, one unseen at rest kept while its weight moves; and
+  on the software adapter: a colour moving drawn from its slot, in the pool and on the path of
+  9.4c; the coordinates of a texture moved half across by its transform; a batch unseen at rest
+  drawn once its alpha rises, opaque and alpha-keyed, in the pool and of its own; two slots of a
+  look each read by its own batches. Of 20 changes made on purpose to `dress`, the plan, the
+  thread and the shaders, every one made a test fail.
+- **Accepted on the user's machine**, the worldserver of `E:` running, observed only:
+  - a lava fall of Dragonblight (`BD_Lavafall01`) previewed against the sky: its lava flows, its
+    pattern another at each capture;
+  - the falls of Coilfang previewed against the sky: their instance placed, in sight and animated
+    (11 slots), their 13 batches drawn, but no pixel seen, still or moving, as at rest in 9.4c2;
+    the cause is not in this step, and stays to be found;
+  - the cities with the script of 9.4d, the GPU at 780 MHz (other clocks than the measures of
+    9.5b, not compared): Orgrimmar 236 instances animated still, 41,225 bones and 16 slots, 1.9 MB
+    a frame, the thread 0.76 to 0.90 ms on average, 1.11 at most; Dalaran 392 instances, 61,456
+    bones and 164 slots, 2.8 MB, the thread 1.20 to 1.21 ms, 1.36 at most, 4.59 at most flying;
+    the view on the interface thread 0.37 to 0.46 ms in Orgrimmar, 0.47 to 0.53 in Dalaran.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

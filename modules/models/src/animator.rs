@@ -1,8 +1,9 @@
 //! The thread of the animations (*Threads*, step 9.5), woken at each frame. For each instance of a
-//! look whose bones move, it chooses the sequence its motion asks for (*Stand*, *Walk*, *Run*,
-//! through the fallbacks of `AnimationData.dbc`), plays it at the speed of the instance over that
-//! of the sequence at its scale, each instance from a moment of its own, blending into the next for
-//! its time of blending. It computes the bones of the instances of the groups in sight, split with
+//! look whose bones or materials move, it chooses the sequence its motion asks for (*Stand*,
+//! *Walk*, *Run*, through the fallbacks of `AnimationData.dbc`), plays it at the speed of the
+//! instance over that of the sequence at its scale, each instance from a moment of its own,
+//! blending into the next for its time of blending. It computes the bones of the instances of the
+//! groups in sight, and before them the slots of their materials that move (`dress`), split with
 //! `parallel_for`, and writes them, with for each owner a table of where each instance's bones
 //! are, into one buffer published whole (`Animated`). An instance out of sight goes on in time,
 //! its bones not computed; a static one costs nothing.
@@ -24,6 +25,7 @@ use uniwow_api::viewport::Handle;
 use uniwow_api::wgpu::WriteOnly;
 use uniwow_api::{bytemuck, wgpu};
 
+use crate::dress;
 use crate::groups::Published;
 use crate::layer::{Scene, in_sight, nearest};
 use crate::loading::Ready;
@@ -35,9 +37,10 @@ use crate::service::Service;
 const STAND: u16 = 0;
 const WALK: u16 = 4;
 const RUN: u16 = 5;
-/// The words of a bone as the shader reads it, and where the bones begin, in words: a multiple
-/// of the alignment of a storage binding.
-const BONE_WORDS: usize = 12;
+/// The vectors of four floats of a bone and of a slot of a material, as the shader reads them, and
+/// where the bones begin, in words: a multiple of the alignment of a storage binding.
+const BONE: usize = 3;
+const SLOT: usize = dress::SLOT / 4;
 const ALIGN_WORDS: usize = 64;
 /// How far past the view of the frame before a group is still animated: by this many yards, and
 /// with the view widened by a quarter on each side, so that what the camera turns or moves into
@@ -49,19 +52,20 @@ const WAIT: Duration = Duration::from_millis(100);
 
 /// What the thread published: its buffer; for each owner animated, its number, what it published
 /// when its bones were computed, where its table begins in words and how many instances it has;
-/// where the bones begin, in bytes.
+/// where the bones and slots begin, in bytes.
 pub struct Animated {
     pub buffer: Arc<wgpu::Buffer>,
     pub owners: Vec<(u32, Arc<Published>, u32, u32)>,
     pub bones_at: u64,
 }
 
-/// What the thread did, for the statistics: the instances and bones of its last frame, the bytes
-/// it wrote, and its time on average and at most over the last second.
+/// What the thread did, for the statistics: the instances, bones and slots of materials of its
+/// last frame, the bytes it wrote, and its time on average and at most over the last second.
 #[derive(Clone, Debug, Default)]
 pub struct AnimationStats {
     pub instances: usize,
     pub bones: usize,
+    pub slots: usize,
     pub bytes: u64,
     pub spent: Duration,
     pub longest: Duration,
@@ -262,10 +266,12 @@ pub fn moves(animation: &Animation) -> bool {
     })
 }
 
-/// An instance whose bones are computed this frame: its look, how it is posed, its bones.
+/// An instance whose bones are computed this frame: its look, how it is posed, its slots of
+/// materials and its bones.
 struct Job {
     look: Arc<Ready>,
     posing: Posing,
+    slots: usize,
     bones: usize,
 }
 
@@ -273,9 +279,9 @@ struct Job {
 #[derive(Default)]
 pub struct Animator {
     playing: HashMap<(u32, u64), Playing>,
-    /// The bones of the last frame, kept for their memory.
-    posed: Vec<[f32; BONE_WORDS]>,
-    /// Whether the bones of each look move (`moves`).
+    /// The slots and bones of the last frame, kept for their memory.
+    posed: Vec<[f32; 4]>,
+    /// Whether each look moves: its bones (`moves`) or its materials.
     moving: HashMap<LookId, bool>,
     fallbacks: Option<HashMap<u16, u16>>,
     buffers: [Option<Arc<wgpu::Buffer>>; 3],
@@ -323,9 +329,11 @@ impl Animator {
         let mut owners = Vec::new();
         let mut tables: Vec<u32> = Vec::new();
         let mut jobs = Vec::new();
-        let mut bones = 0usize;
+        let (mut vectors, mut bones, mut slots) = (0usize, 0usize, 0usize);
         for (id, look) in looks.iter() {
-            self.moving.entry(*id).or_insert_with(|| moves(look.animation()));
+            self.moving
+                .entry(*id)
+                .or_insert_with(|| moves(look.animation()) || !look.moving().is_empty());
         }
         for slot in service.owners() {
             let published = slot.published();
@@ -382,7 +390,7 @@ impl Animator {
                         clock,
                     };
                     let camera = camera.map(|(_, view, _)| facing(instance.transform, view));
-                    jobs.push(Job {
+                    let job = Job {
                         look: look.clone(),
                         posing: Posing {
                             moment: moment(playing.sequence, playing.time),
@@ -391,10 +399,14 @@ impl Animator {
                                 .map(|(sequence, time, left, whole)| (moment(sequence, time), left / whole)),
                             camera,
                         },
+                        slots: look.moving().len(),
                         bones: animation.bones.len(),
-                    });
-                    tables[at + index as usize] = bones as u32 + 1;
-                    bones += animation.bones.len();
+                    };
+                    // Its first bone plus one, in vectors: its slots before it.
+                    tables[at + index as usize] = (vectors + job.slots * SLOT) as u32 + 1;
+                    vectors += job.slots * SLOT + job.bones * BONE;
+                    (bones, slots) = (bones + job.bones, slots + job.slots);
+                    jobs.push(job);
                     any = true;
                 }
             }
@@ -406,26 +418,32 @@ impl Animator {
         }
         self.playing.retain(|key, _| seen.contains(key));
 
-        // The bones, each instance's computed by a slice into its own part of those kept from a
-        // frame to the next.
-        self.posed.resize(bones, [0.0; BONE_WORDS]);
+        // The slots then the bones of each instance, computed by a slice into its own part of those
+        // kept from a frame to the next: its last slot first, its first just before its bones.
+        self.posed.resize(vectors, [0.0; 4]);
         {
             let mut rest = &mut self.posed[..];
             let mut parts = Vec::with_capacity(jobs.len());
             for job in &jobs {
-                let (part, after) = rest.split_at_mut(job.bones);
+                let (part, after) = rest.split_at_mut(job.slots * SLOT + job.bones * BONE);
                 parts.push(Mutex::new(part));
                 rest = after;
             }
             parallel_for(jobs.len(), 4, |range| {
                 let mut matrices = Vec::new();
                 for at in range {
-                    let animation = jobs[at].look.animation();
+                    let (job, mut part) = (&jobs[at], lock(&parts[at]));
+                    let (dressed, posed) = part.split_at_mut(job.slots * SLOT);
+                    for (slot, moving) in dressed.chunks_mut(SLOT).rev().zip(job.look.moving()) {
+                        let values = dress::dressed(job.look.model(), moving, job.posing.moment);
+                        slot.copy_from_slice(bytemuck::cast_slice(&values));
+                    }
+                    let animation = job.look.animation();
                     matrices.clear();
                     matrices.resize(animation.bones.len(), Mat4::IDENTITY);
-                    pose::pose(animation, &jobs[at].posing, &mut matrices);
-                    for (rows, matrix) in lock(&parts[at]).iter_mut().zip(&matrices) {
-                        *rows = pose::rows(matrix);
+                    pose::pose(animation, &job.posing, &mut matrices);
+                    for (bone, matrix) in posed.chunks_mut(BONE).zip(&matrices) {
+                        bone.copy_from_slice(bytemuck::cast_slice(&pose::rows(matrix)));
                     }
                 }
             });
@@ -433,7 +451,7 @@ impl Animator {
         // After the tables, bound from `bones_at`: never an empty range. Written where the GPU
         // takes them from: the staging memory of the queue, or a buffer grown, made mapped.
         let bones_at = tables.len().div_ceil(ALIGN_WORDS) * ALIGN_WORDS;
-        let bytes = ((bones_at + bones.max(1) * BONE_WORDS) * 4) as u64;
+        let bytes = ((bones_at + vectors.max(BONE) * 4) * 4) as u64;
         let slot = self.next;
         self.next = (self.next + 1) % self.buffers.len();
         let buffer = match self.buffers[slot].clone().filter(|buffer| buffer.size() >= bytes) {
@@ -482,6 +500,7 @@ impl Animator {
         scene.animation = AnimationStats {
             instances: jobs.len(),
             bones,
+            slots,
             bytes,
             spent: self.times.iter().map(|(_, spent)| *spent).sum::<Duration>() / count,
             longest: self.times.iter().map(|(_, spent)| *spent).max().unwrap_or_default(),
@@ -497,14 +516,15 @@ impl Animator {
     }
 }
 
-/// Writes into `out` the `tables`, zeros up to `bones_at` words, then the `bones`, then zeros.
-fn fill(out: WriteOnly<'_, [u8]>, tables: &[u32], bones_at: usize, bones: &[[f32; BONE_WORDS]]) {
+/// Writes into `out` the `tables`, zeros up to `bones_at` words, then the `posed` slots and bones,
+/// then zeros.
+fn fill(out: WriteOnly<'_, [u8]>, tables: &[u32], bones_at: usize, posed: &[[f32; 4]]) {
     let (mut head, rest) = out.split_at(tables.len() * 4);
     head.copy_from_slice(bytemuck::cast_slice(tables));
     let (mut pad, rest) = rest.split_at((bones_at - tables.len()) * 4);
     pad.fill(0);
-    let (mut posed, mut rest) = rest.split_at(bones.len() * BONE_WORDS * 4);
-    posed.copy_from_slice(bytemuck::cast_slice(bones));
+    let (mut written, mut rest) = rest.split_at(posed.len() * 16);
+    written.copy_from_slice(bytemuck::cast_slice(posed));
     rest.fill(0);
 }
 

@@ -49,9 +49,10 @@ struct VertexIn {
 struct VertexOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
-    @location(1) uv1: vec2<f32>,
-    @location(2) uv2: vec2<f32>,
-    @location(3) env: vec2<f32>,
+    // The coordinates of its two textures, as their transforms move them.
+    @location(1) uv_one: vec2<f32>,
+    @location(2) uv_two: vec2<f32>,
+    @location(3) @interpolate(flat) colour: vec4<f32>,
     @location(4) world: vec3<f32>,
     @location(5) alpha: f32,
     @location(6) @interpolate(flat) material: u32,
@@ -62,28 +63,24 @@ fn vs_main(in: VertexIn, @builtin(instance_index) drawn: u32) -> VertexOut {
     let entry = entries[drawn];
     let instance = instances[entry.x];
     let material = materials[entry.y];
-    let vertex = posed(first_bone(entry.x), in.position, in.normal, in.bones, in.weights);
+    let bone = first_bone(entry.x);
+    let vertex = posed(bone, in.position, in.normal, in.bones, in.weights);
     let placed = place(instance.row0, instance.row1, instance.row2, instance.extra.x, material.model.x, vertex.position, vertex.normal);
     var out: VertexOut;
     out.clip = placed.clip;
     out.normal = placed.normal;
-    out.uv1 = in.uv1;
-    out.uv2 = in.uv2;
-    out.env = placed.env;
+    let look = dressed(bone, material.combine.w, material.colour);
+    out.uv_one = coordinates(material.combine.y, in.uv1, in.uv2, placed.env, look.one_u, look.one_v);
+    out.uv_two = coordinates(material.combine.z, in.uv1, in.uv2, placed.env, look.two_u, look.two_v);
+    out.colour = look.colour;
+    // A material of no alpha draws nothing, as WotLK leaves it out.
+    if look.colour.a <= 0.0 {
+        out.clip = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
     out.world = placed.world;
     out.alpha = instance.extra.x;
     out.material = entry.y;
     return out;
-}
-
-fn coordinates(source: u32, in: VertexOut) -> vec2<f32> {
-    if source == 2u {
-        return in.env;
-    }
-    if source == 1u {
-        return in.uv2;
-    }
-    return in.uv1;
 }
 
 // The texel of the texture `code` of `size` at `uv`, its gradients given, wrapping on each axis as
@@ -110,15 +107,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let material = materials[in.material];
     // The coordinates and their gradients taken where every pixel runs; the textures in gamma, as
     // WotLK combines them.
-    let uv_one = coordinates(material.combine.y, in);
-    let uv_two = coordinates(material.combine.z, in);
+    let uv_one = in.uv_one;
+    let uv_two = in.uv_two;
     let ddx_one = dpdx(uv_one);
     let ddy_one = dpdy(uv_one);
     let ddx_two = dpdx(uv_two);
     let ddy_two = dpdy(uv_two);
     let one = texel(material.textures.x, material.textures.z & 3u, material.sizes.xy, uv_one, ddx_one, ddy_one);
     let two = texel(material.textures.y, (material.textures.z >> 2u) & 3u, material.sizes.zw, uv_two, ddx_two, ddy_two);
-    let element = material.colour.a * in.alpha;
-    let combined = combine(material.combine.x, vec4<f32>(material.colour.rgb, element), one, two);
+    let element = in.colour.a * in.alpha;
+    let combined = combine(material.combine.x, vec4<f32>(in.colour.rgb, element), one, two);
     return shade(combined, element, material.flags, in.normal, in.world);
 }

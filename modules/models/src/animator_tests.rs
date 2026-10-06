@@ -5,7 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use uniwow_api::formats::{
-    Animation, Bone, FileRef, Interpolation, Keys, Model, ModelTextureSource, ModelVertex, Sequence, Track,
+    Animation, Bone, FileRef, Interpolation, Keys, Model, ModelTextureSource, ModelVertex, Sequence, Texture,
+    TextureFormat, TextureTransform, Track,
 };
 use uniwow_api::glam::{Mat4, Quat, Vec3};
 use uniwow_api::models::{Geosets, Instance, Look, LookId, Models, Motion};
@@ -255,12 +256,17 @@ fn look(file: &str) -> Look {
 
 /// A bench of the pool with the looks of `files`, by their order, and an animator.
 fn bench(files: &[(&str, Model)]) -> Option<(Pooled, Animator)> {
+    bench_with(files, plain([255, 0, 0, 255]))
+}
+
+/// The bench of `bench`, the texture of its looks `texture`.
+fn bench_with(files: &[(&str, Model)], texture: Texture) -> Option<(Pooled, Animator)> {
     let fake = Fake {
         files: files
             .iter()
             .map(|(file, model)| ((*file).to_owned(), model.clone()))
             .collect(),
-        textures: HashMap::from([("red.blp".to_owned(), plain([255, 0, 0, 255]))]),
+        textures: HashMap::from([("red.blp".to_owned(), texture)]),
         ..Fake::default()
     };
     let pooled = Pooled::new(pool::SLOTS)?;
@@ -329,8 +335,8 @@ fn the_thread_writes_the_bones_of_the_animated_instances_in_sight_and_where_they
     let words: Vec<u32> = bytemuck::cast_slice(&read_back(&pooled.bench.gpu, &animated.buffer, 256 + 96)).to_vec();
     assert_eq!(
         words[..3],
-        [1, 0, 2],
-        "the first bone of each instance, none for the still one"
+        [1, 0, 4],
+        "where the first bone of each instance begins in vectors, plus one; none for the still one"
     );
     let rows: &[f32] = bytemuck::cast_slice(&words[64..]);
     let moved = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 3.0, 0.0, 0.0, 1.0, 0.0];
@@ -617,4 +623,228 @@ fn an_instance_back_to_its_look_after_one_playing_nothing_starts_afresh() {
         &HashMap::new(),
     );
     assert_eq!(animator.playing(0, 1), fresh);
+}
+
+/// The square of `square`, its bone still and its sequence *Stand* kept; its colour at rest
+/// `rest`, its colour moving between `from` and `to` through *Stand*.
+fn glowing(rest: [f32; 4], from: [f32; 4], to: [f32; 4]) -> Model {
+    let mut model = square(0, 0);
+    model.colours = vec![rest];
+    model.skins[0].batches[0].colour = Some(0);
+    let track = |values: [f32; 2]| Track {
+        interpolation: Interpolation::Linear,
+        global: None,
+        keys: vec![Keys {
+            times: vec![0, 1000],
+            values: values.to_vec(),
+            tangents: Vec::new(),
+        }],
+    };
+    let rgb = Track {
+        interpolation: Interpolation::Linear,
+        global: None,
+        keys: vec![Keys {
+            times: vec![0, 1000],
+            values: vec![[from[0], from[1], from[2]], [to[0], to[1], to[2]]],
+            tangents: Vec::new(),
+        }],
+    };
+    model.animation = Animation {
+        sequences: vec![sequence(0, 1000, 0.0, 0x7FFF, true)],
+        bones: vec![bone(None)],
+        order: vec![0],
+        colours: vec![(rgb, track([from[3], to[3]]))],
+        ..Animation::default()
+    };
+    model
+}
+
+#[test]
+fn a_colour_that_moves_is_drawn_from_its_slot_on_the_gpu() {
+    // Red at rest, green all through its sequence; its bones still.
+    let model = glowing([1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0], [0.0, 0.98, 0.0, 1.0]);
+    let Some((mut pooled, mut animator)) = bench_with(&[("glowing.m2", model)], plain([255; 4])) else {
+        return;
+    };
+    pooled.bench.service.place("a", &[instance(1, 0, Vec3::ZERO, 0.5)]);
+    let seen = |image: &[u8]| only(pixel(image, MIDDLE.0, MIDDLE.1), 0);
+    assert!(seen(&settled(&mut pooled.bench, FRONT, AIM)), "red at rest");
+    step(&pooled, &mut animator, 0.0);
+    let image = render(&mut pooled.bench, FRONT, AIM);
+    assert!(
+        only(pixel(&image, MIDDLE.0, MIDDLE.1), 1),
+        "{:?}",
+        pixel(&image, MIDDLE.0, MIDDLE.1)
+    );
+    let stats = lock(&pooled.bench.scene).animation.clone();
+    assert_eq!((stats.instances, stats.bones, stats.slots), (1, 1, 1));
+}
+
+#[test]
+fn a_colour_that_moves_is_drawn_on_the_path_of_9_4c_too() {
+    let mut model = glowing([1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0], [0.0, 0.98, 0.0, 1.0]);
+    model.textures[0].source = ModelTextureSource::Filled(11);
+    let fake = Fake {
+        model: Some(model),
+        textures: HashMap::from([
+            ("small.blp".to_owned(), sized(4, [255; 4])),
+            ("large.blp".to_owned(), sized(8, [255; 4])),
+        ]),
+        ..Fake::default()
+    };
+    let Some(mut pooled) = Pooled::new(1) else {
+        return;
+    };
+    assert!(pooled.add(&fake, &skin("small.blp")));
+    assert!(!pooled.add(&fake, &skin("large.blp")));
+    let mut animator = Animator::default();
+    pooled.bench.service.place("a", &[instance(1, 1, Vec3::ZERO, 0.5)]);
+    let at = |image: &[u8]| pixel(image, MIDDLE.0, MIDDLE.1);
+    assert!(only(at(&settled(&mut pooled.bench, FRONT, AIM)), 0), "red at rest");
+    step(&pooled, &mut animator, 0.0);
+    assert!(only(at(&render(&mut pooled.bench, FRONT, AIM)), 1), "green");
+}
+
+#[test]
+fn the_coordinates_of_a_texture_move_by_its_transform_on_the_gpu() {
+    // Half a texture across: its left half red, its right half green.
+    let mut model = glowing([1.0; 4], [1.0; 4], [1.0; 4]);
+    model.transform_combos = vec![0];
+    model.animation.colours.clear();
+    model.skins[0].batches[0].colour = None;
+    model.animation.transforms = vec![TextureTransform {
+        translation: Track {
+            interpolation: Interpolation::Linear,
+            global: None,
+            keys: vec![Keys {
+                times: vec![0],
+                values: vec![[0.5, 0.0, 0.0]],
+                tangents: Vec::new(),
+            }],
+        },
+        ..TextureTransform::default()
+    }];
+    let halves = Texture {
+        width: 4,
+        height: 4,
+        format: TextureFormat::Rgba8,
+        levels: vec![
+            [[255, 0, 0, 255], [255, 0, 0, 255], [0, 255, 0, 255], [0, 255, 0, 255]]
+                .concat()
+                .repeat(4),
+        ],
+    };
+    let Some((mut pooled, mut animator)) = bench_with(&[("halves.m2", model)], halves) else {
+        return;
+    };
+    pooled.bench.service.place("a", &[instance(1, 0, Vec3::ZERO, 1.0)]);
+    // A quarter of the way across the square, from its left.
+    let quarter = |image: &[u8]| pixel(image, 16, 13);
+    assert!(only(quarter(&settled(&mut pooled.bench, FRONT, AIM)), 0), "red at rest");
+    step(&pooled, &mut animator, 0.0);
+    let image = render(&mut pooled.bench, FRONT, AIM);
+    assert!(only(quarter(&image), 1), "moved half across: {:?}", quarter(&image));
+}
+
+#[test]
+fn a_batch_unseen_at_rest_is_drawn_once_its_alpha_rises() {
+    // No alpha at rest, all of it through its sequence; opaque, and alpha-keyed, whose key no
+    // alpha would pass.
+    let model = glowing([1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 0.99]);
+    let mut keyed = model.clone();
+    keyed.materials[0].blending = 1;
+    let Some((mut pooled, mut animator)) = bench_with(&[("rising.m2", model), ("keyed.m2", keyed)], plain([255; 4]))
+    else {
+        return;
+    };
+    pooled.bench.service.place(
+        "a",
+        &[
+            instance(1, 0, Vec3::ZERO, 0.5),
+            instance(2, 1, Vec3::new(0.0, -1.5, 0.0), 0.5),
+        ],
+    );
+    let seen = |image: &[u8]| [LEFT, MIDDLE].map(|(row, column)| pixel(image, row, column)[..3].to_vec());
+    assert_eq!(
+        seen(&settled(&mut pooled.bench, FRONT, AIM)),
+        [vec![0, 0, 0], vec![0, 0, 0]],
+        "not drawn at rest"
+    );
+    step(&pooled, &mut animator, 0.0);
+    let image = render(&mut pooled.bench, FRONT, AIM);
+    assert!(
+        [LEFT, MIDDLE]
+            .iter()
+            .all(|(row, column)| only(pixel(&image, *row, *column), 0)),
+        "red"
+    );
+}
+
+#[test]
+fn each_slot_of_a_look_is_read_by_its_own_batches() {
+    // Two batches over the two triangles of the square, green and blue, each its own slot.
+    let mut model = glowing([1.0; 4], [0.0, 1.0, 0.0, 1.0], [0.0, 0.98, 0.0, 1.0]);
+    let blue = model.animation.colours[0].clone();
+    let blue = (
+        Track {
+            keys: vec![Keys {
+                values: vec![[0.0, 0.0, 1.0], [0.0, 0.0, 0.98]],
+                ..blue.0.keys[0].clone()
+            }],
+            ..blue.0
+        },
+        blue.1,
+    );
+    model.animation.colours.push(blue);
+    model.colours.push([1.0; 4]);
+    let skin = &mut model.skins[0];
+    skin.submeshes[0].count = 3;
+    skin.submeshes.push(uniwow_api::formats::Submesh {
+        start: 3,
+        ..skin.submeshes[0]
+    });
+    let mut second = skin.batches[0];
+    (second.submesh, second.colour) = (1, Some(1));
+    skin.batches.push(second);
+    let Some((mut pooled, mut animator)) = bench_with(&[("halves.m2", model)], plain([255; 4])) else {
+        return;
+    };
+    pooled.bench.service.place("a", &[instance(1, 0, Vec3::ZERO, 1.0)]);
+    render(&mut pooled.bench, FRONT, AIM);
+    step(&pooled, &mut animator, 0.0);
+    let image = render(&mut pooled.bench, FRONT, AIM);
+    // The triangle below its diagonal, then the one above.
+    let (below, above) = (pixel(&image, 19, 19), pixel(&image, 12, 12));
+    assert!(only(below, 1) && only(above, 2), "{below:?} {above:?}");
+    assert_eq!(lock(&pooled.bench.scene).animation.slots, 2);
+}
+
+#[test]
+fn an_alpha_keyed_batch_of_its_own_unseen_at_rest_is_drawn_once_its_alpha_rises() {
+    let mut model = glowing([1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 0.99]);
+    model.materials[0].blending = 1;
+    model.textures[0].source = ModelTextureSource::Filled(11);
+    let fake = Fake {
+        model: Some(model),
+        textures: HashMap::from([
+            ("small.blp".to_owned(), sized(4, [255; 4])),
+            ("large.blp".to_owned(), sized(8, [255; 4])),
+        ]),
+        ..Fake::default()
+    };
+    let Some(mut pooled) = Pooled::new(1) else {
+        return;
+    };
+    assert!(pooled.add(&fake, &skin("small.blp")));
+    assert!(!pooled.add(&fake, &skin("large.blp")));
+    let mut animator = Animator::default();
+    pooled.bench.service.place("a", &[instance(1, 1, Vec3::ZERO, 0.5)]);
+    let at = |image: &[u8]| pixel(image, MIDDLE.0, MIDDLE.1);
+    assert_eq!(
+        at(&settled(&mut pooled.bench, FRONT, AIM))[..3],
+        [0, 0, 0],
+        "not drawn at rest"
+    );
+    step(&pooled, &mut animator, 0.0);
+    assert!(only(at(&render(&mut pooled.bench, FRONT, AIM)), 0), "red");
 }

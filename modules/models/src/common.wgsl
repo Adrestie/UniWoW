@@ -85,6 +85,36 @@ fn place(
     return placed;
 }
 
+// What the material of an instance is at the moment of its animation (`dressed`): its colour, and
+// the rows of the transforms of the coordinates of its two textures.
+struct Dressed {
+    colour: vec4<f32>,
+    one_u: vec3<f32>,
+    one_v: vec3<f32>,
+    two_u: vec3<f32>,
+    two_v: vec3<f32>,
+};
+
+// The material of `colour` at rest, its coordinates unmoved.
+fn at_rest(colour: vec4<f32>) -> Dressed {
+    let u = vec3<f32>(1.0, 0.0, 0.0);
+    let v = vec3<f32>(0.0, 1.0, 0.0);
+    return Dressed(colour, u, v, u, v);
+}
+
+// The coordinates `source` names, the first set (0), the second (1) or those of the environment
+// (2), moved by the rows `u` and `v` of their transform.
+fn coordinates(source: u32, first: vec2<f32>, second: vec2<f32>, env: vec2<f32>, u: vec3<f32>, v: vec3<f32>) -> vec2<f32> {
+    var at = first;
+    if source == 2u {
+        at = env;
+    } else if source == 1u {
+        at = second;
+    }
+    let point = vec3<f32>(at, 1.0);
+    return vec2<f32>(dot(u, point), dot(v, point));
+}
+
 fn fog_amount(position: vec3<f32>) -> f32 {
     let distance = length(position.xy - camera.eye.xy);
     return NEAR_FOG * smoothstep(camera.fog.x, camera.fog.y, distance)

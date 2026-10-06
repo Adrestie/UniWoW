@@ -37,45 +37,42 @@ struct VertexIn {
 struct VertexOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
-    @location(1) uv1: vec2<f32>,
-    @location(2) uv2: vec2<f32>,
-    @location(3) env: vec2<f32>,
+    // The coordinates of its two textures, as their transforms move them.
+    @location(1) uv_one: vec2<f32>,
+    @location(2) uv_two: vec2<f32>,
+    @location(3) @interpolate(flat) colour: vec4<f32>,
     @location(4) world: vec3<f32>,
     @location(5) alpha: f32,
 };
 
 @vertex
 fn vs_main(in: VertexIn, @builtin(instance_index) index: u32) -> VertexOut {
-    let vertex = posed(first_bone(index), in.position, in.normal, in.bones, in.weights);
+    let bone = first_bone(index);
+    let vertex = posed(bone, in.position, in.normal, in.bones, in.weights);
     let placed = place(in.row0, in.row1, in.row2, in.extra.x, batch.model.x, vertex.position, vertex.normal);
     var out: VertexOut;
     out.clip = placed.clip;
     out.normal = placed.normal;
-    out.uv1 = in.uv1;
-    out.uv2 = in.uv2;
-    out.env = placed.env;
+    let look = dressed(bone, batch.combine.w, batch.colour);
+    out.uv_one = coordinates(batch.combine.y, in.uv1, in.uv2, placed.env, look.one_u, look.one_v);
+    out.uv_two = coordinates(batch.combine.z, in.uv1, in.uv2, placed.env, look.two_u, look.two_v);
+    out.colour = look.colour;
+    // A material of no alpha draws nothing, as WotLK leaves it out.
+    if look.colour.a <= 0.0 {
+        out.clip = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
     out.world = placed.world;
     out.alpha = in.extra.x;
     return out;
-}
-
-fn coordinates(source: u32, in: VertexOut) -> vec2<f32> {
-    if source == 2u {
-        return in.env;
-    }
-    if source == 1u {
-        return in.uv2;
-    }
-    return in.uv1;
 }
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Both textures sampled where every pixel runs, their coordinates chosen first; in gamma, as
     // WotLK combines them.
-    let one = textureSample(first, first_sampler, coordinates(batch.combine.y, in));
-    let two = textureSample(second, second_sampler, coordinates(batch.combine.z, in));
-    let element = batch.colour.a * in.alpha;
-    let combined = combine(batch.combine.x, vec4<f32>(batch.colour.rgb, element), one, two);
+    let one = textureSample(first, first_sampler, in.uv_one);
+    let two = textureSample(second, second_sampler, in.uv_two);
+    let element = in.colour.a * in.alpha;
+    let combined = combine(batch.combine.x, vec4<f32>(in.colour.rgb, element), one, two);
     return shade(combined, element, batch.flags, in.normal, in.world);
 }
