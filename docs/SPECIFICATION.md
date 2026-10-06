@@ -4509,6 +4509,90 @@ The proposal is validated, with these additions, for 9.5b:
   streaked, their splash at their foot; flowing, 5,400 to 5,900 pixels changing from a capture to
   the next seen from their side, 1,400 to 2,400 seen from their edge, against the sky and the ground.
 
+#### Step 9.6, proposed: the doodads, the buildings and the water
+
+Asked after the review of 9.5c: the world around the terrain, as the client draws it, on the
+base of 9.4e (the pool, the choice by the GPU) and of the order of the layers.
+
+**Checked before proposing**, by probes not kept, over the client of `E:` and the exports of the
+user's wow.export:
+
+- **The doodads of the tiles** (`MDDF`, already read with the tiles): Azeroth 167,168 on 753
+  tiles (2,991 on one tile at most, 2,269 models), Kalimdor 175,348 on 988 (2,781; 2,193), Outland
+  209,924 on 800 (2,790; 2,677), Northrend 302,497 on 1,131 (3,576; 3,102). Within 300 yards of
+  the middle of a city: Orgrimmar 26 (its doodads stand in its building), Stormwind 205 (15 of
+  models that move), Dalaran 1,587 (47 models, 9 that move, 6 yards of radius on average),
+  Shattrath 240.
+- **The buildings** (`MODF`, already read): 1,882 to 2,285 a map, 39 to 63 on one tile at most,
+  375 to 520 files of WMO a map. In the client, 1,986 WMO of version 17, 9,347 groups (306 for one
+  at most), 7,548 portals and 259,338 doodads placed inside them; none modern. The cities:
+  - Stormwind: 286 groups (278 indoor), 319 portals, 606 lights, 6,803 doodads in one set,
+    727,741 triangles, 2,754 batches, 192 groups of vertex colours, 5 of liquid;
+  - Dalaran: 91 groups, 102 portals, 4,957 doodads, 480,450 triangles, 1,619 batches, 7 of liquid;
+  - Orgrimmar: 144 groups, 157 portals, 2,373 doodads, 379,079 triangles, 1,294 batches;
+  - Shattrath: 29 groups, 39 portals, 3,510 doodads in 5 sets, 193,249 triangles.
+- **The modern WMO** exported by wow.export (31 files): version 17 as well, with the files of their
+  groups and of their doodads by FileDataID (`GFID`, `MODI`) and groups at levels of detail
+  (`_lod1` to `_lod3`); new chunks of lights and of their own (`MAVG`, `MNLD`, `MFED`, `MGI2`).
+- **The water**: `MH2O` in 529 tiles of Azeroth, 746 of Kalimdor, 1,022 of Northrend (92,206,
+  129,596 and 226,762 chunks with liquid, two layers at most); Outland has only the older `MCLQ`
+  in its chunks (61,874), Azeroth 505 more. The types of `LiquidType.dbc` (26) fall into water,
+  ocean, magma and slime; in Azeroth and Northrend, the oceans are most of it (308,256 layers),
+  then slow water, magma, the lake of Wintergrasp, an orange slime. The groups of a building hold
+  their own liquid (`MLIQ`).
+
+**In five parts, each reviewed before the next:**
+
+- **9.6a, the two phases of drawing** (asked by the review of 9.5c). A layer draws what it draws
+  opaque, then what it blends, in two calls; the view draws the opaque of every layer, then the
+  sky (the terrain's, still where nothing is drawn), then the blended of every layer, the order of
+  the stages kept within each phase. `Layer::draw` and `draw_pass` take the phase; a layer of one
+  phase only draws nothing in the other. The terrain and the models split as they are: the models
+  already draw their opaque states, then their blended ones. Tested on the software adapter: a
+  blended batch of a layer drawn before an opaque one of a later layer, behind it, hidden; in
+  front, seen over it.
+- **9.6b, the doodads of the terrain.** The terrain places the doodads of each tile it loads
+  through the service `models`, an owner a tile (`terrain/<map>/<x>_<y>`), given once and cleared
+  when the tile is released: no set merged again at each change. Each placed at the transform of
+  its file (its position, its rotation in degrees, its scale in 1024ths), its look the model of its
+  file with its own textures. The models choose them by the GPU (9.4e3), cut by their size and
+  their reach, posed by the thread when they move (torches, banners). Measured in the four cities
+  and on the tile of most doodads, against 9.5: the frame, the choice on the GPU (at a high clock,
+  as asked for 9.6), the interface thread, the memory; the points left for 9.6 (records without
+  instances, the writing of the bones) built only if the measure asks.
+- **9.6c, the WMO read**, in `assets`: `formats::Wmo` as plain data: its materials (shader,
+  blending, flags, textures, colours), its groups (flags, bounds, vertices, normals, one or two
+  sets of coordinates, vertex colours, triangles with their materials, batches, the doodads they
+  hold, their liquid), its portals and their references, its doodad sets and doodads, its fog and
+  its lights; of version 17 and modern (`GFID`, `MODI`, the groups at their finest level). Checked
+  over every WMO of the client and the exports of wow.export.
+- **9.6d, the buildings drawn**: a module `buildings` and its layer, at the stage of the scene. The
+  terrain hands it the buildings of its tiles (a service, as `models`); the groups go to arenas on
+  the GPU and their textures to arrays (`core/api`), drawn in the pass by a draw per state over the
+  groups seen: from outside, each group by its bounds; from inside, the groups seen through the
+  portals in sight from the group of the camera, as the client does; their shaders of WotLK
+  (diffuse, specular, metal, environment, the two layers), their vertex colours inside. The
+  doodads of the set a building names placed through `models`, an owner a building.
+- **9.6e, the water**: the liquids of the tiles (`MH2O`, and `MCLQ` for Outland) and of the
+  groups of the buildings (`MLIQ`), meshes by layer and by group, drawn blended in the second
+  phase, their textures turning through their frames as `LiquidType.dbc` names them; the oceans
+  of a map to its edges.
+
+**Not in 9.6**: the lights of the buildings and of the map (9.7), the shadows, the reflections and
+the refraction of the water, the levels of detail of the buildings (their finest only), the doodads
+of detail of the ground (`MCLY` ground effects), the destructible buildings.
+
+**To decide with the review:**
+
+- The doodads given by the terrain through `models` (an owner a tile), rather than a module of
+  their own: the terrain reads the tiles already and knows when one is released.
+- The buildings in a module of their own, with their layer, rather than in `models`: the WMO are
+  another format and other shaders; they share the arenas and the arrays of `core/api`.
+- The culling by portals on the CPU at each frame, a few hundred groups at most; on the GPU only if
+  the measure asks.
+- The two phases (9.6a) before anything else, so that the water and the glass of the buildings are
+  drawn over what stands behind them whatever the layer.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around
