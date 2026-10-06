@@ -4158,6 +4158,89 @@ Step 9.4e is done. **Points to revisit with step 9.6**, its doodads adding insta
   sight only (an indirect dispatch over a list of the looks seen), or skip the blocks of the prefix
   sum without instances.
 
+#### Step 9.5, proposed: the animations of the models
+
+Asked after the review of 9.4e: the M2 models animated, *Stand*, *Walk* and *Run* chosen by the
+movement received, on the base step 9.4e laid (*Made ready for step 9.5*, above): the bones of an
+instance in a storage buffer, their place carried with the instance.
+
+**Checked before proposing**, by probes not kept, over the client of `E:` and the models of the
+user's wow.export:
+
+- 23,186 models of 3.3.5a: 12,893 have one bone or none, 8,036 up to 16, 1,214 up to 64, 751 up
+  to 128, 282 up to 256 and 10 more (315 at most; the characters of the HD pack 245 to 262). The
+  vertices of 5,394 are weighted to more than their first bone; a vertex names its bones among the
+  model's directly (wowdev).
+- Of 138,843 sequences, 10,602 have their keys in `.anim` files, in 666 models; none of them is a
+  *Stand* (id 0, in 23,025 models), a *Walk* (4, in 1,849) or a *Run* (5, in 1,756): every
+  sequence this step plays is in its model. The same in the two modern creatures (`MD21`, 274):
+  their `.anim` files (chunked, `AFM2`, named by `AFID`) hold other sequences; their `.bone` files
+  (`BFID`) are for the customisation of faces.
+- The keys of the bones: 130 million in the client, 14 million of them for *Stand*, *Walk* and
+  *Run*. 4,020 models have bones on global sequences, which loop whatever is played: doodads
+  mostly.
+- In the cities of 9.4d, every instance animated: Orgrimmar 531 instances and 74,787 bones (54,557
+  of them with keys), 3.6 MB a frame as matrices of 3 × 4 floats; Dalaran 1,014 instances and
+  83,976 bones, 4.0 MB.
+- The observer sends whether an entity moves along a spline (0x10) and whether it walks (0x04),
+  and the points of the spline with their times, so its speed.
+
+**In three parts, each reviewed before the next:**
+
+- **9.5a, the animations read.** In `assets`, `formats::Model` gains, as plain data:
+  - its bones: parent, flags, pivot, and their tracks of translation, rotation (the compressed
+    quaternions of 3.3.5a and of the modern models) and scale; their order, the parents first;
+  - its sequences (id, variation, duration, speed of movement, flags, time of blending, next
+    variation, alias), its global sequences, and the fallbacks of its playable animations (3.3.5a);
+  - the tracks of its colours, transparencies and texture transforms;
+  - the keys kept only for the sequences played (*Stand*, *Walk*, *Run*, their variations and
+    aliases) and the global sequences; the others named but not read;
+  - the interpolations of WotLK: none, linear (normalised for rotations), Bézier and Hermite;
+  - `.anim` files not read: no sequence played needs them (above); their reading, of 3.3.5a and
+    modern (`AFID`, `AFM2`), comes with the first sequence played that does.
+  Checked over every model of the client (read, refused and why, keys kept), tested on files the
+  tests write.
+- **9.5b, the bones on the GPU.**
+  - The service `models`: an instance gains its motion, standing, walking or running, and its
+    speed in yards a second; `live-world` gives them from the flags and the spline of each entity.
+  - A thread of the module, woken at each frame by the frame signal (*Threads*, above), keeps for
+    each instance (by owner and id) its sequence, variation and time, and the one before while
+    they blend. It chooses *Stand*, *Walk* or *Run* by the motion, through the fallbacks of the
+    model where it lacks one; plays it at the speed of the instance over that of the sequence, so
+    that the feet do not slide; each instance from its own moment (by its id), so that the guards
+    do not breathe together.
+  - It computes the bones of the instances of the groups in sight, the parents first, with their
+    pivots, the billboards facing the camera of the frame before, split with `parallel_for`. It
+    writes in one buffer of the frame the instances of every owner, each with the place of its
+    bones, and the bones (`Queue::write_buffer`: a frame draws the old or the new whole, as
+    *Threads* says). The layer takes that buffer and its layout instead of copying the owners'
+    instances (9.4e); the choice by the GPU stays as it is.
+  - The vertices in the arena gain their four bones and weights (8 bytes, 48 a vertex); the vertex
+    shaders of the pool and of the path of 9.4c skin them. A model without bones, or whose bones
+    have no keys, is drawn at rest as today, and so is every model on a device without the pool.
+  - An instance is chosen by the bounds of its sequences, which the animation may pass.
+  - Measured in Orgrimmar and Dalaran against 9.4e3: the time of the thread on average and at
+    most, the bytes written a frame, the interface thread, the GPU; the walk and run of guards and
+    creatures seen.
+- **9.5c, the materials animated.** The colours, transparencies and texture transforms of each
+  batch, at the time of its instance's sequence or of a global sequence, written with its bones (a
+  few floats for each batch animated), read by the shaders at the place the instance gives: the
+  falls of Coilfang flowing (9.4c2), colours that pulse.
+
+**Not in 9.5**: the dead (lying as *Death* leaves them), emotes, fights and spells, mounts and
+what they carry, the attachments (weapons in hands) and the equipment, particles and ribbons, the
+sounds and events of an animation, the faces of the modern customisation. The doodads that move
+(torches, trees) take this thread with step 9.6.
+
+**To decide with the review:**
+
+- An instance out of sight keeps its pose and its time goes on: the work follows what is seen, and
+  an instance coming back in sight takes up its animation where its time is.
+- If the measure finds the bones of a city costing the thread more than about 2 ms a frame, or the
+  bytes weighing: the instances far away animated less often (every other frame beyond a distance
+  in radii), or the bones computed by the GPU from keys uploaded once, the instances giving only
+  their sequence and time. Built only if the measure asks for it.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around
