@@ -888,8 +888,9 @@ fn project(view_proj: &Mat4, rect: egui::Rect, position: Vec3) -> Option<egui::P
 
 /// Draws a frame: each layer prepared, its computing recorded into an encoder of its own and its
 /// bundle recorded, or kept for its version unless the device is `new_device`; then the pass into
-/// `targets`: `grid`, then the layers in their order, their bundles run or their drawing recorded
-/// in it; everything submitted, the computing first. The layers that panicked or failed are removed.
+/// `targets`: `grid`, then the layers by their stage, in the order they were added within one,
+/// their bundles run or their drawing recorded in it; everything submitted, the computing first.
+/// The layers that panicked or failed are removed.
 fn draw_frame(
     layers: &Layers,
     gpu: &egui_wgpu::RenderState,
@@ -906,6 +907,8 @@ fn draw_frame(
         list.drawing = true;
         std::mem::take(&mut list.layers)
     };
+    // The ground and its sky before the scene, whatever the order the modules started in.
+    entries.sort_by_key(|entry| entry.layer.stage());
     if let Some(timer) = timer.as_deref_mut() {
         timer.begin();
     }
@@ -1260,7 +1263,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use uniwow_api::serde_json::json;
-    use uniwow_api::viewport::{self, Allowance, Drawing, Frame, Label, Layer, LayerStats, Target, View};
+    use uniwow_api::viewport::{self, Allowance, Drawing, Frame, Label, Layer, LayerStats, Stage, Target, View};
     use uniwow_api::{egui, egui_wgpu, wgpu};
 
     use uniwow_api::egui::{Event, Key, Modifiers, PointerButton, Pos2, vec2};
@@ -1837,17 +1840,22 @@ mod tests {
     /// A full screen of `colour`, drawn without depth by a pipeline of the view's target; the
     /// colour read from a storage buffer its computing writes, for a layer that computes.
     const PAINT: &str = r#"
-@group(0) @binding(0) var<storage, read> colour: vec4<f32>;
+// Its colour, then its depth.
+struct Paint {
+    colour: vec4<f32>,
+    depth: vec4<f32>,
+};
+@group(0) @binding(0) var<storage, read> paint: Paint;
 
 @vertex
 fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
     let corner = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));
-    return vec4<f32>(corner * 2.0 - 1.0, 0.5, 1.0);
+    return vec4<f32>(corner * 2.0 - 1.0, paint.depth.x, 1.0);
 }
 
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
-    return colour;
+    return paint.colour;
 }
 
 @group(0) @binding(0) var<storage, read_write> written: vec4<f32>;
@@ -1869,10 +1877,14 @@ fn cs_main() {
     }
 
     /// A layer painting the whole view with one colour, in a bundle or in the pass; or with the colour
-    /// its computing writes, in the same frame.
+    /// its computing writes, in the same frame. At the depth 0.5, tested always and not written, its
+    /// colour replacing what is under it, in the scene; or as `at`, `deep` and `blended` say.
     struct Painter {
         drawing: Drawing,
         colour: [f32; 4],
+        stage: Stage,
+        depth: (f32, bool, wgpu::CompareFunction),
+        blended: bool,
         computes: bool,
         fault: Fault,
         made: Option<(
@@ -1889,10 +1901,30 @@ fn cs_main() {
             Self {
                 drawing,
                 colour,
+                stage: Stage::Scene,
+                depth: (0.5, false, wgpu::CompareFunction::Always),
+                blended: false,
                 computes: false,
                 fault: Fault::None,
                 made: None,
             }
+        }
+
+        fn at(mut self, stage: Stage) -> Self {
+            self.stage = stage;
+            self
+        }
+
+        /// At the depth `depth`, written when `write`, tested by `compare`.
+        fn deep(mut self, depth: f32, write: bool, compare: wgpu::CompareFunction) -> Self {
+            self.depth = (depth, write, compare);
+            self
+        }
+
+        /// Its colour mixed over what is under it by its alpha.
+        fn blended(mut self) -> Self {
+            self.blended = true;
+            self
         }
 
         fn computing(mut self) -> Self {
@@ -1915,7 +1947,7 @@ fn cs_main() {
             wgpu::BindGroup,
             wgpu::Buffer,
         ) {
-            let colour = self.colour;
+            let (colour, (depth, write, compare), blended) = (self.colour, self.depth, self.blended);
             self.made.get_or_insert_with(|| {
                 let device = &gpu.device;
                 let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1924,12 +1956,13 @@ fn cs_main() {
                 });
                 let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: None,
-                    size: 16,
+                    size: 32,
                     usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
+                let paint = [colour, [depth, 0.0, 0.0, 0.0]];
                 gpu.queue
-                    .write_buffer(&buffer, 0, uniwow_api::bytemuck::cast_slice(&colour));
+                    .write_buffer(&buffer, 0, uniwow_api::bytemuck::cast_slice(&paint));
                 let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: None,
                     layout: None,
@@ -1942,8 +1975,8 @@ fn cs_main() {
                     primitive: Default::default(),
                     depth_stencil: Some(wgpu::DepthStencilState {
                         format: TARGET.depth_format,
-                        depth_write_enabled: Some(false),
-                        depth_compare: Some(wgpu::CompareFunction::Always),
+                        depth_write_enabled: Some(write),
+                        depth_compare: Some(compare),
                         stencil: Default::default(),
                         bias: Default::default(),
                     }),
@@ -1955,7 +1988,11 @@ fn cs_main() {
                         module: &shader,
                         entry_point: Some("fs_main"),
                         compilation_options: Default::default(),
-                        targets: &[Some(TARGET.color_format.into())],
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: TARGET.color_format,
+                            blend: blended.then_some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
                     }),
                     multiview_mask: None,
                     cache: None,
@@ -2008,6 +2045,10 @@ fn cs_main() {
 
         fn drawing(&self) -> Drawing {
             self.drawing
+        }
+
+        fn stage(&self) -> Stage {
+            self.stage
         }
 
         fn draw<'a>(
@@ -2187,6 +2228,38 @@ fn cs_main() {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn what_the_scene_blends_over_the_ground_and_its_sky_stays_whatever_the_order_they_came_in() {
+        let Some(gpu) = gpu() else {
+            eprintln!("skipped: no software adapter for a device");
+            return;
+        };
+        let view = view(&Camera::default(), [8, 8], 0.0, viewport::Fog::default());
+        let targets = Targets::new(&gpu);
+        // Half red, blended in front without writing the depth, as a blended batch of the models,
+        // added before the terrain as their module starts first. Behind it, the ground, green,
+        // writing its depth; or the sky, blue, where the depth is still cleared.
+        let half_red = [1.0, 0.0, 0.0, 0.5];
+        let greater = wgpu::CompareFunction::Greater;
+        let ground = Painter::new(Drawing::Bundle, GREEN).deep(0.25, true, greater);
+        let sky = Painter::new(Drawing::Bundle, [0.0, 0.0, 1.0, 1.0]).deep(0.0, false, wgpu::CompareFunction::Equal);
+        for (under, channel) in [(ground, 1), (sky, 2)] {
+            let layers = Layers::default();
+            put(
+                &layers,
+                "models",
+                Painter::new(Drawing::Pass, half_red)
+                    .deep(0.5, false, greater)
+                    .blended(),
+            );
+            put(&layers, "terrain", under.at(Stage::Ground));
+            let drawn = targets.draw(&layers, &gpu, &view, false, None);
+            assert!(drawn.failures.is_empty(), "{:?}", drawn.failures);
+            let seen = targets.middle(&gpu);
+            assert!(seen[0] > 100 && seen[channel] > 100, "both seen: {seen:?}");
         }
     }
 

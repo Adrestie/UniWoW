@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use uniwow_api::glam::{Mat4, Vec3, Vec4};
-use uniwow_api::viewport::{Layer, LayerStats, Target, View};
+use uniwow_api::viewport::{Layer, LayerStats, Stage, Target, View};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
 use crate::gpu::SLOTS;
@@ -160,6 +160,10 @@ impl TerrainLayer {
 }
 
 impl Layer for TerrainLayer {
+    fn stage(&self) -> Stage {
+        Stage::Ground
+    }
+
     fn prepare(&mut self, gpu: &egui_wgpu::RenderState, view: &View) {
         if self.shared.is_none() {
             self.shared = lock(&self.incoming).clone();

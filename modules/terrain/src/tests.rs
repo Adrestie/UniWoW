@@ -12,7 +12,7 @@ use uniwow_api::formats::{
     Formats, GameObjectDisplay, HairGeoset, Layer, MapRecord, Model, Texture, TextureFormat, Tile, Wdl, Wdt,
 };
 use uniwow_api::glam::{Mat4, Vec3};
-use uniwow_api::viewport::{self, Allowance, Layer as _, Target, View};
+use uniwow_api::viewport::{self, Allowance, Layer as _, Stage, Target, View};
 use uniwow_api::{JobId, JobOutcome, bytemuck, egui, egui_wgpu, wgpu};
 
 use crate::gpu::{self, Shared};
@@ -1213,6 +1213,7 @@ fn a_tile_is_one_draw_its_chunks_textured_from_two_arrays_and_the_horizon_beyond
     let [_, _, blue, _, black] = counts(&sky);
     assert!(blue > 500 && black == 0, "sky {blue}, black {black}");
     assert_eq!(layer.stats().draws, 3, "and the sky");
+    assert_eq!(layer.stage(), Stage::Ground, "drawn with its sky before the scene");
 }
 
 #[test]

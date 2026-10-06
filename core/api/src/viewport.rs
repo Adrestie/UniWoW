@@ -248,6 +248,18 @@ pub enum Drawing {
     Pass,
 }
 
+/// When a layer is drawn among the others: the ground with its sky first, so that what the scene
+/// draws over them without writing the depth, such as a blended batch, is not drawn over again;
+/// then the scene. Layers of one stage are drawn in the order they were added.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Stage {
+    /// The terrain and its sky.
+    Ground,
+    /// What stands on the ground, by default.
+    #[default]
+    Scene,
+}
+
 /// Drawn on the interface thread, but may be created on any thread.
 pub trait Layer: Send {
     /// Writes what the layer draws with the view of this frame, such as its buffers of camera and
@@ -270,6 +282,11 @@ pub trait Layer: Send {
     /// frame.
     fn drawing(&self) -> Drawing {
         Drawing::Bundle
+    }
+
+    /// When the layer is drawn among the others: in the scene, by default. Read at each frame.
+    fn stage(&self) -> Stage {
+        Stage::Scene
     }
 
     /// The version of what the layer records: its bundle is kept from frame to frame while the

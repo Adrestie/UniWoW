@@ -4157,6 +4157,9 @@ Step 9.4e is done. **Points to revisit with step 9.6**, its doodads adding insta
 - **Should it still weigh** with the doodads: go over the records of the looks with instances in
   sight only (an indirect dispatch over a list of the looks seen), or skip the blocks of the prefix
   sum without instances.
+- **Two phases of drawing** (the review of 9.5c), before the water and the buildings, which will
+  need them: first what every layer draws opaque, then the sky; then what every layer blends, so
+  that a blended batch of a layer is drawn over the opaque ones of all.
 - **The writing of the bones** (the review of 9.5b): about 40 % of the thread (0.35 to 0.54 ms
   in Orgrimmar), after the computing, in one piece: the bones kept from a frame to the next, then
   copied into the view of `Queue::write_buffer_with`. Each slice could write its own into its part
@@ -4479,13 +4482,32 @@ The proposal is validated, with these additions, for 9.5b:
   - a lava fall of Dragonblight (`BD_Lavafall01`) previewed against the sky: its lava flows, its
     pattern another at each capture;
   - the falls of Coilfang previewed against the sky: their instance placed, in sight and animated
-    (11 slots), their 13 batches drawn, but no pixel seen, still or moving, as at rest in 9.4c2;
-    the cause is not in this step, and stays to be found;
+    (11 slots), their 13 batches drawn, but no pixel seen, still or moving, as at rest in 9.4c2:
+    the cause, found by the review, is the order of the layers (below);
   - the cities with the script of 9.4d, the GPU at 780 MHz (other clocks than the measures of
     9.5b, not compared): Orgrimmar 236 instances animated still, 41,225 bones and 16 slots, 1.9 MB
     a frame, the thread 0.76 to 0.90 ms on average, 1.11 at most; Dalaran 392 instances, 61,456
     bones and 164 slots, 2.8 MB, the thread 1.20 to 1.21 ms, 1.36 at most, 4.59 at most flying;
     the view on the interface thread 0.37 to 0.46 ms in Orgrimmar, 0.47 to 0.53 in Dalaran.
+
+#### Step 9.5c, after its review
+
+- **Found by the review**: the layers were drawn in the order they were added, which followed
+  the alphabetical order of the folders of the modules starting without depending on each other:
+  the models before the terrain. A blended batch writes no depth, so the tiles of the terrain drawn
+  after it covered it, and so did the sky, drawn where the depth is still cleared: every blended
+  batch in front of the ground or the sky was lost, the falls of Coilfang whole.
+- **The order of the layers** (`core/api`, `viewport`): a layer gives its stage, `Stage::Ground`
+  for the terrain and its sky, `Stage::Scene` by default; the view draws them by their stage, those
+  of one stage in the order they were added, whatever the order the modules started in.
+- **Tests**, on the software adapter: half red blended in front without writing the depth, added
+  first, over the ground (green, writing its depth) and over the sky (blue, where the depth is
+  cleared): both seen once the frame is drawn; the terrain drawn at the stage of the ground. Taking
+  out the sort makes the first fail.
+- **Accepted on the user's machine**: the falls of Coilfang previewed 400 yards above Elwynn, the
+  statistics hidden: seen whole against the sky and in front of the ground, their water blue and
+  streaked, their splash at their foot; flowing, 5,400 to 5,900 pixels changing from a capture to
+  the next seen from their side, 1,400 to 2,400 seen from their edge, against the sky and the ground.
 
 #### Tests
 
