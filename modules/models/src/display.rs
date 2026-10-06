@@ -1,17 +1,22 @@
 //! The look of a creature display, as the client builds it from its tables: its model, the skins
 //! it gives the model in the folder of the model, and the submeshes it shows; a character's look,
 //! whose display names the model of its race and sex, with its skin baked into one texture, the
-//! texture of its hair, and its hair and facial hair. Its equipment is not drawn in this milestone.
+//! extra texture of its skin, the texture of its hair, and its hair and facial hair. Its equipment
+//! is not drawn in this milestone.
 //! The look of a game object display: its M2, or none for a WMO.
 
 use uniwow_api::formats::{FileRef, Formats};
 use uniwow_api::models::{Geosets, Look};
 
-/// The kinds of texture a display fills: a creature's three skins, a character's skin and hair.
+/// The kinds of texture a display fills: a creature's three skins, a character's skin, the extra of
+/// its skin (the tusks, bones or fur of the models of some races) and its hair.
 pub const CREATURE_SKIN: u32 = 11;
 pub const CHARACTER_SKIN: u32 = 1;
+pub const SKIN_EXTRA: u32 = 8;
 pub const HAIR: u32 = 6;
-/// The section of `CharSections` holding a hair's texture, and the folder of the baked skins.
+/// The sections of `CharSections` holding a skin, its extra second, and a hair's texture; and the
+/// folder of the baked skins.
+const SKIN_SECTION: u32 = 0;
 const HAIR_SECTION: u32 = 3;
 const BAKED: &str = "Textures\\BakedNpcTextures\\";
 
@@ -88,21 +93,28 @@ pub fn display(formats: &dyn Formats, id: u32) -> Result<(Look, f32), String> {
         textures.push((CHARACTER_SKIN, FileRef::Path(format!("{BAKED}{}", look.baked))));
     }
     let sections = formats.char_sections()?;
-    if let Some(texture) = sections
-        .iter()
-        .find(|section| {
-            (
-                section.race,
-                section.sex,
-                section.section,
-                section.variation,
-                section.colour,
-            ) == (look.race, look.sex, HAIR_SECTION, look.hair_style, look.hair_colour)
-        })
-        .map(|section| &section.textures[0])
-        .filter(|texture| !texture.is_empty())
-    {
-        textures.push((HAIR, FileRef::Path(texture.clone())));
+    // The texture `index` of the section `kind` of the look's race and sex, of `variation` and
+    // `colour`.
+    let section = |kind, variation, colour, index: usize| {
+        sections
+            .iter()
+            .find(|section| {
+                (
+                    section.race,
+                    section.sex,
+                    section.section,
+                    section.variation,
+                    section.colour,
+                ) == (look.race, look.sex, kind, variation, colour)
+            })
+            .map(|section| section.textures[index].clone())
+            .filter(|texture| !texture.is_empty())
+    };
+    if let Some(texture) = section(SKIN_SECTION, 0, look.skin, 1) {
+        textures.push((SKIN_EXTRA, FileRef::Path(texture)));
+    }
+    if let Some(texture) = section(HAIR_SECTION, look.hair_style, look.hair_colour, 0) {
+        textures.push((HAIR, FileRef::Path(texture)));
     }
     Ok((
         Look {

@@ -4045,6 +4045,36 @@ submit.
   pool and forced on that of 9.4c: the Orc Tent once fixed, and the white parts of some guards of
   Orgrimmar, which are not of this step.
 
+#### Step 9.4e2, after its review
+
+- **The white parts of the guards of Orgrimmar**, read by a probe not kept over the displays the
+  observer sends there (the Orgrimmar Grunts 4259, 4260, 4601, 4602, the Forsaken refugees, Kaja,
+  a tauren): every one is a batch of the kind 8, the extra of a character's skin, on the body
+  (submesh 0), the ears (702) and some of the face (1xx, 2xx, 3xx) of the orc, undead and tauren
+  models of the client. The client takes it from `CharSections`: the section 0 (the skin) of the
+  look's race and sex, of variation 0 and of the look's skin colour, its second texture
+  (`…Skin00_NN_Extra.blp`; 318 of them in the client, 2 missing, of the gnome female). `display()`
+  reads that table already for the hair: it gives that texture now, with the kind 8.
+- **Points to revisit, still drawn white** (over every display of the client, by the same probe):
+  - 4 character looks without a baked skin: their skin (kind 1) is made by the client of the
+    sections of `CharSections` (skin, face, facial hair, underwear) and of the textures of their
+    items by region of the body (`ItemDisplayInfo`); with the equipment of a look (its items'
+    models, textures and submeshes), which no step of milestone 9 draws: to place as a step of its
+    own when the user decides it, after 9.5;
+  - 12 character looks whose skin colour has no extra in `CharSections` (the kind 8, as a male
+    draenei): what the client draws there is not established, to see in game;
+  - 66 creature displays on a character's model without a look (kinds 1, 2, 6 and 8), and 97
+    displays leaving empty a skin their model uses (the kinds 11 to 13: 25, 65 and 7 displays):
+    what the client draws there is not established either; none of them was seen in Orgrimmar or
+    Dalaran.
+- **The steering of `models` once at 3.53 ms** in Dalaran: timed by parts over three flights
+  (instrumentation not kept), every frame over a millisecond spent its time reading the bytes of
+  the arenas for the statistics, waiting for the lock a job held while it filled its staging
+  buffer, grew an arena and submitted its copy (up to 3.18 ms of 3.50). Not the handing of looks.
+  An arena now counts its bytes in atomics and keeps its buffer under a lock of its own, held only
+  to read or replace it; the job fills its staging buffer before taking the lock of the holes.
+  Tested: the bytes and the buffer read while a job holds the holes.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

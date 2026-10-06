@@ -3,7 +3,8 @@
 //! one.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 
 use uniwow_api::bytemuck;
 use uniwow_api::formats::{FileRef, Model, ModelTextureSource, Texture, TextureFormat};
@@ -32,8 +33,7 @@ fn a_range_is_taken_from_the_first_hole_holding_it_and_given_back_merged() {
     holes.give(0..4);
     assert_eq!(holes.take(5), None, "two holes, of 4 and 3, apart");
     holes.give(4..7);
-    assert_eq!(holes.free(), 10, "merged with both its neighbours");
-    assert_eq!(holes.take(10), Some(0..10));
+    assert_eq!(holes.take(10), Some(0..10), "merged with both its neighbours");
     holes.give(0..10);
     holes.grow(16);
     assert_eq!(
@@ -108,6 +108,32 @@ fn released_looks_give_their_ranges_back_and_their_textures_when_purged() {
     );
     pool.arrays.purge();
     assert_eq!(pool.arrays.counts().layers, 0);
+}
+
+#[test]
+fn the_frame_reads_an_arena_while_a_job_holds_its_holes() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    let arena = Arena::new(&gpu.device, &gpu.queue, "test arena", wgpu::BufferUsages::STORAGE, 4, 4);
+    arena.put(bytemuck::cast_slice(&[1u32, 2, 3, 4])).unwrap();
+    let (held, holding) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let (read, reading) = mpsc::channel();
+    std::thread::scope(|scope| {
+        // A job taking a range or growing the buffer, which can take milliseconds.
+        let arena = &arena;
+        scope.spawn(move || {
+            let _holes = lock(&arena.holes);
+            held.send(()).unwrap();
+            let _ = released.recv();
+        });
+        holding.recv().unwrap();
+        scope.spawn(move || read.send((arena.bytes(), arena.buffer().map(|(_, generation)| generation))));
+        let seen = reading.recv_timeout(Duration::from_secs(5)).ok();
+        release.send(()).unwrap();
+        assert_eq!(seen, Some(((16, 16), Some(1))), "read without waiting for the job");
+    });
 }
 
 /// A texture of `side` × `side` texels of `colour`.

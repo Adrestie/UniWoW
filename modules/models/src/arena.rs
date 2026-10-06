@@ -2,9 +2,11 @@
 //! from its holes, the first that holds it, and given back to them, merged with its neighbours. A
 //! buffer too small for a range is replaced by one twice as large, the one before copied into it,
 //! so that every range keeps its place. Its jobs write a range by a copy they submit, under the
-//! lock of the arena, after any copy into a larger buffer (the rule of step 9.2f).
+//! lock of its holes, after any copy into a larger buffer (the rule of step 9.2f); the frame reads
+//! the buffer and the bytes held without that lock.
 
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use uniwow_api::wgpu;
@@ -59,18 +61,6 @@ impl Holes {
     pub fn capacity(&self) -> u64 {
         self.capacity
     }
-
-    /// The units in holes.
-    pub fn free(&self) -> u64 {
-        self.holes.iter().map(|hole| hole.end - hole.start).sum()
-    }
-}
-
-struct State {
-    buffer: Option<Arc<wgpu::Buffer>>,
-    holes: Holes,
-    /// Counts the buffers, changed with each.
-    generation: u64,
 }
 
 pub struct Arena {
@@ -82,7 +72,14 @@ pub struct Arena {
     unit: u64,
     /// The fewest units of a buffer.
     least: u64,
-    state: Mutex<State>,
+    /// Held by a job while it takes a range and writes it, or grows the buffer.
+    pub(crate) holes: Mutex<Holes>,
+    /// The buffer now and its generation, counting the buffers: held only to read or replace them,
+    /// so that the frame never waits for a job.
+    buffer: Mutex<Option<(Arc<wgpu::Buffer>, u64)>>,
+    /// The bytes of the buffer and of the units held, read without waiting either.
+    held: AtomicU64,
+    used: AtomicU64,
 }
 
 impl Arena {
@@ -101,11 +98,10 @@ impl Arena {
             usage: usage | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             unit,
             least,
-            state: Mutex::new(State {
-                buffer: None,
-                holes: Holes::default(),
-                generation: 0,
-            }),
+            holes: Mutex::default(),
+            buffer: Mutex::default(),
+            held: AtomicU64::new(0),
+            used: AtomicU64::new(0),
         }
     }
 
@@ -114,37 +110,39 @@ impl Arena {
     pub fn put(&self, data: &[u8]) -> Result<Range<u64>, String> {
         debug_assert_eq!(data.len() as u64 % self.unit, 0);
         let length = data.len() as u64 / self.unit;
-        let mut state = lock(&self.state);
-        let range = match state.holes.take(length) {
-            Some(range) => range,
-            None => {
-                self.grow(&mut state, length)?;
-                state.holes.take(length).expect("grown to hold it")
-            }
-        };
-        if !data.is_empty() {
-            let source = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        // Filled before taking the lock.
+        let source = (!data.is_empty()).then(|| {
+            self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(self.label),
                 contents: data,
                 usage: wgpu::BufferUsages::COPY_SRC,
-            });
-            let buffer = state.buffer.as_ref().expect("grown before");
+            })
+        });
+        let mut holes = lock(&self.holes);
+        let range = match holes.take(length) {
+            Some(range) => range,
+            None => {
+                self.grow(&mut holes, length)?;
+                holes.take(length).expect("grown to hold it")
+            }
+        };
+        if let Some(source) = source {
+            let (buffer, _) = self.buffer().expect("grown before");
             let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some(self.label),
             });
-            encoder.copy_buffer_to_buffer(&source, 0, buffer, range.start * self.unit, data.len() as u64);
+            encoder.copy_buffer_to_buffer(&source, 0, &buffer, range.start * self.unit, data.len() as u64);
             // Under the lock: after any copy into a larger buffer.
             self.queue.submit([encoder.finish()]);
         }
+        self.used.fetch_add(length * self.unit, Ordering::AcqRel);
         Ok(range)
     }
 
     /// A buffer holding `length` more units at least: twice as large, the one before copied into
     /// it.
-    fn grow(&self, state: &mut State, length: u64) -> Result<(), String> {
-        let capacity = (state.holes.capacity() * 2)
-            .max(state.holes.capacity() + length)
-            .max(self.least);
+    fn grow(&self, holes: &mut Holes, length: u64) -> Result<(), String> {
+        let capacity = (holes.capacity() * 2).max(holes.capacity() + length).max(self.least);
         let size = capacity * self.unit;
         if size > self.device.limits().max_buffer_size {
             return Err(format!(
@@ -159,34 +157,35 @@ impl Arena {
             usage: self.usage,
             mapped_at_creation: false,
         });
-        if let Some(old) = &state.buffer {
+        let before = self.buffer();
+        if let Some((old, _)) = &before {
             let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some(self.label),
             });
             encoder.copy_buffer_to_buffer(old, 0, &buffer, 0, old.size());
             self.queue.submit([encoder.finish()]);
         }
-        state.buffer = Some(Arc::new(buffer));
-        state.holes.grow(capacity);
-        state.generation += 1;
+        let generation = before.map_or(0, |(_, generation)| generation) + 1;
+        *lock(&self.buffer) = Some((Arc::new(buffer), generation));
+        holes.grow(capacity);
+        self.held.store(size, Ordering::Release);
         Ok(())
     }
 
     /// `range` given back.
     pub fn give(&self, range: Range<u64>) {
-        lock(&self.state).holes.give(range);
+        let length = range.end - range.start;
+        lock(&self.holes).give(range);
+        self.used.fetch_sub(length * self.unit, Ordering::AcqRel);
     }
 
     /// The buffer now and its generation; none before the first range.
     pub fn buffer(&self) -> Option<(Arc<wgpu::Buffer>, u64)> {
-        let state = lock(&self.state);
-        state.buffer.clone().map(|buffer| (buffer, state.generation))
+        lock(&self.buffer).clone()
     }
 
     /// The bytes of its buffer, and of the units it holds.
     pub fn bytes(&self) -> (u64, u64) {
-        let state = lock(&self.state);
-        let capacity = state.holes.capacity();
-        (capacity * self.unit, (capacity - state.holes.free()) * self.unit)
+        (self.held.load(Ordering::Acquire), self.used.load(Ordering::Acquire))
     }
 }

@@ -20,7 +20,7 @@ use uniwow_api::viewport::{Drawing, Layer, Target, View};
 use uniwow_api::{Event, MODULE_FAILED_TOPIC, bytemuck, egui, egui_wgpu, serde_json, wgpu};
 
 use crate::cache::Cache;
-use crate::display::{self, CHARACTER_SKIN, CREATURE_SKIN, HAIR};
+use crate::display::{self, CHARACTER_SKIN, CREATURE_SKIN, HAIR, SKIN_EXTRA};
 use crate::gpu::{self, ALPHA_KEY, InstanceGpu, Shared, State};
 use crate::groups::{self, Group, TILE};
 use crate::layer::{self, LIMITS, MARGIN, ModelsLayer, Scene};
@@ -399,6 +399,15 @@ fn tables() -> Fake {
         path: path.to_owned(),
         scale,
     };
+    // A row of `CharSections` for the human male.
+    let section = |section, variation, colour, textures: [&str; 2]| CharSection {
+        race: 1,
+        sex: 0,
+        section,
+        variation,
+        colour,
+        textures: [textures[0].to_owned(), textures[1].to_owned(), String::new()],
+    };
     Fake {
         displays: vec![
             display(1, 10, 0, 1.5, ["WolfGrey", "", "WolfEyes"], 0),
@@ -415,7 +424,7 @@ fn tables() -> Fake {
             id: 7,
             race: 1,
             sex: 0,
-            skin: 0,
+            skin: 5,
             face: 0,
             hair_style: 2,
             hair_colour: 4,
@@ -437,18 +446,13 @@ fn tables() -> Fake {
             variation: 1,
             geosets: [1, 2, 1, 0, 0],
         }],
-        sections: vec![CharSection {
-            race: 1,
-            sex: 0,
-            section: 3,
-            variation: 2,
-            colour: 4,
-            textures: [
-                "Character\\Human\\Hair02_04.blp".to_owned(),
-                String::new(),
-                String::new(),
-            ],
-        }],
+        sections: vec![
+            section(3, 2, 4, ["Character\\Human\\Hair02_04.blp", ""]),
+            // Its skin, of its colour 5: its extra second; another colour, and a face of its colour.
+            section(0, 0, 5, ["HumanMaleSkin00_05.blp", "HumanMaleSkin00_05_Extra.blp"]),
+            section(0, 0, 4, ["HumanMaleSkin00_04.blp", "HumanMaleSkin00_04_Extra.blp"]),
+            section(1, 0, 5, ["HumanMaleFaceLower00_05.blp", "HumanMaleFaceUpper00_05.blp"]),
+        ],
         ..Fake::default()
     }
 }
@@ -485,7 +489,7 @@ fn a_creature_display_gives_its_skins_in_the_folder_of_its_model_and_its_variant
 }
 
 #[test]
-fn a_character_display_gives_the_model_of_its_race_its_baked_skin_and_its_hair() {
+fn a_character_display_gives_the_model_of_its_race_its_baked_skin_its_extra_and_its_hair() {
     let (human, _) = display::display(&tables(), 3).unwrap();
     assert_eq!(
         human.model,
@@ -498,6 +502,7 @@ fn a_character_display_gives_the_model_of_its_race_its_baked_skin_and_its_hair()
                 CHARACTER_SKIN,
                 FileRef::Path("Textures\\BakedNpcTextures\\abc.blp".to_owned())
             ),
+            (SKIN_EXTRA, FileRef::Path("HumanMaleSkin00_05_Extra.blp".to_owned())),
             (HAIR, FileRef::Path("Character\\Human\\Hair02_04.blp".to_owned())),
         ]
     );
