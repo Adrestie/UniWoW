@@ -10,7 +10,8 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use uniwow_api::formats::{
-    self, Animation, FacialHair, FileRef, Formats, HairGeoset, Model, ModelTextureSource, TextureFormat,
+    self, Animation, Batch, Bone, FacialHair, FileRef, Formats, HairGeoset, Keys, Model, ModelTextureSource, Sequence,
+    Submesh, TextureFormat, Track,
 };
 use uniwow_api::glam::Vec3;
 use uniwow_api::models::{Extent, Geosets, Look};
@@ -31,6 +32,61 @@ pub struct ModelGpu {
     pub vertices: wgpu::Buffer,
     pub skins: Vec<SkinGpu>,
     pub bytes: u64,
+    /// What it keeps on the CPU (`cpu_bytes`).
+    pub cpu: [u64; 2],
+}
+
+/// The bytes of a track: its keys of each sequence.
+fn track_bytes<T>(track: &Track<T>) -> u64 {
+    track
+        .keys
+        .iter()
+        .map(|keys| {
+            size_of::<Keys<T>>() + keys.times.len() * 4 + (keys.values.len() + keys.tangents.len() * 2) * size_of::<T>()
+        })
+        .sum::<usize>() as u64
+}
+
+/// What `model`, its vertices left out, keeps on the CPU, as far as its lists count: its skins and
+/// the rest, then its animation.
+pub fn cpu_bytes(model: &Model) -> [u64; 2] {
+    let skins: usize = model
+        .skins
+        .iter()
+        .map(|skin| {
+            skin.triangles.len() * 4
+                + skin.submeshes.len() * size_of::<Submesh>()
+                + skin.batches.len() * size_of::<Batch>()
+        })
+        .sum();
+    let rest = size_of::<Model>()
+        + model.textures.len() * size_of::<formats::ModelTexture>()
+        + model.materials.len() * size_of::<formats::Material>()
+        + (model.texture_combos.len()
+            + model.uv_combos.len()
+            + model.weight_combos.len()
+            + model.transform_combos.len()
+            + model.combiner_combos.len())
+            * 2
+        + model.colours.len() * 16
+        + model.weights.len() * 4;
+    let animation = &model.animation;
+    let mut moving = (animation.sequences.len() * size_of::<Sequence>()
+        + animation.globals.len() * 4
+        + animation.order.len() * 2
+        + animation.bones.len() * size_of::<Bone>()) as u64;
+    for bone in &animation.bones {
+        moving += track_bytes(&bone.translation) + track_bytes(&bone.rotation) + track_bytes(&bone.scale);
+    }
+    for (colour, alpha) in &animation.colours {
+        moving += track_bytes(colour) + track_bytes(alpha);
+    }
+    moving += animation.weights.iter().map(track_bytes).sum::<u64>();
+    for transform in &animation.transforms {
+        moving +=
+            track_bytes(&transform.translation) + track_bytes(&transform.rotation) + track_bytes(&transform.scale);
+    }
+    [(skins + rest) as u64, moving]
 }
 
 pub struct SkinGpu {
@@ -247,6 +303,7 @@ fn model(shared: &Shared, formats: &dyn Formats, file: &FileRef) -> Result<Model
     };
     model.vertices = Vec::new();
     Ok(ModelGpu {
+        cpu: cpu_bytes(&model),
         model,
         rest,
         vertices: vertex_buffer,

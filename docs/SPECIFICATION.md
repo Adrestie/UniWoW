@@ -4791,6 +4791,116 @@ the remedies unbuilt. Kept for 9.6d:
 - **Measured** on the user's machine: the 1,986 buildings in 0.65 s on 16 threads, the archives
   read once already; Stormwind alone in 174 ms, its groups on one thread.
 
+#### Step 9.6c, after its review
+
+Validated, nothing to correct: the offsets checked against the public description of the format,
+the colours read as `0xAARRGGBB` and given red first, as Noggit reads the ambient colour. Two rules
+of the client, to be written into the proposal of 9.6d:
+
+- **The doodads of a building**: its set 0 (`Set_$DefaultGlobal`) is always placed, and besides it
+  the set its placement (`MODF`) names when that is another.
+- **The vertex colours of the insides**: the client of 3.3.5a fixes them when it loads a group
+  (`FixColorVertexAlpha`, by its batches of transition, inside and outside, and the ambient colour),
+  unless the flag 0x8 of `MOHD` forbids it. Without it, the insides are too dark or too light.
+
+#### Step 9.6d, proposed: the buildings drawn
+
+Asked by the review of 9.6c, on the plan of 9.6 (a module `buildings` and its layer, built as
+`doodads`; the groups in arenas, their textures in arrays; seen by their bounds from outside and
+through the portals from inside, on the CPU; the shaders of WotLK; the doodads of their sets through
+`models`), with the two rules of that review and the points kept since 9.6b.
+
+**Checked before proposing**, by probes not kept, over the client of `E:`:
+
+- **The buildings placed** (`MODF`, by their unique id): 1,673 in Azeroth, 1,430 in Kalimdor, 1,659
+  in Outland, 1,528 in Northrend; 292, 142, 83 and 83 of them name a doodad set other than 0. Their
+  flags are 0 but for 57 of Northrend (0x1, the destructible ones of Wintergrasp). Every file they
+  name is read by 9.6c.
+- **Around the cities**, the buildings whose position lies within 2.5 and 4.5 tiles:
+
+  | Place | Buildings (files) | Vertices | Triangles | Textures (MB) | Doodads of their sets |
+  |---|---|---|---|---|---|
+  | Stormwind, 2 tiles | 62 (36) | 1,012,906 | 980,521 | 309 (93) | 8,831 |
+  | Stormwind, 4 tiles | 137 (77) | 1,418,461 | 1,378,327 | 540 (168) | 13,498 |
+  | Ironforge, 2 tiles | 56 (37) | 522,251 | 542,674 | 277 (67) | 7,021 |
+  | Orgrimmar, 2 tiles | 38 (27) | 390,220 | 521,696 | 186 (57) | 2,766 |
+  | Shattrath, 2 tiles | 140 (65) | 381,330 | 427,219 | 264 (77) | 4,619 |
+  | Dalaran, 2 tiles | 108 (47) | 621,782 | 673,833 | 340 (126) | 4,800 |
+  | Dalaran, 4 tiles | 345 (150) | 1,789,460 | 1,853,866 | 800 (295) | 11,331 |
+
+  Their textures are of 512 × 512 mostly, some of 1,024, one of 2,048 near Dalaran.
+- **The groups**: all 9,347 have a BSP tree (`MOBN`, `MOBR`), which 9.6c does not read; 6,222 are
+  inside, 3,125 outside; 6,224 have vertex colours, 31 a second set of colours and of coordinates;
+  at most 32,761 vertices (16-bit indices hold them) and 1,453 batches a group, 306 groups and 342
+  portals a building.
+- **The materials**: shaders 0 to 6 (22,836 diffuse, 1,273 environment metal, 517 specular, 192
+  environment, 90 metal, 73 opaque, 52 of two layers); blendings opaque (23,911), alpha key (1,105),
+  alpha (13), add (3), mod2x (1); flags unlit 495, unfogged 6, two-sided 1,022, lit as outside 96,
+  lit at night 323, window 102, clamped 660 across and 689 up and down.
+- **The roots**: their flag 0x8 (the vertex colours not fixed) in 124 buildings, 0x2 (lit as one,
+  the ambient colour taken as none) in 162.
+- **The fix of the vertex colours** (`FixColorVertexAlpha`), as the public description and Noggit
+  give it, to be checked against the client: the vertices of the batches of transition, up to the
+  last vertex of the last of them, lose the ambient colour and are darkened by their alpha; the
+  others lose the ambient colour and are brightened by their alpha, their alpha then 255 in a group
+  outside, 0 inside; the colours halved, the shader doubling them. With the flag 0x8, only that
+  alpha of the vertices after those of transition is set.
+
+**In two parts, each reviewed before the next:**
+
+- **9.6d1, the buildings seen from outside.**
+  - The module `buildings` (category World, using `viewport`, `models` and `formats`), steered as
+    `doodads`: the map of `terrain.map`, the tiles around the camera within a distance of its own,
+    their placements read by jobs, the nearest first, a building kept by its unique id while a tile
+    listing it is held. The choice of the tiles and that keeping are those of `doodads`, moved to
+    `core/api` and shared, as the transform of a placement.
+  - A file of a building read once by a job for all its placements, its vertex colours fixed there
+    as the client fixes them; its groups put in two arenas of the GPU, vertices (about 40 bytes
+    each: position, normal, both sets of coordinates and of colours) and 16-bit indices, the arena
+    of `models` moved to `core/api` and shared; its textures in the arrays of `core/api`. The
+    memory told to the budget of the view, as the terrain and the models tell it.
+  - Its layer at the stage of the scene: each placement tested by its bounds, then each of its
+    groups by its own, against the view; the batches of the groups seen drawn by
+    `multi_draw_indexed_indirect`, a draw a pipeline (shader, blending, two-sided), the transform
+    and material of each batch read by its instance index. The opaque and alpha-keyed batches in the
+    opaque phase, the others in the blended phase, the farthest group first.
+  - The shaders of 3.3.5a: diffuse, specular, metal, environment, opaque, environment metal, two
+    layers (the second texture blended by the alpha of the second colours); lit as the models are,
+    by the sun of the view and its ambient light, the insides by their vertex colours and the
+    ambient colour of the building, the vertices of transition blending the two by their alpha;
+    unlit and unfogged as their flags say, clamped as their flags say.
+  - The doodads of each building through `models`, an owner a building
+    (`buildings/<map>/<unique id>`): its set 0 always, and the set its placement names when that is
+    another; each at the transform of the building times its own (its position, its quaternion, its
+    scale).
+  - Measured in Stormwind, Ironforge, Orgrimmar, Shattrath and Dalaran at 2 and 4 tiles, against the
+    commit before: the frame, the GPU of the layer, the interface thread, the thread of the
+    animations; the memory of the process given by its parts (the models kept, the animations, the
+    caches, the buildings kept), as the review of 9.6b asked; and, once, the choice of `models` on
+    the GPU at a high clock, as asked for 9.6.
+- **9.6d2, the buildings seen from inside.** The BSP of each group read (`formats`); the group the
+  camera is in found as the client finds it, by the BSP below the camera among the groups inside
+  whose bounds hold it; from it, the groups seen through the portals in sight, each portal clipping
+  the view it lets through, the side of the camera tested by the plane of the portal; the doodads
+  of a group drawn only when it is seen. Measured inside Stormwind, Ironforge and Dalaran.
+
+**Not in 9.6d**: the water of the buildings (`MLIQ`, 9.6e); their lights, their fogs, their sky
+(`MOLT`, `MFOG`, `MOSB`) and the glow of their materials at night, with the lights of the map (9.7);
+the colour of a doodad inside a building, which its lighting needs (9.7); the destructible
+buildings in any state but whole; the occlusion on the GPU (9.6f). The blended batches of the
+buildings and of the models are sorted within each layer only.
+
+**To decide:**
+
+1. The two parts, the portals in their own (recommended), or one step.
+2. The choice of the tiles, the keeping by unique id, the transform of a placement and the arena
+   moved to `core/api` and shared between `doodads`, `buildings` and `models` (recommended), or
+   copied into `buildings`.
+3. The distance of the buildings: 1 to 8 tiles, 3 by default, as the terrain's.
+4. The high clock of the GPU for its measure: the profile of the driver set to its highest
+   performance for `UniWoW.exe` during the measure, then set back, which changes a setting of the
+   system and needs your leave.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

@@ -1,19 +1,15 @@
-//! Tests of the pool: its arenas, and the models drawn from it by a few commands, the looks it has
+//! Tests of the pool: the models drawn from it by a few commands, the looks it has
 //! no room for drawn on the path of step 9.4c; on the software adapter of the system when it has
 //! one.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, mpsc};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 
-use uniwow_api::bytemuck;
 use uniwow_api::formats::{FileRef, Model, ModelTextureSource, Texture, TextureFormat};
 use uniwow_api::glam::Vec3;
 use uniwow_api::models::{Geosets, Look, Models};
 use uniwow_api::viewport::{Drawing, Layer};
-use uniwow_api::wgpu;
 
-use crate::arena::{Arena, Holes};
 use crate::choice::Tables;
 use crate::gpu::Shared;
 use crate::layer::{ModelsLayer, Scene};
@@ -21,54 +17,7 @@ use crate::loading::{Caches, Ready};
 use crate::lock;
 use crate::pool;
 use crate::service::Service;
-use crate::tests::{AIM, Bench, FRONT, Fake, TARGET, device, instance, plain, read_back, render, settled, square};
-
-#[test]
-fn a_range_is_taken_from_the_first_hole_holding_it_and_given_back_merged() {
-    let mut holes = Holes::default();
-    assert_eq!(holes.take(1), None, "nothing before the arena grows");
-    holes.grow(10);
-    assert_eq!(holes.take(4), Some(0..4));
-    assert_eq!(holes.take(3), Some(4..7));
-    assert_eq!(holes.take(5), None, "3 left");
-    holes.give(0..4);
-    assert_eq!(holes.take(5), None, "two holes, of 4 and 3, apart");
-    holes.give(4..7);
-    assert_eq!(holes.take(10), Some(0..10), "merged with both its neighbours");
-    holes.give(0..10);
-    holes.grow(16);
-    assert_eq!(
-        holes.take(16),
-        Some(0..16),
-        "the units added joined to the hole before them"
-    );
-}
-
-#[test]
-fn an_arena_keeps_its_ranges_in_place_when_it_grows_and_takes_back_those_given() {
-    let Some(gpu) = device() else {
-        return;
-    };
-    let arena = Arena::new(&gpu.device, &gpu.queue, "test arena", wgpu::BufferUsages::STORAGE, 4, 4);
-    let first = arena.put(bytemuck::cast_slice(&[1u32, 2, 3, 4])).unwrap();
-    let second = arena.put(bytemuck::cast_slice(&[5u32, 6])).unwrap();
-    assert_eq!((first.clone(), second), (0..4, 4..6));
-    let (buffer, generation) = arena.buffer().unwrap();
-    assert_eq!(generation, 2, "grown once");
-    let read: Vec<u32> = bytemuck::cast_slice(&read_back(&gpu, &buffer, 24)).to_vec();
-    assert_eq!(
-        read,
-        [1, 2, 3, 4, 5, 6],
-        "the first range copied into the larger buffer"
-    );
-    assert_eq!(arena.bytes(), (32, 24));
-    arena.give(first);
-    assert_eq!(
-        arena.put(bytemuck::cast_slice(&[7u32])).unwrap(),
-        0..1,
-        "a range given back taken again"
-    );
-}
+use crate::tests::{AIM, Bench, FRONT, Fake, TARGET, device, instance, plain, render, settled, square};
 
 #[test]
 fn released_looks_give_their_ranges_back_and_their_textures_when_purged() {
@@ -109,32 +58,6 @@ fn released_looks_give_their_ranges_back_and_their_textures_when_purged() {
     );
     pool.arrays.purge();
     assert_eq!(pool.arrays.counts().layers, 0);
-}
-
-#[test]
-fn the_frame_reads_an_arena_while_a_job_holds_its_holes() {
-    let Some(gpu) = device() else {
-        return;
-    };
-    let arena = Arena::new(&gpu.device, &gpu.queue, "test arena", wgpu::BufferUsages::STORAGE, 4, 4);
-    arena.put(bytemuck::cast_slice(&[1u32, 2, 3, 4])).unwrap();
-    let (held, holding) = mpsc::channel();
-    let (release, released) = mpsc::channel::<()>();
-    let (read, reading) = mpsc::channel();
-    std::thread::scope(|scope| {
-        // A job taking a range or growing the buffer, which can take milliseconds.
-        let arena = &arena;
-        scope.spawn(move || {
-            let _holes = lock(&arena.holes);
-            held.send(()).unwrap();
-            let _ = released.recv();
-        });
-        holding.recv().unwrap();
-        scope.spawn(move || read.send((arena.bytes(), arena.buffer().map(|(_, generation)| generation))));
-        let seen = reading.recv_timeout(Duration::from_secs(5)).ok();
-        release.send(()).unwrap();
-        assert_eq!(seen, Some(((16, 16), Some(1))), "read without waiting for the job");
-    });
 }
 
 /// A texture of `side` × `side` texels of `colour`.

@@ -14,7 +14,7 @@ use uniwow_api::texture_arrays::{NONE, Placed, Refused};
 
 use crate::dress::Moving;
 use crate::gpu::{State, Vertex, moving_radius};
-use crate::loading::{Caches, key, plan};
+use crate::loading::{Caches, cpu_bytes, key, plan};
 use crate::pool::{MaterialGpu, Pool};
 
 /// The vertices and the indices of a model in the arenas, given back when no look holds it, and
@@ -31,6 +31,8 @@ pub struct ArenaModel {
     indices: Range<u64>,
     pool: Arc<Pool>,
     pub bytes: u64,
+    /// What it keeps on the CPU (`loading::cpu_bytes`).
+    pub cpu: [u64; 2],
 }
 
 impl Drop for ArenaModel {
@@ -104,6 +106,7 @@ pub fn model(pool: &Arc<Pool>, formats: &dyn Formats, file: &FileRef) -> Result<
     };
     model.vertices = Vec::new();
     Ok(ArenaModel {
+        cpu: cpu_bytes(&model),
         model,
         rest,
         base_vertex: vertex_range.start as u32,

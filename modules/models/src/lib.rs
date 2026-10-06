@@ -9,7 +9,6 @@
 mod animator;
 #[cfg(test)]
 mod animator_tests;
-mod arena;
 mod cache;
 mod choice;
 #[cfg(test)]
@@ -434,14 +433,28 @@ impl ModelsModule {
             }
             None => "every look on the path of 9.4c".to_owned(),
         };
+        // What the models held keep on the CPU, each once: their skins and the rest, their animations.
+        let mut counted: HashSet<usize> = HashSet::new();
+        let mut cpu = [0u64; 2];
+        for look in self.held.values() {
+            let (pointer, kept) = match &**look {
+                Ready::Pooled(look) => (Arc::as_ptr(&look.model) as usize, look.model.cpu),
+                Ready::Own(look) => (Arc::as_ptr(&look.model) as usize, look.model.cpu),
+            };
+            if counted.insert(pointer) {
+                cpu = [cpu[0] + kept[0], cpu[1] + kept[1]];
+            }
+        }
         scene.summary = format!(
-            "{} looks on the GPU ({:.0} MB), {} loading, {waiting} waiting; {} models and {} textures held, {} textures unreadable\n  {drawn}",
+            "{} looks on the GPU ({:.0} MB), {} loading, {waiting} waiting; {} models and {} textures held, {} textures unreadable; on the CPU, the models held {:.0} MB, their animations {:.0} MB\n  {drawn}",
             self.held.len(),
             bytes as f64 / MB,
             self.loading.len(),
             models.0,
             textures.0,
-            textures.1
+            textures.1,
+            cpu[0] as f64 / MB,
+            cpu[1] as f64 / MB
         );
         scene.steering = start.elapsed();
     }

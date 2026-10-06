@@ -10,11 +10,11 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
+use uniwow_api::arena::Arena;
 use uniwow_api::texture_arrays::TextureArrays;
 use uniwow_api::viewport::Target;
 use uniwow_api::{bytemuck, wgpu};
 
-use crate::arena::Arena;
 use crate::gpu::{State, Vertex};
 use crate::lock;
 

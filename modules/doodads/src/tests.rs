@@ -1,17 +1,14 @@
-//! Tests of the doodads: the tiles wanted around the camera, the transform of a doodad's file, and
-//! the owners of the tiles kept against a fake service `models`.
+//! Tests of the doodads: their instances, and the owners of the tiles kept against a fake service
+//! `models`.
 
 use std::collections::{BTreeMap, HashSet};
-use std::f32::consts::FRAC_PI_2;
 use std::sync::Mutex;
 
-use uniwow_api::formats::{Doodad, FileRef, Placements};
-use uniwow_api::glam::{Mat3, Mat4, Vec3};
+use uniwow_api::formats::{Doodad, FileRef, Placements, TileId, placement};
+use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::models::{Extent, Geosets, Instance, Look, LookId, LookState, Models, Motion};
 
-use crate::placing::{self, Placing, TILE, TileId};
-
-const ORIGIN: f32 = 32.0 * TILE;
+use crate::placing::{self, Placing};
 
 /// The sets of instances of each owner, as the service keeps them.
 #[derive(Default)]
@@ -106,84 +103,6 @@ fn owner(tile: TileId) -> String {
 }
 
 #[test]
-fn the_tiles_wanted_are_those_around_the_camera_the_nearest_first() {
-    let all = vec![true; 4096];
-    // The middle of the tile `_30_40`: X falls with its y, Y with its x.
-    let eye = [ORIGIN - 40.5 * TILE, ORIGIN - 30.5 * TILE];
-    let wanted = placing::wanted(&all, eye, 1, &HashSet::new());
-    assert_eq!(wanted[0], TileId { x: 30, y: 40 });
-    assert_eq!(
-        wanted.len(),
-        9,
-        "the tiles around it, their centre within 1.5 tiles: {wanted:?}"
-    );
-    assert!(
-        wanted[1..5]
-            .iter()
-            .all(|tile| tile.x.abs_diff(30) + tile.y.abs_diff(40) == 1)
-    );
-    // Held, kept within a tile more; not beyond.
-    let held = tiles(&[TileId { x: 32, y: 40 }, TileId { x: 33, y: 40 }]);
-    let kept = placing::wanted(&all, eye, 1, &held);
-    assert_eq!(kept.len(), 10);
-    assert_eq!(kept[9], TileId { x: 32, y: 40 });
-    // A tile the WDT does not name, never.
-    let mut holed = all.clone();
-    holed[40 * 64 + 30] = false;
-    assert!(!placing::wanted(&holed, eye, 1, &HashSet::new()).contains(&TileId { x: 30, y: 40 }));
-}
-
-/// The transform of a doodad as Noggit builds it, in its axes of the file, Y up, the model's
-/// vertices turned into them; then brought into the world's.
-fn noggit(doodad: &Doodad) -> Mat4 {
-    let [x, y, z] = doodad.rotation.map(f32::to_radians);
-    let placed = Mat4::from_translation(Vec3::from(doodad.position))
-        * Mat4::from_rotation_y(y - FRAC_PI_2)
-        * Mat4::from_rotation_z(-x)
-        * Mat4::from_rotation_x(z)
-        * Mat4::from_scale(Vec3::splat(doodad.scale));
-    // A vertex of the model (x, y, z), Z up, as Noggit reads it: (x, z, -y).
-    let model = Mat4::from_mat3(Mat3::from_cols(Vec3::X, -Vec3::Z, Vec3::Y));
-    // A point of the file's axes in the world's: (ORIGIN - z, ORIGIN - x, y).
-    let world = Mat4::from_translation(Vec3::new(ORIGIN, ORIGIN, 0.0))
-        * Mat4::from_mat3(Mat3::from_cols(-Vec3::Y, Vec3::Z, -Vec3::X));
-    world * placed * model
-}
-
-#[test]
-fn a_doodad_stands_where_its_file_places_it_turned_as_noggit_turns_it() {
-    let still = doodad(1, "a.m2", [100.0, 20.0, 300.0], [0.0; 3], 1.0);
-    let at = placing::transform(&still).transform_point3(Vec3::ZERO);
-    assert!(
-        at.abs_diff_eq(Vec3::new(ORIGIN - 300.0, ORIGIN - 100.0, 20.0), 1e-2),
-        "{at}"
-    );
-    for rotation in [
-        [0.0, 0.0, 0.0],
-        [0.0, 90.0, 0.0],
-        [0.0, 237.5, 0.0],
-        [12.0, 0.0, 0.0],
-        [0.0, 0.0, -20.0],
-        [7.5, 301.0, -14.0],
-        [-33.0, 45.0, 81.0],
-    ] {
-        let doodad = doodad(1, "a.m2", [16_000.0, 35.0, 9_000.0], rotation, 1.75);
-        let (made, expected) = (placing::transform(&doodad), noggit(&doodad));
-        for point in [Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z, Vec3::new(3.0, -2.0, 5.0)] {
-            let (got, want) = (made.transform_point3(point), expected.transform_point3(point));
-            assert!(
-                got.abs_diff_eq(want, 1e-2),
-                "{rotation:?} {point}: {got} against {want}"
-            );
-        }
-    }
-    // Facing along X turned about the vertical, its scale kept.
-    let turned = doodad(1, "a.m2", [0.0; 3], [0.0, 90.0, 0.0], 2.0);
-    let front = placing::transform(&turned).transform_vector3(Vec3::X);
-    assert!(front.abs_diff_eq(Vec3::new(0.0, -2.0, 0.0), 1e-4), "{front}");
-}
-
-#[test]
 fn the_instances_of_a_tile_are_its_doodads_once_each() {
     let models = Fake::default();
     let placements = Placements {
@@ -209,7 +128,11 @@ fn the_instances_of_a_tile_are_its_doodads_once_each() {
             geosets: Geosets::All,
         }
     );
-    assert_eq!(instances[1].transform, placing::transform(&placements.doodads[1]));
+    let second = &placements.doodads[1];
+    assert_eq!(
+        instances[1].transform,
+        placement(second.position, second.rotation, second.scale)
+    );
     assert!(instances.iter().all(|i| i.alpha == 1.0 && i.motion == Motion::Standing));
 }
 

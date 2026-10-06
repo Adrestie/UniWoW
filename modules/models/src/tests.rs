@@ -1151,3 +1151,36 @@ fn the_alpha_is_tested_as_wotlk_does() {
         assert_eq!(seen[0] > 100, drawn, "blending {blending}, alpha {alpha}: {seen:?}");
     }
 }
+
+#[test]
+fn what_a_model_keeps_on_the_cpu_counts_its_skins_and_its_animation() {
+    let mut model = square(0, 0);
+    let [skins, moving] = loading::cpu_bytes(&model);
+    assert_eq!(moving, 0, "no animation");
+    model.skins.push(model.skins[0].clone());
+    let [more, _] = loading::cpu_bytes(&model);
+    assert_eq!(
+        more - skins,
+        (6 * 4 + size_of::<Submesh>() + size_of::<Batch>()) as u64,
+        "a second skin"
+    );
+    // A bone of three keys of translation in one sequence: their times and values, the keys and the bone.
+    let mut bone = uniwow_api::formats::Bone {
+        key_bone: -1,
+        flags: 0,
+        parent: None,
+        pivot: [0.0; 3],
+        translation: Default::default(),
+        rotation: Default::default(),
+        scale: Default::default(),
+    };
+    bone.translation.keys.push(uniwow_api::formats::Keys {
+        times: vec![0, 1, 2],
+        values: vec![[0.0; 3]; 3],
+        tangents: Vec::new(),
+    });
+    model.animation.bones.push(bone);
+    let [_, animation] = loading::cpu_bytes(&model);
+    let keys = size_of::<uniwow_api::formats::Keys<[f32; 3]>>() + 3 * 4 + 3 * 12;
+    assert_eq!(animation, (size_of::<uniwow_api::formats::Bone>() + keys) as u64);
+}

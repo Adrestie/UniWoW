@@ -45,6 +45,7 @@ macro_rules! numbered {
     };
 }
 
+pub mod arena;
 mod command;
 mod commands;
 mod context;

@@ -6,9 +6,79 @@
 //! a map is 64 × 64 tiles of 533⅓ yards, the tile `<map>_<x>_<y>` reaching from
 //! `17066⅔ − 533⅓ x` down in Y and from `17066⅔ − 533⅓ y` down in X.
 
+use std::collections::HashSet;
+use std::f32::consts::FRAC_PI_2;
 use std::sync::Arc;
 
 use crate::ServiceKey;
+use crate::glam::{Mat4, Quat, Vec3};
+
+/// The side of a tile, in yards.
+pub const TILE: f32 = 1600.0 / 3.0;
+/// The world's X and Y at the corner of the tile 0 0.
+pub const ORIGIN: f32 = 32.0 * TILE;
+
+/// A tile of a map by its place, as its file names it: `<map>_<x>_<y>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TileId {
+    pub x: u32,
+    pub y: u32,
+}
+
+impl TileId {
+    pub fn centre(self) -> [f32; 2] {
+        [
+            ORIGIN - TILE * (self.y as f32 + 0.5),
+            ORIGIN - TILE * (self.x as f32 + 0.5),
+        ]
+    }
+
+    /// How far from the point `eye` its centre lies, on the ground, in tiles.
+    pub fn distance(self, eye: [f32; 2]) -> f32 {
+        let [x, y] = self.centre();
+        (x - eye[0]).hypot(y - eye[1]) / TILE
+    }
+}
+
+/// The tiles of a map, `tiles` at `y * 64 + x`, around `eye` within `distance` tiles, the nearest
+/// first: those whose centre lies within half a tile more, as the terrain chooses its own, and
+/// those `held` within a whole tile more, so that a camera going to and fro over a border does not
+/// read them again.
+pub fn tiles_around(tiles: &[bool], eye: [f32; 2], distance: u32, held: &HashSet<TileId>) -> Vec<TileId> {
+    let mut around: Vec<(TileId, f32)> = tiles
+        .iter()
+        .enumerate()
+        .filter(|(_, exists)| **exists)
+        .map(|(index, _)| {
+            let tile = TileId {
+                x: index as u32 % 64,
+                y: index as u32 / 64,
+            };
+            (tile, tile.distance(eye))
+        })
+        .filter(|(tile, away)| {
+            let reach = if held.contains(tile) { 1.0 } else { 0.5 };
+            *away <= distance as f32 + reach
+        })
+        .collect();
+    around.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+    around.into_iter().map(|(tile, _)| tile).collect()
+}
+
+/// From the model of a placement of a tile, a doodad's or a building's, to the world. The axes of
+/// its file, Y up, are those of the client's tiles: the world's X is `ORIGIN` less its Z, its Y
+/// `ORIGIN` less its X, its Z its Y. Its rotation, in degrees, as Noggit applies it in those axes,
+/// comes in the world's to turns about Z by its Y less a quarter, about X by its X, about Y by
+/// less its Z, after the quarter turn back about Z that the model takes.
+pub fn placement(position: [f32; 3], rotation: [f32; 3], scale: f32) -> Mat4 {
+    let [x, y, z] = position;
+    let [a, b, c] = rotation.map(f32::to_radians);
+    let turned = Quat::from_rotation_z(b - FRAC_PI_2)
+        * Quat::from_rotation_x(a)
+        * Quat::from_rotation_y(-c)
+        * Quat::from_rotation_z(-FRAC_PI_2);
+    Mat4::from_scale_rotation_translation(Vec3::splat(scale), turned, Vec3::new(ORIGIN - z, ORIGIN - x, y))
+}
 
 /// A map of `Map.dbc`.
 #[derive(Clone, Debug, PartialEq)]
@@ -760,6 +830,83 @@ pub const SERVICE: ServiceKey<Arc<dyn Formats>> = ServiceKey::new("formats");
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::glam::Mat3;
+
+    #[test]
+    fn the_tiles_around_the_camera_are_chosen_the_nearest_first() {
+        let all = vec![true; 4096];
+        // The middle of the tile `_30_40`: X falls with its y, Y with its x.
+        let eye = [ORIGIN - 40.5 * TILE, ORIGIN - 30.5 * TILE];
+        let around = tiles_around(&all, eye, 1, &HashSet::new());
+        assert_eq!(around[0], TileId { x: 30, y: 40 });
+        assert_eq!(
+            around.len(),
+            9,
+            "the tiles around it, their centre within 1.5 tiles: {around:?}"
+        );
+        assert!(
+            around[1..5]
+                .iter()
+                .all(|tile| tile.x.abs_diff(30) + tile.y.abs_diff(40) == 1)
+        );
+        // Held, kept within a tile more; not beyond.
+        let held = HashSet::from([TileId { x: 32, y: 40 }, TileId { x: 33, y: 40 }]);
+        let kept = tiles_around(&all, eye, 1, &held);
+        assert_eq!(kept.len(), 10);
+        assert_eq!(kept[9], TileId { x: 32, y: 40 });
+        // A tile the WDT does not name, never.
+        let mut holed = all.clone();
+        holed[40 * 64 + 30] = false;
+        assert!(!tiles_around(&holed, eye, 1, &HashSet::new()).contains(&TileId { x: 30, y: 40 }));
+    }
+
+    /// The transform of a placement as Noggit builds it, in its axes of the file, Y up, the model's
+    /// vertices turned into them; then brought into the world's.
+    fn noggit(position: [f32; 3], rotation: [f32; 3], scale: f32) -> Mat4 {
+        let [x, y, z] = rotation.map(f32::to_radians);
+        let placed = Mat4::from_translation(Vec3::from(position))
+            * Mat4::from_rotation_y(y - FRAC_PI_2)
+            * Mat4::from_rotation_z(-x)
+            * Mat4::from_rotation_x(z)
+            * Mat4::from_scale(Vec3::splat(scale));
+        // A vertex of the model (x, y, z), Z up, as Noggit reads it: (x, z, -y).
+        let model = Mat4::from_mat3(Mat3::from_cols(Vec3::X, -Vec3::Z, Vec3::Y));
+        // A point of the file's axes in the world's: (ORIGIN - z, ORIGIN - x, y).
+        let world = Mat4::from_translation(Vec3::new(ORIGIN, ORIGIN, 0.0))
+            * Mat4::from_mat3(Mat3::from_cols(-Vec3::Y, Vec3::Z, -Vec3::X));
+        world * placed * model
+    }
+
+    #[test]
+    fn a_placement_stands_where_its_file_places_it_turned_as_noggit_turns_it() {
+        let at = placement([100.0, 20.0, 300.0], [0.0; 3], 1.0).transform_point3(Vec3::ZERO);
+        assert!(
+            at.abs_diff_eq(Vec3::new(ORIGIN - 300.0, ORIGIN - 100.0, 20.0), 1e-2),
+            "{at}"
+        );
+        for rotation in [
+            [0.0, 0.0, 0.0],
+            [0.0, 90.0, 0.0],
+            [0.0, 237.5, 0.0],
+            [12.0, 0.0, 0.0],
+            [0.0, 0.0, -20.0],
+            [7.5, 301.0, -14.0],
+            [-33.0, 45.0, 81.0],
+        ] {
+            let position = [16_000.0, 35.0, 9_000.0];
+            let (made, expected) = (placement(position, rotation, 1.75), noggit(position, rotation, 1.75));
+            for point in [Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z, Vec3::new(3.0, -2.0, 5.0)] {
+                let (got, want) = (made.transform_point3(point), expected.transform_point3(point));
+                assert!(
+                    got.abs_diff_eq(want, 1e-2),
+                    "{rotation:?} {point}: {got} against {want}"
+                );
+            }
+        }
+        // Facing along X turned about the vertical, its scale kept.
+        let front = placement([0.0; 3], [0.0, 90.0, 0.0], 2.0).transform_vector3(Vec3::X);
+        assert!(front.abs_diff_eq(Vec3::new(0.0, -2.0, 0.0), 1e-4), "{front}");
+    }
 
     fn shown(ids: &[u16], drawn: &[bool]) -> Vec<u16> {
         ids.iter()

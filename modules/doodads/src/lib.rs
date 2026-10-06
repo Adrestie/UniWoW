@@ -11,11 +11,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use uniwow_api::formats::{self, Wdt};
+use uniwow_api::formats::{self, TileId, Wdt};
 use uniwow_api::serde_json::json;
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, PropertyValue, Registrar, egui, log, models, viewport};
 
-use placing::{Placing, TileId};
+use placing::Placing;
 
 /// The setting of how far around the camera tiles are placed, in tiles.
 const DISTANCE: &str = "distance";
@@ -137,7 +137,7 @@ impl DoodadsModule {
             Ok(PropertyValue::Vector([x, y, _])) => [x as f32, y as f32],
             _ => return,
         };
-        let wanted = placing::wanted(&wdt.tiles, eye, self.distance, &self.placed);
+        let wanted = formats::tiles_around(&wdt.tiles, eye, self.distance, &self.placed);
         let set: HashSet<TileId> = wanted.iter().copied().collect();
         if set != self.told {
             // A job placing a tile holds the lock: told at a frame to come.
