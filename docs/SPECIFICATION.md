@@ -4241,6 +4241,34 @@ sounds and events of an animation, the faces of the modern customisation. The do
   in radii), or the bones computed by the GPU from keys uploaded once, the instances giving only
   their sequence and time. Built only if the measure asks for it.
 
+#### Step 9.5, added by the review of the proposal
+
+The proposal is validated, with these additions, for 9.5b:
+
+- **The instances that do not move are not written again by the CPU at each frame.** As
+  proposed, the thread of the animations would have written every instance of every owner at each
+  frame, and the static doodads of 9.6 (tens of thousands) with them, which the set kept of 9.4c1
+  and the copy by the GPU of 9.4e avoid. The copy of the owners' instances into the buffer of the
+  frame by the GPU stays. The thread of the animations writes only:
+  - the bones of the animated instances in sight;
+  - for each owner, a table of a `u32` for each instance, in the order of the owner's set: the
+    place of its bones, or none; copied by the GPU at the same base as its instances.
+  An instance whose bones have no keys, or a static one, costs nothing a frame. The bones and the
+  tables are published together (a buffer grown is made filled, the lesson of 9.3c), so that a
+  frame reads a whole set even when the thread is late.
+- **The priority of the slices of the animations.** In `Queue::take` (`core/kernel/src/jobs.rs`),
+  a worker takes a job before a helper of `parallel_for`. During a large load (the terrain at a
+  distance of 64 and the looks of a city, up to *cores − 1* loads each), the helpers of the thread
+  of the animations would wait behind the jobs, and the thread would compute its slices alone
+  (about 80,000 bones). Its time is measured while the map changes at a distance of 64 and while
+  flying fast over a city; should it pass the frame, the helpers of a work due at a frame take
+  their turn before the jobs (a queue of their own, or a flag of `parallel_for`), without starving
+  the jobs, and tested.
+- **The two points to decide**, agreed: an instance out of sight keeps its pose and its time goes
+  on; beyond 2 ms of the thread a frame (measured, loads included), the instances far away
+  animated less often or the bones computed by the GPU from keys uploaded once, on the measure
+  only.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around
