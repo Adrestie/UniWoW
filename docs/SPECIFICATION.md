@@ -4541,7 +4541,7 @@ user's wow.export:
   then slow water, magma, the lake of Wintergrasp, an orange slime. The groups of a building hold
   their own liquid (`MLIQ`).
 
-**In five parts, each reviewed before the next:**
+**In six parts, each reviewed before the next:**
 
 - **9.6a, the two phases of drawing** (asked by the review of 9.5c). A layer draws what it draws
   opaque, then what it blends, in two calls; the view draws the opaque of every layer, then the
@@ -4551,45 +4551,64 @@ user's wow.export:
   already draw their opaque states, then their blended ones. Tested on the software adapter: a
   blended batch of a layer drawn before an opaque one of a later layer, behind it, hidden; in
   front, seen over it.
-- **9.6b, the doodads of the terrain.** The terrain places the doodads of each tile it loads
-  through the service `models`, an owner a tile (`terrain/<map>/<x>_<y>`), given once and cleared
-  when the tile is released: no set merged again at each change. Each placed at the transform of
-  its file (its position, its rotation in degrees, its scale in 1024ths), its look the model of its
-  file with its own textures. The models choose them by the GPU (9.4e3), cut by their size and
-  their reach, posed by the thread when they move (torches, banners). Measured in the four cities
-  and on the tile of most doodads, against 9.5: the frame, the choice on the GPU (at a high clock,
-  as asked for 9.6), the interface thread, the memory; the points left for 9.6 (records without
-  instances, the writing of the bones) built only if the measure asks.
+- **9.6b, the doodads of the tiles**, in a module `doodads` of their own (decision of the user):
+  - the service `formats` gains a light call, the placements of a tile (its doodads and its
+    buildings) without its terrain: the file read, its chunks of terrain not parsed;
+  - the module follows the map the terrain shows by the command `terrain.map`, as `live-world`
+    does, and chooses its tiles itself: those around the camera within a distance of its own, a
+    setting of its panel, by jobs, the nearest first;
+  - it places the doodads of each tile through the service `models`, an owner a tile
+    (`doodads/<map>/<x>_<y>`), given once and cleared when the tile is left: no set merged again at
+    each change. Each at the transform of its file (its position, its rotation in degrees, its
+    scale in 1024ths), its look the model of its file with its own textures. The models choose them
+    by the GPU (9.4e3), cut by their size and their reach, posed by the thread when they move
+    (torches, banners);
+  - without the module, the terrain is drawn without its doodads, as the architecture wants of a
+    module taken out;
+  - measured in the four cities and on the tile of most doodads, against 9.5: the frame, the choice
+    on the GPU (at a high clock, as asked for 9.6), the interface thread, the memory; the points
+    left for 9.6 (records without instances, the writing of the bones) built only if the measure
+    asks.
 - **9.6c, the WMO read**, in `assets`: `formats::Wmo` as plain data: its materials (shader,
   blending, flags, textures, colours), its groups (flags, bounds, vertices, normals, one or two
   sets of coordinates, vertex colours, triangles with their materials, batches, the doodads they
   hold, their liquid), its portals and their references, its doodad sets and doodads, its fog and
   its lights; of version 17 and modern (`GFID`, `MODI`, the groups at their finest level). Checked
   over every WMO of the client and the exports of wow.export.
-- **9.6d, the buildings drawn**: a module `buildings` and its layer, at the stage of the scene. The
-  terrain hands it the buildings of its tiles (a service, as `models`); the groups go to arenas on
-  the GPU and their textures to arrays (`core/api`), drawn in the pass by a draw per state over the
-  groups seen: from outside, each group by its bounds; from inside, the groups seen through the
-  portals in sight from the group of the camera, as the client does; their shaders of WotLK
-  (diffuse, specular, metal, environment, the two layers), their vertex colours inside. The
-  doodads of the set a building names placed through `models`, an owner a building.
+- **9.6d, the buildings drawn**: a module `buildings` and its layer, at the stage of the scene,
+  built as `doodads` (decision of the user): it follows the map by `terrain.map`, chooses its tiles
+  within a distance of its own and reads their buildings by the placements of `formats`. The
+  groups go to arenas on the GPU and their textures to arrays (`core/api`), drawn in the pass by a
+  draw per state over the groups seen: from outside, each group by its bounds; from inside, the
+  groups seen through the portals in sight from the group of the camera, as the client does, on
+  the CPU; their shaders of WotLK (diffuse, specular, metal, environment, the two layers), their
+  vertex colours inside. The doodads of the set a building names placed through `models`, an owner
+  a building.
 - **9.6e, the water**: the liquids of the tiles (`MH2O`, and `MCLQ` for Outland) and of the
   groups of the buildings (`MLIQ`), meshes by layer and by group, drawn blended in the second
   phase, their textures turning through their frames as `LiquidType.dbc` names them; the oceans
   of a map to its edges.
+- **9.6f, the occlusion on the GPU**, beside the portals (asked by the user): a culling of
+  today's engines, in two passes at each frame: first what was seen at the frame before is drawn;
+  the depth it leaves is reduced to a pyramid of its farthest values (Hi-Z) by a compute pass;
+  then the rest is tested against the pyramid, each instance of `models` and each group of
+  `buildings` by its bounds, and those found in sight drawn, so that nothing appears a frame late.
+  Its test joins the choice by the GPU (9.4e3) and the draws of the groups; measured in the four
+  cities with and without it.
 
 **Not in 9.6**: the lights of the buildings and of the map (9.7), the shadows, the reflections and
 the refraction of the water, the levels of detail of the buildings (their finest only), the doodads
 of detail of the ground (`MCLY` ground effects), the destructible buildings.
 
-**To decide with the review:**
+**Decided by the user**, after the proposal:
 
-- The doodads given by the terrain through `models` (an owner a tile), rather than a module of
-  their own: the terrain reads the tiles already and knows when one is released.
-- The buildings in a module of their own, with their layer, rather than in `models`: the WMO are
-  another format and other shaders; they share the arenas and the arrays of `core/api`.
-- The culling by portals on the CPU at each frame, a few hundred groups at most; on the GPU only if
-  the measure asks.
+- The doodads in a module `doodads` of their own, to keep to the design of the modules: it reads
+  the placements of its tiles itself, through the light call of `formats`, so that a tile both it
+  and the terrain need is read twice from the archives but its terrain parsed once.
+- The buildings in a module of their own, with their layer, rather than in `models`, built the
+  same way.
+- The culling by portals on the CPU, and the occlusion on the GPU of today's engines beside it
+  (9.6f).
 - The two phases (9.6a) before anything else, so that the water and the glass of the buildings are
   drawn over what stands behind them whatever the layer.
 
