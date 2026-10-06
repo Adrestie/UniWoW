@@ -7,6 +7,9 @@
 
 mod arena;
 mod cache;
+mod choice;
+#[cfg(test)]
+mod choice_tests;
 mod display;
 mod gpu;
 mod groups;
@@ -36,6 +39,7 @@ use uniwow_api::{
     serde_json, viewport,
 };
 
+use choice::Tables;
 use gpu::Shared;
 use layer::{ModelsLayer, Scene};
 use loading::{Caches, Ready};
@@ -248,12 +252,26 @@ impl ModelsModule {
         }
     }
 
-    /// Hands the looks held to the layer.
-    fn publish(&mut self) {
+    /// Hands the looks held to the layer; with the pool, a job makes the tables the GPU chooses
+    /// from, handed when made, unless newer ones were.
+    fn publish(&mut self, ctx: &mut Context) {
         self.generation += 1;
-        let mut scene = lock(&self.scene);
-        scene.looks = Arc::new(self.held.clone());
-        scene.generation = self.generation;
+        let looks = Arc::new(self.held.clone());
+        {
+            let mut scene = lock(&self.scene);
+            scene.looks = looks.clone();
+            scene.generation = self.generation;
+        }
+        if let Some(shared) = self.shared.clone().filter(|shared| shared.pool.is_some()) {
+            let (scene, generation) = (self.scene.clone(), self.generation);
+            ctx.spawn("Make the tables of the models", move |_| {
+                let tables = Arc::new(Tables::new(&shared.device, generation, &looks));
+                let mut scene = lock(&scene);
+                if scene.tables.as_ref().is_none_or(|kept| kept.generation < generation) {
+                    scene.tables = Some(tables);
+                }
+            });
+        }
     }
 
     /// At each frame, while the view is drawn: the nearest group of each look placed, the loads it
@@ -302,7 +320,7 @@ impl ModelsModule {
             for id in &released {
                 self.service.set_state(*id, LookState::Waiting);
             }
-            self.publish();
+            self.publish(ctx);
             let (caches, pool) = (self.caches.clone(), shared.pool.clone());
             ctx.spawn("Free the models left", move |_| {
                 drop(gone);
@@ -612,7 +630,7 @@ impl Module for ModelsModule {
         forget_failed(&self.service, event);
     }
 
-    fn on_job(&mut self, job: JobId, outcome: JobOutcome, _ctx: &mut Context) {
+    fn on_job(&mut self, job: JobId, outcome: JobOutcome, ctx: &mut Context) {
         if self.setup == Some(job) {
             self.setup = None;
             if let Some(shared) = outcome.take::<Arc<Shared>>() {
@@ -633,7 +651,7 @@ impl Module for ModelsModule {
                     }
                     self.service.set_drawn(id, look.extent(self.reach));
                     self.held.insert(id, Arc::new(look));
-                    self.publish();
+                    self.publish(ctx);
                 }
                 Some(Some((Err(why), _))) => {
                     self.service.set_state(id, LookState::Refused(why.clone()));

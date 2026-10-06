@@ -1,14 +1,13 @@
-//! The layer of the models in the 3D view: the groups of every owner whose look is on the GPU, in
-//! sight and within the reach of their size, each at the skin its distance chooses; their opaque
-//! and alpha-keyed batches first, then the blended ones, the groups the farthest first.
+//! The layer of the models in the 3D view: the instances of every owner whose look is on the GPU,
+//! in sight and within the reach of their size, each at the skin its distance chooses; their opaque
+//! and alpha-keyed batches first, then the blended ones, the farthest first.
 //!
-//! With the pool, drawn in the pass at each frame by a few commands: the instances of every owner
-//! copied into one buffer of the frame, and, for each batch of each group drawn, the arguments of
-//! its draw and the entries of its instances (the instance among those of the frame, and its
-//! material), written by the CPU; one `multi_draw_indexed_indirect` for the batches of each state
-//! of pipeline, the blended states in a fixed order. The looks the pool had no room for, and every
-//! look without a pool, are drawn as in step 9.4c, with their own buffers and textures: without a
-//! pool, in a bundle kept while the groups drawn, their skins and that order stay the same.
+//! With the pool, drawn in the pass at each frame by a few commands: the CPU finds the groups in
+//! sight and sorts the instances of looks with blended batches, the farthest first; the GPU chooses
+//! each instance of those groups and writes the draws of each state (`choice`). The looks the pool
+//! had no room for, and every look without a pool, are drawn as in step 9.4c, each group at its
+//! level, with their own buffers and textures: without a pool, in a bundle kept while the groups
+//! drawn, their skins and their order stay the same.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -17,13 +16,13 @@ use std::time::{Duration, Instant};
 use uniwow_api::glam::{Mat4, Vec3, Vec4};
 use uniwow_api::models::LookId;
 use uniwow_api::viewport::{Drawing, Layer, LayerStats, Target, View};
-use uniwow_api::wgpu::util::DrawIndexedIndirectArgs;
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
+use crate::choice::{Blended, Choice, GroupOfFrame, Section, Tables};
 use crate::gpu::{CAMERA, Shared, State, camera_values};
 use crate::loading::{LookGpu, Ready};
 use crate::lock;
-use crate::pool::{ENTRY, INSTANCE, Pool};
+use crate::pool::Pool;
 use crate::service::Service;
 
 /// The distances, in radii of an instance, past which its skin goes to the next one; the share of
@@ -35,13 +34,15 @@ pub const MARGIN: f32 = 0.1;
 const SWAP_YARDS: f32 = 2.0;
 const SWAP_SHARE: f32 = 0.05;
 
-/// What the module hands to the layer: the looks on the GPU, how far an instance is drawn, and
-/// what the statistics say.
+/// What the module hands to the layer: the looks on the GPU, the tables the GPU chooses from, made
+/// by a job a frame or so after the looks, how far an instance is drawn, and what the statistics
+/// say.
 #[derive(Default)]
 pub struct Scene {
     pub looks: Arc<HashMap<LookId, Arc<Ready>>>,
     /// Counts the changes of `looks`.
     pub generation: u64,
+    pub tables: Option<Arc<Tables>>,
     /// How far an instance is drawn, in radii.
     pub reach: f32,
     pub summary: String,
@@ -94,7 +95,7 @@ pub fn still_ordered(distances: &[f32]) -> bool {
     })
 }
 
-/// A group drawn this frame.
+/// A group of a look of its own drawn this frame.
 struct Drawn {
     key: GroupKey,
     look: Arc<Ready>,
@@ -110,7 +111,7 @@ struct Drawn {
 const BLENDED: [u16; 6] = [2, 7, 3, 4, 5, 6];
 
 /// The order of a state among those drawn.
-fn rank(state: &State) -> (usize, u16, bool, bool, bool) {
+pub fn rank(state: &State) -> (usize, u16, bool, bool, bool) {
     let blended = BLENDED
         .iter()
         .position(|blending| *blending == state.blending)
@@ -124,36 +125,9 @@ fn rank(state: &State) -> (usize, u16, bool, bool, bool) {
     )
 }
 
-/// The buffers of a frame of the pool and the bind group reading them, with what it was made with.
-struct FrameBuffers {
-    instances: wgpu::Buffer,
-    entries: wgpu::Buffer,
-    args: wgpu::Buffer,
-    group: Option<wgpu::BindGroup>,
-    made: (u64, u64),
-}
-
-/// A buffer of at least `bytes`, twice the size it needs to grow to.
-fn sized(
-    device: &wgpu::Device,
-    kept: Option<wgpu::Buffer>,
-    bytes: u64,
-    usage: wgpu::BufferUsages,
-    label: &str,
-) -> (wgpu::Buffer, bool) {
-    match kept {
-        Some(buffer) if buffer.size() >= bytes => (buffer, false),
-        _ => (
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size: bytes.next_power_of_two().max(256),
-                usage: usage | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }),
-            true,
-        ),
-    }
-}
+/// An instance of a look with blended batches: its owner, the owner's layout and its place there,
+/// by which its order is kept from a frame to the next.
+type BlendedKey = (u32, u64, u32);
 
 pub struct ModelsLayer {
     service: Arc<Service>,
@@ -171,12 +145,11 @@ pub struct ModelsLayer {
     version: u64,
     /// When the bundle was recorded, in the last second.
     recordings: VecDeque<Instant>,
-    /// With the pool: the buffers of the owners copied into that of the frame (the buffer, its
-    /// bytes, where they go), the buffers of the frame, and the draws of each state, opaque then
-    /// blended (the state, its first draw, its draws).
-    copies: Vec<(Arc<wgpu::Buffer>, u64, u64)>,
-    frame: Option<FrameBuffers>,
-    buckets: [Vec<(State, u32, u32)>; 2],
+    /// With the pool: the choice by the GPU, the bind group the vertex shader of the pool reads and
+    /// the generation of the pool it was made at, and the blended instances in the order drawn last.
+    choice: Option<Choice>,
+    pool_group: Option<(wgpu::BindGroup, (u64, u64))>,
+    blended: Vec<BlendedKey>,
     stats: LayerStats,
 }
 
@@ -194,9 +167,9 @@ impl ModelsLayer {
             recorded: (u64::MAX, Vec::new(), Vec::new()),
             version: 0,
             recordings: VecDeque::new(),
-            copies: Vec::new(),
-            frame: None,
-            buckets: [Vec::new(), Vec::new()],
+            choice: None,
+            pool_group: None,
+            blended: Vec::new(),
             stats: LayerStats::default(),
         }
     }
@@ -205,110 +178,10 @@ impl ModelsLayer {
         self.shared.as_ref().and_then(|shared| shared.pool.clone())
     }
 
-    /// The draws of the pooled looks drawn this frame, written to the buffers of the frame: the
-    /// instances of every owner copied into one, the entries and arguments of each batch of each
-    /// group, gathered by state; the commands it takes.
-    fn prepare_pool(
-        &mut self,
-        pool: &Pool,
-        gpu: &egui_wgpu::RenderState,
-        owners: &[(u32, Arc<wgpu::Buffer>, u32)],
-    ) -> u64 {
-        let mut base: HashMap<u32, u32> = HashMap::new();
-        self.copies.clear();
-        let mut total = 0u32;
-        for (number, buffer, used) in owners {
-            base.insert(*number, total);
-            self.copies
-                .push((buffer.clone(), u64::from(*used) * INSTANCE, u64::from(total) * INSTANCE));
-            total += used;
-        }
-        let mut entries: Vec<[u32; 2]> = Vec::new();
-        let mut gathered: [HashMap<State, Vec<DrawIndexedIndirectArgs>>; 2] = [HashMap::new(), HashMap::new()];
-        let at: HashMap<GroupKey, usize> = self
-            .drawn
-            .iter()
-            .enumerate()
-            .map(|(index, group)| (group.key, index))
-            .collect();
-        let opaque = self.drawn.iter().map(|group| (group, false));
-        let blended = self.order.iter().map(|key| (&self.drawn[at[key]], true));
-        for (group, pass) in opaque.chain(blended) {
-            let Ready::Pooled(look) = &*group.look else {
-                continue;
-            };
-            let first = base[&group.key.0] + group.instances.start;
-            for record in &look.skins[group.level] {
-                if record.state.blended() != pass {
-                    continue;
-                }
-                gathered[usize::from(pass)]
-                    .entry(record.state)
-                    .or_default()
-                    .push(DrawIndexedIndirectArgs {
-                        index_count: record.count,
-                        instance_count: group.instances.len() as u32,
-                        first_index: record.first_index,
-                        base_vertex: record.base_vertex,
-                        first_instance: entries.len() as u32,
-                    });
-                entries.extend((0..group.instances.len() as u32).map(|instance| [first + instance, record.material]));
-            }
-        }
-        let mut args: Vec<DrawIndexedIndirectArgs> = Vec::new();
-        for (bucket, gathered) in self.buckets.iter_mut().zip(gathered) {
-            bucket.clear();
-            let mut states: Vec<(State, Vec<DrawIndexedIndirectArgs>)> = gathered.into_iter().collect();
-            states.sort_by_key(|(state, _)| rank(state));
-            for (state, draws) in states {
-                bucket.push((state, args.len() as u32, draws.len() as u32));
-                args.extend(draws);
-            }
-        }
-        if args.is_empty() {
-            return 0;
-        }
-        let kept = self.frame.take();
-        let (instances, new_instances) = sized(
-            &gpu.device,
-            kept.as_ref().map(|frame| frame.instances.clone()),
-            u64::from(total) * INSTANCE,
-            wgpu::BufferUsages::STORAGE,
-            "models instances of the frame",
-        );
-        let (entry_buffer, new_entries) = sized(
-            &gpu.device,
-            kept.as_ref().map(|frame| frame.entries.clone()),
-            entries.len() as u64 * ENTRY,
-            wgpu::BufferUsages::STORAGE,
-            "models entries of the frame",
-        );
-        let (arg_buffer, _) = sized(
-            &gpu.device,
-            kept.as_ref().map(|frame| frame.args.clone()),
-            (args.len() * size_of::<DrawIndexedIndirectArgs>()) as u64,
-            wgpu::BufferUsages::INDIRECT,
-            "models draws of the frame",
-        );
-        let made = pool.generation();
-        let group = kept
-            .and_then(|frame| {
-                frame
-                    .group
-                    .filter(|_| frame.made == made && !new_instances && !new_entries)
-            })
-            .or_else(|| pool.bind_group(&instances, &entry_buffer));
-        gpu.queue.write_buffer(&entry_buffer, 0, bytemuck::cast_slice(&entries));
-        let arg_bytes: Vec<u8> = args.iter().flat_map(|arg| arg.as_bytes().to_vec()).collect();
-        gpu.queue.write_buffer(&arg_buffer, 0, &arg_bytes);
-        self.frame = Some(FrameBuffers {
-            instances,
-            entries: entry_buffer,
-            args: arg_buffer,
-            group,
-            made,
-        });
-        self.buckets.iter().map(|bucket| bucket.len() as u64).sum()
+    /// The choice by the GPU, once the pool draws.
+    #[cfg(test)]
+    pub fn choice(&mut self) -> Option<&mut Choice> {
+        self.choice.as_mut()
     }
 
     /// The batches of the looks with buffers and textures of their own, `pass` saying which: the
@@ -343,11 +216,12 @@ impl Layer for ModelsLayer {
         let Some(shared) = self.shared.clone() else {
             return;
         };
-        let (looks, generation, reach, summary, bytes, steering) = {
+        let (looks, generation, tables, reach, summary, bytes, steering) = {
             let scene = lock(&self.scene);
             (
                 scene.looks.clone(),
                 scene.generation,
+                scene.tables.clone(),
                 scene.reach,
                 scene.summary.clone(),
                 scene.bytes,
@@ -373,12 +247,26 @@ impl Layer for ModelsLayer {
         });
         gpu.queue
             .write_buffer(camera, 0, bytemuck::cast_slice(&camera_values(view, reach)));
+        let pool = shared.pool.clone();
+        if let Some(pool) = &pool
+            && self.choice.is_none()
+        {
+            self.choice = Some(Choice::new(&gpu.device, pool.count));
+        }
+        if let Some(choice) = &mut self.choice {
+            choice.read_back();
+            choice.set_tables(tables);
+        }
+        let tables = self.choice.as_ref().and_then(|choice| choice.tables.as_ref());
 
         let levels = std::mem::take(&mut self.levels);
         let mut drawn = Vec::new();
         let mut layouts = Vec::new();
-        let mut owners = Vec::new();
-        let (mut instances, mut groups) = (0u64, 0usize);
+        let mut owners: Vec<(Arc<wgpu::Buffer>, Section)> = Vec::new();
+        let mut chosen = Vec::new();
+        let mut candidates: Vec<(f32, BlendedKey, Blended)> = Vec::new();
+        let (mut instances, mut groups, mut seen) = (0u64, 0usize, 0usize);
+        let mut base = 0u32;
         for slot in self.service.owners() {
             let published = slot.published();
             let Some(buffer) = published.buffer.clone() else {
@@ -391,7 +279,7 @@ impl Layer for ModelsLayer {
                 .map(|group| group.first + group.count)
                 .max()
                 .unwrap_or(0);
-            owners.push((slot.number, buffer.clone(), used));
+            owners.push((buffer.clone(), (slot.number, published.layout, base, used)));
             for group in &published.groups {
                 let Some(look) = looks.get(&group.look) else {
                     continue;
@@ -402,10 +290,40 @@ impl Layer for ModelsLayer {
                 if distance > reach * radius.max(1.0) || !in_sight(view.view_proj, bounds) {
                     continue;
                 }
+                seen += 1;
+                instances += u64::from(group.count);
+                // From the pool: chosen by the GPU, each instance of a look with blended batches
+                // sorted here.
+                if let Some(look_slot) = tables.and_then(|tables| tables.slots.get(&group.look)) {
+                    chosen.push(GroupOfFrame {
+                        first: base + group.first,
+                        count: group.count,
+                        slot: *look_slot,
+                    });
+                    let blends = tables.is_some_and(|tables| {
+                        tables.looks[*look_slot as usize]
+                            .blended
+                            .iter()
+                            .any(|records| !records.is_empty())
+                    });
+                    if blends {
+                        for at in group.first..group.first + group.count {
+                            let origin = published.origins.get(at as usize).copied().unwrap_or(group.low);
+                            candidates.push((
+                                view.eye.distance(origin),
+                                (slot.number, published.layout, at),
+                                Blended {
+                                    index: base + at,
+                                    slot: *look_slot,
+                                },
+                            ));
+                        }
+                    }
+                    continue;
+                }
                 let key = (slot.number, group.look, group.tile);
                 let level = level(distance / radius.max(0.5), levels.get(&key).copied(), look.levels());
                 self.levels.insert(key, level);
-                instances += u64::from(group.count);
                 layouts.push((key, published.layout, level));
                 drawn.push(Drawn {
                     key,
@@ -417,6 +335,7 @@ impl Layer for ModelsLayer {
                     distance,
                 });
             }
+            base += used;
         }
         // The blended groups, the farthest first: sorted again only when two cross by the margin.
         let distance_of: HashMap<GroupKey, f32> = drawn
@@ -433,36 +352,71 @@ impl Layer for ModelsLayer {
             self.order = order.into_iter().map(|(key, _)| key).collect();
         }
         self.drawn = drawn;
+        // The blended instances of the pool, the farthest first, in the same way.
+        let at: HashMap<BlendedKey, usize> = candidates
+            .iter()
+            .enumerate()
+            .map(|(index, (_, key, _))| (*key, index))
+            .collect();
+        let same_set = self.blended.len() == at.len() && self.blended.iter().all(|key| at.contains_key(key));
+        let kept = same_set && still_ordered(&self.blended.iter().map(|key| candidates[at[key]].0).collect::<Vec<_>>());
+        let blended: Vec<Blended> = if kept {
+            self.blended.iter().map(|key| candidates[at[key]].2).collect()
+        } else {
+            candidates.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            self.blended = candidates.iter().map(|(_, key, _)| *key).collect();
+            candidates.iter().map(|(_, _, instance)| *instance).collect()
+        };
 
+        // The groups of looks of their own, as in step 9.4c.
         let mut draws = 0;
         let mut triangles = 0;
+        let mut own_commands = 0;
         for group in &self.drawn {
             for (_, count) in group.look.batches(group.level) {
                 draws += 1;
+                own_commands += 1;
                 triangles += u64::from(count / 3) * u64::from(group.instances.len() as u32);
             }
         }
-        let commands = match self.pool() {
-            Some(pool) => {
-                // A command for each batch of a look with its own buffers.
-                let own: u64 = self
-                    .drawn
-                    .iter()
-                    .filter_map(|group| match &*group.look {
-                        Ready::Own(look) => Some(look.skins[group.level].len() as u64),
-                        Ready::Pooled(_) => None,
-                    })
-                    .sum();
-                self.prepare_pool(&pool, gpu, &owners) + own
+        let drawing = match (&pool, &mut self.choice) {
+            (Some(pool), Some(choice)) => {
+                let made = choice.frame(&gpu.queue, &owners, &chosen, &blended, view.view_proj, view.eye, reach);
+                let made_at = pool.generation();
+                if made || self.pool_group.as_ref().is_none_or(|(_, at)| *at != made_at) {
+                    self.pool_group = choice
+                        .buffers()
+                        .and_then(|(instances, entries)| pool.bind_group(instances, entries))
+                        .map(|group| (group, made_at));
+                }
+                let commands = choice.tables.as_ref().map_or(0, |tables| tables.regions.len())
+                    + choice.blended_regions.len()
+                    + own_commands;
+                let gpu_drawn = choice.drawn;
+                draws += u64::from(gpu_drawn.draws);
+                triangles += u64::from(gpu_drawn.triangles);
+                format!(
+                    "{commands} commands in the pass; chosen by the GPU: {} pairs, levels {:?}; {} groups of looks of their own",
+                    gpu_drawn.pairs,
+                    gpu_drawn.levels,
+                    self.drawn.len(),
+                )
             }
-            None => {
+            _ => {
                 let recorded = (generation, layouts, self.order.clone());
                 if recorded != self.recorded {
                     self.recorded = recorded;
                     self.version += 1;
                     self.recordings.push_back(Instant::now());
                 }
-                draws
+                let mut used = [0usize; LIMITS.len() + 1];
+                for group in &self.drawn {
+                    used[group.level] += 1;
+                }
+                format!(
+                    "levels {used:?}; bundle recorded {} times in the last second",
+                    self.recordings.len()
+                )
             }
         };
         while self
@@ -472,37 +426,18 @@ impl Layer for ModelsLayer {
         {
             self.recordings.pop_front();
         }
-        let mut used = [0usize; LIMITS.len() + 1];
-        for group in &self.drawn {
-            used[group.level] += 1;
-        }
-        let drawing = match self.pool() {
-            Some(_) => format!("{commands} commands in the pass"),
-            None => format!("bundle recorded {} times in the last second", self.recordings.len()),
-        };
         self.stats = LayerStats {
             draws,
             triangles,
             bytes,
-            items: format!(
-                "{summary}\n  {instances} instances in sight in {} groups of {groups}, levels {used:?}; {drawing}",
-                self.drawn.len(),
-            ),
+            items: format!("{summary}\n  {instances} instances in {seen} groups in sight of {groups}; {drawing}"),
             steering,
         };
     }
 
     fn compute(&mut self, _gpu: &egui_wgpu::RenderState, _view: &View, encoder: &mut wgpu::CommandEncoder) {
-        let Some(frame) = &self.frame else {
-            return;
-        };
-        if self.buckets.iter().all(Vec::is_empty) {
-            return;
-        }
-        for (buffer, bytes, at) in &self.copies {
-            if *bytes > 0 {
-                encoder.copy_buffer_to_buffer(buffer, 0, &frame.instances, *at, *bytes);
-            }
+        if let Some(choice) = &mut self.choice {
+            choice.compute(encoder);
         }
     }
 
@@ -571,28 +506,24 @@ impl Layer for ModelsLayer {
         let (Some((_, camera)), Some(pool)) = (&self.camera, self.pool()) else {
             return;
         };
-        let pooled = match (&self.frame, pool.vertices.buffer(), pool.indices.buffer()) {
-            (Some(frame), Some((vertices, _)), Some((indices, _))) => {
-                frame.group.as_ref().map(|group| (frame, group, vertices, indices))
+        let pooled = match (
+            &self.choice,
+            &self.pool_group,
+            pool.vertices.buffer(),
+            pool.indices.buffer(),
+        ) {
+            (Some(choice), Some((group, _)), Some((vertices, _)), Some((indices, _))) => {
+                Some((choice, group, vertices, indices))
             }
             _ => None,
         };
         for blended in [false, true] {
-            if let Some((frame, group, vertices, indices)) = &pooled
-                && !self.buckets[usize::from(blended)].is_empty()
-            {
+            if let Some((choice, group, vertices, indices)) = &pooled {
                 pass.set_bind_group(0, camera, &[]);
                 pass.set_bind_group(1, *group, &[]);
                 pass.set_vertex_buffer(0, vertices.slice(..));
                 pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-                for (state, first, count) in &self.buckets[usize::from(blended)] {
-                    pass.set_pipeline(&pool.pipeline(*state));
-                    pass.multi_draw_indexed_indirect(
-                        &frame.args,
-                        u64::from(*first) * size_of::<DrawIndexedIndirectArgs>() as u64,
-                        *count,
-                    );
-                }
+                choice.draw(pass, blended, &|state| pool.pipeline(state));
             }
             // The looks the pool had no room for, as in step 9.4c.
             for (group, look) in self.own(blended) {

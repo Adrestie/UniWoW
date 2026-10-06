@@ -14,13 +14,14 @@ use uniwow_api::viewport::{Drawing, Layer};
 use uniwow_api::wgpu;
 
 use crate::arena::{Arena, Holes};
+use crate::choice::Tables;
 use crate::gpu::Shared;
 use crate::layer::{ModelsLayer, Scene};
 use crate::loading::{Caches, Ready};
 use crate::lock;
 use crate::pool;
 use crate::service::Service;
-use crate::tests::{AIM, Bench, FRONT, Fake, TARGET, device, instance, plain, read_back, render, square};
+use crate::tests::{AIM, Bench, FRONT, Fake, TARGET, device, instance, plain, read_back, render, settled, square};
 
 #[test]
 fn a_range_is_taken_from_the_first_hole_holding_it_and_given_back_merged() {
@@ -147,15 +148,15 @@ fn sized(side: u32, colour: [u8; 4]) -> Texture {
 }
 
 /// A bench of a layer drawing with the pool, and what its module would make the looks with.
-struct Pooled {
-    bench: Bench,
-    shared: Arc<Shared>,
+pub(crate) struct Pooled {
+    pub(crate) bench: Bench,
+    pub(crate) shared: Arc<Shared>,
     caches: Caches,
 }
 
 impl Pooled {
     /// The bench of a pool of `slots` arrays, its scene empty.
-    fn new(slots: usize) -> Option<Self> {
+    pub(crate) fn new(slots: usize) -> Option<Self> {
         let gpu = device()?;
         let shared = Arc::new(Shared::new(&gpu, &TARGET, Some(slots)));
         let service = Arc::new(Service::default());
@@ -183,7 +184,7 @@ impl Pooled {
 
     /// `look` of `fake` made ready as the module makes it, added to the scene; whether from the
     /// pool.
-    fn add(&self, fake: &Fake, look: &Look) -> bool {
+    pub(crate) fn add(&self, fake: &Fake, look: &Look) -> bool {
         let id = self.bench.service.look(look);
         let mut refused = Vec::new();
         let made = crate::load(&self.shared, fake, &self.caches, look, &mut refused).unwrap();
@@ -194,18 +195,23 @@ impl Pooled {
         looks.insert(id, Arc::new(made));
         scene.looks = Arc::new(looks);
         scene.generation += 1;
+        scene.tables = Some(Arc::new(Tables::new(
+            &self.bench.gpu.device,
+            scene.generation,
+            &scene.looks,
+        )));
         pooled
     }
 }
 
 /// The pixel at `row` and `column` of an image of `render`.
-fn pixel(pixels: &[u8], row: usize, column: usize) -> [u8; 4] {
+pub(crate) fn pixel(pixels: &[u8], row: usize, column: usize) -> [u8; 4] {
     let at = row * 256 + column * 4;
     [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
 }
 
 /// Whether `pixel` is lit of its colour `channel` alone: 0 red, 1 green, 2 blue.
-fn only(pixel: [u8; 4], channel: usize) -> bool {
+pub(crate) fn only(pixel: [u8; 4], channel: usize) -> bool {
     (0..3).all(|other| {
         if other == channel {
             pixel[other] > 100
@@ -217,9 +223,9 @@ fn only(pixel: [u8; 4], channel: usize) -> bool {
 
 /// Where a square of scale 0.5 stands at y = -1.5, 0 and 1.5 in an image of `render`, on its
 /// middle row.
-const LEFT: (usize, usize) = (18, 8);
+pub(crate) const LEFT: (usize, usize) = (18, 8);
 const MIDDLE: (usize, usize) = (18, 16);
-const RIGHT: (usize, usize) = (18, 24);
+pub(crate) const RIGHT: (usize, usize) = (18, 24);
 
 /// The square of `square`, its texture given by each look, as the skin of a creature.
 fn skinned() -> Model {
@@ -229,7 +235,7 @@ fn skinned() -> Model {
 }
 
 /// A look of `skinned` with `file` for its skin.
-fn skin(file: &str) -> Look {
+pub(crate) fn skin(file: &str) -> Look {
     Look {
         model: FileRef::Path("square.m2".to_owned()),
         textures: vec![(11, FileRef::Path(file.to_owned()))],
@@ -238,7 +244,7 @@ fn skin(file: &str) -> Look {
 }
 
 /// Textures of 4 × 4 texels, red, green and blue.
-fn colours() -> HashMap<String, Texture> {
+pub(crate) fn colours() -> HashMap<String, Texture> {
     [
         ("red.blp", [255, 0, 0, 255]),
         ("green.blp", [0, 255, 0, 255]),
@@ -276,7 +282,7 @@ fn the_looks_of_one_model_are_drawn_by_one_command_their_instances_from_every_ow
             instance(2, 2, Vec3::ZERO, 0.5),
         ],
     );
-    let image = render(bench, FRONT, AIM);
+    let image = settled(bench, FRONT, AIM);
     assert_eq!(bench.layer.drawing(), Drawing::Pass);
     for ((row, column), channel) in [(LEFT, 0), (RIGHT, 1), (MIDDLE, 2)] {
         let seen = pixel(&image, row, column);

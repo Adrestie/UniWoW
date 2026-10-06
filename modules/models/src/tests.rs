@@ -20,6 +20,7 @@ use uniwow_api::viewport::{Drawing, Layer, Target, View};
 use uniwow_api::{Event, MODULE_FAILED_TOPIC, bytemuck, egui, egui_wgpu, serde_json, wgpu};
 
 use crate::cache::Cache;
+use crate::choice::Tables;
 use crate::display::{self, CHARACTER_SKIN, CREATURE_SKIN, HAIR, SKIN_EXTRA};
 use crate::gpu::{self, ALPHA_KEY, InstanceGpu, Shared, State};
 use crate::groups::{self, Group, TILE};
@@ -758,12 +759,7 @@ pub fn bench_on(model: Model, red: [u8; 4], pooled: bool) -> Option<Bench> {
     let ready = crate::load(&shared, &fake, &Caches::default(), &look, &mut refused).unwrap();
     assert!(refused.is_empty(), "{refused:?}");
     assert_eq!(matches!(ready, Ready::Pooled(_)), pooled);
-    let scene = Arc::new(Mutex::new(Scene {
-        looks: Arc::new(HashMap::from([(id, Arc::new(ready))])),
-        generation: 1,
-        reach: 100.0,
-        ..Scene::default()
-    }));
+    let scene = Arc::new(Mutex::new(scene(&gpu.device, HashMap::from([(id, Arc::new(ready))]))));
     let layer = ModelsLayer::new(service.clone(), scene.clone(), Arc::new(Mutex::new(Some(shared))));
     Some(Bench {
         gpu,
@@ -905,6 +901,25 @@ pub fn render(bench: &mut Bench, eye: Vec3, look: Vec3) -> Vec<u8> {
     read_back(&gpu, &pixels, u64::from(256 * size))
 }
 
+/// The scene of `looks`, of the generation 1, with the tables the job of the module makes of them.
+pub fn scene(device: &wgpu::Device, looks: HashMap<LookId, Arc<Ready>>) -> Scene {
+    let looks = Arc::new(looks);
+    Scene {
+        tables: Some(Arc::new(Tables::new(device, 1, &looks))),
+        looks,
+        generation: 1,
+        reach: 100.0,
+        ..Scene::default()
+    }
+}
+
+/// The image of `render` once what the GPU drew is read back: the frames it takes rendered first.
+pub fn settled(bench: &mut Bench, eye: Vec3, look: Vec3) -> Vec<u8> {
+    render(bench, eye, look);
+    render(bench, eye, look);
+    render(bench, eye, look)
+}
+
 /// The pixel at the middle of an image of `render`.
 pub fn middle(pixels: &[u8]) -> [u8; 4] {
     let at = 16 * 256 + 16 * 4;
@@ -935,7 +950,7 @@ fn a_model_is_drawn_where_its_instance_stands_lit_and_one_sided() {
     bench
         .service
         .place("test", &[instance(1, 0, Vec3::new(0.0, 0.0, 30.0), 1.0)]);
-    assert_eq!(middle(&render(&mut bench, FRONT, AIM)), BLACK);
+    assert_eq!(middle(&settled(&mut bench, FRONT, AIM)), BLACK);
     let stats = bench.layer.stats();
     assert_eq!((stats.draws, stats.triangles), (0, 0), "out of sight");
 }

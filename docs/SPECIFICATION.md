@@ -4075,6 +4075,76 @@ submit.
   to read or replace it; the job fills its staging buffer before taking the lock of the holes.
   Tested: the bytes and the buffer read while a job holds the holes.
 
+#### Step 9.4e3, as built
+
+- **Checked at the start**, by a probe not kept over the displays the observer sends: a third of
+  the instances have a look with blended batches (167 of 531 in Orgrimmar, 336 of 1,014 in
+  Dalaran). Chosen by the CPU, as the proposal had them sorted, their opaque batches could take
+  another level than their blended ones; so the GPU chooses every instance, and the CPU only orders
+  the blended draws.
+- **The choice by the GPU** (`models/src/choice.rs`, `choice.wgsl`), with the pool:
+  - the tables the GPU chooses from, made by a job of the module when its looks change and handed
+    with them (a look loaded is drawn a frame or two later, when its tables come): the pooled looks
+    by slot, their radius and levels; their opaque records, gathered by state in the order drawn
+    (then by look, level and batch), and the regions of those states;
+  - at each frame, the CPU finds the groups in sight as in 9.4c and writes them for the GPU; it
+    sorts the instances of looks with blended batches the farthest first, one by one, the order
+    kept until two cross by the margin of 9.4c, and writes for each a template of draw at each
+    level of its look, for each blended batch, gathered by blended state in the fixed order;
+  - `choose`, a workgroup a group: each instance in sight (its box against the sides of the view),
+    within the reach of its size, at the level its distance chooses with the margin of 9.4c1 from
+    its level of the frame before; the instances of each record counted. The levels are kept for
+    each owner: copied where the owner moved in the buffer of the frame, chosen afresh when it
+    regroups, forgotten while out of sight;
+  - a prefix sum over the records by blocks of 256 (`blocks`, `tops`, `place`): the place of each
+    record's instances among the entries, and of its draw among those of its state; `pack`: the
+    arguments of the records with instances, packed in the order of their state's records, and the
+    count of each state's draws; `tops` keeps the templates whose level is the one chosen for their
+    instance, packed in their order; `scatter`: each instance's entries at its records' places;
+  - drawn: one `multi_draw_indexed_indirect_count` a state, the opaque ones then the blended ones.
+    On Direct3D 12, wgpu 30 does not give a draw counted by the GPU its first instance (its command
+    signature for `draw_indexed_indirect_count` leaves out the special constants the other draws are
+    given): there, one `multi_draw_indexed_indirect` a state over all its records, those without
+    instances drawing none;
+  - what was drawn read back two frames later: the draws, the pairs of an instance and a batch, the
+    triangles, the instances at each level, in the statistics of the layer.
+- **The pool** now asks for compute shaders, indirect execution and eight storage buffers a stage;
+  the instances of every owner publish their origins, for the order of the blended ones. The looks
+  of their own (no room in the arrays) are chosen by the CPU as in 9.4c.
+- **Found by the acceptance and fixed**: the prefix sum in one workgroup cost a fixed 0.7 to 1.7 ms
+  of the GPU at its low clock, over about 20,000 records in Dalaran (most without instances); the
+  tables, made on the interface thread, took 2.2 to 3.4 ms 46 times in 50 seconds over Dalaran,
+  as its looks came and went (frames of 2.7 to 4.2 ms). Both as above now.
+- **Tests**, on the software adapter (Direct3D 12: every record drawn there, the packing read back):
+  an instance of a group in sight, one beside the view and one beyond its reach, one drawn; the
+  level kept going up and down within the margin, then changed past it; kept where its owner moves
+  in the buffer of the frame, chosen afresh when it regroups, forgotten while out of sight; blended
+  instances of two owners drawn one by one the farthest first (four halves of red and blue), each
+  where it stands, their order kept until two cross by the margin; a template drawn only at the
+  level chosen; the draws of a state packed in their order and counted, across two blocks of
+  records (360). Of 29 changes made on purpose to the choice, its shader and the layer, 28 made a
+  test fail; the job making the tables is checked by the acceptance only.
+- **Accepted on the user's machine** (RTX 3080 Ti, Vulkan: the draws packed and counted by the
+  GPU), the worldserver of `E:` running, observed only, with the script of 9.4d, run after run as in
+  9.4e2 against the path of 9.4c forced, at the same clocks (about 300 MHz in Orgrimmar, 420 to 490
+  in Dalaran):
+
+  | | Orgrimmar: 9.4e3; 9.4c | Dalaran: 9.4e3; 9.4c |
+  |---|---|---|
+  | Draws | 874 to 882 still, 418 to 733 flying; 1,010, 367 to 810 | 2,948 to 2,973 still, 1,502 to 2,809 flying; 2,954 to 2,971, 1,556 to 2,813 |
+  | Triangles | 0.72 to 0.73 M still, 0.29 to 0.58 flying; 1.10 M, 0.69 to 1.19 | 1.13 to 1.14 M still; 1.25 to 1.26 M |
+  | Instances at each level, still | 129, 33, 0, 0 | 187, 120, 6, 0 |
+  | Commands of the layer | 6 to 7 | 8 to 9 |
+  | The view on the interface thread | 0.31 to 0.38 ms, 1.21 at most; 0.52 to 0.73, 1.10 at most | 0.33 to 0.45 ms, 1.39 at most, once 3.41; 1.56 to 2.29, 3.51 at most, once 12.46 |
+  | The models on the GPU | computing 0.35 to 0.40 ms, drawing 0.36 to 0.60; drawing 0.49 to 0.83 | computing 0.26 to 0.35 ms, drawing 0.42 to 0.77; drawing 0.39 to 0.89 |
+
+  No bundle recorded. Against the goals of 9.4e: a few dozen commands, met (9 at most); the
+  interface thread under 1 ms on average in Dalaran, met; no recording while flying, met; the GPU
+  no worse than 9.4d, not quite: the levels chosen for each instance take a tenth to a third of
+  the triangles off and the drawing is faster, but with the computing the models cost the GPU,
+  at these clocks, as much as the path of 9.4c to 0.3 ms more. Seen from five yards: an Orgrimmar
+  Grunt and Kaja with their skins whole (the extra of 9.4e2, after its review).
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

@@ -11,7 +11,7 @@ use uniwow_api::models::{Geosets, Instance, Look, Models};
 use uniwow_api::viewport::View;
 
 use crate::gpu::{Shared, camera_values};
-use crate::layer::{ModelsLayer, Scene};
+use crate::layer::ModelsLayer;
 use crate::loading::Caches;
 use crate::pool;
 use crate::service::Service;
@@ -252,12 +252,10 @@ fn drawn_on(
     let mut refused = Vec::new();
     let ready = crate::load(&shared, &fake, &Caches::default(), &look, &mut refused).unwrap();
     assert!(refused.is_empty(), "{refused:?}");
-    let scene = Arc::new(Mutex::new(Scene {
-        looks: Arc::new(HashMap::from([(id, Arc::new(ready))])),
-        generation: 1,
-        reach: 100.0,
-        ..Scene::default()
-    }));
+    let scene = Arc::new(Mutex::new(crate::tests::scene(
+        &gpu.device,
+        HashMap::from([(id, Arc::new(ready))]),
+    )));
     let layer = ModelsLayer::new(service.clone(), scene.clone(), Arc::new(Mutex::new(Some(shared))));
     let mut bench = Bench {
         gpu: gpu.clone(),

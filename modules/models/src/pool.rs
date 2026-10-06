@@ -82,13 +82,15 @@ pub struct Pool {
     sampler: wgpu::Sampler,
     /// What an empty slot binds: an array of one white texel.
     empty: wgpu::TextureView,
+    /// Whether the GPU counts the draws it packs (`MULTI_DRAW_INDIRECT_COUNT`, not on Direct3D 12).
+    pub count: bool,
     pub(crate) pipelines: Mutex<HashMap<State, Arc<wgpu::RenderPipeline>>>,
 }
 
 impl Pool {
     /// The pool of `device`, its pipelines laid out after `camera`, its arrays `slots`; none when
-    /// the device does not offer the first instance of an indirect draw, storage buffers read by
-    /// vertices, or as many sampled textures a stage as `slots`.
+    /// the device does not offer the first instance of an indirect draw, compute shaders, storage
+    /// buffers read by vertices, eight a stage, or as many sampled textures a stage as `slots`.
     pub fn new(
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
@@ -97,13 +99,15 @@ impl Pool {
         target: &Target,
         slots: usize,
     ) -> Option<Self> {
+        let downlevel = adapter.get_downlevel_capabilities().flags;
         let offered = device.features().contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
-            && adapter
-                .get_downlevel_capabilities()
-                .flags
-                .contains(wgpu::DownlevelFlags::VERTEX_STORAGE)
+            && downlevel.contains(
+                wgpu::DownlevelFlags::VERTEX_STORAGE
+                    | wgpu::DownlevelFlags::COMPUTE_SHADERS
+                    | wgpu::DownlevelFlags::INDIRECT_EXECUTION,
+            )
             && device.limits().max_sampled_textures_per_shader_stage as usize >= slots
-            && device.limits().max_storage_buffers_per_shader_stage >= 3;
+            && device.limits().max_storage_buffers_per_shader_stage >= 8;
         if !offered {
             return None;
         }
@@ -205,6 +209,11 @@ impl Pool {
             target: *target,
             sampler,
             empty,
+            // Direct3D 12 in wgpu 30 does not give a draw counted by the GPU its first instance:
+            // its command signature for `draw_indexed_indirect_count` leaves out the special constants
+            // the other draws are given.
+            count: device.features().contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT)
+                && adapter.get_info().backend != wgpu::Backend::Dx12,
             pipelines: Mutex::default(),
         })
     }
