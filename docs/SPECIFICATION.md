@@ -5296,6 +5296,89 @@ bounds from outside kept.
   4. The blocks of the device held by small buffers: the buffers of instances of the owners in an
      arena, as the vertices are, so that the blocks emptied are given back; to measure first.
 
+#### Step 9.6e, proposed: the water
+
+Asked by the review of 9.6d2, on the plan of 9.6 (the liquids of the tiles and of the buildings,
+meshes by layer and by group, drawn blended in the second phase, their textures turning through
+their frames; the oceans to the edges of a map) and the rule its review added (the water of the
+ground, drawn before all the blended of the scene, whether it writes the depth decided and tested).
+
+**Checked before proposing**, by probes not kept, over the client of `E:`:
+
+- **The water of the tiles** (`MH2O`): in 529 tiles of Azeroth, 746 of Kalimdor, 1,022 of
+  Northrend, two layers a chunk at most. Most of it is ocean (`LiquidType` 2): 86,222 layers of
+  92,219 in Azeroth, 124,647 of 129,611 in Kalimdor, 222,034 of 226,825 in Northrend, of the
+  vertex format 2 (depths only), and most layers have no vertices at all (70,528, 94,944 and
+  201,204 layers), flat at their least height. Then slow water (5, format 0: heights and depths),
+  slow magma (7, format 1: heights and coordinates), the lake of Wintergrasp (81), an orange slime
+  (181) and water (1). 6,073 to 8,516 layers a map name the tiles they cover by a bitmap.
+- **The older water** (`MCLQ`, in the chunks): all of Outland's (61,874 chunks, none of `MH2O`),
+  and 505 chunks of Azeroth: a grid of 9 × 9 vertices, 8 × 8 tiles whose flags say where the
+  liquid lies, its kind by the flags of the chunk (river 0x4, ocean 0x8, magma 0x10, slime 0x20).
+- **`LiquidType.dbc`**: 26 types of 45 fields. Its field 3 is 1 for the waters and oceans of the
+  world, 0 for three waters of instances and the orange slime, 2 for the magmas, 3 for the slimes;
+  their material (`LiquidMaterial.dbc`: 3 records, a vertex format and flags each) 3 for the waters
+  and oceans (format 0), 2 for magma and slime (format 1), 1 for the four others (format 0). The
+  first texture of a water names a file of frames (`lake_a.%d`), that of an ocean a reflection map;
+  the sixth of both the frames of the ocean (`ocean_h.%d`); magma `lava.%d` or one texture, slime
+  `slime.%d`; 30 frames each. The others are those of the detailed procedural water of the client,
+  a setting (`basicReflectionMap`, `basicWaterHeightTex_%d`, `proceduralRiverDepthTex`). The colours
+  of the water are in none of these tables: the client takes them from the light of the map
+  (`LightIntBand`: river and ocean, near and far; `LightFloatBand`: their alpha shallow and deep),
+  which comes with 9.7.
+- **The water of the buildings** (`MLIQ`, read in 9.6c): 406 groups; in 200, the flag 0x4 of the
+  building makes the type of the group a `LiquidType` (1, 3, 4, 5, 7, 8, 14); in the 206 others,
+  the group names 15 and the low nibble of its tiles gives the kind (0, 2, 3, 4, 6, 7), its
+  `LiquidType` to be derived as the public description of the format gives it and checked against
+  the client. 255 vertices a liquid at the median, 29,673 at most.
+
+**In two parts, each reviewed before the next:**
+
+- **9.6e1, the water of the tiles.**
+  - `formats`: the liquids of a tile by a light call, as the placements of `doodads`: `MH2O`, or
+    `MCLQ` in the chunks without it; each layer its `LiquidType`, the tiles it covers in its chunk,
+    its heights (its least height where it has none), its depths and coordinates where its format
+    has them. `LiquidType.dbc` and `LiquidMaterial.dbc` in the tables.
+  - The module `liquids` (World, as this specification names it), steered as `doodads`: the tiles
+    around the camera of the map of `terrain.map` within the distance of the terrain, read by jobs,
+    the nearest first, let go once left; their meshes, by tile and by type, in an arena of
+    `core/api`, told to the budget of the view by bands.
+  - Its layer at a new stage between the ground and the scene (`Stage::Water`), so that the water is
+    drawn after the sky of the terrain and before every blended batch of the scene, whatever the
+    order the modules started in: in the blended phase, tested against the depth and not writing
+    it, so that what lies under its surface, opaque, drawn before it, shows through it.
+  - Its look before the lights of 9.7: the frames of its type's texture turning (at the rate of the
+    client, to measure by captures of the game); water and ocean coloured near and far by the depth
+    of each vertex, their alpha shallow and deep, by fixed values taken from captures of the game at
+    noon, the light of the map to replace them in 9.7; magma and slime by their texture and their
+    coordinates.
+  - Measured over the coasts of Azeroth and of Northrend, Outland and a lake of magma: the frame,
+    the GPU of the layer, the interface thread, the memory.
+- **9.6e2, the water of the buildings**: the liquid of each group by its `LiquidType`, by the rule of
+  the flag 0x4 and of the tiles; handed by `buildings` to `liquids` through a service, an owner a
+  building, as the doodads are handed to `models`; shown only while its group is seen, through the
+  portals from inside. Measured in Stormwind (its canals are of its building) and Dalaran.
+
+**Not in 9.6e**: the reflections, the refraction, the detailed procedural water of the client, the
+waves and flows, the particles and sounds of the liquids, the colours of the light of the map
+(9.7), the editing of the liquids.
+
+**To decide:**
+
+1. The two parts (recommended), or one step.
+2. `liquids` reading the liquids of its tiles itself by a light call (recommended, as `doodads`),
+   or the terrain reading them and sharing them.
+3. A stage of its own for the water between the ground and the scene (recommended), or the water
+   drawn by the layer of the terrain after its sky.
+4. The water not writing the depth (recommended: what lies under it shows; a blended batch under
+   its surface is drawn over it), or writing it.
+5. Magma and slime: blended as the water, or opaque in the opaque phase; to choose from captures of
+   the game (a lake of magma of the Searing Gorge, the slime of Naxxramas).
+6. The ocean past the last tiles of a map: none, the sky shows (recommended for 9.6e), or a plane at
+   the level of the sea to the horizon of the view.
+7. The liquids of the buildings handed to `liquids` (recommended), or drawn by the layer of the
+   buildings in its blended phase, after the blended of the models it follows.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around
