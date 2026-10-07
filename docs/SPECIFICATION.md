@@ -5111,8 +5111,21 @@ the arrays of textures shared and 16-bit indices, the holes of the terrain under
 - **Tested** by 25 changes made on purpose: 23 made a test fail; one, the files let go put back to
   waiting by the steering, is two lines of the module not tested apart; one changed code since
   taken out (the bones of an owner skipped passed over, now never given to the frame).
-- **Not done**: the captures of the game (`jeu.ps1`), the game not running: they need the user to
-  start it and log in.
+- **The captures of the game** (`jeu.ps1`, the user's client connected, its character put back
+  where it stood after), at the same places as the view of the editor: the inn of Goldshire from
+  outside, its door from the porch and from inside, its hall; the trade district of Stormwind;
+  Dalaran, in a hall of the city and at Krasus' Landing. Two differences:
+  1. The light of the view: the editor's is still the light set before the lights of the maps (a
+     sun of 0.55, an ambient light of 0.45, a grey sky), the game's that of its hour (11 h, a blue
+     sky): what is outside is about twice as dark in the editor. To compare again once the lights
+     of the maps are drawn (9.7).
+  2. The insides, much darker in the editor at the same places, which that light does not touch:
+     the floor of the hall of the inn 4 of 255 against 43 in the game, a wall 28 against 92; the
+     hall of Dalaran brown where the game shows it violet. They are lit here by their vertex colours
+     as the fix leaves them, doubled, and the ambient colour of the building, which gives about the
+     colours as read (0.43 for the walls of the hall of the inn): the client lights them more.
+  The transition and the buildings lit as one cannot be told apart through those two differences:
+  kept as built.
 - **Questions:**
   1. The blocks the allocator reserves and does not allocate (about 4 GB in Dalaran at 4 tiles):
      to measure first, from the same report, the size and the allocations of each block, to know
@@ -5121,6 +5134,9 @@ the arrays of textures shared and 16-bit indices, the holes of the terrain under
   2. The steering of `models` walks every group at each frame to tell the budget (1.1 ms in
      Dalaran): the distance of an owner far beyond the reach to keep taken for all its groups, or
      walked again only when the camera moved by a margin.
+  3. The light of the insides: the vertex colours not halved back (twice as bright), the light of
+     the map mixed in as later clients do it, or the lights of the building (`MOLT`, 10 in the inn);
+     to decide with the lights of 9.7, the light of the view then that of the game's hour.
 
 #### Tests
 
