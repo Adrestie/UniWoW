@@ -4901,6 +4901,143 @@ buildings and of the models are sorted within each layer only.
    performance for `UniWoW.exe` during the measure, then set back, which changes a setting of the
    system and needs your leave.
 
+#### Step 9.6d1, as built: the buildings seen from outside
+
+Built without a review between the proposal and the buildings drawn, as the user asked: the
+questions met on the way are noted at the end, with their possibilities, for the review.
+
+- **Shared in `core/api`**: the arena of a buffer of the GPU (`arena`, moved from `models`, its
+  tests with it); the tile of a map (`formats::TileId`, `TILE`, `ORIGIN`), the tiles around the
+  camera (`formats::tiles_around`) and the transform of a placement of a tile
+  (`formats::placement`), moved from `doodads`, which uses them, their tests with them.
+- **The module `buildings`** (category World, using `viewport`, `models` and `formats`), steered as
+  `doodads`: the map of `terrain.map`, its WDT by a job, the tiles around the camera within its
+  distance (1 to 8 tiles, 3 by default) read by jobs, the nearest first, as many at once as the
+  workers but one; a building kept by its unique id while a tile listing it is held (`keeping`);
+  each file read once by a job for all its placements, dropped when no building kept has it.
+- **A file on the GPU** (`gpu`): its vertex colours fixed as the client fixes them (`colours`), its
+  groups one after the other in the arena of the vertices (40 bytes each: position, normal, both
+  sets of coordinates and of colours) and their indices in that of the indices (32 bits, after the
+  vertices before them), its materials in a table, their textures in arrays of `core/api` (64 a
+  stage, their own); its ranges given back when it is dropped. What the buildings hold on the GPU
+  told to the budget of the view, as a fixed cost.
+- **The layer**, at the stage of the scene, drawn in the pass: at each frame, each placement tested
+  by its bounds against the sides of the view, then each of its groups by its own; the batches of
+  the groups in sight listed as indirect draws, their entry (the placement, the material, the
+  flags of the group and the kind of the batch) read by their instance index; the opaque and
+  alpha-keyed ones in the opaque phase by state (blending, two sides), the others in the blended
+  phase from the farthest group; a `multi_draw_indexed_indirect` for each run of one state. Drawn
+  only on a device offering the first instance of an indirect draw, storage buffers read by
+  vertices and 64 textures a stage.
+- **The shading** (`buildings.wgsl`): the pixel shaders of 3.3.5a combined in gamma (diffuse,
+  specular and metal as diffuse, environment and environment metal adding the second texture
+  mapped on the environment by the alpha of the first, opaque, two layers blending the second
+  texture by the alpha of the second colours); held to their edges as their flags say. A batch is
+  lit by its kind, as the three counts of its group give it: outside by the sun and the ambient
+  light of the view, inside by its vertex colours doubled back and the ambient colour of its
+  building, of a transition by both, blended by the alpha the fix leaves; a material lit as
+  outside wholly outside, an unlit one not lit; every batch of a building lit as one (its flag 0x2)
+  lit as outside. An opaque batch keeps every pixel, the alpha of its textures a mask of their own;
+  an alpha-keyed one those over its key, both written opaque. Fogged as the models are, but where
+  unfogged.
+- **Their doodads** (`doodads`), through `models`, an owner a building
+  (`buildings/<map>/<unique id>`): its set 0 and the set its placement names when another, each at
+  the transform of the building times its own (its position, its quaternion as the file gives it,
+  which Noggit converts then inverts to the same, its scale), placed by a job and taken away as
+  `doodads` takes its tiles away, under a lock.
+- **The memory on the CPU** (asked by the review of 9.6b): `models` says on a line of its own what
+  the models it holds keep there, each once (their skins and the rest, their animations, counted
+  from their lists); `buildings` what its files keep.
+- **Tests**: a building listed by several tiles kept once, and let go when no tile lists it; the
+  vertex colours fixed as the client fixes them (the transition darkened, the others brightened,
+  the flags 0x2 and 0x8, held to a byte); the groups of a file one after the other; a box in sight
+  of the view, across it and along it; the doodads of the set 0 and of the set named, at the
+  building's transform times their own, placed while the building is kept and taken away after;
+  the CPU a model keeps. Drawn on the software adapter: a square seen from its front, its back
+  culled but where two-sided; lit inside by its vertex colours, outside by the sun; a batch outside
+  of a group inside lit by the sun, a transition by its colours; a building lit as one lit as
+  outside; an opaque batch keeping the pixels its texture's alpha leaves out, an alpha-keyed one
+  not; the opaque batches by state, the blended from the farthest. Of 31 changes made on purpose
+  to the module and to the count of `models`, every one made a test fail; one more, on a test of
+  the doubles of a tile, showed the code it changed to change nothing, and that code was taken
+  out.
+- **Seen on the user's machine**: Goldshire, its inn and its smithy; Stormwind from above its gates,
+  its walls, bridge, statues and cathedral, its trade and mage quarters near, their roofs, walls
+  and streets; the doodads of the tiles and of the buildings among them.
+- **Measured on the user's machine**, the worldserver of `E:` running, observed only, with the
+  script of 9.4d, run after run with the module, without it, with it again, the buildings and the
+  terrain at 3 tiles, the doodads at 2, the GPU at its low clock (354 to 586 MHz on average):
+
+  | Place | View, interface (ms) | Buildings: in sight of kept, groups, batches | Their GPU (MB, ms) | `models` on the interface (ms) | Private memory (GB) |
+  |---|---|---|---|---|---|
+  | Stormwind | 0.73 to 0.75 against 0.39 to 0.40 | 13 to 16 of 90, 72 to 161 groups, 826 to 1,527 | 290 to 301, 0.60 to 0.84 | 0.80 to 0.86 against 0.38 | 3.4 to 3.7 against 2.2 |
+  | Orgrimmar | 0.63 to 0.70 against 0.43 to 0.45 | 1 of 98 to 147, 24 to 73, 416 to 792 | 220 to 226, 0.26 to 0.65 | 0.71 to 0.89 against 0.46 to 0.51 | 3.1 to 3.2 against 2.5 to 2.6 |
+  | Shattrath | 0.79 to 0.82 against 0.47 to 0.49 | 1 of 281 to 308, 6 to 10, 176 to 254 | 204, 0.27 to 0.43 | 1.14 to 1.23 against 0.65 to 0.68 | 3.8 to 4.1 against 2.4 to 2.8 |
+  | Dalaran | 0.91 to 1.07 against 0.48 to 0.54 | 15 to 16 of 226 to 241, 45 to 98, 602 to 1,518 | 405 to 416, 0.23 to 0.84 | 1.49 to 1.70 against 0.72 to 0.79 | 5.3 to 5.9 against 3.1 |
+  | Dalaran, 4 tiles | 1.09 to 1.22 against 0.51 to 0.55 | 18 of 406, 50 to 105, 671 to 1,595 | 591 to 601, 0.64 to 0.90 | 1.79 to 1.97 against 0.71 to 0.79 | 6.3 to 8.2 against 3.7 |
+
+  The layer of the buildings takes 0.08 to 0.14 ms of the interface thread; the rest of what it
+  adds is in `models`, whose groups the doodads of the buildings make 2.5 times as many (5,007 to
+  5,373 against 1,886 to 1,934 in Dalaran at 4 tiles): the remedy of the review of 9.6b, the bounds
+  of an owner tested before its groups, is now worth weighing. The frame on the GPU alike within
+  its noise. The memory on the CPU by its parts (the review of 9.6b): the models held 12 to 35 MB,
+  their animations 56 to 126 MB, the models of the tiles of the terrain 142 to 286 MB, the files
+  of the buildings 0.6 to 2 MB; the private memory of the process grows by 0.5 to 4.5 GB while
+  its working set grows by 0.1 GB: the surplus is not the data the modules keep but memory
+  committed and not touched, likely the buffers each upload makes (`create_buffer_init` for each
+  range of an arena and each texture) kept by the driver; to measure apart, a belt of staging
+  reused being the remedy. The buildings of the 15 to 61 tiles around the middle of a map drawn
+  in 0.2 to 0.6 s.
+- **Decided while building, without a review** (the user asked to go on to the buildings drawn):
+  the four points of the proposal taken as recommended: 9.6d1 first, the portals in 9.6d2; the
+  transform of a placement, the choice of the tiles and the arena moved to `core/api` (the keeping
+  by unique id written apart in `buildings`, simpler than that of `doodads`: an owner a building,
+  no doodad handed on); the distance 1 to 8 tiles, 3 by default; no setting of the system changed
+  for the clock of the GPU.
+- **Found by the first sight of the buildings**, and corrected:
+  - the outer walls of the rooms of a building are batches outside in groups inside (the hall of
+    the inn of Goldshire: no batch of transition, 6 inside, 1 outside): lit as inside by their
+    vertex colours brightened, they were white. A batch is lit by its kind, as the three counts of
+    its group give it: outside by the sun, inside by the vertex colours, of a transition by both;
+  - the alpha of the textures of the buildings is a mask (a third of the texels of the walls and
+    roofs of Stormwind at 0): an opaque batch tested by it showed the sky through its holes, white
+    and speckled. An opaque batch keeps every pixel, an alpha-keyed one tests its key, both written
+    opaque;
+  - the 162 buildings lit as one (0x2), Stormwind among them (its flags 0xF), have vertex colours
+    nearly black (1 to 8 of 255 on average) and not fixed: their insides were black from outside.
+    Every batch of such a building is lit as outside.
+- **Questions noted while building, with their possibilities:**
+  1. The light inside: the vertex colours (fixed, doubled back) and the ambient colour of the
+     building, the light outside the sun and the ambient light of the view, a transition blended by
+     the alpha the fix leaves, a material lit as outside (0x8) wholly outside; after the public
+     description and the shaders of later clients. To compare with the client in the same places,
+     by captures of the game (`jeu.ps1`) if you allow it.
+  2. The buildings lit as one (0x2): lit as outside here; what the client of 3.3.5a does with them
+     is to check (they may come from a later client, through the HD files of `E:`).
+  3. The models test the alpha of their opaque batches against 1/255, as the buildings did: a
+     model whose texture's alpha is a mask may show holes too; to check on the doodads.
+  4. The shaders specular (1) and metal (2) drawn as diffuse, their highlight left out: it needs
+     the light of the map, step 9.7.
+  5. Environment (3) and environment metal (5): the second texture, mapped on the environment as
+     the models map it, added by the alpha of the first; the exact weights of 3.3.5a to check.
+  6. Two layers (6): the second texture under the first by the alpha of the second colours; the
+     order to check on one of the 31 groups that have them.
+  7. The alpha key at 224/255, as the models test it; the client's for the buildings to check.
+  8. The faces culled as those of the models; the diffuse colour, the glow at night (`sidn`) and
+     the flag of a window not used.
+  9. The budget of the view: the buildings tell what they hold, a fixed cost; they do not limit
+     their loads by what the budget allows (possibility: by bands of distance, as the terrain).
+  10. The device: drawn only where the models draw by their pool (the first instance of an
+      indirect draw, storage buffers read by vertices, 64 textures a stage); no path for the
+      others.
+  11. Their own arrays of textures: a texture both a model and a building use is held twice
+      (possibility: arrays shared in `core/api`).
+  12. The vertices 40 bytes, the indices 32 bits (16 would halve them, a base vertex a group).
+  13. The doodads of the sets placed whatever group is seen (the portals of 9.6d2 to show those of
+      the groups seen only); their colour (`MODD`) not used, with the lights (9.7).
+  14. Where the terrain has holes under a building and a group of it is not drawn, the clear colour
+      of the view shows, black, below the horizon of the sky.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around
