@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 use std::ops::Range;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use uniwow_api::arena::Arena;
+use uniwow_api::arena::{Arena, Refusal};
 use uniwow_api::formats::{FileRef, Formats, LiquidTypeRecord};
 use uniwow_api::texture_arrays::{Placed, TextureArrays};
 use uniwow_api::viewport::{Target, View};
@@ -365,10 +365,16 @@ impl Shared {
     pub fn bytes(&self) -> u64 {
         self.vertices.bytes().0 + self.indices.bytes().0 + self.arrays.bytes() + self.table.size()
     }
+
+    /// The ranges given back by the arenas since they were made.
+    pub fn given(&self) -> u64 {
+        self.vertices.given() + self.indices.given()
+    }
 }
 
 /// The liquids of a tile on the GPU: its vertices, the indices of its water and those of its magma
-/// and slime, each a range of the arena of the indices, and where its vertices begin.
+/// and slime, each a range of the arena of the indices, and where its vertices begin; what it takes
+/// in each arena, the vertices' then the indices'.
 pub struct TileGpu {
     shared: Arc<Shared>,
     vertices: Range<u64>,
@@ -377,6 +383,7 @@ pub struct TileGpu {
     pub water: Range<u32>,
     pub opaque: Range<u32>,
     pub bytes: u64,
+    pub arenas: [u64; 2],
 }
 
 impl Drop for TileGpu {
@@ -387,7 +394,7 @@ impl Drop for TileGpu {
 }
 
 /// `meshes` put on the GPU of `shared`; none when they hold nothing.
-pub fn upload(shared: &Arc<Shared>, meshes: &Meshes) -> Result<Option<TileGpu>, String> {
+pub fn upload(shared: &Arc<Shared>, meshes: &Meshes) -> Result<Option<TileGpu>, Refusal> {
     if meshes.water.is_empty() && meshes.opaque.is_empty() {
         return Ok(None);
     }
@@ -397,7 +404,7 @@ pub fn upload(shared: &Arc<Shared>, meshes: &Meshes) -> Result<Option<TileGpu>, 
         Ok(range) => range,
         Err(reason) => {
             shared.vertices.give(vertices);
-            return Err(reason);
+            return Err(reason.into());
         }
     };
     let first = indices.start as u32;
@@ -408,6 +415,10 @@ pub fn upload(shared: &Arc<Shared>, meshes: &Meshes) -> Result<Option<TileGpu>, 
         opaque: water.end..water.end + meshes.opaque.len() as u32,
         water,
         bytes: (meshes.vertices.len() * size_of::<Vertex>() + all.len() * 4) as u64,
+        arenas: [
+            (meshes.vertices.len() * size_of::<Vertex>()) as u64,
+            all.len() as u64 * 4,
+        ],
         vertices,
         indices,
     }))

@@ -1,17 +1,20 @@
-//! Tests of the liquids: their meshes and the surfaces of their water, the frames of a type, and,
-//! on the software adapter of the system when it has one, the water drawn over the magma under it,
-//! a blended batch under its surface seen through it and one over it drawn over it, from over the
-//! water and from under it, the water writing no depth.
+//! Tests of the liquids: their meshes, flat layers by rectangles, and the surfaces of their water,
+//! the frames of a type, the tiles read and let go; and, on the software adapter of the system when
+//! it has one, a tile read giving the water over it by its place in the world, a tile refused for
+//! want of room put on the GPU once a range is given back, the water
+//! drawn over the magma under it, a blended batch under its surface seen through it and one over it
+//! drawn over it, from over the water and from under it, the water writing no depth.
 
 use std::future::Future;
 use std::pin::pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
+use uniwow_api::arena::Refusal;
 use uniwow_api::formats::{
     AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef,
-    Formats, GameObjectDisplay, HairGeoset, LIQUID_SIDE, LiquidLayer, LiquidTypeRecord, MapRecord, Model, Texture,
-    TextureFormat, Tile, Wdl, Wdt, Wmo,
+    Formats, GameObjectDisplay, HairGeoset, LIQUID_SIDE, LiquidLayer, LiquidTypeRecord, MapRecord, Model, ORIGIN, TILE,
+    Texture, TextureFormat, Tile, TileId, Wdl, Wdt, Wmo,
 };
 use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::liquids::{CELL, Surfaces};
@@ -65,12 +68,9 @@ fn a_layer_is_two_triangles_a_tile_it_covers_its_water_giving_the_height_of_its_
     assert_eq!(meshes.opaque[..3], [81 + 70, 81 + 71, 81 + 80]);
     assert_eq!(meshes.vertices[81].uv, [0.5, 0.25], "its own coordinates");
     assert_eq!(meshes.vertices[81].slot, 1);
-    // The surfaces of the water alone, a tile each.
-    let mut surfaces = Surfaces::default();
-    for (cell, height) in &meshes.surfaces {
-        surfaces.add(*cell, *height);
-    }
-    assert_eq!(surfaces.len(), 2);
+    // The surfaces of the water alone, a cell each.
+    assert_eq!(meshes.surfaces.len(), 2);
+    let surfaces = Surfaces::from_cells(meshes.surfaces.iter().copied());
     let middle = |row: f32, column: f32| (100.0 - (row + 0.5) * CELL, 200.0 - (column + 0.5) * CELL);
     let (x, y) = middle(0.0, 0.0);
     assert_eq!(surfaces.surface(x, y), Some(4.0));
@@ -80,6 +80,84 @@ fn a_layer_is_two_triangles_a_tile_it_covers_its_water_giving_the_height_of_its_
     assert_eq!(surfaces.surface(x, y), None, "a tile not covered");
     let (x, y) = middle(7.0, 7.0);
     assert_eq!(surfaces.surface(x, y), None, "magma is no water");
+}
+
+#[test]
+fn a_flat_layer_is_a_quad_for_each_rectangle_of_the_cells_it_covers() {
+    assert_eq!(mesh::rectangles(u64::MAX), [[0, 0, 8, 8]]);
+    // Two rows of two, then one cell, then a run of two under it: three rectangles.
+    let bits = |cells: &[(usize, usize)]| {
+        cells
+            .iter()
+            .fold(0u64, |bits, (row, column)| bits | 1 << (row * 8 + column))
+    };
+    let cells = bits(&[(0, 0), (0, 1), (1, 0), (1, 1), (2, 4), (3, 4), (3, 5)]);
+    assert_eq!(mesh::rectangles(cells), [[0, 0, 2, 2], [2, 4, 1, 1], [3, 4, 1, 2]]);
+    assert_eq!(mesh::rectangles(0), Vec::<[usize; 4]>::new());
+    let kind = |liquid: u16| (liquid == 2).then_some((0, true));
+    // An ocean without vertices, over all its chunk: a quad, its 64 cells at its height.
+    let ocean = mesh::meshes(&[layer(2, [100.0, 200.0], -1.0, u64::MAX, 255)], kind);
+    assert_eq!(
+        (ocean.vertices.len(), ocean.water.as_slice()),
+        (4, [0, 1, 2, 0, 2, 3].as_slice())
+    );
+    assert_eq!(
+        ocean.vertices.iter().map(|vertex| vertex.position).collect::<Vec<_>>(),
+        [
+            [100.0, 200.0, -1.0],
+            [100.0, 200.0 - 8.0 * CELL, -1.0],
+            [100.0 - 8.0 * CELL, 200.0 - 8.0 * CELL, -1.0],
+            [100.0 - 8.0 * CELL, 200.0, -1.0]
+        ]
+    );
+    assert_eq!((ocean.vertices[2].uv, ocean.vertices[2].depth), ([2.0, 2.0], 1.0));
+    assert_eq!(ocean.surfaces.len(), 64);
+    assert!(ocean.surfaces.iter().all(|(_, height)| *height == -1.0));
+    // Partly covered: a quad a rectangle.
+    let shore = mesh::meshes(&[layer(2, [100.0, 200.0], -1.0, cells, 255)], kind);
+    assert_eq!(
+        (shore.vertices.len(), shore.water.len(), shore.surfaces.len()),
+        (12, 18, 7)
+    );
+    // A depth apart: its 9 × 9 vertices.
+    let mut deep = layer(2, [100.0, 200.0], -1.0, u64::MAX, 255);
+    deep.depths[40] = 10;
+    let deep = mesh::meshes(&[deep], kind);
+    assert_eq!((deep.vertices.len(), deep.water.len()), (81, 384));
+}
+
+#[test]
+fn the_tiles_are_read_within_the_budget_and_the_room_of_the_arenas_and_let_go_beyond() {
+    use crate::Stand::{Held, NoRoom, Reading, Waiting};
+    let tile = |x| TileId { x, y: 0 };
+    let wanted = [
+        (tile(0), 0.0, Held),
+        (tile(1), 100.0, Reading),
+        (tile(2), 200.0, NoRoom),
+        (tile(3), 300.0, Waiting),
+        (tile(4), 400.0, Waiting),
+        (tile(5), 500.0, Held),
+        (tile(6), 600.0, Waiting),
+    ];
+    let all = [f32::INFINITY; 2];
+    let steps = |budget, room, slots| crate::steps(&wanted, budget, room, slots);
+    assert_eq!(
+        steps(all, all, 9),
+        (vec![tile(3), tile(4), tile(6)], vec![]),
+        "all, but the tile waiting for room"
+    );
+    assert_eq!(
+        steps(all, all, 3),
+        (vec![tile(3), tile(4)], vec![]),
+        "one being read already"
+    );
+    // The budget lets load to 400 and keep to 450: tile 5 let go.
+    assert_eq!(steps([400.0, 450.0], all, 9), (vec![tile(3), tile(4)], vec![tile(5)]));
+    // The arenas have room to load before 400 and to keep before 500.
+    assert_eq!(steps(all, [400.0, 500.0], 9), (vec![tile(3)], vec![tile(5)]));
+    // Room to keep only before 100: the tile being read let go, and its slot free again.
+    assert_eq!(steps(all, [50.0, 100.0], 1), (vec![], vec![tile(1), tile(5)]));
+    assert_eq!(steps(all, [400.0, 100.0], 1), (vec![tile(3)], vec![tile(1), tile(5)]));
 }
 
 fn record(id: u32, kind: u32, material: u32, texture: &str) -> LiquidTypeRecord {
@@ -127,6 +205,17 @@ struct Liquid;
 impl Formats for Liquid {
     fn maps(&self) -> Result<Arc<Vec<MapRecord>>, String> {
         Err("none".to_owned())
+    }
+    fn liquid_types(&self) -> Result<Arc<Vec<LiquidTypeRecord>>, String> {
+        Ok(Arc::new(vec![
+            record(5, 1, 3, r"XTextures\procWater\basicReflectionMap.blp"),
+            record(7, 2, 2, r"XTextures\lava\magma0.blp"),
+        ]))
+    }
+    /// A slow water at 2.5 over the first chunk of the tile, flat.
+    fn liquids(&self, _directory: &str, x: u32, y: u32) -> Result<Option<Vec<LiquidLayer>>, String> {
+        let corner = [ORIGIN - y as f32 * TILE, ORIGIN - x as f32 * TILE];
+        Ok(Some(vec![layer(5, corner, 2.5, u64::MAX, 0)]))
     }
     fn areas(&self) -> Result<Arc<Vec<AreaRecord>>, String> {
         Err("none".to_owned())
@@ -197,6 +286,11 @@ fn resolved<F: Future>(future: F) -> Option<F::Output> {
 
 /// A device of the software adapter of the system; or none.
 fn device() -> Option<egui_wgpu::RenderState> {
+    device_with(wgpu::Limits::default().max_buffer_size)
+}
+
+/// A device of the software adapter of the system, its buffers of `largest` bytes at most; or none.
+fn device_with(largest: u64) -> Option<egui_wgpu::RenderState> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = resolved(instance.request_adapter(&wgpu::RequestAdapterOptions {
         force_fallback_adapter: true,
@@ -205,6 +299,7 @@ fn device() -> Option<egui_wgpu::RenderState> {
     .ok()?;
     let mut limits = wgpu::Limits::default();
     limits.max_sampled_textures_per_shader_stage = adapter.limits().max_sampled_textures_per_shader_stage.min(128);
+    limits.max_buffer_size = largest;
     let (device, queue) = resolved(adapter.request_device(&wgpu::DeviceDescriptor {
         required_limits: limits,
         ..Default::default()
@@ -427,15 +522,57 @@ fn bench(gpu: &egui_wgpu::RenderState, layers: &[LiquidLayer]) -> (LiquidsLayer,
         Some((shared.slot(&Liquid, record)?, mesh::is_water(record.kind)))
     });
     let tile = gpu::upload(&shared, &meshes).unwrap().map(Arc::new);
-    let mut surfaces = Surfaces::default();
-    for (cell, height) in &meshes.surfaces {
-        surfaces.add(*cell, *height);
-    }
+    let surfaces = Surfaces::from_cells(meshes.surfaces.iter().copied());
     let scene = Arc::new(Mutex::new(Scene {
         tiles: tile.into_iter().collect(),
         ..Scene::default()
     }));
     (LiquidsLayer::new(shared, scene), surfaces)
+}
+
+#[test]
+fn a_tile_read_gives_the_water_over_it_by_its_place_in_the_world() {
+    let Some(gpu) = device() else {
+        eprintln!("skipped: no software adapter for a device");
+        return;
+    };
+    let shared = Arc::new(Shared::new(&gpu, &TARGET).expect("the liquids on the device"));
+    let tile = TileId { x: 31, y: 49 };
+    let held = crate::read(&Liquid, &shared, "Azeroth", tile).unwrap();
+    assert_eq!(
+        held.gpu.as_ref().map(|gpu| (gpu.water.len(), gpu.opaque.len())),
+        Some((6, 0))
+    );
+    let surfaces = crate::surfaces(&std::collections::HashMap::from([(tile, held)]));
+    let corner = [ORIGIN - 49.0 * TILE, ORIGIN - 31.0 * TILE];
+    assert_eq!(surfaces.surface(corner[0] - 1.0, corner[1] - 1.0), Some(2.5));
+    assert_eq!(
+        surfaces.surface(corner[0] - 1.0, corner[1] - CELL * 8.0 - 1.0),
+        None,
+        "the chunk beside"
+    );
+}
+
+#[test]
+fn a_tile_refused_for_want_of_room_is_put_on_the_gpu_once_a_range_is_given_back() {
+    // Buffers of 32 KB: 1,170 vertices; twelve layers of 9 × 9 vertices hold, not 24.
+    let Some(gpu) = device_with(32 << 10) else {
+        eprintln!("skipped: no software adapter for a device");
+        return;
+    };
+    let shared = Arc::new(Shared::new(&gpu, &TARGET).expect("the liquids on the device"));
+    let mut uneven = layer(5, [100.0, 100.0], 0.0, u64::MAX, 0);
+    uneven.depths[40] = 255;
+    let tile = mesh::meshes(&vec![uneven; 12], |_| Some((0, true)));
+    let first = gpu::upload(&shared, &tile).unwrap().unwrap();
+    let given = shared.given();
+    assert!(
+        matches!(gpu::upload(&shared, &tile), Err(Refusal::NoRoom(_))),
+        "no room for a second"
+    );
+    drop(first);
+    assert_eq!(shared.given(), given + 2, "its vertices and its indices given back");
+    assert!(gpu::upload(&shared, &tile).unwrap().is_some(), "room made");
 }
 
 #[test]

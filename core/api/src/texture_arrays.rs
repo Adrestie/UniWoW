@@ -260,7 +260,7 @@ impl TextureArrays {
                 Ok(placed)
             }
             Err(Refused::Unreadable(reason)) => {
-                log::warn!("a texture of {} is left out: {reason}", self.owner);
+                log::warn!("a texture of {} is left out, drawn white: {reason}", self.owner);
                 *entry = Entry::Unreadable(reason.clone());
                 self.unreadable.fetch_add(1, Ordering::AcqRel);
                 Err(Refused::Unreadable(reason))

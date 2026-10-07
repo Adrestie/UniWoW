@@ -66,6 +66,10 @@ const WANTED: wgpu::Features = wgpu::Features::TEXTURE_COMPRESSION_BC
 /// them: the models read their arrays of textures by 64 slots.
 const SAMPLED_TEXTURES: u32 = 128;
 
+/// The largest buffer asked for, and the largest bound for storage, where the adapter takes them:
+/// the arenas of vertices of a few cities pass the 256 MB of the defaults.
+const LARGEST_BUFFER: u64 = 2 << 30;
+
 /// The blocks of memory of the device its allocator places the buffers and textures in, from the
 /// first to the largest: with the 256 MB of `MemoryHints::Performance`, a few small buffers held
 /// long kept gigabytes reserved.
@@ -73,8 +77,8 @@ const MEMORY_BLOCKS: std::ops::Range<u64> = (32 << 20)..(128 << 20);
 
 /// The device as `default` asks for it, with what `WANTED` names when the adapter offers it; as
 /// many layers in an array of textures as the adapter takes (the terrain keeps its textures in
-/// arrays, 256 layers each by default); up to `SAMPLED_TEXTURES` textures a stage; and its memory
-/// in blocks of `MEMORY_BLOCKS`.
+/// arrays, 256 layers each by default); up to `SAMPLED_TEXTURES` textures a stage; buffers and
+/// storage bindings up to `LARGEST_BUFFER`; and its memory in blocks of `MEMORY_BLOCKS`.
 fn with_features(default: DeviceDescriptor) -> DeviceDescriptor {
     Arc::new(move |adapter| {
         let mut descriptor = default(adapter);
@@ -88,6 +92,10 @@ fn with_features(default: DeviceDescriptor) -> DeviceDescriptor {
         limits.max_sampled_textures_per_shader_stage = limits
             .max_sampled_textures_per_shader_stage
             .max(offered.max_sampled_textures_per_shader_stage.min(SAMPLED_TEXTURES));
+        limits.max_buffer_size = limits.max_buffer_size.max(offered.max_buffer_size.min(LARGEST_BUFFER));
+        limits.max_storage_buffer_binding_size = limits
+            .max_storage_buffer_binding_size
+            .max(offered.max_storage_buffer_binding_size.min(LARGEST_BUFFER));
         descriptor
     })
 }
@@ -100,7 +108,7 @@ mod tests {
 
     use uniwow_api::wgpu;
 
-    use super::{MEMORY_BLOCKS, SAMPLED_TEXTURES, WANTED, with_features};
+    use super::{LARGEST_BUFFER, MEMORY_BLOCKS, SAMPLED_TEXTURES, WANTED, with_features};
 
     fn resolved<F: Future>(future: F) -> Option<F::Output> {
         match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
@@ -139,6 +147,18 @@ mod tests {
                 .limits()
                 .max_sampled_textures_per_shader_stage
                 .min(SAMPLED_TEXTURES)
+        );
+        let offered = adapter.limits();
+        assert_eq!(
+            (
+                descriptor.required_limits.max_buffer_size,
+                descriptor.required_limits.max_storage_buffer_binding_size
+            ),
+            (
+                offered.max_buffer_size.clamp(256 << 20, LARGEST_BUFFER),
+                offered.max_storage_buffer_binding_size.clamp(128 << 20, LARGEST_BUFFER)
+            ),
+            "the buffers the adapter takes, 2 GB at most"
         );
         assert!(
             matches!(

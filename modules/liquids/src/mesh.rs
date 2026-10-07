@@ -1,6 +1,8 @@
 //! The meshes of the liquids of a tile and the surfaces of its water: each layer's vertices in the
-//! world, two triangles for each tile of its chunk it covers, those of water apart from those of
-//! magma and slime; and the height of the water over each tile it covers, the mean of its corners.
+//! world, those of water apart from those of magma and slime; and the height of the water over each
+//! cell it covers, the mean of its corners. A layer whose vertices are all at one height and one
+//! depth, its coordinates those by default, as are those without vertices, is drawn by a quad for
+//! each rectangle of the cells it covers; another by two triangles a cell over its 9 × 9 vertices.
 
 use uniwow_api::formats::{LIQUID_SIDE, LiquidLayer};
 use uniwow_api::liquids::{CELL, Surfaces};
@@ -30,13 +32,62 @@ unsafe impl uniwow_api::bytemuck::Zeroable for Vertex {}
 unsafe impl uniwow_api::bytemuck::Pod for Vertex {}
 
 /// The meshes of the liquids of a tile: their vertices, the indices of the water and those of the
-/// magma and slime into them, and the tiles of water with their heights.
+/// magma and slime into them, and the cells of water with their heights.
 #[derive(Debug, Default, PartialEq)]
 pub struct Meshes {
     pub vertices: Vec<Vertex>,
     pub water: Vec<u32>,
     pub opaque: Vec<u32>,
     pub surfaces: Vec<([i32; 2], f32)>,
+}
+
+/// Whether every vertex of `layer` is at one height and one depth, its coordinates those by
+/// default.
+fn is_flat(layer: &LiquidLayer) -> bool {
+    let same = |values: &[f32]| values.iter().all(|value| *value == values[0]);
+    layer.coordinates.is_empty()
+        && !layer.heights.is_empty()
+        && same(&layer.heights)
+        && layer.depths.iter().all(|depth| Some(depth) == layer.depths.first())
+}
+
+/// The rectangles of the cells `cells` covers, a bit a cell row by row, each its first row and
+/// column and its rows and columns: the runs of each row, each joined to the same run of the row
+/// before.
+pub fn rectangles(cells: u64) -> Vec<[usize; 4]> {
+    let covered = |row: usize, column: usize| cells >> (row * 8 + column) & 1 != 0;
+    let mut done = Vec::new();
+    let mut open: Vec<[usize; 4]> = Vec::new();
+    for row in 0..8 {
+        let mut next = Vec::new();
+        let mut column = 0;
+        while column < 8 {
+            if !covered(row, column) {
+                column += 1;
+                continue;
+            }
+            let start = column;
+            while column < 8 && covered(row, column) {
+                column += 1;
+            }
+            let length = column - start;
+            match open
+                .iter()
+                .position(|rectangle| rectangle[1] == start && rectangle[3] == length)
+            {
+                Some(at) => {
+                    let mut rectangle = open.swap_remove(at);
+                    rectangle[2] += 1;
+                    next.push(rectangle);
+                }
+                None => next.push([row, start, 1, length]),
+            }
+        }
+        done.append(&mut open);
+        open = next;
+    }
+    done.append(&mut open);
+    done
 }
 
 /// The meshes of `layers`, each layer's type given its slot in the table and whether it is water
@@ -47,46 +98,75 @@ pub fn meshes(layers: &[LiquidLayer], kind: impl Fn(u16) -> Option<(u32, bool)>)
         let Some((slot, water)) = kind(layer.liquid) else {
             continue;
         };
-        let base = meshes.vertices.len() as u32;
-        for row in 0..LIQUID_SIDE {
-            for column in 0..LIQUID_SIDE {
-                let at = row * LIQUID_SIDE + column;
-                meshes.vertices.push(Vertex {
-                    position: [
-                        layer.corner[0] - row as f32 * CELL,
-                        layer.corner[1] - column as f32 * CELL,
-                        layer.heights.get(at).copied().unwrap_or_default(),
-                    ],
-                    // Two repeats of a texture a chunk, where the layer gives no coordinates.
-                    uv: layer
-                        .coordinates
-                        .get(at)
-                        .copied()
-                        .unwrap_or([column as f32 / 4.0, row as f32 / 4.0]),
-                    depth: f32::from(layer.depths.get(at).copied().unwrap_or(255)) / 255.0,
-                    slot,
-                });
+        // The vertex at `row` and `column` of the layer's grid.
+        let vertex = |row: usize, column: usize| {
+            let at = row * LIQUID_SIDE + column;
+            Vertex {
+                position: [
+                    layer.corner[0] - row as f32 * CELL,
+                    layer.corner[1] - column as f32 * CELL,
+                    layer.heights.get(at).copied().unwrap_or_default(),
+                ],
+                // Two repeats of a texture a chunk, where the layer gives no coordinates.
+                uv: layer
+                    .coordinates
+                    .get(at)
+                    .copied()
+                    .unwrap_or([column as f32 / 4.0, row as f32 / 4.0]),
+                depth: f32::from(layer.depths.get(at).copied().unwrap_or(255)) / 255.0,
+                slot,
+            }
+        };
+        let indices = if water { &mut meshes.water } else { &mut meshes.opaque };
+        if is_flat(layer) {
+            for [row, column, rows, columns] in rectangles(layer.tiles) {
+                let base = meshes.vertices.len() as u32;
+                meshes.vertices.extend([
+                    vertex(row, column),
+                    vertex(row, column + columns),
+                    vertex(row + rows, column + columns),
+                    vertex(row + rows, column),
+                ]);
+                indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+            }
+        } else {
+            let base = meshes.vertices.len() as u32;
+            for row in 0..LIQUID_SIDE {
+                for column in 0..LIQUID_SIDE {
+                    meshes.vertices.push(vertex(row, column));
+                }
+            }
+            for row in 0..8 {
+                for column in 0..8 {
+                    if layer.tiles >> (row * 8 + column) & 1 == 0 {
+                        continue;
+                    }
+                    let corner = |r: usize, c: usize| base + (r * LIQUID_SIDE + c) as u32;
+                    let [a, b, c, d] = [
+                        corner(row, column),
+                        corner(row, column + 1),
+                        corner(row + 1, column + 1),
+                        corner(row + 1, column),
+                    ];
+                    indices.extend([a, b, c, a, c, d]);
+                }
             }
         }
-        let indices = if water { &mut meshes.water } else { &mut meshes.opaque };
-        for row in 0..8 {
-            for column in 0..8 {
-                if layer.tiles >> (row * 8 + column) & 1 == 0 {
-                    continue;
-                }
-                let corner = |r: usize, c: usize| base + (r * LIQUID_SIDE + c) as u32;
-                let [a, b, c, d] = [
-                    corner(row, column),
-                    corner(row, column + 1),
-                    corner(row + 1, column + 1),
-                    corner(row + 1, column),
-                ];
-                indices.extend([a, b, c, a, c, d]);
-                if water {
-                    let height = [a, b, c, d]
-                        .iter()
-                        .map(|index| meshes.vertices[*index as usize].position[2])
-                        .sum::<f32>()
+        if water {
+            for row in 0..8 {
+                for column in 0..8 {
+                    if layer.tiles >> (row * 8 + column) & 1 == 0 {
+                        continue;
+                    }
+                    let height = [
+                        (row, column),
+                        (row, column + 1),
+                        (row + 1, column + 1),
+                        (row + 1, column),
+                    ]
+                    .iter()
+                    .map(|(r, c)| vertex(*r, *c).position[2])
+                    .sum::<f32>()
                         / 4.0;
                     let x = layer.corner[0] - (row as f32 + 0.5) * CELL;
                     let y = layer.corner[1] - (column as f32 + 0.5) * CELL;

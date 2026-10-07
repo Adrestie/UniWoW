@@ -101,7 +101,7 @@ pub fn model(pool: &Arc<Pool>, formats: &dyn Formats, file: &FileRef) -> Result<
         Ok(range) => range,
         Err(why) => {
             pool.vertices.give(vertex_range);
-            return Err(why);
+            return Err(why.into());
         }
     };
     model.vertices = Vec::new();
@@ -119,14 +119,8 @@ pub fn model(pool: &Arc<Pool>, formats: &dyn Formats, file: &FileRef) -> Result<
 }
 
 /// `look` ready to draw from the pool; the textures that could not be read drawn white, said once
-/// each in `refused`. Refused, and why, when its model or a texture finds no room there.
-pub fn look(
-    pool: &Arc<Pool>,
-    formats: &dyn Formats,
-    caches: &Caches,
-    look: &Look,
-    refused: &mut Vec<String>,
-) -> Result<PooledLook, String> {
+/// each in the log by the arrays. Refused, and why, when its model or a texture finds no room there.
+pub fn look(pool: &Arc<Pool>, formats: &dyn Formats, caches: &Caches, look: &Look) -> Result<PooledLook, String> {
     let model = caches
         .pooled
         .get(&key(&look.model), || self::model(pool, formats, &look.model))?;
@@ -154,12 +148,8 @@ pub fn look(
                             held.push(placed);
                         }
                     }
-                    Err(Refused::Unreadable(why)) => {
-                        let why = format!("{file:?}: {why}");
-                        if !refused.contains(&why) {
-                            refused.push(why);
-                        }
-                    }
+                    // Drawn white, said once in the log by the arrays.
+                    Err(Refused::Unreadable(_)) => {}
                     Err(Refused::NoRoom(why)) => return Err(why),
                 }
             }

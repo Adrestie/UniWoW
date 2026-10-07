@@ -224,7 +224,7 @@ fn load(
     refused: &mut Vec<String>,
 ) -> Result<Ready, String> {
     if let Some(pool) = &shared.pool {
-        match pooled::look(pool, formats, caches, look, refused) {
+        match pooled::look(pool, formats, caches, look) {
             Ok(pooled) => return Ok(Ready::Pooled(pooled)),
             Err(why) => log::info!("models: {:?} drawn on the path of 9.4c: {why}", look.model),
         }
@@ -372,8 +372,9 @@ struct ModelsModule {
     frame: u64,
     reach: f32,
     preview: Preview,
-    /// The last refusals, looks and textures.
+    /// The last refusals, looks and textures, and every one said, each said once.
     refusals: Vec<String>,
+    said: HashSet<String>,
 }
 
 impl Default for ModelsModule {
@@ -397,6 +398,7 @@ impl Default for ModelsModule {
             reach: DEFAULT_REACH,
             preview: Preview::default(),
             refusals: Vec::new(),
+            said: HashSet::new(),
         }
     }
 }
@@ -405,7 +407,11 @@ impl Default for ModelsModule {
 const REFUSALS: usize = 8;
 
 impl ModelsModule {
+    /// Says `why` in the log and the panel, unless it was already said.
     fn refuse(&mut self, why: String) {
+        if !self.said.insert(why.clone()) {
+            return;
+        }
         log::warn!("models: {why}");
         self.refusals.push(why);
         if self.refusals.len() > REFUSALS {
@@ -576,6 +582,12 @@ impl ModelsModule {
             }
             None => "every look on the path of 9.4c".to_owned(),
         };
+        let instances = self.service.instances().map_or((0, 0), |arena| arena.bytes());
+        let drawn = format!(
+            "{drawn}; the owners' instances in an arena of {:.1} MB ({:.1} used)",
+            instances.0 as f64 / MB,
+            instances.1 as f64 / MB
+        );
         // What the models held keep on the CPU, each once: their skins and the rest, their animations.
         let mut counted: HashSet<usize> = HashSet::new();
         let mut cpu = [0u64; 2];

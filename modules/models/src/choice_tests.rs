@@ -281,12 +281,8 @@ fn a_blended_instance_beyond_the_surface_of_the_water_is_drawn_before_those_on_t
 
 /// The red under the water and the blue over it, of two owners, drawn as `pooled` draws them.
 fn beyond_the_water_first(mut pooled: Pooled) {
-    let mut surfaces = Surfaces::default();
-    for x in -8..=8 {
-        for y in -8..=8 {
-            surfaces.add(Surfaces::cell(x as f32, y as f32), 0.0);
-        }
-    }
+    let surfaces =
+        Surfaces::from_cells((-8..=8).flat_map(|x| (-8..=8).map(move |y| (Surfaces::cell(x as f32, y as f32), 0.0))));
     // Red under the surface, blue over it, both in the middle of the view; seen from over the water
     // and from under it, the nearer drawn first where the farthest first would draw it last.
     let at = |id, look, x: f32, z: f32| {

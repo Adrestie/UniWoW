@@ -372,12 +372,20 @@ impl Layer for BuildingsLayer {
                 "{buildings} buildings in sight of {}, {groups} groups of {all_groups}, {} batches ({} blended, {} \
                  beyond the water)\n  \
                  the camera inside {inside} of them, {through} groups seen through their portals; the arrays {} \
-                 textures; on the CPU {:.1} MB",
+                 textures; arenas of vertices, indices and materials of {}, {} and {} MB ({}, {} and {} used), \
+                 of {} MB at most each; on the CPU {:.1} MB",
                 placed.len(),
                 listed.len(),
                 beyond.len() + near.len(),
                 beyond.len(),
                 shared.arrays.counts().placed,
+                shared.vertices.bytes().0 >> 20,
+                shared.indices.bytes().0 >> 20,
+                shared.materials.bytes().0 >> 20,
+                shared.vertices.bytes().1 >> 20,
+                shared.indices.bytes().1 >> 20,
+                shared.materials.bytes().1 >> 20,
+                shared.vertices.most() >> 20,
                 cpu as f64 / (1024.0 * 1024.0)
             ),
             steering,

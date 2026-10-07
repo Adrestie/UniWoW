@@ -21,6 +21,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use uniwow_api::arena::{self, Refusal};
 use uniwow_api::formats::{self, Building, DoodadSet, FileRef, TileId, Wdt, WmoDoodad};
 use uniwow_api::serde_json::json;
 use uniwow_api::viewport::Demand;
@@ -81,6 +82,9 @@ enum FileState {
     Waiting,
     Loading(JobId),
     Ready(Arc<WmoFile>),
+    /// Refused for want of room, when the arenas had given back so many ranges and the camera
+    /// stood there: read again once room may have been made (`arena::room_made`).
+    NoRoom(u64, [f32; 2]),
     Refused,
 }
 
@@ -90,10 +94,23 @@ struct FileEntry {
     users: HashSet<u32>,
 }
 
+/// Where a file in `state` stands for the budget, the arenas having given back `given` ranges and
+/// the camera at `eye`: one refused for want of room waiting again once room may have been made.
+fn held(state: &FileState, given: u64, eye: [f32; 2]) -> budget::Held {
+    match state {
+        FileState::Waiting => budget::Held::Waiting,
+        FileState::Loading(_) => budget::Held::Loading,
+        FileState::Ready(read) => budget::Held::Ready(read.gpu.bytes),
+        FileState::NoRoom(then, at) if arena::room_made(*then, *at, given, eye) => budget::Held::Waiting,
+        FileState::NoRoom(..) => budget::Held::NoRoom,
+        FileState::Refused => budget::Held::Refused,
+    }
+}
+
 /// The buildings a tile lists, or why it could not be read.
 type Read = Result<Vec<Building>, String>;
 /// A file read and put on the GPU, or why not.
-type Loaded = Result<WmoFile, String>;
+type Loaded = Result<WmoFile, Refusal>;
 
 #[derive(Default)]
 struct BuildingsModule {
@@ -115,11 +132,11 @@ struct BuildingsModule {
     tile_jobs: HashMap<JobId, TileId>,
     refused: HashSet<TileId>,
     /// The files of the buildings kept, each building's file and the ground it covers, and the
-    /// reads of files running.
+    /// reads of files running, with the ranges the arenas had given back when they started.
     files: HashMap<FileRef, FileEntry>,
     building_files: HashMap<u32, FileRef>,
     grounds: HashMap<u32, [[f32; 2]; 2]>,
-    file_jobs: HashMap<JobId, FileRef>,
+    file_jobs: HashMap<JobId, (FileRef, u64)>,
     /// The buildings whose doodads were told wanted, the jobs placing or taking them away, and the
     /// flags of the doodads placed, by building.
     told: HashSet<u32>,
@@ -129,8 +146,9 @@ struct BuildingsModule {
     /// Whether the buildings drawn changed since the scene was last given them.
     changed: bool,
     told_budget: Option<Demand>,
-    /// The last frame signal seen.
+    /// The last frame signal seen, and the camera then.
     frame: u64,
+    eye: [f32; 2],
     /// When the map or the distance changed, until the tiles wanted are all read and their files
     /// loaded; then what that took and how many tiles they are.
     since: Option<Instant>,
@@ -195,6 +213,7 @@ impl BuildingsModule {
 
     /// Reads the file `file` by a job and puts it on the GPU.
     fn load(&mut self, file: FileRef, formats: &Arc<dyn formats::Formats>, ctx: &mut Context) {
+        let given = self.shared.as_ref().map_or(0, |shared| shared.given());
         let (shared, formats, read) = (self.shared.clone(), formats.clone(), file.clone());
         let job = ctx.spawn(&format!("Read the building {read:?}"), move |_| -> Loaded {
             let shared = shared.ok_or("no device to draw on")?;
@@ -212,14 +231,16 @@ impl BuildingsModule {
                 holders,
             })
         });
-        self.file_jobs.insert(job, file.clone());
+        self.file_jobs.insert(job, (file.clone(), given));
         if let Some(entry) = self.files.get_mut(&file) {
             entry.state = FileState::Loading(job);
         }
     }
 
-    /// The files as the budget sees them from `eye`: each by the distance of its nearest building.
-    fn budgeted(&self, eye: [f32; 2]) -> Vec<budget::File<FileRef>> {
+    /// The files as the budget sees them from `eye`: each by the distance of its nearest building;
+    /// one refused for want of room waiting again once room may have been made, the arenas having
+    /// given back `given` ranges.
+    fn budgeted(&self, eye: [f32; 2], given: u64) -> Vec<budget::File<FileRef>> {
         self.files
             .iter()
             .map(|(key, entry)| budget::File {
@@ -230,11 +251,10 @@ impl BuildingsModule {
                     .filter_map(|id| self.grounds.get(id))
                     .map(|ground| budget::distance(eye, *ground))
                     .fold(f32::INFINITY, f32::min),
-                held: match &entry.state {
-                    FileState::Waiting => budget::Held::Waiting,
-                    FileState::Loading(_) => budget::Held::Loading,
-                    FileState::Ready(read) => budget::Held::Ready(read.gpu.bytes),
-                    FileState::Refused => budget::Held::Refused,
+                held: held(&entry.state, given, eye),
+                arenas: match &entry.state {
+                    FileState::Ready(read) => Some(read.gpu.arenas()),
+                    _ => None,
                 },
             })
             .collect()
@@ -324,6 +344,7 @@ impl BuildingsModule {
             Ok(PropertyValue::Vector([x, y, _])) => [x as f32, y as f32],
             _ => return,
         };
+        self.eye = eye;
 
         // The tiles: those left let go, the nearest wanted read.
         let wanted = formats::tiles_around(&wdt.tiles, eye, self.distance, &self.kept.tiles());
@@ -367,17 +388,24 @@ impl BuildingsModule {
         }
 
         // The files: told to the budget by the distance of their nearest building, read within the
-        // reach it allows to load, let go beyond the reach it allows to keep.
-        let files = self.budgeted(eye);
-        let fixed = self.shared.as_ref().map_or(0, |shared| shared.arrays.bytes());
-        let demand = budget::demand(&files, fixed, budget::expected(&files));
+        // reach it allows to load and the room of the arenas, let go beyond the reach it allows to
+        // keep or past the room of the arenas.
+        let Some(shared) = self.shared.clone() else {
+            return;
+        };
+        let files = self.budgeted(eye, shared.given());
+        let room = [
+            budget::room(&files, shared.most(), budget::LOAD_SHARE),
+            budget::room(&files, shared.most(), 1.0),
+        ];
+        let demand = budget::demand(&files, shared.arrays.bytes(), budget::expected(&files), room[0]);
         let allowance = if self.told_budget.as_ref() == Some(&demand) {
             view.allowance()
         } else {
             self.told_budget = Some(demand.clone());
             view.tell_budget(ctx.module_id(), demand)
         };
-        let plan = budget::plan(&files, &allowance, slots);
+        let plan = budget::plan(&files, &allowance, room, slots);
         for file in plan.start {
             self.load(file, &formats, ctx);
         }
@@ -531,12 +559,13 @@ impl Module for BuildingsModule {
         if let Some(Err(reason)) = &self.wdt {
             ui.colored_label(ui.visuals().warn_fg_color, format!("{map}: {reason}"));
         }
-        let (mut ready, mut loading, mut waiting, mut refused) = (0, 0, 0, 0);
+        let (mut ready, mut loading, mut waiting, mut no_room, mut refused) = (0, 0, 0, 0, 0);
         for entry in self.files.values() {
             match entry.state {
                 FileState::Ready(_) => ready += 1,
                 FileState::Loading(_) => loading += 1,
                 FileState::Waiting => waiting += 1,
+                FileState::NoRoom(..) => no_room += 1,
                 FileState::Refused => refused += 1,
             }
         }
@@ -544,8 +573,8 @@ impl Module for BuildingsModule {
         let bytes = self.shared.as_ref().map_or(0, |shared| shared.bytes());
         ui.label(format!(
             "{map}: {} tiles held, {} reading; {} buildings, of {ready} files read, {loading} reading, {waiting} \
-             waiting for the budget or their turn, {refused} refused; the doodads of {doodads} placed; {:.0} MB on \
-             the GPU",
+             waiting for the budget or their turn, {no_room} for room, {refused} refused; the doodads of {doodads} \
+             placed; {:.0} MB on the GPU",
             self.kept.tiles().len(),
             self.reading.len(),
             self.kept.len(),
@@ -631,7 +660,7 @@ impl Module for BuildingsModule {
             }
             return;
         }
-        let Some(file) = self.file_jobs.remove(&job) else {
+        let Some((file, given)) = self.file_jobs.remove(&job) else {
             return;
         };
         let Some(entry) = self.files.get_mut(&file) else {
@@ -641,13 +670,16 @@ impl Module for BuildingsModule {
             return;
         }
         let loaded = match outcome {
-            JobOutcome::Panicked(message) => Err(message),
+            JobOutcome::Panicked(message) => Err(Refusal::Failed(message)),
             JobOutcome::Cancelled => return,
-            outcome => outcome.take::<Loaded>().unwrap_or_else(|| Err("no outcome".to_owned())),
+            outcome => outcome
+                .take::<Loaded>()
+                .unwrap_or_else(|| Err(Refusal::Failed("no outcome".to_owned()))),
         };
         match loaded {
             Ok(read) => entry.state = FileState::Ready(Arc::new(read)),
-            Err(reason) => {
+            Err(Refusal::NoRoom(_)) => entry.state = FileState::NoRoom(given, self.eye),
+            Err(Refusal::Failed(reason)) => {
                 entry.state = FileState::Refused;
                 self.refuse(format!("{file:?}: {reason}"));
             }

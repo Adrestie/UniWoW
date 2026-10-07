@@ -14,11 +14,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// What the module shares with its layer: the tiles held, and the time it spent steering.
+/// What the module shares with its layer: the tiles held, the time it spent steering, and the
+/// longest it took to give the tiles held since the map was shown.
 #[derive(Default)]
 pub struct Scene {
     pub tiles: Vec<Arc<TileGpu>>,
     pub steering: Duration,
+    pub publishing: Duration,
 }
 
 pub struct LiquidsLayer {
@@ -47,9 +49,9 @@ impl LiquidsLayer {
 impl Layer for LiquidsLayer {
     fn prepare(&mut self, gpu: &egui_wgpu::RenderState, view: &View) {
         let shared = self.shared.clone();
-        let (tiles, steering) = {
+        let (tiles, steering, publishing) = {
             let scene = lock(&self.scene);
-            (scene.tiles.clone(), scene.steering)
+            (scene.tiles.clone(), scene.steering, scene.publishing)
         };
         let (camera, _) = self.camera.get_or_insert_with(|| {
             let buffer = shared.device.create_buffer(&wgpu::BufferDescriptor {
@@ -88,10 +90,16 @@ impl Layer for LiquidsLayer {
             triangles: (water + opaque) / 3,
             bytes: shared.bytes(),
             items: format!(
-                "{} tiles, {} triangles of water and {} of magma and slime",
+                "{} tiles, {} triangles of water and {} of magma and slime; arenas of {} and {} MB ({} and {}                  used), of {} MB at most each; given in {:.2} ms at the longest",
                 tiles.len(),
                 water / 3,
-                opaque / 3
+                opaque / 3,
+                shared.vertices.bytes().0 >> 20,
+                shared.indices.bytes().0 >> 20,
+                shared.vertices.bytes().1 >> 20,
+                shared.indices.bytes().1 >> 20,
+                shared.vertices.most() >> 20,
+                publishing.as_secs_f64() * 1000.0
             ),
             steering,
         };

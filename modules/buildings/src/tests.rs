@@ -9,6 +9,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
+use uniwow_api::arena::Refusal;
 use uniwow_api::formats::{
     AnimationRecord, AreaRecord, Building, CharSection, CreatureDisplay, CreatureLook, CreatureModel, DoodadSet,
     FacialHair, FileRef, Formats, GameObjectDisplay, HairGeoset, MapRecord, Model, ORIGIN, Texture, TextureFormat,
@@ -505,6 +506,11 @@ fn resolved<F: Future>(future: F) -> Option<F::Output> {
 /// A device of the software adapter of the system, offering what it offers of what the buildings
 /// are drawn with; or none.
 pub(crate) fn device() -> Option<egui_wgpu::RenderState> {
+    device_with(wgpu::Limits::default().max_buffer_size)
+}
+
+/// The device of `device`, its buffers of `largest` bytes at most.
+fn device_with(largest: u64) -> Option<egui_wgpu::RenderState> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = resolved(instance.request_adapter(&wgpu::RequestAdapterOptions {
         force_fallback_adapter: true,
@@ -513,6 +519,7 @@ pub(crate) fn device() -> Option<egui_wgpu::RenderState> {
     .ok()?;
     let mut limits = wgpu::Limits::default();
     limits.max_sampled_textures_per_shader_stage = adapter.limits().max_sampled_textures_per_shader_stage.min(128);
+    limits.max_buffer_size = largest;
     let (device, queue) = resolved(adapter.request_device(&wgpu::DeviceDescriptor {
         required_features: adapter.features() & wgpu::Features::INDIRECT_FIRST_INSTANCE,
         required_limits: limits,
@@ -903,12 +910,17 @@ fn the_ground_of_a_building_and_how_far_the_eye_lies_from_it() {
 }
 
 fn file(key: u32, distance: f32, held: budget::Held) -> budget::File<u32> {
-    budget::File { key, distance, held }
+    budget::File {
+        key,
+        distance,
+        held,
+        arenas: None,
+    }
 }
 
 #[test]
 fn the_files_are_told_by_bands_and_read_within_what_the_budget_allows() {
-    use budget::Held::{Loading, Ready, Refused, Waiting};
+    use budget::Held::{Loading, NoRoom, Ready, Refused, Waiting};
     use uniwow_api::viewport::{Allowance, BAND};
     let files = [
         file(1, 10.0, Ready(100)),
@@ -923,7 +935,7 @@ fn the_files_are_told_by_bands_and_read_within_what_the_budget_allows() {
     // Wanted at what those on the GPU take on average, or at the size expected while none is.
     assert_eq!(budget::expected(&files), 60);
     assert_eq!(budget::expected(&files[1..5]), budget::EXPECTED);
-    let demand = budget::demand(&files, 1000, 7);
+    let demand = budget::demand(&files, 1000, 7, f32::INFINITY);
     assert_eq!(demand.fixed, 1000);
     assert_eq!(
         (demand.held[0], demand.wanted[0]),
@@ -947,23 +959,101 @@ fn the_files_are_told_by_bands_and_read_within_what_the_budget_allows() {
         release: vec![6],
         waiting,
     };
-    assert_eq!(budget::plan(&files, &allowance, 9), plan(vec![5, 7], false));
-    assert_eq!(budget::plan(&files, &allowance, 3), plan(vec![5, 7], false));
+    let all = [f32::INFINITY; 2];
+    assert_eq!(budget::plan(&files, &allowance, all, 9), plan(vec![5, 7], false));
+    assert_eq!(budget::plan(&files, &allowance, all, 3), plan(vec![5, 7], false));
     assert_eq!(
-        budget::plan(&files, &allowance, 2),
+        budget::plan(&files, &allowance, all, 2),
         plan(vec![5], true),
         "one loading already, file 7 waiting its turn"
     );
-    assert_eq!(budget::plan(&files, &allowance, 1), plan(vec![], true));
+    assert_eq!(budget::plan(&files, &allowance, all, 1), plan(vec![], true));
     // All fits: every waiting read, nothing let go.
     assert_eq!(
-        budget::plan(&files, &Allowance::default(), 9),
+        budget::plan(&files, &Allowance::default(), all, 9),
         budget::Plan {
             start: vec![5, 7, 2],
             release: vec![],
             waiting: false
         }
     );
+    // The arenas with room for a band to load and four to keep: file 7 not read, file 8 let go,
+    // and not wanted from the budget past the room to load.
+    assert_eq!(
+        budget::plan(&files, &allowance, [BAND, BAND * 4.0], 9),
+        budget::Plan {
+            start: vec![5],
+            release: vec![6, 8],
+            waiting: false
+        }
+    );
+    let demand = budget::demand(&files, 1000, 7, BAND);
+    assert_eq!((demand.wanted[0], demand.wanted[1..].iter().sum::<u64>()), (107, 80));
+    // How far they fit: file 1 in the arenas by what it takes, the others at that on average.
+    let mut held = files.clone();
+    held[0].arenas = Some([60, 40]);
+    assert_eq!(
+        budget::room(&held, [100, 1_000], 1.0),
+        BAND * 0.5,
+        "files 1 and 5 pass 100"
+    );
+    assert_eq!(
+        budget::room(&held, [300, 1_000], 1.0),
+        BAND * 4.0,
+        "five of 60, then file 8"
+    );
+    // Refused for want of room: still wanted, not read until room may have been made.
+    let room = [file(9, BAND * 0.2, NoRoom)];
+    assert_eq!(budget::demand(&room, 0, 7, f32::INFINITY).wanted[0], 7);
+    assert_eq!(
+        budget::plan(&room, &Allowance::default(), all, 9).start,
+        Vec::<u32>::new()
+    );
+}
+
+#[test]
+fn a_file_refused_for_want_of_room_waits_until_a_range_is_given_back_or_the_camera_moves() {
+    use uniwow_api::arena::MOVED;
+    let refused = crate::FileState::NoRoom(5, [0.0, 0.0]);
+    assert_eq!(crate::held(&refused, 5, [MOVED, 0.0]), budget::Held::NoRoom);
+    assert_eq!(crate::held(&refused, 6, [0.0, 0.0]), budget::Held::Waiting);
+    assert_eq!(crate::held(&refused, 5, [0.0, MOVED + 1.0]), budget::Held::Waiting);
+    assert_eq!(
+        crate::held(&crate::FileState::Refused, 6, [0.0; 2]),
+        budget::Held::Refused
+    );
+}
+
+#[test]
+fn a_file_refused_for_want_of_room_is_put_on_the_gpu_once_a_range_is_given_back() {
+    // Buffers of 32 KB: 819 vertices; a file of 120 squares, 480 vertices, held once, not twice.
+    let Some(gpu) = device_with(32 << 10) else {
+        return;
+    };
+    let Ok(shared) = Shared::new(&gpu, &TARGET) else {
+        eprintln!("skipped: the device does not draw buildings");
+        return;
+    };
+    let shared = Arc::new(shared);
+    let file = || {
+        let mut wmo = square(material(0, 0), false, None);
+        wmo.groups = vec![wmo.groups[0].clone(); 120];
+        wmo
+    };
+    let first = gpu::upload(&shared, &NoFiles, file()).unwrap();
+    assert_eq!(first.arenas(), [480 * 40, 720 * 4]);
+    let given = shared.given();
+    assert!(
+        matches!(gpu::upload(&shared, &NoFiles, file()), Err(Refusal::NoRoom(_))),
+        "no room for a second"
+    );
+    drop(first);
+    assert_eq!(
+        shared.given(),
+        given + 3,
+        "its vertices, indices and materials given back"
+    );
+    assert!(gpu::upload(&shared, &NoFiles, file()).is_ok(), "room made");
 }
 
 #[test]
@@ -988,12 +1078,9 @@ fn a_blended_group_beyond_the_surface_of_the_water_from_the_eye_is_drawn_before_
         wmo: Arc::new(gpu::upload(&Arc::new(shared), &NoFiles, wmo).unwrap()),
         parts: None,
     }];
-    let mut surfaces = Surfaces::default();
-    for x in -40..=40 {
-        for y in -10..=10 {
-            surfaces.add(Surfaces::cell(x as f32, y as f32), 0.0);
-        }
-    }
+    let surfaces = Surfaces::from_cells(
+        (-40..=40).flat_map(|x| (-10..=10).map(move |y| (Surfaces::cell(x as f32, y as f32), 0.0))),
+    );
     // The first index of what is drawn beyond the water and on the eye's side.
     let firsts = |eye: Vec3, surfaces: Option<&Surfaces>| {
         let listing = layer::list(&placed, &view(eye), surfaces);

@@ -5520,6 +5520,91 @@ small cache of the files read last in `assets`, optional.
   4. The hints of memory: `Manual` from 32 to 128 MB kept; `MemoryUsage` reserves 0.5 GB less in
      Dalaran, in more blocks.
 
+#### Step 9.6e1, after its review
+
+Validated: the reading of `MH2O` and `MCLQ`, the format of the vertices by the layer, the phases
+around the water and their inversion under it, the arena of the owners' instances and the hints of
+memory. To fix before 9.6e2, the user seeing refusals in the game (water and buildings missing): the
+device asking for the buffers the adapter takes; an arena growing up to that limit; a refusal for
+want of room tried again, the demand told to the budget bounded by the room of the arenas; flat
+layers by quads, and the water to the distance of the terrain by bands of the budget. Then the
+surfaces made by tile in the job reading it, and a texture missing said once with how it is drawn.
+Answered: the water darker at a grazing angle in the game is the reflection of the client's
+procedural water, kept for later; the band at the horizon answered inside the map by the water to
+the distance of the terrain, nothing past its edge (decision 6 kept); the gain of the magma and the
+fog under the water with 9.7; `Manual` from 32 to 128 MB kept.
+
+#### Step 9.6e1, its review points as built
+
+- **The buffers of the device** (`kernel`): `max_buffer_size` and `max_storage_buffer_binding_size`
+  asked for up to what the adapter takes, 2 GB at most (`LARGEST_BUFFER`), against the 256 and 128
+  MB of wgpu's defaults. Of the arenas, those of the materials of `models` and of `buildings` are
+  bound for storage; the vertices, the indices and the owners' instances are not. An arena takes for
+  its limit the largest buffer of its use: for storage, the smaller of the two.
+- **The arenas** (`core/api/src/arena.rs`): grown twice as large or to their limit, `min(max(2 ×
+  capacity, needed, least), most)`, the hole that ends the arena counted in what is needed; refused
+  only when that passes the limit, as `NoRoom` (the bytes needed and the most), told apart from the
+  other refusals by `Refusal::{NoRoom, Failed}`. Each counts the ranges it gave back
+  (`Arena::given`). `arena::room` gives how far from the eye what is wanted fits in arenas filled to
+  a share of them, the nearest first, each by what it takes there or what is expected;
+  `arena::room_made`, whether room may have been made since a refusal: a range given back, or the
+  camera moved by a chunk (`MOVED`).
+- **Refused for want of room, tried again**: a file of `buildings` (`FileState::NoRoom`) or a tile
+  of `liquids` refused for want of room stays wanted and waits until room may have been made, then
+  is read again, the nearest first. Both read only what is nearer than the room of their arenas
+  filled to 90 %, and leave the rest out of the demand told to the budget; they let go what passes
+  the room of their arenas whole (`budget::room` and `budget::plan` of `buildings`, `steps` of
+  `liquids`, each tested apart).
+- **Flat layers** (`liquids/src/mesh.rs`): a layer whose vertices are all at one height and one
+  depth, its coordinates those by default, those without vertices among them, is drawn by a quad for
+  each rectangle of the cells it covers, the runs of a row joined to the same run of the row before.
+  The triangles of the water, measured over the client: off Booty Bay within 3 tiles 1,216,514
+  before and 415,154 now, 2.9 times fewer; all of Azeroth 11,356,280 and 2,442,892, 4.6 times; all
+  of Northrend 28,567,954 and 3,177,722, 9 times. Not the 60 times of the review: 70,744 of the
+  92,724 layers of Azeroth are flat, but the 21,980 others, whose depths differ from a vertex to the
+  next (the ocean of the format 2 along the coasts among them), keep their 9 × 9 vertices and now
+  hold most of the triangles (question 1).
+- **The water to the distance of the terrain**: the tiles of `liquids` within the distance of the
+  terrain, read within the reach the budget lets load, told by bands, let go beyond the reach it
+  lets keep.
+- **The surfaces by tile** (`core/api/src/liquids.rs`): each tile of the map a grid of its 128 × 128
+  cells, NaN where it has no water, or one height when the water covers it all at one (`Grid::Flat`,
+  the open sea), made by the job reading the tile; `Surfaces` maps each tile to its grid, shared; a
+  publication shares them; a height is found by the tile, then an index.
+- **A texture missing** (`bearrug.blp`, named by a model, absent from the client): drawn white by
+  the three layers (`NONE`, or white on the path of 9.4c); said once in the log, "left out, drawn
+  white", by the arrays for the pool, and by `models` once for each message on the path of 9.4c.
+- **Measured** on the user's machine, the terrain at 64 tiles, the buildings at 8, the models at a
+  reach of 1,000, each flight at 150 yards a second; no refusal in the log, but the texture missing,
+  said once:
+
+  | Flight | Arenas (used) | Memory of the device | Private |
+  |---|---|---|---|
+  | Zul'Drak to the Storm Peaks | buildings: vertices 320 MB (147), indices 64 (45), materials under 1; liquids 112 and 64 MB (76 and 36); the pool of `models` 130 MB (48), the owners' instances 8 (3.8); 2,047 MB at most each | 3,674 MB allocated of 5,046 reserved, 36 blocks | 7,036 MB |
+  | Off Booty Bay | liquids 56 and 32 MB (55 and 27) | 1,970 MB of 2,877, 24 blocks | 4,152 MB |
+  | Off Booty Bay, the terrain at 3 tiles | buildings 160, 32 and under 1 MB (62, 18); liquids 14 and 8 (6 and 3); owners' instances 8 (3.7) | 1,626 MB of 1,853, 16 blocks | 3,120 MB |
+
+  The arena of the vertices of `buildings` at 320 MB is the size refused before. The water:
+  Northrend 1,022 tiles, 3.18 M triangles, 180 MB, the GPU 1.2 ms; at sea 544 tiles, 2.44 M
+  triangles, 91 MB, the GPU 1.26 ms. The frame at 16.7 ms, the longest 17.3 ms, but 34.5 ms once at
+  sea while the terrain streamed at 64 tiles.
+- **Publishing** the tiles of liquids: the longest 0.26 to 0.36 ms with 544 to 1,022 tiles held,
+  while they arrive one by one; flying over the sea with the terrain at 3 tiles, 41 tiles held and
+  read as the camera passes, 0.03 ms.
+- **Tested** by 24 changes made on purpose, to the arenas, the limits of the device, the grids, the
+  meshes of flat layers, the steering of `liquids`, the budget of `buildings` and the refusals said:
+  all made a test fail. Added: an arena grown to its limit and refused past it, the hole that ends
+  it counted, a range given back making room; the reach of what fits in arenas; when room may have
+  been made; a tile and a file refused for want of room, put on the GPU once a range is given back
+  (buffers of 32 KB); a tile read placing its water by its place in the world; the grids of the
+  water; the quads of flat layers; the tiles read and let go by the budget and the room; a refusal
+  said once.
+- **Questions:**
+  1. The layers whose depths differ now hold most of the triangles of the water: a coarser mesh for
+     those of one height (the depth, and so the colour, less exact), or kept.
+  2. At 64 tiles, the water costs the GPU 1.2 ms (a draw for each of 1,022 tiles): one draw for all
+     of them, or kept.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

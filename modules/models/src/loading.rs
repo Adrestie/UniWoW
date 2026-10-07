@@ -453,7 +453,7 @@ pub fn look(
                 Some((texture, *wrap as usize))
             }
             Err(why) => {
-                let why = format!("{file:?}: {why}");
+                let why = format!("{file:?}: {why}; drawn white");
                 if !refused.contains(&why) {
                     refused.push(why);
                 }

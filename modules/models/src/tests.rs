@@ -1146,6 +1146,19 @@ fn a_look_keeps_the_batches_of_the_submeshes_it_shows_and_seen_at_rest() {
     assert_eq!(batches(Geosets::All), (2, 1), "the one at alpha 0 left out");
     assert_eq!(batches(Geosets::Creature(0x1)), (1, 1), "102 hidden, 101 unseen");
     assert_eq!(batches(Geosets::Creature(0x2)), (2, 1));
+    let mut refused = Vec::new();
+    loading::look(&shared, &fake, &Caches::default(), &look(Geosets::All), &mut refused).unwrap();
+    assert!(refused[0].ends_with("not in the client; drawn white"), "{refused:?}");
+}
+
+#[test]
+fn a_refusal_is_said_once_however_many_looks_meet_it() {
+    let mut module = crate::ModelsModule::default();
+    for _ in 0..3 {
+        module.refuse("\"bearrug.blp\": not in the client; drawn white".to_owned());
+    }
+    module.refuse("another".to_owned());
+    assert_eq!(module.refusals.len(), 2);
 }
 
 #[test]

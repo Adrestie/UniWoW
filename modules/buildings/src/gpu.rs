@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 use std::ops::Range;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use uniwow_api::arena::Arena;
+use uniwow_api::arena::{Arena, Refusal};
 use uniwow_api::formats::{Formats, Wmo, WmoMaterial};
 use uniwow_api::texture_arrays::{NONE, Placed, TextureArrays};
 use uniwow_api::viewport::{Target, View};
@@ -441,6 +441,16 @@ impl Shared {
     }
 
     /// What the buildings take on the GPU: the buffers of their arenas and their arrays.
+    /// The ranges given back by the arenas since they were made.
+    pub fn given(&self) -> u64 {
+        self.vertices.given() + self.indices.given() + self.materials.given()
+    }
+
+    /// The most bytes the arenas of the vertices and of the indices can have.
+    pub fn most(&self) -> [u64; 2] {
+        [self.vertices.most(), self.indices.most()]
+    }
+
     pub fn bytes(&self) -> u64 {
         let arenas: u64 = [&self.vertices, &self.indices, &self.materials]
             .iter()
@@ -502,6 +512,14 @@ pub struct WmoGpu {
 }
 
 impl WmoGpu {
+    /// What it takes in the arenas of the vertices and of the indices.
+    pub fn arenas(&self) -> [u64; 2] {
+        [
+            (self.vertices.end - self.vertices.start) * size_of::<Vertex>() as u64,
+            (self.indices.end - self.indices.start) * 4,
+        ]
+    }
+
     /// What it keeps on the CPU: its groups and their batches, and its cells.
     pub fn cpu(&self) -> u64 {
         (size_of::<Self>()
@@ -570,7 +588,7 @@ pub fn geometry(wmo: &mut Wmo) -> (Vec<Vertex>, Vec<u32>, Vec<u32>) {
 
 /// `wmo` put on the GPU of `shared`, its textures read through `formats`: its geometry in the
 /// arenas, its materials in the table, its textures in the arrays.
-pub fn upload(shared: &Arc<Shared>, formats: &dyn Formats, mut wmo: Wmo) -> Result<WmoGpu, String> {
+pub fn upload(shared: &Arc<Shared>, formats: &dyn Formats, mut wmo: Wmo) -> Result<WmoGpu, Refusal> {
     let cells = Cells::new(&wmo);
     let (vertices, indices, starts) = geometry(&mut wmo);
     let mut textures = Vec::new();
@@ -611,7 +629,7 @@ pub fn upload(shared: &Arc<Shared>, formats: &dyn Formats, mut wmo: Wmo) -> Resu
         Ok(range) => range,
         Err(reason) => {
             shared.vertices.give(vertex_range);
-            return Err(reason);
+            return Err(reason.into());
         }
     };
     let material_range = match shared.materials.put(bytemuck::cast_slice(&materials)) {
@@ -619,7 +637,7 @@ pub fn upload(shared: &Arc<Shared>, formats: &dyn Formats, mut wmo: Wmo) -> Resu
         Err(reason) => {
             shared.vertices.give(vertex_range);
             shared.indices.give(index_range);
-            return Err(reason);
+            return Err(reason.into());
         }
     };
     let groups = wmo

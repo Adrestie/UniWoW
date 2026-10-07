@@ -1,8 +1,11 @@
 //! The liquids of the tiles of the map the terrain shows, around the camera of the 3D view within
-//! the distance of the terrain: the layers of each tile read by a job, the nearest first, their
-//! meshes put on the GPU and drawn by the layer of the module; the surfaces of their water given
-//! through the service `liquids`, by which the other layers tell what they blend beyond the water
-//! from what is on the eye's side. Nothing is changed: no undo entry, no file written.
+//! the distance of the terrain: the layers of each tile read by a job, the nearest first, within
+//! the reach the budget of the view lets load and the room of the arenas holding them, let go
+//! beyond the reach it lets keep; their meshes put on the GPU and drawn by the layer of the module;
+//! the surfaces of their water given through the service `liquids`, by which the other layers tell
+//! what they blend beyond the water from what is on the eye's side. A tile refused for want of room
+//! is read again once the arenas gave a range back or the camera moved. Nothing is changed: no undo
+//! entry, no file written.
 
 mod gpu;
 mod layer;
@@ -14,8 +17,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use uniwow_api::arena::{self, Refusal};
 use uniwow_api::formats::{self, TILE, TileId, Wdt};
-use uniwow_api::liquids::{self, Liquids, Surfaces};
+use uniwow_api::liquids::{self, Grid, Liquids, Surfaces};
 use uniwow_api::serde_json::json;
 use uniwow_api::viewport::Demand;
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, PropertyValue, Registrar, egui, log, viewport};
@@ -27,6 +31,11 @@ use layer::{LiquidsLayer, Scene};
 const DEFAULT_DISTANCE: u32 = 3;
 /// The refusals of tiles the panel keeps.
 const REFUSALS: usize = 8;
+/// What a tile not yet read is expected to take on the GPU, in its arenas of vertices and of
+/// indices, while none is held: about a tile of open sea.
+const EXPECTED: [u64; 2] = [48 << 10, 16 << 10];
+/// The share of an arena the tiles read fill at most; those held keep it whole.
+const LOAD_SHARE: f64 = 0.9;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -44,15 +53,14 @@ impl Liquids for Water {
     }
 }
 
-/// The liquids of a tile read: on the GPU, none where it has none; the tiles of its water with
-/// their heights.
+/// The liquids of a tile read: on the GPU, none where it has none; the surface of its water.
 struct Held {
     gpu: Option<Arc<TileGpu>>,
-    surfaces: Vec<([i32; 2], f32)>,
+    grid: Option<Arc<Grid>>,
 }
 
 /// A read of a tile, or why it could not be read.
-type Read = Result<Held, String>;
+type Read = Result<Held, Refusal>;
 
 /// Reads the liquids of the tile `tile` of the map `directory` through `formats` and puts them on
 /// the GPU of `shared`.
@@ -65,10 +73,62 @@ fn read(formats: &dyn formats::Formats, shared: &Arc<Shared>, directory: &str, t
         let record = types.iter().find(|record| record.id == u32::from(liquid))?;
         Some((shared.slot(formats, record)?, mesh::is_water(record.kind)))
     });
+    let grid = Grid::of([tile.y as i32, tile.x as i32], meshes.surfaces.iter().copied()).map(Arc::new);
     Ok(Held {
         gpu: gpu::upload(shared, &meshes)?.map(Arc::new),
-        surfaces: meshes.surfaces,
+        grid,
     })
+}
+
+/// The surfaces of the water of the tiles `held`, their grids shared, not copied.
+fn surfaces(held: &HashMap<TileId, Held>) -> Surfaces {
+    let mut surfaces = Surfaces::default();
+    for (tile, held) in held {
+        if let Some(grid) = &held.grid {
+            surfaces.insert([tile.y as i32, tile.x as i32], grid.clone());
+        }
+    }
+    surfaces
+}
+
+/// Where a tile wanted stands: read, being read, waiting for the budget or its turn, or refused for
+/// want of room and none made since.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stand {
+    Held,
+    Reading,
+    Waiting,
+    NoRoom,
+}
+
+/// Of the tiles `wanted`, the nearest first, each with its distance and where it stands: those to
+/// read, waiting within the reach the budget lets load, `budget[0]`, and nearer than the room of the
+/// arenas to load, `room[0]`, so many that no more than `slots` are read at once; and those held or
+/// being read to let go, beyond the reach it lets keep, `budget[1]`, or as far as the room to keep,
+/// `room[1]`.
+fn steps(
+    wanted: &[(TileId, f32, Stand)],
+    budget: [f32; 2],
+    room: [f32; 2],
+    slots: usize,
+) -> (Vec<TileId>, Vec<TileId>) {
+    let kept = |distance: f32| distance <= budget[1] && distance < room[1];
+    let release: Vec<TileId> = wanted
+        .iter()
+        .filter(|(_, distance, stand)| matches!(stand, Stand::Held | Stand::Reading) && !kept(*distance))
+        .map(|(tile, _, _)| *tile)
+        .collect();
+    let reading = wanted
+        .iter()
+        .filter(|(_, distance, stand)| *stand == Stand::Reading && kept(*distance))
+        .count();
+    let start = wanted
+        .iter()
+        .filter(|(_, distance, stand)| *stand == Stand::Waiting && *distance <= budget[0] && *distance < room[0])
+        .take(slots.saturating_sub(reading))
+        .map(|(tile, _, _)| *tile)
+        .collect();
+    (start, release)
 }
 
 #[derive(Default)]
@@ -84,34 +144,40 @@ struct LiquidsModule {
     distance: u32,
     wdt: Option<Result<Arc<Wdt>, String>>,
     reading_wdt: Option<JobId>,
-    /// The tiles read, the reads running, by tile and by job, the tiles refused.
+    /// The tiles read; the reads running, by tile with the ranges the arenas had given back when
+    /// they started, and by job; the tiles refused, and those refused for want of room, with the
+    /// ranges given back and the camera then.
     held: HashMap<TileId, Held>,
-    reading: HashMap<TileId, JobId>,
+    reading: HashMap<TileId, (JobId, u64)>,
     jobs: HashMap<JobId, TileId>,
     refused: HashSet<TileId>,
+    no_room: HashMap<TileId, (u64, [f32; 2])>,
     refusals: VecDeque<String>,
     /// Whether the tiles held changed since the layer and the surfaces were given them.
     changed: bool,
     told_budget: Option<Demand>,
-    /// The last frame signal seen.
+    /// The last frame signal seen, and the camera then.
     frame: u64,
+    eye: [f32; 2],
 }
 
 impl LiquidsModule {
     /// Shows the liquids of the map `map`, by its folder, or of none.
     fn show(&mut self, map: Option<String>, ctx: &mut Context) {
-        for job in self.reading.values() {
+        for (job, _) in self.reading.values() {
             ctx.cancel(*job);
         }
         self.reading.clear();
         self.jobs.clear();
         self.held.clear();
         self.refused.clear();
+        self.no_room.clear();
         self.refusals.clear();
         self.wdt = None;
         self.reading_wdt = None;
         self.map = map;
         self.changed = true;
+        lock(&self.scene).publishing = Duration::ZERO;
     }
 
     fn refuse(&mut self, tile: TileId, reason: &str) {
@@ -124,9 +190,9 @@ impl LiquidsModule {
     }
 
     /// At each frame: follows the map and the distance of the terrain; then, at each frame signal,
-    /// reads the tiles the camera wants, the nearest first, as many at once as the workers but one,
-    /// lets go those it left, gives the layer and the surfaces the tiles held when they change, and
-    /// tells the budget of the view what they take.
+    /// tells the budget what the tiles take and want, reads those it lets load and the arenas have
+    /// room for, the nearest first, as many at once as the workers but one, lets go those left or
+    /// beyond what it lets keep, and gives the layer and the surfaces the tiles held when they change.
     fn steer(&mut self, ctx: &mut Context) {
         let start = Instant::now();
         let (Some(view), Some(formats), Some(shared)) = (
@@ -174,37 +240,104 @@ impl LiquidsModule {
             Ok(PropertyValue::Vector([x, y, _])) => [x as f32, y as f32],
             _ => return,
         };
+        self.eye = eye;
         let held: HashSet<TileId> = self.held.keys().copied().collect();
-        let wanted = formats::tiles_around(&wdt.tiles, eye, self.distance, &held);
+        let wanted: Vec<TileId> = formats::tiles_around(&wdt.tiles, eye, self.distance, &held)
+            .into_iter()
+            .filter(|tile| !self.refused.contains(tile))
+            .collect();
         let set: HashSet<TileId> = wanted.iter().copied().collect();
-        let left: Vec<TileId> = self.held.keys().filter(|tile| !set.contains(tile)).copied().collect();
-        for tile in left {
-            self.held.remove(&tile);
-            self.changed = true;
+        let away = |tile: TileId| (tile.distance(eye) - 0.5).max(0.0) * TILE;
+
+        // What the tiles take and are expected to take, and how far the arenas hold them.
+        let taken = |tile: &TileId| -> Option<[u64; 2]> {
+            let held = self.held.get(tile)?;
+            Some(held.gpu.as_ref().map_or([0, 0], |gpu| gpu.arenas))
+        };
+        let expected = if self.held.is_empty() {
+            EXPECTED
+        } else {
+            let sum = self
+                .held
+                .keys()
+                .filter_map(taken)
+                .fold([0, 0], |sum, bytes| [sum[0] + bytes[0], sum[1] + bytes[1]]);
+            sum.map(|bytes| bytes / self.held.len() as u64)
+        };
+        let sizes: Vec<(f32, Option<[u64; 2]>)> = wanted.iter().map(|tile| (away(*tile), taken(tile))).collect();
+        let most = [shared.vertices.most(), shared.indices.most()];
+        let (room_load, room_keep) = (
+            arena::room(&sizes, most, expected, LOAD_SHARE),
+            arena::room(&sizes, most, expected, 1.0),
+        );
+
+        // Told to the budget: those held in the band of their distance, those wanted the arenas
+        // have room for at what they are expected to take.
+        let mut demand = Demand {
+            fixed: shared.arrays.bytes() + shared.table.size(),
+            ..Demand::default()
+        };
+        for (tile, (distance, _)) in wanted.iter().zip(&sizes) {
+            let band = Demand::band(*distance);
+            match self.held.get(tile) {
+                Some(held) => {
+                    let bytes = held.gpu.as_ref().map_or(0, |gpu| gpu.bytes);
+                    demand.held[band] += bytes;
+                    demand.wanted[band] += bytes;
+                }
+                None if *distance < room_load => demand.wanted[band] += expected[0] + expected[1],
+                None => {}
+            }
         }
-        let stale: Vec<TileId> = self
-            .reading
+        let allowance = if self.told_budget.as_ref() == Some(&demand) {
+            view.allowance()
+        } else {
+            self.told_budget = Some(demand.clone());
+            view.tell_budget(ctx.module_id(), demand)
+        };
+
+        // Those left let go; then those wanted read or let go as the budget and the room say, a tile
+        // refused for want of room waiting again once room may have been made.
+        let given = shared.given();
+        self.no_room
+            .retain(|tile, refused| set.contains(tile) && !arena::room_made(refused.0, refused.1, given, eye));
+        let left: Vec<TileId> = self
+            .held
             .keys()
+            .chain(self.reading.keys())
             .filter(|tile| !set.contains(tile))
             .copied()
             .collect();
-        for tile in stale {
-            if let Some(job) = self.reading.remove(&tile) {
-                ctx.cancel(job);
-            }
-        }
+        let stands: Vec<(TileId, f32, Stand)> = wanted
+            .iter()
+            .map(|tile| {
+                let stand = if self.held.contains_key(tile) {
+                    Stand::Held
+                } else if self.reading.contains_key(tile) {
+                    Stand::Reading
+                } else if self.no_room.contains_key(tile) {
+                    Stand::NoRoom
+                } else {
+                    Stand::Waiting
+                };
+                (*tile, away(*tile), stand)
+            })
+            .collect();
         let slots = std::thread::available_parallelism()
             .map_or(2, |n| n.get())
             .saturating_sub(1)
             .max(1);
-        for tile in &wanted {
-            if self.reading.len() >= slots {
-                break;
+        let (to_read, release) = steps(&stands, [allowance.load, allowance.keep], [room_load, room_keep], slots);
+        for tile in left.into_iter().chain(release) {
+            if self.held.remove(&tile).is_some() {
+                self.changed = true;
             }
-            if self.held.contains_key(tile) || self.reading.contains_key(tile) || self.refused.contains(tile) {
-                continue;
+            if let Some((job, _)) = self.reading.remove(&tile) {
+                ctx.cancel(job);
             }
-            let (formats, shared, directory, tile) = (formats.clone(), shared.clone(), directory.clone(), *tile);
+        }
+        for tile in to_read {
+            let (formats, shared, directory) = (formats.clone(), shared.clone(), directory.clone());
             let job = ctx.spawn(
                 &format!("Read the liquids of the tile {} {} of {directory}", tile.x, tile.y),
                 move |job| -> Option<Read> {
@@ -214,43 +347,25 @@ impl LiquidsModule {
                     Some(read(&*formats, &shared, &directory, tile))
                 },
             );
-            self.reading.insert(tile, job);
+            self.reading.insert(tile, (job, given));
             self.jobs.insert(job, tile);
-        }
-        // What the tiles held take, each in the band of its distance.
-        let mut demand = Demand {
-            fixed: shared.arrays.bytes() + shared.table.size(),
-            ..Demand::default()
-        };
-        for (tile, held) in &self.held {
-            if let Some(gpu) = &held.gpu {
-                let band = Demand::band((tile.distance(eye) - 0.5).max(0.0) * TILE);
-                demand.held[band] += gpu.bytes;
-                demand.wanted[band] += gpu.bytes;
-            }
-        }
-        if self.told_budget.as_ref() != Some(&demand) {
-            view.tell_budget(ctx.module_id(), demand.clone());
-            self.told_budget = Some(demand);
         }
         self.publish();
         lock(&self.scene).steering = start.elapsed();
     }
 
-    /// Gives the layer and the surfaces the tiles held, when they changed.
+    /// Gives the layer and the surfaces the tiles held, when they changed: the grids of their water
+    /// shared, not copied.
     fn publish(&mut self) {
         if !self.changed {
             return;
         }
+        let start = Instant::now();
         self.changed = false;
-        let mut surfaces = Surfaces::default();
-        for held in self.held.values() {
-            for (cell, height) in &held.surfaces {
-                surfaces.add(*cell, *height);
-            }
-        }
-        *lock(&self.water.surfaces) = Arc::new(surfaces);
-        lock(&self.scene).tiles = self.held.values().filter_map(|held| held.gpu.clone()).collect();
+        *lock(&self.water.surfaces) = Arc::new(surfaces(&self.held));
+        let mut scene = lock(&self.scene);
+        scene.tiles = self.held.values().filter_map(|held| held.gpu.clone()).collect();
+        scene.publishing = scene.publishing.max(start.elapsed());
     }
 }
 
@@ -297,11 +412,12 @@ impl Module for LiquidsModule {
         let with = self.held.values().filter(|held| held.gpu.is_some()).count();
         let surfaces = lock(&self.water.surfaces).len();
         ui.label(format!(
-            "{map}: {} tiles read within {} tiles of the camera, {with} with liquids, {} reading, {} refused; \
-             {surfaces} tiles of water under the surfaces given",
+            "{map}: {} tiles read within {} tiles of the camera, {with} with liquids, {} reading, {} waiting \
+             for room, {} refused; {surfaces} tiles of water under the surfaces given",
             self.held.len(),
             self.distance,
             self.reading.len(),
+            self.no_room.len(),
             self.refused.len()
         ));
         for refusal in &self.refusals {
@@ -332,9 +448,9 @@ impl Module for LiquidsModule {
         let Some(tile) = self.jobs.remove(&job) else {
             return;
         };
-        if self.reading.get(&tile) != Some(&job) {
+        let Some((_, given)) = self.reading.get(&tile).copied().filter(|(reading, _)| *reading == job) else {
             return;
-        }
+        };
         self.reading.remove(&tile);
         match outcome {
             JobOutcome::Panicked(message) => self.refuse(tile, &message),
@@ -344,7 +460,10 @@ impl Module for LiquidsModule {
                     self.held.insert(tile, held);
                     self.changed = true;
                 }
-                Some(Some(Err(reason))) => self.refuse(tile, &reason),
+                Some(Some(Err(Refusal::NoRoom(_)))) => {
+                    self.no_room.insert(tile, (given, self.eye));
+                }
+                Some(Some(Err(Refusal::Failed(reason)))) => self.refuse(tile, &reason),
                 _ => {}
             },
         }
