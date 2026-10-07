@@ -8,6 +8,7 @@ use std::sync::{Arc, OnceLock};
 
 use uniwow_api::bytemuck::Zeroable;
 use uniwow_api::formats::{Formats, Layer, Tile};
+use uniwow_api::journal;
 use uniwow_api::texture_arrays::{NONE, Placed, TextureArrays};
 use uniwow_api::viewport::Target;
 use uniwow_api::wgpu::util::DeviceExt;
@@ -538,6 +539,7 @@ pub fn build_tile(
     });
     shared.queue.submit([]);
     let bytes = vertices.size() + index_buffer.size() + parts.layers.size() + (64 * 64 * 4 * CHUNKS) as u64;
+    journal::uploaded(bytes);
     Ok(Some(TileGpu {
         id: model.id,
         kind: Kind::Full,
@@ -589,6 +591,7 @@ pub fn build_light(
     shared.queue.submit([]);
     let bytes =
         vertices.size() + index_buffer.size() + parts.layers.size() + u64::from(side * side * 4) * CHUNKS as u64;
+    journal::uploaded(bytes);
     Ok(Some(TileGpu {
         id,
         kind: Kind::Light,

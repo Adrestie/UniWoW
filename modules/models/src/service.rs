@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use uniwow_api::arena::Arena;
 use uniwow_api::formats::Formats;
+use uniwow_api::journal;
 use uniwow_api::models::{Extent, Instance, Look, LookId, LookState, Models};
 use uniwow_api::wgpu;
 
@@ -43,19 +44,22 @@ pub struct Service {
 impl Service {
     /// The owners, by their number: the first given instances first.
     pub fn owners(&self) -> Vec<Arc<Slot>> {
-        let mut owners: Vec<Arc<Slot>> = lock(&self.owners).values().cloned().collect();
+        let mut owners: Vec<Arc<Slot>> = journal::lock(&self.owners, "models owners").values().cloned().collect();
         owners.sort_by_key(|slot| slot.number);
         owners
     }
 
     /// The look `id` and its state.
     pub fn look_of(&self, id: LookId) -> Option<(Look, LookState)> {
-        lock(&self.looks).looks.get(id.0 as usize).cloned()
+        journal::lock(&self.looks, "models looks")
+            .looks
+            .get(id.0 as usize)
+            .cloned()
     }
 
     /// Sets the state of a look not drawn.
     pub fn set_state(&self, id: LookId, state: LookState) {
-        let mut table = lock(&self.looks);
+        let mut table = journal::lock(&self.looks, "models looks");
         table.extents.remove(&id);
         if let Some(entry) = table.looks.get_mut(id.0 as usize) {
             entry.1 = state;
@@ -64,7 +68,7 @@ impl Service {
 
     /// The look `id` drawn, made of `extent`.
     pub fn set_drawn(&self, id: LookId, extent: Extent) {
-        let mut table = lock(&self.looks);
+        let mut table = journal::lock(&self.looks, "models looks");
         if let Some(entry) = table.looks.get_mut(id.0 as usize) {
             entry.1 = LookState::Drawn;
             table.extents.insert(id, extent);
@@ -74,7 +78,7 @@ impl Service {
     /// Removes the owners of the module `id`: the one its id names, and those it names `<id>/…`.
     pub fn forget_module(&self, id: &str) {
         let prefix = format!("{id}/");
-        lock(&self.owners).retain(|owner, _| owner != id && !owner.starts_with(&prefix));
+        journal::lock(&self.owners, "models owners").retain(|owner, _| owner != id && !owner.starts_with(&prefix));
     }
 
     pub fn set_reach(&self, reach: f32) {
@@ -82,7 +86,7 @@ impl Service {
     }
 
     fn slot(&self, owner: &str) -> Arc<Slot> {
-        lock(&self.owners)
+        journal::lock(&self.owners, "models owners")
             .entry(owner.to_owned())
             .or_insert_with(|| Arc::new(Slot::new(self.numbers.fetch_add(1, Ordering::Relaxed))))
             .clone()
@@ -106,7 +110,7 @@ impl Service {
 
 impl Models for Service {
     fn look(&self, look: &Look) -> LookId {
-        let mut table = lock(&self.looks);
+        let mut table = journal::lock(&self.looks, "models looks");
         if let Some(id) = table.ids.get(look) {
             return *id;
         }
@@ -137,7 +141,7 @@ impl Models for Service {
     }
 
     fn clear(&self, owner: &str) {
-        lock(&self.owners).remove(owner);
+        journal::lock(&self.owners, "models owners").remove(owner);
     }
 
     fn shown(&self, owner: &str) -> Arc<AtomicBool> {
@@ -153,7 +157,7 @@ impl Models for Service {
 
     fn extent(&self, look: LookId) -> Option<Extent> {
         let reach = f32::from_bits(self.reach.load(Ordering::Relaxed));
-        lock(&self.looks)
+        journal::lock(&self.looks, "models looks")
             .extents
             .get(&look)
             .map(|extent| Extent { reach, ..*extent })

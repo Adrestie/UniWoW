@@ -25,9 +25,12 @@ impl Shell {
                 continue;
             };
             let (id, outcome) = (finished.id, finished.outcome);
-            if let Err(message) = call_module(&mut self.slots[index], &mut self.host, |f, ctx| {
+            let start = Instant::now();
+            let done = call_module(&mut self.slots[index], &mut self.host, |f, ctx| {
                 f.on_job(id, outcome, ctx)
-            }) {
+            });
+            uniwow_api::journal::spent(&format!("jobs handed back to {}", finished.owner), start.elapsed());
+            if let Err(message) = done {
                 self.fail(index, format!("job '{}': {message}", finished.label));
             }
         }

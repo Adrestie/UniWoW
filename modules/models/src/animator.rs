@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use uniwow_api::formats::{Animation, Formats};
 use uniwow_api::glam::{Mat3, Mat4, Vec3};
+use uniwow_api::journal;
 use uniwow_api::models::{LookId, Motion};
 use uniwow_api::parallel::parallel_for;
 use uniwow_api::viewport::Handle;
@@ -460,6 +461,7 @@ impl Animator {
                     && let Some(mut view) = queue.write_buffer_with(&buffer, 0, size)
                 {
                     fill(view.slice(..), &tables, bones_at, &self.posed);
+                    journal::uploaded(bytes);
                 }
                 buffer
             }

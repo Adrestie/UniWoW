@@ -3,6 +3,7 @@
 mod calls;
 mod closing;
 mod frame;
+mod frames;
 mod history_ops;
 mod hotkey_window;
 mod menus;
@@ -39,6 +40,7 @@ use crate::requirements::{self, Need};
 use crate::router::{self, Bridge, Entry, PropertyEntry, ReplyTo, Request};
 use crate::settings::Settings;
 
+use frames::Frames;
 use history_ops::Recorded;
 use hotkey_window::HotkeyWindow;
 use menus::MenuAction;
@@ -85,6 +87,7 @@ pub struct Shell {
     players: Players,
     hotkeys: Hotkeys,
     hotkey_window: HotkeyWindow,
+    frames: Frames,
 }
 
 /// Where the closing of the editor stands while modules have unsaved changes.
@@ -111,6 +114,7 @@ impl Shell {
             .ok()
             .and_then(|p| p.parent().map(Path::to_path_buf))
             .unwrap_or_default();
+        uniwow_api::journal::mark_interface_thread();
         let (bridge, requests) = Bridge::new(Some(cc.egui_ctx.clone()));
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
         let pool = Pool::new(threads, Some(cc.egui_ctx.clone()), Some(bridge.clone()));
@@ -157,6 +161,7 @@ impl Shell {
             modules_dir,
             restart_needed: false,
             last_settings_save: Instant::now(),
+            frames: Frames::new(),
             panels: PanelsHealth::Drawn,
             requests: Some(requests),
             replies: Vec::new(),
@@ -559,5 +564,8 @@ fn call_module<R>(
     let Slot { id, module, .. } = slot;
     let module = module.as_deref_mut().expect("running modules are loaded");
     let mut ctx = Context::new(host, id);
-    guarded_as(id, || f(module, &mut ctx))
+    let start = Instant::now();
+    let done = guarded_as(id, || f(module, &mut ctx));
+    uniwow_api::journal::spent(&format!("module {id}"), start.elapsed());
+    done
 }

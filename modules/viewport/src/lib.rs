@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::hotkey::{Hotkey, HotkeyKind, Keys};
+use uniwow_api::journal;
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::viewport::{
     self, Allowance, Demand, Drawing, Fog, Frame, Label, Layer, MAX_FRAME_WAIT, Phase, Sun, Target, View,
@@ -612,7 +613,9 @@ impl Module for ViewportModule {
                 .as_ref()
                 .is_none_or(|(at, _)| at.elapsed() >= Duration::from_secs(1))
             {
+                let start = Instant::now();
                 let report = ctx.gpu().and_then(|gpu| gpu.device.generate_allocator_report());
+                journal::spent("view: the report of the allocator", start.elapsed());
                 self.allocator = Some((Instant::now(), report.as_ref().map(stats::allocator)));
             }
             let allocator = self.allocator.as_ref().and_then(|(_, report)| *report);
@@ -804,6 +807,13 @@ impl ViewportModule {
             .map(|last| now - last)
             .filter(|interval| *interval < Duration::from_secs(1));
         self.last_frame = Some(now);
+        for layer in &layers {
+            journal::spent(&format!("view: {} prepare", layer.owner), layer.prepare);
+            if let Some(record) = layer.record {
+                journal::spent(&format!("view: {} record", layer.owner), record);
+            }
+        }
+        journal::spent("view: submit", submit);
         let sample = Sample {
             interval,
             prepare: layers.iter().map(|layer| layer.prepare).sum(),
@@ -814,6 +824,12 @@ impl ViewportModule {
         self.stats.push(now, sample);
         if let Some(timer) = &mut self.timer {
             for frame in timer.collect(&gpu.device) {
+                let layers: Vec<String> = frame
+                    .layers
+                    .iter()
+                    .map(|(owner, computing, drawing)| format!("{owner} {:.2}", computing + drawing))
+                    .collect();
+                journal::set_gpu(format!("{:.2} ms: {}", frame.total, layers.join(", ")));
                 self.stats.push_gpu(now, frame);
             }
         }

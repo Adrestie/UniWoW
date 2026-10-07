@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 use crate::formats::{FileRef, Formats, Texture, TextureFormat};
 use crate::wgpu::util::DeviceExt;
-use crate::{log, wgpu};
+use crate::{journal, log, wgpu};
 
 /// What a texture without a layer has in its place, as a code: drawn white by its shader.
 pub const NONE: u32 = u32::MAX;
@@ -336,6 +336,7 @@ impl TextureArrays {
             contents: &bytes,
             usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::MAP_WRITE,
         });
+        journal::uploaded(bytes.len() as u64);
         let mut arrays = lock(&self.arrays);
         let (slot, layer) = self.free_layer(&mut arrays, class).ok_or_else(|| {
             format!(

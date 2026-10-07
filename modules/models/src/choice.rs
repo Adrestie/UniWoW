@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use uniwow_api::glam::{Mat4, Vec3};
+use uniwow_api::journal;
 use uniwow_api::models::LookId;
 use uniwow_api::viewport::Phase;
 use uniwow_api::wgpu::util::DeviceExt;
@@ -678,6 +679,7 @@ impl Choice {
             self.bind_groups = None;
         }
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
+        journal::uploaded((size_of_val(&params) + frame_words.len() * 4 + template_entries.len() * 8) as u64);
         if !frame_words.is_empty() {
             queue.write_buffer(
                 self.frames.as_ref().expect("sized"),

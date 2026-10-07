@@ -10,13 +10,9 @@
 use std::fmt;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
-use crate::wgpu;
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|e| e.into_inner())
-}
+use crate::{journal, wgpu};
 
 /// The holes of an arena of `capacity` units, sorted, none touching another.
 #[derive(Debug, Default, PartialEq)]
@@ -238,7 +234,7 @@ impl Arena {
     pub fn put(&self, data: &[u8]) -> Result<Range<u64>, NoRoom> {
         debug_assert_eq!(data.len() as u64 % self.unit, 0);
         let length = data.len() as u64 / self.unit;
-        let mut holes = lock(&self.holes);
+        let mut holes = journal::lock(&self.holes, "arena holes");
         let range = match holes.take(length) {
             Some(range) => range,
             None => {
@@ -251,6 +247,7 @@ impl Arena {
             // Under the lock, written by the next submission: a growth submitted after it runs the
             // writes waiting before its copy into the larger buffer.
             self.queue.write_buffer(&buffer, range.start * self.unit, data);
+            journal::uploaded(data.len() as u64);
         }
         self.used.fetch_add(length * self.unit, Ordering::AcqRel);
         Ok(range)
@@ -282,9 +279,10 @@ impl Arena {
             });
             encoder.copy_buffer_to_buffer(old, 0, &buffer, 0, old.size());
             self.queue.submit([encoder.finish()]);
+            journal::grown(old.size());
         }
         let generation = before.map_or(0, |(_, generation)| generation) + 1;
-        *lock(&self.buffer) = Some((Arc::new(buffer), generation));
+        *journal::lock(&self.buffer, "arena buffer") = Some((Arc::new(buffer), generation));
         holes.grow(capacity);
         self.held.store(size, Ordering::Release);
         Ok(())
@@ -293,18 +291,19 @@ impl Arena {
     /// `data` written again from the unit `at` of a range held, under the lock of the holes, so that
     /// no growth copies the buffer between.
     pub fn write(&self, at: u64, data: &[u8]) {
-        let _holes = lock(&self.holes);
+        let _holes = journal::lock(&self.holes, "arena holes");
         if let Some((buffer, _)) = self.buffer()
             && !data.is_empty()
         {
             self.queue.write_buffer(&buffer, at * self.unit, data);
+            journal::uploaded(data.len() as u64);
         }
     }
 
     /// `range` given back.
     pub fn give(&self, range: Range<u64>) {
         let length = range.end - range.start;
-        lock(&self.holes).give(range);
+        journal::lock(&self.holes, "arena holes").give(range);
         self.used.fetch_sub(length * self.unit, Ordering::AcqRel);
         self.given.fetch_add(1, Ordering::AcqRel);
     }
@@ -317,7 +316,7 @@ impl Arena {
 
     /// The buffer now and its generation; none before the first range.
     pub fn buffer(&self) -> Option<(Arc<wgpu::Buffer>, u64)> {
-        lock(&self.buffer).clone()
+        journal::lock(&self.buffer, "arena buffer").clone()
     }
 
     /// The most bytes its buffer can have.
@@ -336,7 +335,8 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    use super::{Arena, Holes, MOVED, NoRoom, lock, reach, room, room_made};
+    use super::{Arena, Holes, MOVED, NoRoom, reach, room, room_made};
+    use crate::journal::lock as journal_lock;
     use crate::{bytemuck, wgpu};
 
     /// A device of the software adapter of the system, when it has one.
@@ -533,7 +533,7 @@ mod tests {
             // A job taking a range or growing the buffer, which can take milliseconds.
             let arena = &arena;
             scope.spawn(move || {
-                let _holes = lock(&arena.holes);
+                let _holes = journal_lock(&arena.holes, "test");
                 held.send(()).unwrap();
                 let _ = released.recv();
             });

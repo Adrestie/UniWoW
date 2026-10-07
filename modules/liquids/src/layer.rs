@@ -3,19 +3,16 @@
 //! surface and what is blended on the eye's side, from over it and from under it.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use uniwow_api::glam::{Mat4, Vec3, Vec4};
+use uniwow_api::journal;
 
 use uniwow_api::viewport::{Drawing, Layer, LayerStats, Phase, Stage, Target, View};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
 use crate::gpu::{CAMERA, Shared, TileGpu, camera_values};
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 /// A liquid another module placed, on the GPU: drawn while its flag is set and its bounds, in the
 /// world, are in sight.
@@ -78,7 +75,7 @@ impl Layer for LiquidsLayer {
     fn prepare(&mut self, gpu: &egui_wgpu::RenderState, view: &View) {
         let shared = self.shared.clone();
         let (mut tiles, placed, steering, publishing) = {
-            let scene = lock(&self.scene);
+            let scene = journal::lock(&self.scene, "liquids scene");
             (
                 scene.tiles.clone(),
                 scene.placed.clone(),

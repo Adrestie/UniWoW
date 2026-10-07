@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 use uniwow_api::arena::{self, Refusal};
 use uniwow_api::formats::{self, TILE, TileId, Wdt};
 use uniwow_api::glam::Vec3;
+use uniwow_api::journal;
 use uniwow_api::liquids::{self, Grid, Liquids, Placed, Surfaces};
 use uniwow_api::serde_json::json;
 use uniwow_api::viewport::Demand;
@@ -59,7 +60,7 @@ struct Water {
 
 impl Liquids for Water {
     fn surfaces(&self) -> Arc<Surfaces> {
-        lock(&self.surfaces).clone()
+        journal::lock(&self.surfaces, "liquids surfaces").clone()
     }
 
     fn place(&self, owner: &str, liquids: Vec<Placed>) -> Vec<Arc<AtomicBool>> {

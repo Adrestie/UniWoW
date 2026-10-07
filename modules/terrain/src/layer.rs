@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use uniwow_api::glam::{Mat4, Vec3, Vec4};
+use uniwow_api::journal;
 use uniwow_api::viewport::{Layer, LayerStats, Phase, Stage, Target, View};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
@@ -183,7 +184,7 @@ impl Layer for TerrainLayer {
             self.arrays = Some((generation, shared.arrays_group(&views)));
         }
 
-        let scene = lock(&self.scene);
+        let scene = journal::lock(&self.scene, "terrain scene");
         let lods = std::mem::take(&mut self.lods);
         self.drawn = scene
             .tiles

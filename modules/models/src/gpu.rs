@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use uniwow_api::formats::{self, Texture, TextureFormat};
+use uniwow_api::journal;
 use uniwow_api::viewport::{Target, View};
 use uniwow_api::wgpu::util::DeviceExt;
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
@@ -441,6 +442,7 @@ impl Shared {
 
     /// A buffer of `usage` made with `contents`.
     pub fn buffer(&self, label: &str, contents: &[u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
+        journal::uploaded(contents.len() as u64);
         self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
             contents,
@@ -512,6 +514,7 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, texture: &Texture) -> Resu
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
+    journal::uploaded(bytes.len() as u64);
     let source = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("models texture"),
         contents: &bytes,

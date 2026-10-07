@@ -27,23 +27,35 @@ impl Shell {
     /// The work of the kernel. eframe calls it before each `ui`, and also while the window is
     /// minimised whenever a repaint is requested, as other threads do when they need the kernel.
     pub(super) fn logic_pass(&mut self, ctx: &egui::Context) {
+        self.frames.start(self.host.pool.running().len());
+        let timed = |part: &str, start: Instant| uniwow_api::journal::spent(part, start.elapsed());
         // Before the calls and jobs: an event a thread published before a call is delivered
         // before the events that call causes.
+        let start = Instant::now();
         self.collect_from_threads();
         self.apply_pending();
         self.apply_reported();
+        timed("kernel: what the threads reported", start);
         let minimised = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
         let budget = if minimised { MINIMISED_CALL_BUDGET } else { CALL_BUDGET };
+        let start = Instant::now();
         if self.serve_calls(budget) {
             // Calls were left for the next frame: it must come even if nothing else asks for it.
             ctx.request_repaint();
         }
+        timed("kernel: calls", start);
+        let start = Instant::now();
         self.deliver_jobs();
+        timed("kernel: jobs handed back", start);
+        let start = Instant::now();
         self.collect_from_threads();
         self.apply_reported();
         self.dispatch_events();
         self.apply_reported();
+        timed("kernel: events", start);
+        let start = Instant::now();
         self.play(ctx, Instant::now());
+        timed("kernel: players", start);
         if !self.host.events.is_empty() {
             ctx.request_repaint();
         }
@@ -111,6 +123,7 @@ impl Shell {
             commands_panel: &mut self.commands_panel,
         };
         let mut shown = Ok(());
+        let panels = Instant::now();
         egui::CentralPanel::default().show(ui, |ui| {
             if let PanelsHealth::Broken(reason) = &self.panels {
                 ui.colored_label(
@@ -128,6 +141,7 @@ impl Shell {
             });
         });
         let Viewer { failures, closed, .. } = viewer;
+        uniwow_api::journal::spent("kernel: panels", panels.elapsed());
         let ctx = ui.ctx().clone();
         // A layout egui_dock cannot draw would otherwise stop the editor at every start. The reset is
         // tried once; a panel that panics at every frame then leaves a fixed message instead.
@@ -154,13 +168,19 @@ impl Shell {
         }
 
         // The modules' floating windows, over the panels.
+        let windows = Instant::now();
         for index in 0..self.slots.len() {
-            if self.slots[index].state.is_running()
-                && let Err(message) = call_module(&mut self.slots[index], &mut self.host, |f, c| f.windows_ui(&ctx, c))
-            {
+            if !self.slots[index].state.is_running() {
+                continue;
+            }
+            let start = Instant::now();
+            let done = call_module(&mut self.slots[index], &mut self.host, |f, c| f.windows_ui(&ctx, c));
+            uniwow_api::journal::spent(&format!("windows of {}", self.slots[index].id), start.elapsed());
+            if let Err(message) = done {
                 self.fail(index, format!("windows: {message}"));
             }
         }
+        uniwow_api::journal::spent("kernel: windows of the modules", windows.elapsed());
         self.hotkey_window(&ctx);
         // A modal window takes the keyboard from the editor: one the kernel draws, from the frame it
         // is drawn in to the last one; one a Rust module draws with egui, as egui knows it, from
@@ -213,5 +233,6 @@ impl Shell {
         {
             ctx.request_repaint();
         }
+        self.frames.window_drawn();
     }
 }

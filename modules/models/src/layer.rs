@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use uniwow_api::glam::{Mat4, Vec3, Vec4};
+use uniwow_api::journal;
 use uniwow_api::liquids;
 use uniwow_api::models::LookId;
 use uniwow_api::viewport::{Drawing, Layer, LayerStats, Phase, Target, View};
@@ -284,7 +285,7 @@ impl Layer for ModelsLayer {
             return;
         };
         let (looks, generation, tables, reach, summary, bytes, steering, animated, animation, liquids) = {
-            let mut scene = lock(&self.scene);
+            let mut scene = journal::lock(&self.scene, "models scene");
             scene.camera = Some((view.view_proj, view.view, view.eye));
             (
                 scene.looks.clone(),

@@ -5665,6 +5665,43 @@ fog under the water with 9.7; `Manual` from 32 to 128 MB kept.
      their liquids are shown with them, as the doodads. Seen from under Dalaran, its sewers show
      through the faces turned away. Kept.
 
+#### The frames measured in flight, before any correction
+
+Asked by the user's flights in Northrend at 30 to 40 frames a second, from the Howling Fjord to
+Dalaran by the Grizzly Hills, the view drawn at each vertical blank of 60 Hz (a frame past 16.7 ms
+waits for the next, 33 ms).
+
+- **The journal of the frames** (`core/api/src/journal.rs`, `kernel/src/shell/frames.rs`): what each
+  part spent on the interface thread in a frame (the kernel's steps; each module in all its calls,
+  in `windows_ui` and in `on_job` apart; each layer preparing and recording, the submission, the
+  report of the allocator), the bytes sent to the GPU from any thread (the arenas, the arrays of
+  textures, the tiles of the terrain, the models of their own, the per-frame tables of `models` and
+  `buildings`), the arenas grown and what they copied, the waits of the interface thread for the
+  locks of the arenas and of `models`, `liquids` and `terrain`, what the GPU spent by layer on the
+  frame timed last, and the jobs not yet handed back. Kept cheap whether written or not; written a
+  line a frame where `UNIWOW_SLOW_FRAMES` names a file, the frames past 17.5 ms marked slow.
+- **Flown by the user**, the terrain at 64 tiles, the buildings at 8, the doodads at 4, the models
+  at a reach of 1,000, 300 then 600 yards a second:
+
+  | Flight | Frames a second | Slow | The longest | Interface work, slow / others | Sent a slow frame | Arenas grown |
+  |---|---|---|---|---|---|---|
+  | Statistics shown | 46.4 | 33 % | 112 ms | 27.0 / 6.0 ms | 26.6 MB | 4, 89 MB |
+  | Statistics hidden | 43.8 | 34 % | 133 ms | 28.9 / 6.5 ms | 31.6 MB | 4, 89 MB |
+  | Terrain 16, buildings 3 | 28.0 | 53 % | 138 ms | 38.9 / 4.5 ms | 42.1 MB | none |
+
+  Of the slow frames, 421 of 464, 381 of 433 and 296 of 325 took more than 16.7 ms of work on the
+  interface thread; the GPU spent 3 to 4.4 ms on a frame. By part, a slow frame of the second
+  flight: the jobs handed back to `models` 7.3 ms (46 at most), its windows 2.7, those of
+  `buildings` 1.9, `liquids` 1.5 and `terrain` 1.5; recording the bundle of the terrain 3.9 ms,
+  preparing `models` 3.1, `buildings` 1.1, submitting 1.1. The waits for a lock 0.1 ms a slow frame
+  on average, 3 ms at the longest (10 in the third flight); the report of the allocator, made once a
+  second while the statistics are shown, 2.9 ms at the longest, and the second flight, without it,
+  as slow. Up to 298 jobs waited to be handed back at once: 94 on average in the slow frames of the
+  second flight, 11 in the others.
+- **The same flight scripted** (`viewport.look_at` 60 times a second along the same way): 60 frames
+  a second, 4 to 5 % slow, 34 ms at the longest; the flights of the user loaded many more models at
+  once.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

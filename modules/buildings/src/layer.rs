@@ -7,20 +7,17 @@
 //! after.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use uniwow_api::glam::{Mat4, Vec3, Vec4};
+use uniwow_api::journal;
 use uniwow_api::liquids::{self, Surfaces};
 use uniwow_api::viewport::{Drawing, Layer, LayerStats, Phase, Target, View};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
 use crate::doodads::Part;
 use crate::gpu::{CAMERA, Shared, State, WmoGpu, camera_values};
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 /// The liquids of a building placed through the service `liquids`: the flag of each, with its group.
 pub type Poured = Arc<[(u16, Arc<AtomicBool>)]>;
@@ -259,6 +256,7 @@ impl Grown {
             && !data.is_empty()
         {
             queue.write_buffer(buffer, 0, data);
+            journal::uploaded(data.len() as u64);
         }
         made
     }
@@ -303,7 +301,7 @@ impl Layer for BuildingsLayer {
     fn prepare(&mut self, gpu: &egui_wgpu::RenderState, view: &View) {
         let shared = self.shared.clone();
         let (placed, steering, cpu, liquids) = {
-            let scene = lock(&self.scene);
+            let scene = journal::lock(&self.scene, "buildings scene");
             (scene.placed.clone(), scene.steering, scene.cpu, scene.liquids.clone())
         };
         let surfaces = liquids.map(|liquids| liquids.surfaces());

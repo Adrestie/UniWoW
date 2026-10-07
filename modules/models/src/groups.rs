@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use uniwow_api::arena::Arena;
 use uniwow_api::glam::Vec3;
+use uniwow_api::journal;
 use uniwow_api::models::{Instance, LookId};
 use uniwow_api::{bytemuck, log};
 
@@ -185,7 +186,7 @@ impl Slot {
 
     /// What the layer draws of this owner.
     pub fn published(&self) -> Arc<Published> {
-        lock(&self.published).clone()
+        journal::lock(&self.published, "models published").clone()
     }
 
     /// Changes the set with `update`, then writes it into `arena`, from the calling thread: none
@@ -207,7 +208,7 @@ impl Slot {
             arena.write(written.range.start, bytemuck::cast_slice(&data));
             kept.groups = groups.clone();
             let layout = kept.layout;
-            *lock(&self.published) = Arc::new(Published {
+            *journal::lock(&self.published, "models published") = Arc::new(Published {
                 written: Some(written),
                 groups,
                 layout,
@@ -235,7 +236,7 @@ impl Slot {
         kept.written = Some(written.clone());
         kept.groups = groups.clone();
         let layout = kept.layout;
-        *lock(&self.published) = Arc::new(Published {
+        *journal::lock(&self.published, "models published") = Arc::new(Published {
             written: Some(written),
             groups,
             layout,
