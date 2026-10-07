@@ -10,8 +10,8 @@ use std::task::{Context, Poll, Waker};
 
 use uniwow_api::formats::{
     AnimationRecord, AreaRecord, Building, CharSection, CreatureDisplay, CreatureLook, CreatureModel, DoodadSet,
-    FacialHair, FileRef, Formats, GameObjectDisplay, HairGeoset, MapRecord, Model, Texture, Tile, TileId, Wdl, Wdt,
-    Wmo, WmoBatch, WmoDoodad, WmoGroup, WmoMaterial,
+    FacialHair, FileRef, Formats, GameObjectDisplay, HairGeoset, MapRecord, Model, Texture, TextureFormat, Tile,
+    TileId, Wdl, Wdt, Wmo, WmoBatch, WmoDoodad, WmoGroup, WmoMaterial,
 };
 use uniwow_api::glam::{Mat4, Quat, Vec3};
 use uniwow_api::models::{Extent, Instance, Look, LookId, LookState, Models};
@@ -422,11 +422,20 @@ impl Formats for NoFiles {
     fn wdl(&self, _directory: &str) -> Result<Option<Wdl>, String> {
         Ok(None)
     }
-    fn texture(&self, _file: &FileRef) -> Result<Texture, String> {
-        Err("none".to_owned())
+    fn texture(&self, file: &FileRef) -> Result<Texture, String> {
+        match file {
+            // White, its alpha a mask of nothing.
+            FileRef::Path(path) if path == "masked.blp" => Ok(Texture {
+                width: 4,
+                height: 4,
+                format: TextureFormat::Rgba8,
+                levels: vec![[255, 255, 255, 0].repeat(16)],
+            }),
+            _ => Err("none".to_owned()),
+        }
     }
-    fn texture_rgba(&self, _file: &FileRef) -> Result<Texture, String> {
-        Err("none".to_owned())
+    fn texture_rgba(&self, file: &FileRef) -> Result<Texture, String> {
+        self.texture(file)
     }
 }
 
@@ -692,4 +701,69 @@ fn the_opaque_batches_are_drawn_by_state_and_the_blended_from_the_farthest() {
     let runs = layer::runs(&opaque, 0);
     assert_eq!((runs.len(), runs[1].first), (2, 1));
     assert_eq!(layer::runs(&blended, 2)[0].count, 2, "one state, one run");
+}
+
+#[test]
+fn a_batch_is_of_a_transition_inside_or_outside_by_its_place_in_its_group() {
+    let counts = [2, 3, 1];
+    let kinds: Vec<u32> = (0..6).map(|index| gpu::kind(index, counts)).collect();
+    assert_eq!(kinds, [0, 0, 1, 1, 1, 2]);
+    assert_eq!(gpu::kind(0, [0, 0, 4]), 2);
+}
+
+#[test]
+fn a_batch_outside_in_a_group_inside_is_lit_by_the_sun() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    let front = Vec3::new(5.0, 0.0, 0.0);
+    // The outer wall of a room: a group inside, its batch outside, its vertex colours red.
+    let mut wall = square(material(0, 0), true, Some([200, 0, 0, 255]));
+    wall.groups[0].batch_counts = [0, 0, 1];
+    let Some(mut layer) = bench(&gpu, wall) else {
+        return;
+    };
+    let lit = middle(&gpu, &mut layer, front);
+    assert!(lit[0] == lit[1] && lit[1] == lit[2] && lit[0] > 50, "{lit:?}");
+    // Of a transition: blended by the alpha of its colours, here wholly inside.
+    let mut door = square(material(0, 0), true, Some([200, 0, 0, 0]));
+    door.groups[0].batch_counts = [1, 0, 0];
+    let mut layer = bench(&gpu, door).unwrap();
+    let lit = middle(&gpu, &mut layer, front);
+    assert!(lit[0] > 50 && lit[1] < 10, "{lit:?}");
+}
+
+#[test]
+fn an_opaque_batch_keeps_its_pixels_whatever_the_alpha_of_its_texture() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    let front = Vec3::new(5.0, 0.0, 0.0);
+    let masked = |blending| {
+        let mut material = material(0x1, blending);
+        material.textures[0] = Some(FileRef::Path("masked.blp".to_owned()));
+        square(material, false, None)
+    };
+    let Some(mut opaque) = bench(&gpu, masked(0)) else {
+        return;
+    };
+    assert_eq!(middle(&gpu, &mut opaque, front), [255, 255, 255, 255]);
+    // Alpha-keyed, not drawn under its key.
+    let mut keyed = bench(&gpu, masked(1)).unwrap();
+    assert_eq!(middle(&gpu, &mut keyed, front), [0, 0, 0, 255]);
+}
+
+#[test]
+fn a_building_lit_as_one_is_lit_as_outside_whatever_its_batches() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    // Inside, of nearly black colours, as Stormwind's groups are.
+    let mut dark = square(material(0, 0), true, Some([2, 2, 2, 255]));
+    dark.flags = 0xF;
+    let Some(mut layer) = bench(&gpu, dark) else {
+        return;
+    };
+    let lit = middle(&gpu, &mut layer, Vec3::new(5.0, 0.0, 0.0));
+    assert!(lit[0] > 50, "{lit:?}");
 }

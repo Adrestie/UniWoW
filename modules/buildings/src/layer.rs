@@ -100,7 +100,7 @@ pub(crate) fn list(placed: &[Placed], view: &View) -> (Vec<Listed>, Vec<Listed>,
                     state: batch.state,
                     distance,
                     command: [batch.count, 1, batch.first, building.wmo.base_vertex as u32, 0],
-                    entry: [instance as u32, batch.material, group.flags, 0],
+                    entry: [instance as u32, batch.material, group.flags | batch.kind << 8, 0],
                 };
                 if batch.state.blended() {
                     blended.push(listed);
@@ -285,7 +285,7 @@ impl Layer for BuildingsLayer {
             triangles,
             bytes: shared.bytes(),
             items: format!(
-                "{buildings} buildings in sight of {}, {groups} groups of {all_groups}, {} batches ({} blended); \
+                "{buildings} buildings in sight of {}, {groups} groups of {all_groups}, {} batches ({} blended)\n  \
                  the arrays {} textures; on the CPU {:.1} MB",
                 placed.len(),
                 listed.len(),

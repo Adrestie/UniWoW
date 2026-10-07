@@ -446,7 +446,7 @@ impl ModelsModule {
             }
         }
         scene.summary = format!(
-            "{} looks on the GPU ({:.0} MB), {} loading, {waiting} waiting; {} models and {} textures held, {} textures unreadable; on the CPU, the models held {:.0} MB, their animations {:.0} MB\n  {drawn}",
+            "{} looks on the GPU ({:.0} MB), {} loading, {waiting} waiting; {} models and {} textures held, {} textures unreadable\n  on the CPU, the models held {:.0} MB, their animations {:.0} MB\n  {drawn}",
             self.held.len(),
             bytes as f64 / MB,
             self.loading.len(),

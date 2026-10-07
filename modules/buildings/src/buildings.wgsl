@@ -1,10 +1,11 @@
 // The buildings drawn from what they share: for each batch drawn, by the number of its draw
 // (`instance_index`, its first instance pointing into the entries of the frame), its entry gives
-// its placement among those of the frame, its material and the flags of its group; its textures
-// are read from the arrays by slot (the bindings of the arrays and `sampled` follow, written for
-// the count of slots). The pixel shaders of 3.3.5a combine its textures in gamma; it is lit by the
-// light outside, the sun and the ambient light of the view, and inside by its vertex colours and the
-// ambient colour of its building, the alpha of its vertex colours blending the two; then fogged.
+// its placement among those of the frame, its material, the flags of its group and its kind; its
+// textures are read from the arrays by slot (the bindings of the arrays and `sampled` follow,
+// written for the count of slots). The pixel shaders of 3.3.5a combine its textures in gamma; a
+// batch outside is lit by the sun and the ambient light of the view, one inside by its vertex
+// colours and the ambient colour of its building, one of a transition by both, blended by the alpha
+// of its vertex colours; then fogged.
 
 struct Camera {
     view_proj: mat4x4<f32>,
@@ -54,6 +55,8 @@ const NONE: u32 = 0xFFFFFFFFu;
 // drawn.
 const NEAR_FOG: f32 = 0.55;
 const LEAST_ALPHA: f32 = 1.0 / 255.0;
+// The blending of an opaque material.
+const OPAQUE: u32 = 0u;
 // The flags of a group: its vertex colours, outside; of a material: lit as outside.
 const HAS_COLOURS: u32 = 0x4u;
 const OUTSIDE: u32 = 0x8u;
@@ -190,10 +193,21 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let one = texel(material.textures.x, material.textures.z & 3u, material.sizes.xy, in.uv1, ddx_one, ddy_one);
     let two = texel(material.textures.y, (material.textures.z >> 2u) & 3u, material.sizes.zw, second, ddx_two, ddy_two);
     let combined = combine(shader, one, two, in.blend);
-    let alpha = clamp(combined.a, 0.0, 1.0);
+    var alpha = clamp(combined.a, 0.0, 1.0);
     let shading = material.shading;
-    if alpha < select(LEAST_ALPHA, shading.x, shading.x > 0.0) {
+    // An opaque batch keeps every pixel, the alpha of its textures a mask of their own; an
+    // alpha-keyed one those over its key; a blended one those it shows. The first two are opaque.
+    var reference = LEAST_ALPHA;
+    if shading.x > 0.0 {
+        reference = shading.x;
+    } else if material.flags.y == OPAQUE {
+        reference = -1.0;
+    }
+    if alpha < reference {
         discard;
+    }
+    if reference != LEAST_ALPHA {
+        alpha = 1.0;
     }
     let fog = select(fog_amount(in.world), 0.0, shading.z > 0.5);
     // A mod2x batch doubles what is drawn in gamma, as the models draw it.
@@ -208,7 +222,14 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         // Inside: the vertex colours, halved when fixed, and the ambient colour, both in gamma.
         let coloured = (in.group & HAS_COLOURS) != 0u;
         let inside = linear(select(vec3<f32>(0.0), in.colour1.rgb * 2.0, coloured) + in.ambient);
-        var weight = select(select(0.0, 1.0, (in.group & OUTSIDE) != 0u), in.colour1.a, coloured);
+        // The share of the light outside: by the kind of the batch; for a transition, by the alpha
+        // of its vertex colours, or by its group when it has none.
+        var weight = 1.0;
+        switch (in.group >> 8u) & 3u {
+            case 0u: { weight = select(select(0.0, 1.0, (in.group & OUTSIDE) != 0u), in.colour1.a, coloured); }
+            case 1u: { weight = 0.0; }
+            default: {}
+        }
         if (material.flags.x & LIT_OUTSIDE) != 0u {
             weight = 1.0;
         }

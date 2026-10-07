@@ -38,6 +38,11 @@ const CLAMP_ACROSS: u32 = 0x40;
 const CLAMP_UP: u32 = 0x80;
 /// The flags of a group.
 const HAS_COLOURS: u32 = 0x4;
+/// The flag of a building lit as one (its "unified render path"): its vertex colours, unfixed and
+/// nearly black, do not light its insides, every batch of it lit as outside.
+const LIT_AS_ONE: u16 = 0x2;
+/// The kind of a batch outside.
+const OUTSIDE_BATCH: u32 = 2;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -448,6 +453,20 @@ pub struct BatchGpu {
     pub count: u32,
     pub material: u32,
     pub state: State,
+    /// Of a transition (0), inside (1) or outside (2), by its place among the batches of its group.
+    pub kind: u32,
+}
+
+/// The kind of the batch `index` of a group of `counts` batches of transition, inside and outside.
+pub fn kind(index: usize, counts: [u16; 3]) -> u32 {
+    let [transition, inside, _] = counts.map(usize::from);
+    if index < transition {
+        0
+    } else if index < transition + inside {
+        1
+    } else {
+        OUTSIDE_BATCH
+    }
 }
 
 /// A group on the GPU: its bounds, its flags for the shader, its batches.
@@ -605,12 +624,18 @@ pub fn upload(shared: &Arc<Shared>, formats: &dyn Formats, mut wmo: Wmo) -> Resu
             batches: group
                 .batches
                 .iter()
-                .filter(|batch| batch.count > 0)
-                .map(|batch| BatchGpu {
+                .enumerate()
+                .filter(|(_, batch)| batch.count > 0)
+                .map(|(index, batch)| BatchGpu {
                     first: index_range.start as u32 + start + batch.first,
                     count: batch.count,
                     material: material_range.start as u32 + u32::from(batch.material),
                     state: State::of(&wmo.materials[usize::from(batch.material)]),
+                    kind: if wmo.flags & LIT_AS_ONE != 0 {
+                        OUTSIDE_BATCH
+                    } else {
+                        kind(index, group.batch_counts)
+                    },
                 })
                 .collect(),
         })
