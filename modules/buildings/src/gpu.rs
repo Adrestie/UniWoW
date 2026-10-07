@@ -39,8 +39,10 @@ const CLAMP_UP: u32 = 0x80;
 /// The flags of a group.
 const HAS_COLOURS: u32 = 0x4;
 /// The flag of a building lit as one (its "unified render path"): its vertex colours, unfixed and
-/// nearly black, do not light its insides, every batch of it lit as outside.
+/// nearly black, do not light its insides, every batch of it lit as outside, its ambient colour
+/// added at the drawing; and the flag its groups give the shader then.
 const LIT_AS_ONE: u16 = 0x2;
+const GROUP_LIT_AS_ONE: u32 = 0x10;
 /// The kind of a batch outside.
 const OUTSIDE_BATCH: u32 = 2;
 
@@ -215,7 +217,8 @@ impl Shared {
         {
             return Err(format!(
                 "the device does not offer what the buildings are drawn with: the first instance of an \
-                 indirect draw, storage buffers read by vertices and {SLOTS} textures a stage"
+                 indirect draw, storage buffers read by vertices and {SLOTS} textures a stage; there is no \
+                 other way to draw them"
             ));
         }
         let storage = |binding| wgpu::BindGroupLayoutEntry {
@@ -620,7 +623,12 @@ pub fn upload(shared: &Arc<Shared>, formats: &dyn Formats, mut wmo: Wmo) -> Resu
         .zip(starts)
         .map(|(group, start)| GroupGpu {
             bounds: group.bounds,
-            flags: group.flags & (HAS_COLOURS | colours::OUTSIDE),
+            flags: group.flags & (HAS_COLOURS | colours::OUTSIDE)
+                | if wmo.flags & LIT_AS_ONE != 0 {
+                    GROUP_LIT_AS_ONE
+                } else {
+                    0
+                },
             batches: group
                 .batches
                 .iter()

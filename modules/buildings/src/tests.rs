@@ -10,14 +10,15 @@ use std::task::{Context, Poll, Waker};
 
 use uniwow_api::formats::{
     AnimationRecord, AreaRecord, Building, CharSection, CreatureDisplay, CreatureLook, CreatureModel, DoodadSet,
-    FacialHair, FileRef, Formats, GameObjectDisplay, HairGeoset, MapRecord, Model, Texture, TextureFormat, Tile,
-    TileId, Wdl, Wdt, Wmo, WmoBatch, WmoDoodad, WmoGroup, WmoMaterial,
+    FacialHair, FileRef, Formats, GameObjectDisplay, HairGeoset, MapRecord, Model, ORIGIN, Texture, TextureFormat,
+    Tile, TileId, Wdl, Wdt, Wmo, WmoBatch, WmoDoodad, WmoGroup, WmoMaterial,
 };
 use uniwow_api::glam::{Mat4, Quat, Vec3};
 use uniwow_api::models::{Extent, Instance, Look, LookId, LookState, Models};
 use uniwow_api::viewport::{Layer, Phase, Target, View};
 use uniwow_api::{egui, egui_wgpu, wgpu};
 
+use crate::budget;
 use crate::colours;
 use crate::doodads::{self, Owners};
 use crate::gpu::{self, Shared, State};
@@ -765,5 +766,137 @@ fn a_building_lit_as_one_is_lit_as_outside_whatever_its_batches() {
         return;
     };
     let lit = middle(&gpu, &mut layer, Vec3::new(5.0, 0.0, 0.0));
-    assert!(lit[0] > 50, "{lit:?}");
+    assert!(lit[0] > 50 && lit[0] == lit[1], "{lit:?}");
+    // Its ambient colour added at the drawing.
+    let mut red = square(material(0, 0), true, Some([2, 2, 2, 255]));
+    red.flags = 0xF;
+    red.ambient = [120, 0, 0, 255];
+    let mut layer = bench(&gpu, red).unwrap();
+    let reddened = middle(&gpu, &mut layer, Vec3::new(5.0, 0.0, 0.0));
+    assert!(
+        reddened[0] > lit[0] && reddened[1] == lit[1],
+        "{reddened:?} against {lit:?}"
+    );
+}
+
+#[test]
+fn a_transition_adds_the_light_outside_by_its_alpha_to_its_colours() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    let front = Vec3::new(5.0, 0.0, 0.0);
+    // Wholly outside: its red colour darkened to nothing by the fix, lit by the sun alone.
+    let mut door = square(material(0, 0), true, Some([200, 0, 0, 255]));
+    door.groups[0].batch_counts = [1, 0, 0];
+    let Some(mut layer) = bench(&gpu, door) else {
+        return;
+    };
+    let outside = middle(&gpu, &mut layer, front);
+    assert!(outside[0] == outside[1] && outside[0] > 50, "{outside:?}");
+    // Half: its colour as the fix left it, whole, and half the sun added, grey.
+    let mut half = square(material(0, 0), true, Some([200, 0, 0, 128]));
+    half.groups[0].batch_counts = [1, 0, 0];
+    let mut fixed = half.groups[0].clone();
+    colours::fix(&mut fixed, half.flags, half.ambient);
+    let left = (f32::from(fixed.colours[0][0][0]) * 2.0 / 255.0).min(1.0);
+    let mut layer = bench(&gpu, half).unwrap();
+    let blended = middle(&gpu, &mut layer, front);
+    assert!(blended[1] > 20, "{blended:?}");
+    let linear = |gamma: f32| {
+        if gamma <= 0.04045 {
+            gamma / 12.92
+        } else {
+            ((gamma + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let [red, green] = [blended[0], blended[1]].map(|value| linear(f32::from(value) / 255.0));
+    assert!(
+        (red - green - linear(left)).abs() < 0.02,
+        "{blended:?}: {} against {}",
+        red - green,
+        linear(left)
+    );
+}
+
+#[test]
+fn the_ground_of_a_building_and_how_far_the_eye_lies_from_it() {
+    let mut placed = building(1, "a.wmo");
+    // In the axes of its file: X from 10 to 30, Z from 100 to 140.
+    placed.bounds = [[10.0, 0.0, 100.0], [30.0, 50.0, 140.0]];
+    let ground = budget::ground(&placed);
+    assert_eq!(
+        ground,
+        [[ORIGIN - 140.0, ORIGIN - 30.0], [ORIGIN - 100.0, ORIGIN - 10.0]]
+    );
+    assert_eq!(budget::distance([ORIGIN - 120.0, ORIGIN - 20.0], ground), 0.0, "inside");
+    assert_eq!(budget::distance([ORIGIN - 90.0, ORIGIN - 20.0], ground), 10.0);
+    assert_eq!(
+        budget::distance([ORIGIN - 97.0, ORIGIN - 6.0], ground),
+        5.0,
+        "from a corner"
+    );
+}
+
+fn file(key: u32, distance: f32, held: budget::Held) -> budget::File<u32> {
+    budget::File { key, distance, held }
+}
+
+#[test]
+fn the_files_are_told_by_bands_and_read_within_what_the_budget_allows() {
+    use budget::Held::{Loading, Ready, Refused, Waiting};
+    use uniwow_api::viewport::{Allowance, BAND};
+    let files = [
+        file(1, 10.0, Ready(100)),
+        file(2, BAND * 3.5, Waiting),
+        file(3, BAND * 1.5, Loading),
+        file(4, BAND * 2.0, Refused),
+        file(5, BAND * 0.5, Waiting),
+        file(6, BAND * 9.0, Ready(50)),
+        file(7, BAND * 2.5, Waiting),
+        file(8, BAND * 4.0, Ready(30)),
+    ];
+    // Wanted at what those on the GPU take on average, or at the size expected while none is.
+    assert_eq!(budget::expected(&files), 60);
+    assert_eq!(budget::expected(&files[1..5]), budget::EXPECTED);
+    let demand = budget::demand(&files, 1000, 7);
+    assert_eq!(demand.fixed, 1000);
+    assert_eq!(
+        (demand.held[0], demand.wanted[0]),
+        (100, 107),
+        "file 1 held, file 5 wanted"
+    );
+    assert_eq!(
+        (demand.held[9], demand.wanted[1], demand.wanted[2], demand.wanted[3]),
+        (50, 7, 7, 7)
+    );
+    assert_eq!(demand.held.iter().sum::<u64>(), 180);
+    // Within 3 bands to load, 5 to keep: the nearest waiting read, as many as the slots left; file
+    // 2 beyond the reach to load not read, file 8 within the reach to keep kept.
+    let allowance = Allowance {
+        load: BAND * 3.0,
+        keep: BAND * 5.0,
+        ..Allowance::default()
+    };
+    let plan = |start: Vec<u32>, waiting| budget::Plan {
+        start,
+        release: vec![6],
+        waiting,
+    };
+    assert_eq!(budget::plan(&files, &allowance, 9), plan(vec![5, 7], false));
+    assert_eq!(budget::plan(&files, &allowance, 3), plan(vec![5, 7], false));
+    assert_eq!(
+        budget::plan(&files, &allowance, 2),
+        plan(vec![5], true),
+        "one loading already, file 7 waiting its turn"
+    );
+    assert_eq!(budget::plan(&files, &allowance, 1), plan(vec![], true));
+    // All fits: every waiting read, nothing let go.
+    assert_eq!(
+        budget::plan(&files, &Allowance::default(), 9),
+        budget::Plan {
+            start: vec![5, 7, 2],
+            release: vec![],
+            waiting: false
+        }
+    );
 }

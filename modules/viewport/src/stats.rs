@@ -90,6 +90,16 @@ pub fn process_memory() -> Option<(u64, u64)> {
     }
 }
 
+/// What the report of the allocator of the device says in short: its bytes allocated, those
+/// reserved and its blocks.
+pub fn allocator(report: &wgpu::AllocatorReport) -> [u64; 3] {
+    [
+        report.total_allocated_bytes,
+        report.total_reserved_bytes,
+        report.blocks.len() as u64,
+    ]
+}
+
 fn ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
@@ -131,9 +141,17 @@ impl Stats {
     }
 
     /// The statistics as the view shows them, a line each: the frames, the interface thread, the
-    /// GPU, the memory of the process, then each layer; `timed` says whether the GPU is timed,
-    /// `memory` what the process takes, its working set and its private bytes.
-    pub fn text(&self, timed: bool, memory: Option<(u64, u64)>, budget: &Allowance) -> String {
+    /// GPU, the memory of the process and of the allocator of the device, then each layer; `timed`
+    /// says whether the GPU is timed, `memory` what the process takes, its working set and its
+    /// private bytes, `allocator` what the allocator of the device holds, its bytes allocated, those
+    /// reserved and its blocks.
+    pub fn text(
+        &self,
+        timed: bool,
+        memory: Option<(u64, u64)>,
+        allocator: Option<[u64; 3]>,
+        budget: &Allowance,
+    ) -> String {
         let samples = || self.samples.iter().map(|(_, sample)| sample);
         let (interval, longest) = spread(samples().filter_map(|s| s.interval.map(ms)));
         let mut lines = vec![format!(
@@ -162,6 +180,13 @@ impl Stats {
                 "process: {:.0} MB in memory, {:.0} MB private",
                 mb(working),
                 mb(private)
+            ));
+        }
+        if let Some([allocated, reserved, blocks]) = allocator {
+            lines.push(format!(
+                "allocator of the device: {:.0} MB allocated of {:.0} MB reserved, {blocks} blocks",
+                mb(allocated),
+                mb(reserved)
             ));
         }
         if budget.budget != u64::MAX {

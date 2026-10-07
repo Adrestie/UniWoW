@@ -265,6 +265,46 @@ fn the_order_of_blended_instances_is_kept_until_two_cross_by_the_margin() {
 }
 
 #[test]
+fn an_owner_out_of_sight_is_not_given_to_the_frame() {
+    let fake = Fake {
+        model: Some(square(0, 0)),
+        textures: colours(),
+        ..Fake::default()
+    };
+    let Some(mut pooled) = Pooled::new(pool::SLOTS) else {
+        return;
+    };
+    assert!(pooled.add(&fake, &look("square.m2")));
+    // An owner beside the view, another in sight: the second alone in the frame, from its start.
+    pooled
+        .bench
+        .service
+        .place("aside", &[instance(1, 0, Vec3::new(-2.0, 50.0, 0.0), 1.0)]);
+    pooled
+        .bench
+        .service
+        .place("seen", &[instance(2, 0, Vec3::new(-2.0, 0.0, 0.0), 1.0)]);
+    let image = settled(&mut pooled.bench, FRONT, AIM);
+    assert!(only(middle(&image), 0), "{:?}", middle(&image));
+    let given = |pooled: &mut Pooled| {
+        let choice = pooled.bench.layer.choice().expect("with the pool");
+        choice
+            .sections()
+            .iter()
+            .map(|section| (section.2, section.3))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(given(&mut pooled), [(0, 1)]);
+    // Both in sight, both given.
+    pooled
+        .bench
+        .service
+        .place("aside", &[instance(1, 0, Vec3::new(-2.0, 0.5, 0.0), 1.0)]);
+    render(&mut pooled.bench, FRONT, AIM);
+    assert_eq!(given(&mut pooled), [(0, 1), (1, 1)]);
+}
+
+#[test]
 fn a_level_is_forgotten_while_its_instance_is_out_of_sight() {
     let fake = Fake {
         model: Some(levelled((PLAIN, 0))),

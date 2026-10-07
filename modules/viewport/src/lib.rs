@@ -402,6 +402,9 @@ struct ViewportModule {
     pass: PassWatch,
     last_frame: Option<Instant>,
     show_stats: bool,
+    /// The report of the allocator of the device last made, and when: its bytes allocated, those
+    /// reserved and its blocks.
+    allocator: Option<(Instant, Option<[u64; 3]>)>,
     /// What the layers wrote over the view at the last frame, with the transform it was drawn with.
     labels: (Mat4, Vec<Label>),
     budget: Budget,
@@ -429,6 +432,7 @@ impl Default for ViewportModule {
             pass: PassWatch::default(),
             last_frame: None,
             show_stats: false,
+            allocator: None,
             labels: (Mat4::IDENTITY, Vec::new()),
             budget: Arc::default(),
             fog: Arc::default(),
@@ -571,9 +575,19 @@ impl Module for ViewportModule {
         if self.show_stats {
             let colour = egui::Color32::from_gray(225);
             let allowance = budget(&self.budget).allowance;
+            // The report of the allocator lists every allocation: made again once a second.
+            if self
+                .allocator
+                .as_ref()
+                .is_none_or(|(at, _)| at.elapsed() >= Duration::from_secs(1))
+            {
+                let report = ctx.gpu().and_then(|gpu| gpu.device.generate_allocator_report());
+                self.allocator = Some((Instant::now(), report.as_ref().map(stats::allocator)));
+            }
+            let allocator = self.allocator.as_ref().and_then(|(_, report)| *report);
             let text = self
                 .stats
-                .text(self.timer.is_some(), stats::process_memory(), &allowance);
+                .text(self.timer.is_some(), stats::process_memory(), allocator, &allowance);
             let galley = painter.layout_no_wrap(text, egui::FontId::monospace(11.0), colour);
             let at = rect.left_top() + egui::vec2(8.0, 8.0);
             let back = egui::Rect::from_min_size(at, galley.size()).expand(4.0);
@@ -2461,7 +2475,7 @@ fn cs_main() {
                 layers: vec![("terrain".to_owned(), 0.25, 1.5)],
             },
         );
-        let text = stats.text(true, None, &Allowance::default());
+        let text = stats.text(true, None, None, &Allowance::default());
         assert!(text.starts_with("48 fps: a frame 20.7 ms, the longest 40.0"), "{text}");
         assert!(text.contains("view, interface thread: 2.00 ms"), "{text}");
         assert!(text.contains("GPU: 3.00 ms"), "{text}");
@@ -2471,7 +2485,7 @@ fn cs_main() {
         );
         assert!(!text.contains("the pass failed"), "{text}");
         stats.set_pass(Some((3, "refused".to_owned())));
-        let failing = stats.text(true, None, &Allowance::default());
+        let failing = stats.text(true, None, None, &Allowance::default());
         assert!(
             failing.contains("the pass failed, 3 frames in a row not drawn: refused"),
             "{failing}"
@@ -2487,9 +2501,29 @@ fn cs_main() {
             ),
             "{text}"
         );
-        assert!(stats.text(false, None, &Allowance::default()).contains("not timed"));
-        let memory = stats.text(true, Some((300 << 20, 200 << 20)), &Allowance::default());
+        assert!(
+            stats
+                .text(false, None, None, &Allowance::default())
+                .contains("not timed")
+        );
+        let report = wgpu::AllocatorReport {
+            allocations: Vec::new(),
+            blocks: Vec::new(),
+            total_allocated_bytes: 100 << 20,
+            total_reserved_bytes: 400 << 20,
+        };
+        assert_eq!(super::stats::allocator(&report), [100 << 20, 400 << 20, 0]);
+        let memory = stats.text(
+            true,
+            Some((300 << 20, 200 << 20)),
+            Some([100 << 20, 400 << 20, 7]),
+            &Allowance::default(),
+        );
         assert!(memory.contains("process: 300 MB in memory, 200 MB private"), "{memory}");
+        assert!(
+            memory.contains("allocator of the device: 100 MB allocated of 400 MB reserved, 7 blocks"),
+            "{memory}"
+        );
         assert!(!memory.contains("GPU budget"), "no budget told, none written");
         let budget = Allowance {
             budget: 1000 << 20,
@@ -2497,7 +2531,7 @@ fn cs_main() {
             limited: Some(viewport::BAND * 8.0),
             ..Allowance::default()
         };
-        let limited = stats.text(true, None, &budget);
+        let limited = stats.text(true, None, None, &budget);
         assert!(
             limited.contains("GPU budget of the view: 300 of 1000 MB; reach limited to 2.0 tiles"),
             "{limited}"
@@ -2512,9 +2546,11 @@ fn cs_main() {
         };
         stats.push(start + Duration::from_secs(3), later);
         assert!(
-            stats.text(true, None, &Allowance::default()).starts_with("100 fps"),
+            stats
+                .text(true, None, None, &Allowance::default())
+                .starts_with("100 fps"),
             "{}",
-            stats.text(true, None, &Allowance::default())
+            stats.text(true, None, None, &Allowance::default())
         );
     }
 }

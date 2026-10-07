@@ -27,6 +27,7 @@ use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 use crate::animator::{Animated, AnimationStats};
 use crate::choice::{Blended, Choice, GroupOfFrame, Move, Section, Tables};
 use crate::gpu::{CAMERA, Shared, State, camera_values};
+use crate::groups::Published;
 use crate::loading::{LookGpu, Ready};
 use crate::lock;
 use crate::pool::Pool;
@@ -98,6 +99,25 @@ pub fn nearest(eye: Vec3, bounds: [Vec3; 2]) -> f32 {
     (low - eye).max(eye - high).max(Vec3::ZERO).length()
 }
 
+/// The box of an owner's groups drawn and their largest radius, `owner_bounds`.
+pub type OwnerBounds = Option<([Vec3; 2], f32)>;
+
+/// The box of the groups of `published` whose looks are drawn, grown by the largest of their radii
+/// at their scales, and that radius; none when none is drawn. None of those groups is in sight
+/// or within reach where this box is not.
+pub fn owner_bounds(published: &Published, looks: &HashMap<LookId, Arc<Ready>>) -> OwnerBounds {
+    let mut found: OwnerBounds = None;
+    for group in &published.groups {
+        let Some(look) = looks.get(&group.look) else {
+            continue;
+        };
+        let radius = look.radius() * group.scale;
+        let ([low, high], largest) = found.unwrap_or(([group.low, group.high], 0.0));
+        found = Some(([low.min(group.low), high.max(group.high)], largest.max(radius)));
+    }
+    found.map(|([low, high], radius)| ([low - Vec3::splat(radius), high + Vec3::splat(radius)], radius))
+}
+
 /// Whether the blended groups at `distances`, in the order drawn last, may stay so: none nearer
 /// than the next by more than the margin.
 pub fn still_ordered(distances: &[f32]) -> bool {
@@ -166,6 +186,10 @@ pub struct ModelsLayer {
     /// The bind group of the bones, and the bones it was made with.
     skin_group: Option<(wgpu::BindGroup, Option<Arc<Animated>>)>,
     blended: Vec<BlendedKey>,
+    /// The bounds of each owner (`owner_bounds`), by its number, with the publication and the
+    /// generation of the looks they were made of, the publication held so that its place is not
+    /// taken by another.
+    owner_bounds: HashMap<u32, (Arc<Published>, u64, OwnerBounds)>,
     stats: LayerStats,
 }
 
@@ -187,6 +211,7 @@ impl ModelsLayer {
             pool_group: None,
             skin_group: None,
             blended: Vec::new(),
+            owner_bounds: HashMap::new(),
             stats: LayerStats::default(),
         }
     }
@@ -294,6 +319,7 @@ impl Layer for ModelsLayer {
             .flat_map(|animated| &animated.owners)
             .map(|(number, published, at, count)| (*number, (published, *at, *count)))
             .collect();
+        let mut present = Vec::new();
         for slot in self.service.owners() {
             let (published, table) = match snapshots.get(&slot.number) {
                 Some((published, at, count)) => ((*published).clone(), Some((*at, *count))),
@@ -303,6 +329,26 @@ impl Layer for ModelsLayer {
                 continue;
             };
             groups += published.groups.len();
+            // The bounds of the owner tested before its groups: one out of reach or out of sight is
+            // not given to the frame, its instances nor its bones copied.
+            let owner = match self.owner_bounds.get(&slot.number) {
+                Some((made_of, made_at, bounds)) if Arc::ptr_eq(made_of, &published) && *made_at == generation => {
+                    *bounds
+                }
+                _ => {
+                    let bounds = owner_bounds(&published, &looks);
+                    self.owner_bounds
+                        .insert(slot.number, (published.clone(), generation, bounds));
+                    bounds
+                }
+            };
+            present.push(slot.number);
+            let owner_seen = owner.is_some_and(|(bounds, radius)| {
+                nearest(view.eye, bounds) <= reach * radius.max(1.0) && in_sight(view.view_proj, bounds)
+            });
+            if !owner_seen {
+                continue;
+            }
             let used = published
                 .groups
                 .iter()
@@ -376,6 +422,7 @@ impl Layer for ModelsLayer {
             }
             base += used;
         }
+        self.owner_bounds.retain(|number, _| present.contains(number));
         // The blended groups, the farthest first: sorted again only when two cross by the margin.
         let distance_of: HashMap<GroupKey, f32> = drawn
             .iter()

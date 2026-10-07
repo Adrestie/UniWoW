@@ -5038,6 +5038,90 @@ questions met on the way are noted at the end, with their possibilities, for the
   14. Where the terrain has holes under a building and a group of it is not drawn, the clear colour
       of the view shows, black, below the horizon of the sky.
 
+#### Step 9.6d1, after its review
+
+The buildings seen from outside validated: the fix of the vertex colours as `FixColorVertexAlpha`,
+the planes of the view in reverse Z. Four points before 9.6d2:
+
+1. **The private memory** (+0.5 to 4.5 GB for 0.1 GB of working set): the report of the allocator
+   of the device (`Device::generate_allocator_report`) in the statistics, and whether the memory
+   falls after 30 s without loads. An arena writes its range by `Queue::write_buffer` under its
+   lock instead of a buffer of its own copied (two allocations and two copies a range); the
+   textures as sparingly.
+2. **The budget**: the buildings told by bands of distance, as the terrain, their files loaded
+   within what it allows, and read as many at once as the workers but one.
+3. **The interface thread**: the remedy of 9.6b built, the bounds of each owner of `models` tested
+   before its groups.
+4. **The transition**: the fix already darkens its colours by `1 − a`, so that blending inside and
+   outside by `a` darkens the inside twice; probably the inside plus the outside times `a`, to
+   decide by captures of the game.
+
+Answered: the captures of the game allowed by the user (`jeu.ps1`), in the same places (the inn of
+Goldshire inside and outside, a door, Stormwind, Dalaran); a building lit as one (0x2, the
+unified render path of 3.3.5a) kept lit as outside, its ambient colour added at the drawing; the
+opaque batches of the models whose textures have texels of alpha 0 probed, and given the rule of
+the buildings if they show holes; no path without the pool, said in the panel. Later: the
+specular and metal shaders and the glow at night (9.7), the doodads of the groups seen (9.6d2),
+the arrays of textures shared and 16-bit indices, the holes of the terrain under a building.
+
+#### Step 9.6d1, its review points as built
+
+- **The private memory.** The statistics give the report of the allocator of the device
+  (`Device::generate_allocator_report`, made again once a second): its bytes allocated, those
+  reserved and its blocks. An arena writes a range by `Queue::write_buffer` under the lock of its
+  holes, without a buffer of its own; a texture is written into a buffer mapped where the GPU reads
+  it from (`MAP_WRITE`), without a buffer of wgpu's own copied into it. Measured in Dalaran at 4
+  tiles with the script of 9.4d: the private memory 7.0 to 7.6 GB against 6.3 to 8.2 GB before,
+  within its noise; the allocator 2.1 to 2.2 GB allocated of 5.6 to 6.2 GB reserved, in 24 to 26
+  blocks; the process 1.2 to 1.3 GB in memory. The private memory is the memory in use plus what
+  the allocator reserves (1.2 + 6.2 against 7.5 GB): the surplus is the blocks of the allocator,
+  which the system commits, not buffers the driver keeps; two thirds of what they reserve is not
+  allocated. Held still 31 s without loads, nothing falls: 7,532 then 7,533 MB private, 6,208 MB
+  reserved both times.
+- **The budget.** Each file of a building told to the budget by the distance of the nearest of its
+  buildings, held or wanted in that band, as the terrain tells its tiles; a file not yet read
+  wanted at what those on the GPU take on average (4 MB while none is). A file waits until the
+  budget lets it load; the nearest read first, as many at once as the workers but one, those
+  reading counted; a file beyond the reach the budget lets keep let go, waiting again. The panel
+  counts the files waiting for the budget or their turn.
+- **The interface thread.** The bounds of each owner of `models`, the box of its groups drawn
+  grown by their largest radius at their scales, kept until its publication or the looks change,
+  tested before its groups; an owner out of reach or out of sight not given to the frame, neither
+  its instances nor its bones copied. Measured in Dalaran at 4 tiles before that last change:
+  `models` 1.81 to 1.92 ms on the interface thread against 1.79 to 1.97 ms, nothing gained there.
+  The city of Dalaran is one building (`ND_Dalaran.wmo`: 91 groups, 4,633 doodads in its set 0),
+  one owner whose bounds hold the camera; the steering of `models` (1.13 to 1.16 ms) still walks
+  every group to tell the budget. The doodads of the groups seen (9.6d2) are the remedy there.
+- **Found by the mutations**: where the device has no count of indirect draws (the software
+  adapter of the tests), a frame where the GPU chose nothing drew the draws of the frame before;
+  hidden while every owner's instances were copied anew, shown once an owner out of sight was not.
+  Nothing is drawn then.
+- **The transition**: lit by the inside plus the outside times the alpha of its vertex colours, as
+  the review proposed; its test checks that the colour the fix left is kept whole under the light
+  outside added. To compare with the client by its captures.
+- **A building lit as one (0x2)**: lit as outside, its ambient colour added.
+- **The opaque batches of the models**: of the 13,624 opaque batches with a texture of the models
+  under `World\`, 1,288 have a texture with more than 5 % of its texels of alpha 0; the models
+  already take the first texture of an opaque batch as opaque whatever its combiner (a test checks
+  it), and the stable of Duskwood shows no hole: no change.
+- **The device**: the panel says there is no other way to draw the buildings where the pool is
+  not offered.
+- **Seen on the user's machine**: the inn of Goldshire, its door, walls, roof and chimney; a gate of
+  wood; the stable of Duskwood; Dalaran.
+- **Tested** by 25 changes made on purpose: 23 made a test fail; one, the files let go put back to
+  waiting by the steering, is two lines of the module not tested apart; one changed code since
+  taken out (the bones of an owner skipped passed over, now never given to the frame).
+- **Not done**: the captures of the game (`jeu.ps1`), the game not running: they need the user to
+  start it and log in.
+- **Questions:**
+  1. The blocks the allocator reserves and does not allocate (about 4 GB in Dalaran at 4 tiles):
+     to measure first, from the same report, the size and the allocations of each block, to know
+     what holds them; then either left as they are, or fewer and longer-lived allocations (the
+     arrays of textures and the arenas grown by larger steps).
+  2. The steering of `models` walks every group at each frame to tell the budget (1.1 ms in
+     Dalaran): the distance of an owner far beyond the reach to keep taken for all its groups, or
+     walked again only when the camera moved by a margin.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

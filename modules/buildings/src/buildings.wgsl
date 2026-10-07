@@ -61,6 +61,8 @@ const OPAQUE: u32 = 0u;
 const HAS_COLOURS: u32 = 0x4u;
 const OUTSIDE: u32 = 0x8u;
 const LIT_OUTSIDE: u32 = 0x8u;
+// The flag a building lit as one gives its groups.
+const LIT_AS_ONE: u32 = 0x10u;
 
 struct VertexIn {
     @location(0) position: vec3<f32>,
@@ -222,18 +224,28 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         // Inside: the vertex colours, halved when fixed, and the ambient colour, both in gamma.
         let coloured = (in.group & HAS_COLOURS) != 0u;
         let inside = linear(select(vec3<f32>(0.0), in.colour1.rgb * 2.0, coloured) + in.ambient);
-        // The share of the light outside: by the kind of the batch; for a transition, by the alpha
-        // of its vertex colours, or by its group when it has none.
-        var weight = 1.0;
+        // By the kind of the batch: a transition adds the light outside by the alpha of its vertex
+        // colours to theirs, which the fix darkened by the rest; without colours, its group says.
+        var light = outside;
         switch (in.group >> 8u) & 3u {
-            case 0u: { weight = select(select(0.0, 1.0, (in.group & OUTSIDE) != 0u), in.colour1.a, coloured); }
-            case 1u: { weight = 0.0; }
+            case 0u: {
+                if coloured {
+                    light = inside + outside * in.colour1.a;
+                } else if (in.group & OUTSIDE) == 0u {
+                    light = inside;
+                }
+            }
+            case 1u: { light = inside; }
             default: {}
         }
-        if (material.flags.x & LIT_OUTSIDE) != 0u {
-            weight = 1.0;
+        // A building lit as one: outside, its ambient colour added at the drawing.
+        if (in.group & LIT_AS_ONE) != 0u {
+            light = outside + linear(in.ambient);
         }
-        rgb = rgb * mix(inside, outside, weight);
+        if (material.flags.x & LIT_OUTSIDE) != 0u {
+            light = outside;
+        }
+        rgb = rgb * light;
     }
     return vec4<f32>(mix(rgb, fog_colour(shading.w), fog), alpha);
 }

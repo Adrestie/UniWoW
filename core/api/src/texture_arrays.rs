@@ -330,10 +330,11 @@ impl TextureArrays {
                 bytes[at..at + texels.len()].copy_from_slice(texels);
             }
         }
+        // Written where the GPU reads it from, without a buffer of wgpu's own copied into it.
         let source = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(self.owner),
             contents: &bytes,
-            usage: wgpu::BufferUsages::COPY_SRC,
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::MAP_WRITE,
         });
         let mut arrays = lock(&self.arrays);
         let (slot, layer) = self.free_layer(&mut arrays, class).ok_or_else(|| {

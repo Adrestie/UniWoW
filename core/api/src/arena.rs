@@ -2,16 +2,15 @@
 //! models and the buildings keep their vertices, indices and materials: a range is given
 //! from its holes, the first that holds it, and given back to them, merged with its neighbours. A
 //! buffer too small for a range is replaced by one twice as large, the one before copied into it,
-//! so that every range keeps its place. Its jobs write a range by a copy they submit, under the
-//! lock of its holes, after any copy into a larger buffer (the rule of step 9.2f); the frame reads
-//! the buffer and the bytes held without that lock.
+//! so that every range keeps its place. Its jobs write a range by `Queue::write_buffer`, under the
+//! lock of its holes, without a buffer of their own; the frame reads the buffer and the bytes held
+//! without that lock.
 
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::wgpu;
-use crate::wgpu::util::DeviceExt;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
@@ -113,14 +112,6 @@ impl Arena {
     pub fn put(&self, data: &[u8]) -> Result<Range<u64>, String> {
         debug_assert_eq!(data.len() as u64 % self.unit, 0);
         let length = data.len() as u64 / self.unit;
-        // Filled before taking the lock.
-        let source = (!data.is_empty()).then(|| {
-            self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(self.label),
-                contents: data,
-                usage: wgpu::BufferUsages::COPY_SRC,
-            })
-        });
         let mut holes = lock(&self.holes);
         let range = match holes.take(length) {
             Some(range) => range,
@@ -129,14 +120,11 @@ impl Arena {
                 holes.take(length).expect("grown to hold it")
             }
         };
-        if let Some(source) = source {
+        if !data.is_empty() {
             let (buffer, _) = self.buffer().expect("grown before");
-            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some(self.label),
-            });
-            encoder.copy_buffer_to_buffer(&source, 0, &buffer, range.start * self.unit, data.len() as u64);
-            // Under the lock: after any copy into a larger buffer.
-            self.queue.submit([encoder.finish()]);
+            // Under the lock, written by the next submission: a growth submitted after it runs the
+            // writes waiting before its copy into the larger buffer.
+            self.queue.write_buffer(&buffer, range.start * self.unit, data);
         }
         self.used.fetch_add(length * self.unit, Ordering::AcqRel);
         Ok(range)

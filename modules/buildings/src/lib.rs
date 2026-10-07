@@ -1,9 +1,11 @@
 //! The buildings (WMO) of the tiles of the map the terrain shows, around the camera of the 3D view
 //! within a distance of their own: the placements of each tile read by a job, the nearest first, a
 //! building kept by its unique id while a tile listing it is held; each file read once by a job and
-//! put on the GPU for all its placements; drawn by the layer of the module, their doodads placed
-//! through the service `models`. Nothing is changed: no undo entry, no file written.
+//! put on the GPU for all its placements, within what the budget of the view allows; drawn by the
+//! layer of the module, their doodads placed through the service `models`. Nothing is changed: no
+//! undo entry, no file written.
 
+mod budget;
 mod colours;
 mod doodads;
 mod gpu;
@@ -62,6 +64,8 @@ impl WmoFile {
 }
 
 enum FileState {
+    /// Wanted, not yet read: beyond what the budget allows, or waiting for its turn.
+    Waiting,
     Loading(JobId),
     Ready(Arc<WmoFile>),
     Refused,
@@ -97,9 +101,11 @@ struct BuildingsModule {
     reading: HashMap<TileId, JobId>,
     tile_jobs: HashMap<JobId, TileId>,
     refused: HashSet<TileId>,
-    /// The files of the buildings kept, each building's file, and the reads of files running.
+    /// The files of the buildings kept, each building's file and the ground it covers, and the
+    /// reads of files running.
     files: HashMap<FileRef, FileEntry>,
     building_files: HashMap<u32, FileRef>,
+    grounds: HashMap<u32, [[f32; 2]; 2]>,
     file_jobs: HashMap<JobId, FileRef>,
     /// The buildings whose doodads were told wanted, and the jobs placing or taking them away.
     told: HashSet<u32>,
@@ -136,6 +142,7 @@ impl BuildingsModule {
         self.file_jobs.clear();
         self.files.clear();
         self.building_files.clear();
+        self.grounds.clear();
         self.kept.clear();
         self.refused.clear();
         self.refusals.clear();
@@ -151,43 +158,73 @@ impl BuildingsModule {
         self.map = map;
     }
 
-    /// Keeps the building `id` the tiles brought: its file read if it is not yet.
-    fn bring(&mut self, id: u32, formats: &Arc<dyn formats::Formats>, ctx: &mut Context) {
+    /// Keeps the building `id` the tiles brought: its file wanted, read when the budget allows it.
+    fn bring(&mut self, id: u32) {
         let Some(building) = self.kept.get(id) else {
             return;
         };
         let file = building.file.clone();
+        self.grounds.insert(id, budget::ground(building));
         self.building_files.insert(id, file.clone());
-        let shared = self.shared.clone();
-        let entry = self.files.entry(file.clone()).or_insert_with(|| {
-            let (formats, read) = (formats.clone(), file.clone());
-            let label = format!("Read the building {read:?}");
-            let job = ctx.spawn(&label, move |_| -> Loaded {
-                let shared = shared.ok_or("no device to draw on")?;
-                let wmo = formats.wmo(&read)?;
-                let (sets, doodads) = (wmo.doodad_sets.clone(), wmo.doodads.clone());
-                if !wmo.faults.is_empty() {
-                    log::warn!("{read:?}: {} faults, the first {}", wmo.faults.len(), wmo.faults[0]);
-                }
-                let gpu = gpu::upload(&shared, &*formats, wmo)?;
-                Ok(WmoFile {
-                    gpu: Arc::new(gpu),
-                    sets,
-                    doodads,
-                })
-            });
-            self.file_jobs.insert(job, file.clone());
-            FileEntry {
-                state: FileState::Loading(job),
+        self.files
+            .entry(file)
+            .or_insert_with(|| FileEntry {
+                state: FileState::Waiting,
                 users: HashSet::new(),
-            }
-        });
-        entry.users.insert(id);
+            })
+            .users
+            .insert(id);
         self.changed = true;
+    }
+
+    /// Reads the file `file` by a job and puts it on the GPU.
+    fn load(&mut self, file: FileRef, formats: &Arc<dyn formats::Formats>, ctx: &mut Context) {
+        let (shared, formats, read) = (self.shared.clone(), formats.clone(), file.clone());
+        let job = ctx.spawn(&format!("Read the building {read:?}"), move |_| -> Loaded {
+            let shared = shared.ok_or("no device to draw on")?;
+            let wmo = formats.wmo(&read)?;
+            let (sets, doodads) = (wmo.doodad_sets.clone(), wmo.doodads.clone());
+            if !wmo.faults.is_empty() {
+                log::warn!("{read:?}: {} faults, the first {}", wmo.faults.len(), wmo.faults[0]);
+            }
+            let gpu = gpu::upload(&shared, &*formats, wmo)?;
+            Ok(WmoFile {
+                gpu: Arc::new(gpu),
+                sets,
+                doodads,
+            })
+        });
+        self.file_jobs.insert(job, file.clone());
+        if let Some(entry) = self.files.get_mut(&file) {
+            entry.state = FileState::Loading(job);
+        }
+    }
+
+    /// The files as the budget sees them from `eye`: each by the distance of its nearest building.
+    fn budgeted(&self, eye: [f32; 2]) -> Vec<budget::File<FileRef>> {
+        self.files
+            .iter()
+            .map(|(key, entry)| budget::File {
+                key: key.clone(),
+                distance: entry
+                    .users
+                    .iter()
+                    .filter_map(|id| self.grounds.get(id))
+                    .map(|ground| budget::distance(eye, *ground))
+                    .fold(f32::INFINITY, f32::min),
+                held: match &entry.state {
+                    FileState::Waiting => budget::Held::Waiting,
+                    FileState::Loading(_) => budget::Held::Loading,
+                    FileState::Ready(read) => budget::Held::Ready(read.gpu.bytes),
+                    FileState::Refused => budget::Held::Refused,
+                },
+            })
+            .collect()
     }
 
     /// Lets the building `id` go: its file, when no other building kept has it, dropped.
     fn take_away(&mut self, id: u32, ctx: &mut Context) {
+        self.grounds.remove(&id);
         let Some(file) = self.building_files.remove(&id) else {
             return;
         };
@@ -307,6 +344,28 @@ impl BuildingsModule {
             self.tile_jobs.insert(job, tile);
         }
 
+        // The files: told to the budget by the distance of their nearest building, read within the
+        // reach it allows to load, let go beyond the reach it allows to keep.
+        let files = self.budgeted(eye);
+        let fixed = self.shared.as_ref().map_or(0, |shared| shared.arrays.bytes());
+        let demand = budget::demand(&files, fixed, budget::expected(&files));
+        let allowance = if self.told_budget.as_ref() == Some(&demand) {
+            view.allowance()
+        } else {
+            self.told_budget = Some(demand.clone());
+            view.tell_budget(ctx.module_id(), demand)
+        };
+        let plan = budget::plan(&files, &allowance, slots);
+        for file in plan.start {
+            self.load(file, &formats, ctx);
+        }
+        for file in plan.release {
+            if let Some(entry) = self.files.get_mut(&file) {
+                entry.state = FileState::Waiting;
+                self.changed = true;
+            }
+        }
+
         // The buildings drawn, given to the layer when they change.
         if self.changed {
             self.changed = false;
@@ -333,21 +392,13 @@ impl BuildingsModule {
             self.steer_doodads(&directory, models.as_ref(), ctx);
         }
 
-        let demand = Demand {
-            fixed: self.shared.as_ref().map_or(0, |shared| shared.bytes()),
-            ..Demand::default()
-        };
-        if self.told_budget.as_ref() != Some(&demand) {
-            view.tell_budget(ctx.module_id(), demand.clone());
-            self.told_budget = Some(demand);
-        }
-
         let loading = self
             .files
             .values()
             .any(|entry| matches!(entry.state, FileState::Loading(_)));
         let done = self.reading.is_empty()
             && !loading
+            && !plan.waiting
             && wanted
                 .iter()
                 .all(|tile| self.kept.holds(*tile) || self.refused.contains(tile));
@@ -453,19 +504,21 @@ impl Module for BuildingsModule {
         if let Some(Err(reason)) = &self.wdt {
             ui.colored_label(ui.visuals().warn_fg_color, format!("{map}: {reason}"));
         }
-        let (mut ready, mut loading, mut refused) = (0, 0, 0);
+        let (mut ready, mut loading, mut waiting, mut refused) = (0, 0, 0, 0);
         for entry in self.files.values() {
             match entry.state {
                 FileState::Ready(_) => ready += 1,
                 FileState::Loading(_) => loading += 1,
+                FileState::Waiting => waiting += 1,
                 FileState::Refused => refused += 1,
             }
         }
         let doodads = lock(&self.owners).placed();
         let bytes = self.shared.as_ref().map_or(0, |shared| shared.bytes());
         ui.label(format!(
-            "{map}: {} tiles held, {} reading; {} buildings, of {ready} files read, {loading} reading, {refused} \
-             refused; the doodads of {doodads} placed; {:.0} MB on the GPU",
+            "{map}: {} tiles held, {} reading; {} buildings, of {ready} files read, {loading} reading, {waiting} \
+             waiting for the budget or their turn, {refused} refused; the doodads of {doodads} placed; {:.0} MB on \
+             the GPU",
             self.kept.tiles().len(),
             self.reading.len(),
             self.kept.len(),
@@ -534,15 +587,12 @@ impl Module for BuildingsModule {
             };
             match read {
                 Ok(buildings) => {
-                    let Some(formats) = ctx.service(formats::SERVICE) else {
-                        return;
-                    };
                     let (brought, gone) = self.kept.hold(tile, buildings);
                     for id in gone {
                         self.take_away(id, ctx);
                     }
                     for id in brought {
-                        self.bring(id, &formats, ctx);
+                        self.bring(id);
                     }
                 }
                 Err(reason) => {

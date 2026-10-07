@@ -830,6 +830,10 @@ impl Choice {
         let (Some(tables), Some(args), Some(work)) = (&self.tables, &self.args, &self.work) else {
             return 0;
         };
+        // Nothing chosen: the choice did not run, its arguments are those of the frame before.
+        if self.groups == 0 && self.templates == 0 {
+            return 0;
+        }
         let (regions, first, counts): (&[(State, u32, u32)], u32, u32) = if blended {
             (
                 &self.blended_regions,
@@ -874,5 +878,10 @@ impl Choice {
             (u64::from(self.work_offsets[3]) + tables.regions.len() as u64) * 4,
         );
         (args, counts[self.work_offsets[3] as usize..].to_vec())
+    }
+
+    /// The owners given to the frame, where their instances are copied.
+    pub fn sections(&self) -> &[Section] {
+        &self.sections
     }
 }

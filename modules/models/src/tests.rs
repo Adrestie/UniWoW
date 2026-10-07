@@ -1184,3 +1184,53 @@ fn what_a_model_keeps_on_the_cpu_counts_its_skins_and_its_animation() {
     let keys = size_of::<uniwow_api::formats::Keys<[f32; 3]>>() + 3 * 4 + 3 * 12;
     assert_eq!(animation, (size_of::<uniwow_api::formats::Bone>() + keys) as u64);
 }
+
+#[test]
+fn the_bounds_of_an_owner_hold_its_groups_drawn_grown_by_their_largest_radius() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    let fake = Fake {
+        model: Some(square(0, 0)),
+        textures: HashMap::from([("red.blp".to_owned(), plain([255, 0, 0, 255]))]),
+        ..Fake::default()
+    };
+    let shared = Shared::new(&gpu, &TARGET, None);
+    let look = Look {
+        model: FileRef::Path("square.m2".to_owned()),
+        textures: Vec::new(),
+        geosets: Geosets::All,
+    };
+    let ready = Arc::new(crate::load(&shared, &fake, &Caches::default(), &look, &mut Vec::new()).unwrap());
+    let radius = ready.radius();
+    let group = |look: u32, low: Vec3, high: Vec3, scale: f32| Group {
+        look: LookId(look),
+        tile: [0, 0],
+        first: 0,
+        count: 1,
+        low,
+        high,
+        scale,
+    };
+    // Two groups of a look drawn, one of a look not drawn far away.
+    let published = groups::Published {
+        groups: vec![
+            group(0, Vec3::ZERO, Vec3::X, 1.0),
+            group(0, Vec3::new(10.0, 0.0, 0.0), Vec3::new(10.0, 5.0, 0.0), 2.0),
+            group(1, Vec3::splat(-100.0), Vec3::splat(-100.0), 9.0),
+        ],
+        ..groups::Published::default()
+    };
+    let looks = HashMap::from([(LookId(0), ready)]);
+    let (bounds, largest) = layer::owner_bounds(&published, &looks).unwrap();
+    assert_eq!(largest, radius * 2.0);
+    assert_eq!(
+        bounds,
+        [Vec3::splat(-largest), Vec3::new(10.0, 5.0, 0.0) + Vec3::splat(largest)]
+    );
+    let undrawn = groups::Published {
+        groups: vec![group(1, Vec3::ZERO, Vec3::ZERO, 1.0)],
+        ..groups::Published::default()
+    };
+    assert_eq!(layer::owner_bounds(&undrawn, &looks), None, "no look of it drawn");
+}
