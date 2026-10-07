@@ -56,6 +56,7 @@ mod event;
 pub mod formats;
 pub mod hotkey;
 mod job;
+pub mod liquids;
 pub mod models;
 mod module;
 mod numbers;

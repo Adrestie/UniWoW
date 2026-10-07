@@ -259,19 +259,22 @@ const MAPPED: u8 = 2;
 
 /// The layers whose computing and drawing a frame times apart, at most.
 pub const TIMED_LAYERS: usize = 16;
-/// The timestamps of a frame: its pass, then six for each layer timed (its computing begun and
-/// ended, its drawing of each phase begun and ended).
+/// The timestamps of a frame: its pass, then for each layer timed its computing begun and ended and
+/// its drawing of each phase begun and ended.
 const QUERIES: u32 = 2 + PER_LAYER * TIMED_LAYERS as u32;
-const PER_LAYER: u32 = 6;
+const PER_LAYER: u32 = 2 + 2 * Phase::ALL.len() as u32;
 
 /// The milliseconds of the pass of a frame from its timestamps `ticks`, of `period` nanoseconds,
-/// and of each of its `layers` layers timed: its computing, and its drawing in both phases.
+/// and of each of its `layers` layers timed: its computing, and its drawing in every phase.
 pub(crate) fn spans(ticks: &[u64], layers: usize, period: f64) -> (f64, Vec<(f64, f64)>) {
     let span = |start: usize| ticks[start + 1].saturating_sub(ticks[start]) as f64 * period / 1e6;
     let timed = (0..layers)
         .map(|layer| {
             let at = 2 + PER_LAYER as usize * layer;
-            (span(at), span(at + 2) + span(at + 4))
+            (
+                span(at),
+                (0..Phase::ALL.len()).map(|phase| span(at + 2 + 2 * phase)).sum(),
+            )
         })
         .collect();
     (span(0), timed)

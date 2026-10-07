@@ -3,13 +3,16 @@
 //! draws packed; on the software adapter of the system when it has one.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use uniwow_api::formats::{FileRef, Model, ModelTexture, ModelTextureSource};
 use uniwow_api::glam::Vec3;
+use uniwow_api::liquids::{Liquids, Surfaces};
 use uniwow_api::models::{Geosets, Look, Models};
 use uniwow_api::viewport::Layer;
 use uniwow_api::wgpu;
 
+use crate::lock;
 use crate::pool;
 use crate::pool_tests::{LEFT, Pooled, RIGHT, colours, only, pixel, skin};
 use crate::tests::{AIM, FRONT, Fake, instance, middle, plain, render, settled, square};
@@ -166,6 +169,11 @@ fn a_level_is_kept_where_its_owner_moves_in_the_frame_and_lost_when_it_regroups(
 
 /// A bench of a blended square, half seen through, unlit, of the looks red (0) and blue (1).
 fn blended() -> Option<Pooled> {
+    blended_on(Some(pool::SLOTS))
+}
+
+/// The bench of `blended`, with a pool of `slots` arrays or on the path of step 9.4c.
+fn blended_on(slots: Option<usize>) -> Option<Pooled> {
     let mut model = square(PLAIN, 2);
     model.textures[0].source = ModelTextureSource::Filled(11);
     let fake = Fake {
@@ -173,9 +181,9 @@ fn blended() -> Option<Pooled> {
         textures: colours(),
         ..Fake::default()
     };
-    let pooled = Pooled::new(pool::SLOTS)?;
-    assert!(pooled.add(&fake, &skin("red.blp")));
-    assert!(pooled.add(&fake, &skin("blue.blp")));
+    let pooled = Pooled::on(slots)?;
+    assert_eq!(pooled.add(&fake, &skin("red.blp")), slots.is_some());
+    assert_eq!(pooled.add(&fake, &skin("blue.blp")), slots.is_some());
     Some(pooled)
 }
 
@@ -222,9 +230,16 @@ fn blended_instances_are_drawn_one_by_one_the_farthest_first() {
 
 #[test]
 fn the_blended_instances_of_each_owner_are_drawn_where_they_stand() {
-    let Some(mut pooled) = blended() else {
-        return;
-    };
+    for slots in [Some(pool::SLOTS), None] {
+        let Some(pooled) = blended_on(slots) else {
+            return;
+        };
+        where_they_stand(pooled);
+    }
+}
+
+/// The red of an owner on the left and the blue of another on the right, as `pooled` draws them.
+fn where_they_stand(mut pooled: Pooled) {
     let side = |id, look, y| {
         let mut placed = instance(id, look, Vec3::new(0.0, y, 0.0), 0.5);
         placed.alpha = 0.5;
@@ -243,6 +258,66 @@ fn the_blended_instances_of_each_owner_are_drawn_where_they_stand() {
         "{:?}",
         pixel(&image, RIGHT.0, RIGHT.1)
     );
+}
+
+/// Water at 0 around the origin.
+struct Pond(Arc<Surfaces>);
+
+impl Liquids for Pond {
+    fn surfaces(&self) -> Arc<Surfaces> {
+        self.0.clone()
+    }
+}
+
+#[test]
+fn a_blended_instance_beyond_the_surface_of_the_water_is_drawn_before_those_on_the_eye_s_side() {
+    for slots in [Some(pool::SLOTS), None] {
+        let Some(pooled) = blended_on(slots) else {
+            return;
+        };
+        beyond_the_water_first(pooled);
+    }
+}
+
+/// The red under the water and the blue over it, of two owners, drawn as `pooled` draws them.
+fn beyond_the_water_first(mut pooled: Pooled) {
+    let mut surfaces = Surfaces::default();
+    for x in -8..=8 {
+        for y in -8..=8 {
+            surfaces.add(Surfaces::cell(x as f32, y as f32), 0.0);
+        }
+    }
+    // Red under the surface, blue over it, both in the middle of the view; seen from over the water
+    // and from under it, the nearer drawn first where the farthest first would draw it last.
+    let at = |id, look, x: f32, z: f32| {
+        let mut placed = instance(id, look, Vec3::new(x, 0.0, z), 1.0);
+        placed.alpha = 0.5;
+        placed
+    };
+    let (above, below) = (FRONT, Vec3::new(5.0, 0.0, -1.0));
+    for (eye, red, blue, seen_without, seen_with) in [
+        (above, 1.0, 0.0, (0.5, 0.25), (0.25, 0.5)),
+        (below, 0.0, 1.0, (0.25, 0.5), (0.5, 0.25)),
+    ] {
+        let bench = &mut pooled.bench;
+        // Owners new to the layer: an order of their own, not one kept.
+        bench.service.clear("reds");
+        bench.service.clear("blues");
+        bench.service.place("reds", &[at(1, 0, red, -0.5)]);
+        bench.service.place("blues", &[at(1, 1, blue, 0.5)]);
+        lock(&bench.scene).liquids = None;
+        let seen = middle(&render(bench, eye, AIM));
+        assert!(
+            stored(seen, seen_without.0, seen_without.1),
+            "the farthest first: {seen:?}"
+        );
+        lock(&bench.scene).liquids = Some(Arc::new(Pond(Arc::new(surfaces.clone()))));
+        let seen = middle(&render(bench, eye, AIM));
+        assert!(
+            stored(seen, seen_with.0, seen_with.1),
+            "beyond the water first: {seen:?}"
+        );
+    }
 }
 
 #[test]

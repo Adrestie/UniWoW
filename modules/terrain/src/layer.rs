@@ -267,14 +267,17 @@ impl Layer for TerrainLayer {
         else {
             return;
         };
-        // The ground first in each phase: the sky begins the blended one, where nothing opaque
-        // was drawn; the depth is still at infinity there only.
-        if phase == Phase::Blended {
+        // The ground first in each phase: the sky begins the first blended one, where nothing
+        // opaque was drawn; the depth is still at infinity there only.
+        if phase == Phase::Beyond {
             if self.sky {
                 bundle.set_pipeline(&shared.sky_pipeline);
                 bundle.set_bind_group(0, camera, &[]);
                 bundle.draw(0..3, 0..1);
             }
+            return;
+        }
+        if phase != Phase::Opaque {
             return;
         }
         if !self.drawn.is_empty() {

@@ -15,6 +15,7 @@ pub mod model;
 mod tests;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -106,8 +107,10 @@ struct TerrainModule {
     shared: Option<Arc<Shared>>,
     setup: Option<JobId>,
     scene: Arc<Mutex<Scene>>,
-    /// The map shown, as the command `terrain.map` gives it from any thread.
+    /// The map shown, as the command `terrain.map` gives it from any thread, with the distance of
+    /// the terrain.
     shown_map: Arc<Mutex<serde_json::Value>>,
+    shared_distance: Arc<AtomicU32>,
     maps: Option<Result<Vec<MapChoice>, String>>,
     maps_job: Option<JobId>,
     /// The map shown, by its index in `maps`; the one the settings name, until the maps are listed.
@@ -563,16 +566,28 @@ impl TerrainModule {
 impl Module for TerrainModule {
     fn register(&mut self, reg: &mut Registrar) {
         reg.panel("terrain", "Terrain", DockArea::Right);
-        let shown = self.shown_map.clone();
+        let (shown, distance) = (self.shown_map.clone(), self.shared_distance.clone());
         reg.command_on_caller(
             "terrain.map",
-            "The map the terrain shows: its id in Map.dbc, its folder and its name; null while none is shown.",
+            "The map the terrain shows: its id in Map.dbc, its folder and its name, and how far around the \
+             camera its tiles are loaded, in tiles; null while none is shown.",
             serde_json::json!({ "type": "object" }),
             serde_json::json!({
                 "type": ["object", "null"],
-                "properties": { "id": { "type": "integer" }, "directory": { "type": "string" }, "name": { "type": "string" } }
+                "properties": {
+                    "id": { "type": "integer" },
+                    "directory": { "type": "string" },
+                    "name": { "type": "string" },
+                    "distance": { "type": "integer" }
+                }
             }),
-            Arc::new(move |_| Ok(lock(&shown).clone())),
+            Arc::new(move |_| {
+                let mut shown = lock(&shown).clone();
+                if let Some(map) = shown.as_object_mut() {
+                    map.insert("distance".to_owned(), distance.load(Ordering::Relaxed).into());
+                }
+                Ok(shown)
+            }),
         );
     }
 
@@ -583,6 +598,7 @@ impl Module for TerrainModule {
             .map_or(DEFAULT_DISTANCE, |value| {
                 value.clamp(u64::from(DISTANCES[0]), u64::from(DISTANCES[1])) as u32
             });
+        self.shared_distance.store(self.distance, Ordering::Relaxed);
         self.remembered = ctx.setting(MAP).and_then(|value| value.as_str().map(str::to_owned));
         let Some(view) = ctx.service(viewport::SERVICE) else {
             log::info!("no viewport service: the terrain is not drawn");
@@ -696,6 +712,7 @@ impl Module for TerrainModule {
                 .changed()
             {
                 ctx.set_setting(DISTANCE, serde_json::json!(self.distance));
+                self.shared_distance.store(self.distance, Ordering::Relaxed);
             }
             ui.label("GPU budget of the view (MB)");
             let mut mb = allowance.budget / MB;

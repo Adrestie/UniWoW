@@ -5379,6 +5379,147 @@ waves and flows, the particles and sounds of the liquids, the colours of the lig
 7. The liquids of the buildings handed to `liquids` (recommended), or drawn by the layer of the
    buildings in its blended phase, after the blended of the models it follows.
 
+#### Step 9.6e, after its review
+
+The two parts, `liquids` reading the liquids of its tiles itself, a stage of its own for the water,
+and the liquids of the buildings handed to `liquids` (1, 2, 3 and 7, as recommended). Magma and
+slime by captures of the game: opaque (5). Nothing past the last tiles of a map (6). Added to 4,
+already in 9.6e1: the blended batches under the water seen through it. The water writes no depth;
+the blended are drawn in the order sky, the scene blended beyond the surface, the water, the scene
+blended on the eye's side, the order inverted when the camera is under the water; `liquids` offers
+the height of the surface over a point and whether a point is under it; `models` places each blended
+instance by its origin, `buildings` each group by its bounds; the API of the layers is given a phase
+more; tested on the software adapter. With 9.6e, the memory (question 4 of 9.6d2): the buffers of
+instances of the owners of `models` in an arena, and the hints of memory of the device
+(`wgpu::MemoryHints`), measured apart then together; the budget counts what is allocated, not what
+is reserved. The 8 yards over a street kept (question 1), the light of the insides with 9.7 (2), the
+demand of `models` made again only when its distances are walked whole or its looks held change (3).
+For 9.6e1: instances of `MH2O` of 24 bytes; the format of the vertices by the `LiquidType` through
+`LiquidMaterial`; a layer without vertices flat at its least height; the bitmap of its tiles; a
+small cache of the files read last in `assets`, optional.
+
+#### Step 9.6e1, as built: the water of the tiles
+
+- **Read** (`formats`, `assets/src/liquid.rs`): `Formats::liquids(directory, x, y)` reads the root
+  of a tile only, as the placements are read: its `MH2O`, a header of 12 bytes for each of its 256
+  chunks, then instances of 24 bytes (the `LiquidType`, the format of the vertices, the least and
+  greatest heights, the rectangle of tiles, the offsets of the bitmap and of the vertices); the
+  bitmap read from its low bit, row by row over the rectangle, every tile of it where none is given;
+  a layer without vertices flat at its least height, its depth 255; heights held within the two.
+  Then `MCLQ` in the chunks `MH2O` leaves without liquid: its offset in the header of the chunk
+  (0x60), which points at the header of its part; a layer for each kind the flags of the chunk name
+  (0x4 water, 0x8 ocean, 0x10 magma, 0x20 slime, the `LiquidType` 1 to 4), 804 bytes each, a tile
+  dry by its flag 0x8; the depths of the water, the coordinates of magma and slime. `LiquidType.dbc`
+  (26 records of 45 fields: id, name, kind, material, six textures, the two numbers of its
+  animation) and `LiquidMaterial.dbc` (3 records) in the tables (`Formats::liquid_types`).
+- **The format of the vertices: the layer's own, not its type's.** The review gave it by the
+  `LiquidType` through `LiquidMaterial`. Over the client, 22,264 layers of ocean (type 2, whose
+  material 3 has the format 0: heights and depths) hold the bytes of the format their own field
+  names, 2 (depths only), and not those of 0: read by their material, their vertices would run past
+  their data. The layer's field is read; the material's format is kept in the record of the type
+  (`vertex_format`), read by nothing.
+- **Over the client** (a test, when `UNIWOW_CLIENT` names it): 26 types; every tile of Azeroth,
+  Kalimdor, Outland and Northrend read without a fault, their layers by type: Azeroth 1: 44, 2:
+  86,683, 5: 5,874, 7: 123; Kalimdor 2: 124,647, 5: 4,960, 7: 4; Outland, all of `MCLQ`, 1: 6,946,
+  2: 54,477, 3: 461; Northrend 1: 68, 2: 222,034, 5: 4,036, 81: 638, 181: 49. The axes: the corner
+  of a chunk at X `ORIGIN - y·TILE - row·CHUNK`, Y `ORIGIN - x·TILE - column·CHUNK` of its tile
+  `<x>_<y>`, the vertex of a row and a column an eighth of a chunk further down each: of the 975
+  tiles of water whose ground lies under them, 765 have the ground under the surface so placed, 554
+  with the axes swapped; the test asks three quarters at least, and a tenth more than swapped.
+- **The phases** (`core/api`): `Phase::Opaque`, `Beyond`, `Water` and `Near`, drawn in that order
+  (`Phase::ALL`), each but the first blended; `Stage::Water` between the ground and the scene. The
+  view records a bundle for each of the four, and the statistics time each. The sky of the terrain
+  is drawn at the start of `Beyond`, where the depth is still at infinity. The service `liquids`
+  (`core/api/src/liquids.rs`): `Surfaces`, the height of the water over each of its tiles (an eighth
+  of a chunk), the highest where layers overlap; `surface(x, y)`, `under(point)`, and `phase(eye,
+  point)`: `Beyond` when one of the two lies under the water and the other not, `Near` otherwise.
+  Magma and slime have no surface there.
+- **The others' blended**: `buildings` lists each blended group of a placement by the centre of its
+  bounds; `models` each blended instance chosen by the GPU by its origin (the regions of the frame,
+  those beyond first), and each group of a look of its own (the path of 9.4c) by its centre. Their
+  opaque batches unchanged.
+- **The module `liquids`** (World), steered as `doodads`: the map and the distance of `terrain.map`
+  (its answer now gives the distance), the WDT read by a job, the tiles within that distance of the
+  camera read by jobs, the nearest first, as many at once as the workers but one, let go once left,
+  told to the budget of the view by bands. A tile read: a mesh of 81 vertices a layer (its place,
+  its coordinates, a quarter of a repeat a tile where it has none, its depth over 255, the slot of
+  its type), two triangles a tile covered, the water apart from the magma and slime; the tiles of
+  water at the mean height of their four corners, given to `Surfaces`. Vertices and indices in two
+  arenas of `core/api`, the frames of the types in arrays of `core/api` (16 slots), a table of 64
+  types for the shader (the codes of their frames, their count, water or not, the material, the
+  animation). Its layer draws in the pass: the magma and slime in `Opaque`, writing the depth; the
+  water in `Water`, blended, not writing it, both faces drawn. Its panel: the tiles read, with
+  liquids, reading and refused, the tiles of water given.
+- **Its look**, before the lights of 9.7: a frame every 60 ms (`ceil(ms / 60)` modulo the count, as
+  Noggit, read for the facts only: 30 frames in 1.8 seconds); the procedural water (material 3)
+  takes the frames of `XTextures\river\lake_a`, turning without moving; the water its coordinates
+  scaled by the first number of its animation and turned by the second, in degrees, its texel added
+  to a colour from shallow to deep by its depth, its alpha so; magma and slime their coordinates
+  running by their animation, `ms / 2,880`, their texel brightened, opaque and unlit. Fogged as the
+  terrain.
+- **Its colours, by captures of the game at noon** (the pond of Goldshire, the Searing Gorge), in
+  gamma: shallow (0.24, 0.35, 0.31), alpha 0.65; deep (0.18, 0.28, 0.27), alpha 0.9; the magma 1.35
+  times its texture. The pond seen near, the editor 68 to 86, 85 to 90, 68 to 70 against the game's
+  63 to 81, 79 to 92, 63 to 72; seen low, 78 to 81, 87 to 88, 69 against 51 to 53, 71 to 76, 66 to
+  68: the game's water darker and more opaque at a grazing angle, which these values do not depend
+  on. The magma 249, 52 at the median against 255, 43 to 62. The first values, (0.16, 0.25, 0.23,
+  0.45) and (0.11, 0.18, 0.18, 0.85), showed the pond brown (67 to 91, 68 to 77, 45 to 50), the
+  ground under it too visible, and the magma darker (185, 42).
+- **Seen in the editor**, one launch a map: the pond of Goldshire near, low and from under its
+  surface (what is over the water tinted through it); the magma of the Searing Gorge, running; the
+  sea off Booty Bay; the lake of Zangarmarsh and the magma of Shadowmoon Valley, of `MCLQ`.
+- **Measured** on the user's machine, the frame at 16.7 ms everywhere: the pond, 28 tiles, 0.19 M
+  triangles of water, 25 MB, the GPU 0.05 ms (0.08 at most), the interface 0.03 ms; the Searing
+  Gorge, 5 tiles, 5,364 triangles of water and 8,346 of magma, the GPU under 0.01 ms; the sea off
+  Booty Bay, 35 tiles, 0.96 M triangles of water, 47 MB, the GPU 0.15 ms (0.16).
+- **The memory**, in Dalaran held still, the same build, an environment variable choosing the
+  configuration for this measure only (one capture each, 34 seconds after the start):
+
+  | Configuration | Allocated | Reserved | Blocks | Private memory |
+  |---|---|---|---|---|
+  | A buffer an owner, `Performance` (before) | 1,957 MB | 5,120 MB | 22 | 6,344 MB |
+  | The arena, `Performance` | 1,960 MB | 4,928 MB | 21 | 6,181 MB |
+  | A buffer an owner, `Manual` 32 to 128 MB | 1,962 MB | 2,815 MB | 22 | 4,074 MB |
+  | The arena, `Manual` 32 to 128 MB (kept) | 1,966 MB | 2,943 MB | 23 | 4,190 MB |
+  | The arena, `MemoryUsage` (8 to 64 MB) | 1,957 MB | 2,401 MB | 30 | 3,651 MB |
+
+  The arena alone gives back a block of 192 MB; the hints, 2.2 GB of what is reserved and as much of
+  the private memory. Kept: the arena, and `Manual` from 32 to 128 MB (`kernel`), as the review
+  proposed; `MemoryUsage` reserves 0.5 GB less in blocks of 8 to 64 MB, more blocks to allocate
+  while tiles stream. The owners' instances (`models/src/groups.rs`): a range each in one arena,
+  written in place while its groups keep their places, a new range written whole when they change,
+  the range before given back once nothing published names it (the layer holds what a frame draws
+  until the next); the arena read after what the owners published, so that it holds every range they
+  name; `Arena::write` writes a range held again under the lock of the holes.
+- **The demand of `models`** (question 3 of 9.6d2): made again and told to the budget only when the
+  distances were walked whole, which a publication of the looks held also makes. In Dalaran held
+  still, the same build otherwise: the steering of `models` 0.36 ms (0.42 at most) against 0.91
+  (1.59), the module on the interface thread 1.05 ms against 1.66.
+- **Tested**, besides the tests named above (the layers and tiles read from written files, a damaged
+  one refused without a panic, the client's when given; the meshes and surfaces; the frames of a
+  type; on the software adapter, the magma alone red and opaque, the water over it tinting it, a
+  blended green beyond the surface drawn before the water and on the eye's side after it, from over
+  the water and from under it, one behind the surface but before the magma seen, one behind the
+  magma hidden; the buildings' group under the water drawn in `Beyond` only; the order of the
+  blended of `models` with the pond, on both its paths; the arena's range written in place, a new
+  one for new groups, the old given back once nothing names it; the hints of the device), by 29
+  changes made on purpose: 21 made a test fail at once; the 8 others once the tests were completed
+  (the ocean without vertices given two heights; slime no water; the painter drawn first in its
+  phase, as a layer of another stage; one behind the magma; the buildings' phases drawn apart; the
+  tests of the water and of the owners' places run on the path of 9.4c too) or run with the crates
+  holding them (the order of the phases, caught by the test of the liquids).
+- **Not done**: the cache of the files read last in `assets`, optional.
+- **Questions:**
+  1. The water seen low, brighter and less opaque than the game's, which darkens it at a grazing
+     angle: with the alphas of the light of 9.7, or a term of the angle of view now.
+  2. At sea, past the three tiles of liquids, the ground of the WDL under the sea shows as a dark
+     band at the horizon (decision 6): kept until the ocean to the edges, or a plane at the level of
+     the sea to the horizon.
+  3. The magma 1.35 times its texture, and under the water no fog of its own: with the lights of
+     9.7.
+  4. The hints of memory: `Manual` from 32 to 128 MB kept; `MemoryUsage` reserves 0.5 GB less in
+     Dalaran, in more blocks.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

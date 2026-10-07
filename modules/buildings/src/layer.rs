@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use uniwow_api::glam::{Mat4, Vec3, Vec4};
+use uniwow_api::liquids::{self, Surfaces};
 use uniwow_api::viewport::{Drawing, Layer, LayerStats, Phase, Target, View};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
@@ -32,6 +33,9 @@ pub struct Placed {
 #[derive(Default)]
 pub struct Scene {
     pub placed: Vec<Placed>,
+    /// The liquids, by which a blended group is told beyond the surface of the water or on the
+    /// eye's side.
+    pub liquids: Option<liquids::Handle>,
     /// What the files of the buildings keep on the CPU.
     pub cpu: u64,
     /// The time the module spent steering at its last frame.
@@ -111,21 +115,24 @@ fn show(parts: Option<&Arc<[Part]>>, seen: Option<&[bool]>) {
 }
 
 /// What the frame draws of the buildings: the draws of the batches of the groups in sight, the
-/// opaque ones by state, the blended ones from the farthest; how many placements and groups are in
-/// sight, how many placements hold the camera in a group inside, and how many groups those see
-/// through their portals.
+/// opaque ones by state, the blended ones from the farthest, those beyond the surface of the water
+/// from the eye apart from those on its side; how many placements and groups are in sight, how
+/// many placements hold the camera in a group inside, and how many groups those see through their
+/// portals.
 #[derive(Default)]
 pub(crate) struct Listing {
     pub opaque: Vec<Listed>,
-    pub blended: Vec<Listed>,
+    pub beyond: Vec<Listed>,
+    pub near: Vec<Listed>,
     pub buildings: usize,
     pub groups: usize,
     pub inside: usize,
     pub through: usize,
 }
 
-/// What the frame draws of `placed` seen in `view`; the doodads of each shown or hidden.
-pub(crate) fn list(placed: &[Placed], view: &View) -> Listing {
+/// What the frame draws of `placed` seen in `view`, a blended group by the centre of its bounds
+/// against the surfaces of the water `surfaces`; the doodads of each shown or hidden.
+pub(crate) fn list(placed: &[Placed], view: &View, surfaces: Option<&Surfaces>) -> Listing {
     let planes = planes(&view.view_proj);
     let mut listing = Listing::default();
     for (instance, building) in placed.iter().enumerate() {
@@ -153,7 +160,9 @@ pub(crate) fn list(placed: &[Placed], view: &View) -> Listing {
                 continue;
             }
             listing.groups += 1;
-            let distance = ((bounds[0] + bounds[1]) * 0.5).distance(view.eye);
+            let centre = (bounds[0] + bounds[1]) * 0.5;
+            let distance = centre.distance(view.eye);
+            let beyond = surfaces.is_some_and(|surfaces| surfaces.phase(view.eye, centre) == Phase::Beyond);
             for batch in &group.batches {
                 let listed = Listed {
                     state: batch.state,
@@ -161,16 +170,20 @@ pub(crate) fn list(placed: &[Placed], view: &View) -> Listing {
                     command: [batch.count, 1, batch.first, building.wmo.base_vertex as u32, 0],
                     entry: [instance as u32, batch.material, group.flags | batch.kind << 8, 0],
                 };
-                if batch.state.blended() {
-                    listing.blended.push(listed);
-                } else {
+                if !batch.state.blended() {
                     listing.opaque.push(listed);
+                } else if beyond {
+                    listing.beyond.push(listed);
+                } else {
+                    listing.near.push(listed);
                 }
             }
         }
     }
     listing.opaque.sort_by_key(|listed| listed.state);
-    listing.blended.sort_by(|a, b| b.distance.total_cmp(&a.distance));
+    for blended in [&mut listing.beyond, &mut listing.near] {
+        blended.sort_by(|a, b| b.distance.total_cmp(&a.distance));
+    }
     listing
 }
 
@@ -246,7 +259,8 @@ pub struct BuildingsLayer {
     /// The buildings drawn this frame, held until the next, and the runs of each phase.
     drawn: Vec<Placed>,
     opaque: Vec<Run>,
-    blended: Vec<Run>,
+    beyond: Vec<Run>,
+    near: Vec<Run>,
     stats: LayerStats,
 }
 
@@ -262,7 +276,8 @@ impl BuildingsLayer {
             group: None,
             drawn: Vec::new(),
             opaque: Vec::new(),
-            blended: Vec::new(),
+            beyond: Vec::new(),
+            near: Vec::new(),
             stats: LayerStats::default(),
         }
     }
@@ -271,10 +286,11 @@ impl BuildingsLayer {
 impl Layer for BuildingsLayer {
     fn prepare(&mut self, gpu: &egui_wgpu::RenderState, view: &View) {
         let shared = self.shared.clone();
-        let (placed, steering, cpu) = {
+        let (placed, steering, cpu, liquids) = {
             let scene = lock(&self.scene);
-            (scene.placed.clone(), scene.steering, scene.cpu)
+            (scene.placed.clone(), scene.steering, scene.cpu, scene.liquids.clone())
         };
+        let surfaces = liquids.map(|liquids| liquids.surfaces());
         let (camera, _) = self.camera.get_or_insert_with(|| {
             let buffer = shared.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("buildings camera"),
@@ -297,12 +313,13 @@ impl Layer for BuildingsLayer {
 
         let Listing {
             opaque,
-            blended,
+            beyond,
+            near,
             buildings,
             groups,
             inside,
             through,
-        } = list(&placed, view);
+        } = list(&placed, view, surfaces.as_deref());
         let instances: Vec<[f32; 16]> = placed
             .iter()
             .map(|building| {
@@ -316,7 +333,7 @@ impl Layer for BuildingsLayer {
                 values
             })
             .collect();
-        let listed: Vec<&Listed> = opaque.iter().chain(&blended).collect();
+        let listed: Vec<&Listed> = opaque.iter().chain(&beyond).chain(&near).collect();
         let commands: Vec<[u32; 5]> = listed
             .iter()
             .enumerate()
@@ -343,20 +360,23 @@ impl Layer for BuildingsLayer {
             };
         }
         self.opaque = runs(&opaque, 0);
-        self.blended = runs(&blended, opaque.len() as u32);
+        self.beyond = runs(&beyond, opaque.len() as u32);
+        self.near = runs(&near, (opaque.len() + beyond.len()) as u32);
         let triangles: u64 = listed.iter().map(|listed| u64::from(listed.command[0] / 3)).sum();
         let all_groups: usize = placed.iter().map(|building| building.wmo.groups.len()).sum();
         self.stats = LayerStats {
-            draws: (self.opaque.len() + self.blended.len()) as u64,
+            draws: (self.opaque.len() + self.beyond.len() + self.near.len()) as u64,
             triangles,
             bytes: shared.bytes(),
             items: format!(
-                "{buildings} buildings in sight of {}, {groups} groups of {all_groups}, {} batches ({} blended)\n  \
+                "{buildings} buildings in sight of {}, {groups} groups of {all_groups}, {} batches ({} blended, {} \
+                 beyond the water)\n  \
                  the camera inside {inside} of them, {through} groups seen through their portals; the arrays {} \
                  textures; on the CPU {:.1} MB",
                 placed.len(),
                 listed.len(),
-                blended.len(),
+                beyond.len() + near.len(),
+                beyond.len(),
                 shared.arrays.counts().placed,
                 cpu as f64 / (1024.0 * 1024.0)
             ),
@@ -379,7 +399,9 @@ impl Layer for BuildingsLayer {
     ) {
         let runs = match phase {
             Phase::Opaque => &self.opaque,
-            Phase::Blended => &self.blended,
+            Phase::Beyond => &self.beyond,
+            Phase::Near => &self.near,
+            Phase::Water => return,
         };
         let (Some((_, camera)), Some((group, _)), Some(commands), Some((vertices, _)), Some((indices, _))) = (
             &self.camera,

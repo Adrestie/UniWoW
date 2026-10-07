@@ -15,6 +15,7 @@ use uniwow_api::formats::{
     Tile, TileId, Wdl, Wdt, Wmo, WmoBatch, WmoDoodad, WmoGroup, WmoMaterial,
 };
 use uniwow_api::glam::{Mat4, Quat, Vec3};
+use uniwow_api::liquids::{Liquids, Surfaces};
 use uniwow_api::models::{Extent, Instance, Look, LookId, LookState, Models};
 use uniwow_api::viewport::{Layer, Phase, Target, View};
 use uniwow_api::{egui, egui_wgpu, wgpu};
@@ -555,6 +556,11 @@ pub(crate) fn view(eye: Vec3) -> View {
 
 /// The middle pixel of what `layer` draws seen from `eye` towards the origin, cleared to black.
 fn middle(gpu: &egui_wgpu::RenderState, layer: &mut BuildingsLayer, eye: Vec3) -> [u8; 4] {
+    middle_in(gpu, layer, eye, &Phase::ALL)
+}
+
+/// The middle pixel of what `layer` draws in `phases` seen from `eye` towards the origin.
+fn middle_in(gpu: &egui_wgpu::RenderState, layer: &mut BuildingsLayer, eye: Vec3, phases: &[Phase]) -> [u8; 4] {
     let size = 32u32;
     let view = view(eye);
     layer.prepare(gpu, &view);
@@ -610,8 +616,8 @@ fn middle(gpu: &egui_wgpu::RenderState, layer: &mut BuildingsLayer, eye: Vec3) -
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        for phase in Phase::ALL {
-            layer.draw_pass(gpu, &TARGET, &view, phase, &mut pass);
+        for phase in phases {
+            layer.draw_pass(gpu, &TARGET, &view, *phase, &mut pass);
         }
     }
     encoder.copy_texture_to_buffer(
@@ -737,8 +743,9 @@ fn the_opaque_batches_are_drawn_by_state_and_the_blended_from_the_farthest() {
             parts: None,
         },
     ];
-    let listing = layer::list(&placed, &view(Vec3::new(20.0, 0.0, 0.0)));
-    let (opaque, blended) = (&listing.opaque, &listing.blended);
+    let listing = layer::list(&placed, &view(Vec3::new(20.0, 0.0, 0.0)), None);
+    let (opaque, blended) = (&listing.opaque, &listing.near);
+    assert!(listing.beyond.is_empty(), "no water");
     assert_eq!((listing.buildings, listing.groups), (1, 4));
     assert_eq!(
         opaque.iter().map(|listed| listed.state).collect::<Vec<_>>(),
@@ -957,4 +964,90 @@ fn the_files_are_told_by_bands_and_read_within_what_the_budget_allows() {
             waiting: false
         }
     );
+}
+
+#[test]
+fn a_blended_group_beyond_the_surface_of_the_water_from_the_eye_is_drawn_before_it() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    let Ok(shared) = Shared::new(&gpu, &TARGET) else {
+        return;
+    };
+    // Two blended squares, one under the surface at 0, one over it.
+    let mut wmo = square(material(0, 2), false, None);
+    let at = |z: f32| {
+        let mut group = wmo.groups[0].clone();
+        group.bounds = [[0.0, -1.0, z - 1.0], [0.0, 1.0, z + 1.0]];
+        group
+    };
+    wmo.groups = vec![at(-5.0), at(5.0)];
+    wmo.bounds = [[0.0, -1.0, -6.0], [0.0, 1.0, 6.0]];
+    let placed = [Placed {
+        transform: Mat4::IDENTITY,
+        wmo: Arc::new(gpu::upload(&Arc::new(shared), &NoFiles, wmo).unwrap()),
+        parts: None,
+    }];
+    let mut surfaces = Surfaces::default();
+    for x in -40..=40 {
+        for y in -10..=10 {
+            surfaces.add(Surfaces::cell(x as f32, y as f32), 0.0);
+        }
+    }
+    // The first index of what is drawn beyond the water and on the eye's side.
+    let firsts = |eye: Vec3, surfaces: Option<&Surfaces>| {
+        let listing = layer::list(&placed, &view(eye), surfaces);
+        let first = |listed: &[layer::Listed]| listed.iter().map(|listed| listed.command[2]).collect::<Vec<_>>();
+        (first(&listing.beyond), first(&listing.near))
+    };
+    let (under, over) = (0, 6);
+    let base = firsts(Vec3::new(20.0, 0.0, 10.0), None).1.into_iter().min().unwrap();
+    let shift = |(beyond, near): (Vec<u32>, Vec<u32>)| {
+        (
+            beyond.iter().map(|first| first - base).collect::<Vec<_>>(),
+            near.iter().map(|first| first - base).collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(
+        shift(firsts(Vec3::new(20.0, 0.0, 10.0), Some(&surfaces))),
+        (vec![under], vec![over]),
+        "from over the water"
+    );
+    assert_eq!(
+        shift(firsts(Vec3::new(20.0, 0.0, -10.0), Some(&surfaces))),
+        (vec![over], vec![under]),
+        "from under it"
+    );
+    assert_eq!(
+        shift(firsts(Vec3::new(20.0, 0.0, 10.0), None)).0,
+        Vec::<u32>::new(),
+        "without water, all on the eye's side"
+    );
+    // Drawn in the phase of its part: a white group under the surface, from over the water.
+    let shared = Arc::new(Shared::new(&gpu, &TARGET).unwrap());
+    let mut white = square(material(0x1, 2), false, None);
+    white.groups[0].bounds = [[0.0, -1.0, -6.0], [0.0, 1.0, -4.0]];
+    let scene = Arc::new(Mutex::new(Scene::default()));
+    {
+        let mut scene = scene.lock().unwrap();
+        scene.placed = vec![Placed {
+            transform: Mat4::IDENTITY,
+            wmo: Arc::new(gpu::upload(&shared, &NoFiles, white).unwrap()),
+            parts: None,
+        }];
+        scene.liquids = Some(Arc::new(Pond(Arc::new(surfaces))));
+    }
+    let mut layer = BuildingsLayer::new(shared, scene);
+    let eye = Vec3::new(20.0, 0.0, 1.0);
+    assert_eq!(middle_in(&gpu, &mut layer, eye, &[Phase::Beyond]), [255, 255, 255, 255]);
+    assert_eq!(middle_in(&gpu, &mut layer, eye, &[Phase::Near]), [0, 0, 0, 255]);
+}
+
+/// Water at 0 around the origin.
+struct Pond(Arc<Surfaces>);
+
+impl Liquids for Pond {
+    fn surfaces(&self) -> Arc<Surfaces> {
+        self.0.clone()
+    }
 }

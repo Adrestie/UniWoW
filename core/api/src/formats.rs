@@ -17,6 +17,8 @@ use crate::glam::{Mat4, Quat, Vec3};
 pub const TILE: f32 = 1600.0 / 3.0;
 /// The world's X and Y at the corner of the tile 0 0.
 pub const ORIGIN: f32 = 32.0 * TILE;
+/// The side of a chunk of terrain, 16 of a tile.
+pub const CHUNK: f32 = TILE / 16.0;
 
 /// A tile of a map by its place, as its file names it: `<map>_<x>_<y>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -298,6 +300,41 @@ pub struct Doodad {
 pub struct Placements {
     pub doodads: Vec<Doodad>,
     pub buildings: Vec<Building>,
+}
+
+/// The vertices of a layer of liquid a side: 8 tiles of a chunk, 9 vertices.
+pub const LIQUID_SIDE: usize = 9;
+
+/// A layer of liquid over a chunk of a tile: its type, of `LiquidType.dbc`; the corner of its chunk
+/// of highest X and Y, in world coordinates; the 8 × 8 tiles of the chunk it covers, a bit each,
+/// the bit `row * 8 + column`; and its 9 × 9 vertices, row by row as those of the terrain: a row
+/// goes down in Y, the rows go down in X, 4⅙ yards apart. Each vertex its height, its depth from 0
+/// to 255 (255 where its format has none), and its coordinates of texture where its format has
+/// them, none otherwise.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiquidLayer {
+    pub liquid: u16,
+    pub corner: [f32; 2],
+    pub tiles: u64,
+    pub heights: Vec<f32>,
+    pub depths: Vec<u8>,
+    pub coordinates: Vec<[f32; 2]>,
+}
+
+/// A type of liquid of `LiquidType.dbc`: its kind (0 and 1 water, 2 magma, 3 slime), its material
+/// (`LiquidMaterial.dbc`, 3 the procedural water) and the format of the vertices it names (0 heights
+/// and depths, 1 heights and coordinates, 2 depths), its six textures (a frame number where a name holds `%d`, none where
+/// empty) and the two numbers of its animation: for magma and slime how fast its coordinates run,
+/// for water the scale of its texture and its turn in degrees.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiquidTypeRecord {
+    pub id: u32,
+    pub name: String,
+    pub kind: u32,
+    pub material: u32,
+    pub vertex_format: Option<u32>,
+    pub textures: [String; 6],
+    pub animation: [f32; 2],
 }
 
 /// A building placed on a tile, in the axes of `Doodad`, with its bounds in them.
@@ -814,6 +851,10 @@ pub trait Formats: Send + Sync {
     fn char_sections(&self) -> Result<Arc<Vec<CharSection>>, String>;
     /// The animations, by increasing id.
     fn animations(&self) -> Result<Arc<Vec<AnimationRecord>>, String>;
+    /// The types of liquid, by increasing id. None by default.
+    fn liquid_types(&self) -> Result<Arc<Vec<LiquidTypeRecord>>, String> {
+        Err("the types of liquid are not read".to_owned())
+    }
     /// The M2 `file`, with its skins: of 3.3.5a, its path as a table names it (`.mdx` and `.mdl`
     /// read as `.m2`) and its skins beside it; modern, its skins named by its chunk `SFID`.
     fn model(&self, file: &FileRef) -> Result<Model, String>;
@@ -832,6 +873,13 @@ pub trait Formats: Send + Sync {
             doodads: tile.doodads,
             buildings: tile.buildings,
         }))
+    }
+    /// The layers of liquid of the tile `<directory>_<x>_<y>`, its terrain left unread: of `MH2O`,
+    /// or of `MCLQ` in the chunks without; none when the WDT of its map has no such tile. None by
+    /// default.
+    fn liquids(&self, directory: &str, x: u32, y: u32) -> Result<Option<Vec<LiquidLayer>>, String> {
+        let _ = (directory, x, y);
+        Ok(None)
     }
     /// The WDL of the map whose folder is `directory`; none when the client has none.
     fn wdl(&self, directory: &str) -> Result<Option<Wdl>, String>;

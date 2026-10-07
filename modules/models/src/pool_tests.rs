@@ -80,8 +80,13 @@ pub(crate) struct Pooled {
 impl Pooled {
     /// The bench of a pool of `slots` arrays, its scene empty.
     pub(crate) fn new(slots: usize) -> Option<Self> {
+        Self::on(Some(slots))
+    }
+
+    /// The bench of a pool of `slots` arrays, or without the pool, on the path of step 9.4c.
+    pub(crate) fn on(slots: Option<usize>) -> Option<Self> {
         let gpu = device()?;
-        let shared = Arc::new(Shared::new(&gpu, &TARGET, Some(slots)));
+        let shared = Arc::new(Shared::new(&gpu, &TARGET, slots));
         let service = Arc::new(Service::default());
         let _ = service.gpu.set((gpu.device.clone(), gpu.queue.clone()));
         let scene = Arc::new(Mutex::new(Scene {

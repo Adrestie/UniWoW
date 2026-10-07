@@ -317,21 +317,21 @@ fn a_building_the_camera_is_inside_of_draws_and_shows_the_doodads_of_the_groups_
         view
     };
     // In the first room looking back: itself alone, drawn alone.
-    let listing = layer::list(&placed, &view(at(5.0, 2.0), at(-100.0, 2.0)));
+    let listing = layer::list(&placed, &view(at(5.0, 2.0), at(-100.0, 2.0)), None);
     assert_eq!((listing.inside, listing.through, listing.groups), (1, 1, 1));
     assert_eq!(shown(), [true, false, false, true]);
     // Out of sight: all shown again, for when it is seen from outside.
-    let listing = layer::list(&placed, &view(at(-50.0, 2.0), at(-100.0, 2.0)));
+    let listing = layer::list(&placed, &view(at(-50.0, 2.0), at(-100.0, 2.0)), None);
     assert_eq!(listing.buildings, 0);
     assert_eq!(shown(), [true; 4]);
-    layer::list(&placed, &view(at(5.0, 2.0), at(-100.0, 2.0)));
+    layer::list(&placed, &view(at(5.0, 2.0), at(-100.0, 2.0)), None);
     // Along the row: every group.
-    let listing = layer::list(&placed, &view(at(5.0, 2.0), at(100.0, 2.0)));
+    let listing = layer::list(&placed, &view(at(5.0, 2.0), at(100.0, 2.0)), None);
     assert_eq!((listing.inside, listing.through), (1, 4));
     assert_eq!(shown(), [true; 4]);
     // From outside the building: all of them, its groups by their bounds.
-    layer::list(&placed, &view(at(5.0, 2.0), at(-100.0, 2.0)));
-    let listing = layer::list(&placed, &view(at(-50.0, 2.0), at(100.0, 2.0)));
+    layer::list(&placed, &view(at(5.0, 2.0), at(-100.0, 2.0)), None);
+    let listing = layer::list(&placed, &view(at(-50.0, 2.0), at(100.0, 2.0)), None);
     assert_eq!((listing.inside, listing.groups), (0, 4));
     assert_eq!(shown(), [true; 4]);
     // The second door aside: the rooms past it in sight, not drawn.
@@ -340,6 +340,6 @@ fn a_building_the_camera_is_inside_of_draws_and_shows_the_doodads_of_the_groups_
         wmo: Arc::new(gpu::upload(&shared, &NoFiles, row([4.0, 5.0])).unwrap()),
         parts: None,
     }];
-    let listing = layer::list(&aside, &view(at(5.0, 2.0), at(100.0, 2.0)));
+    let listing = layer::list(&aside, &view(at(5.0, 2.0), at(100.0, 2.0)), None);
     assert_eq!((listing.through, listing.groups), (2, 2));
 }

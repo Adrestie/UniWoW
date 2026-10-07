@@ -51,12 +51,15 @@ const BACKGROUND: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 
+/// The bundles of a layer, one for each phase.
+type Bundles = [wgpu::RenderBundle; Phase::ALL.len()];
+
 /// A layer, with the bundle kept for it and the version it was recorded at.
 struct Entry {
     owner: String,
     layer: Box<dyn Layer>,
-    /// Its bundles of the two phases, kept with the version they were recorded at.
-    kept: Option<(u64, [wgpu::RenderBundle; 2])>,
+    /// Its bundles of the phases, kept with the version they were recorded at.
+    kept: Option<(u64, Bundles)>,
 }
 
 /// The layers, and the owners whose layers were removed while the list was out being drawn.
@@ -904,8 +907,8 @@ struct PassTargets<'a> {
 /// What a layer gives its frame: its bundle, or none for its drawing in the pass; what it computes;
 /// its number among the layers timed on the GPU; and what it cost.
 struct Prepared {
-    /// Its bundles of the two phases, for a layer drawing in bundles.
-    bundles: Option<[wgpu::RenderBundle; 2]>,
+    /// Its bundles of the phases, for a layer drawing in bundles.
+    bundles: Option<Bundles>,
     computed: Option<wgpu::CommandBuffer>,
     timed: Option<u32>,
     prepare: Duration,
@@ -1015,7 +1018,7 @@ fn draw_frame(
         }
         for (index, phase) in Phase::ALL.into_iter().enumerate() {
             for ((entry, layer), panic) in entries.iter_mut().zip(&mut prepared).zip(&mut panicked) {
-                // A layer that panicked in the first phase is not drawn in the second.
+                // A layer that panicked in a phase is not drawn in the next.
                 if panic.is_some() {
                     continue;
                 }
@@ -1163,10 +1166,11 @@ fn prepare_layer(
         (Some(version), Some((kept, bundles))) if *kept == version => (bundles.clone(), None),
         _ => {
             let recording = Instant::now();
-            let bundles = [
-                record(&entry.owner, entry.layer.as_mut(), gpu, view, Phase::Opaque)?,
-                record(&entry.owner, entry.layer.as_mut(), gpu, view, Phase::Blended)?,
-            ];
+            let mut recorded = Vec::with_capacity(Phase::ALL.len());
+            for phase in Phase::ALL {
+                recorded.push(record(&entry.owner, entry.layer.as_mut(), gpu, view, phase)?);
+            }
+            let bundles: Bundles = recorded.try_into().expect("a bundle a phase");
             entry.kept = version.map(|version| (version, bundles.clone()));
             (bundles, Some(recording.elapsed()))
         }
@@ -1393,7 +1397,7 @@ mod tests {
             phase: Phase,
             _bundle: &mut wgpu::RenderBundleEncoder<'a>,
         ) {
-            // Once a recording, of its two bundles.
+            // Once a recording, of its bundles.
             if phase == Phase::Opaque {
                 self.counts.drawn.fetch_add(1, Ordering::Relaxed);
             }
@@ -2392,7 +2396,7 @@ fn cs_main() {
         let ground = Painter::new(Drawing::Bundle, GREEN).deep(0.25, true, greater);
         let sky = Painter::new(Drawing::Bundle, [0.0, 0.0, 1.0, 1.0])
             .deep(0.0, false, wgpu::CompareFunction::Equal)
-            .in_phase(Phase::Blended);
+            .in_phase(Phase::Beyond);
         for (under, channel) in [(ground, 1), (sky, 2)] {
             let layers = Layers::default();
             put(
@@ -2401,7 +2405,7 @@ fn cs_main() {
                 Painter::new(Drawing::Pass, half_red)
                     .deep(0.5, false, greater)
                     .blended()
-                    .in_phase(Phase::Blended),
+                    .in_phase(Phase::Near),
             );
             put(&layers, "terrain", under.at(Stage::Ground));
             let drawn = targets.draw(&layers, &gpu, &view, false, None);
@@ -2409,6 +2413,36 @@ fn cs_main() {
             let seen = targets.middle(&gpu);
             assert!(seen[0] > 100 && seen[channel] > 100, "both seen: {seen:?}");
         }
+    }
+
+    #[test]
+    fn what_is_blended_beyond_the_water_is_drawn_before_it_and_what_is_on_this_side_after() {
+        let Some(gpu) = gpu() else {
+            eprintln!("skipped: no software adapter for a device");
+            return;
+        };
+        let view = view(&Camera::default(), [8, 8], 0.0, viewport::Fog::default());
+        let targets = Targets::new(&gpu);
+        // Red beyond the surface, blue the water, green on this side, each half over what is
+        // under it; added in the other order, the water in its stage: the phases order them.
+        let layers = Layers::default();
+        let half = |colour: [f32; 3], phase| {
+            Painter::new(Drawing::Pass, [colour[0], colour[1], colour[2], 0.5])
+                .blended()
+                .in_phase(phase)
+        };
+        put(&layers, "near", half([0.0, 1.0, 0.0], Phase::Near));
+        put(&layers, "water", half([0.0, 0.0, 1.0], Phase::Water).at(Stage::Water));
+        put(
+            &layers,
+            "beyond",
+            Painter::new(Drawing::Bundle, RED).blended().in_phase(Phase::Beyond),
+        );
+        let drawn = targets.draw(&layers, &gpu, &view, false, None);
+        assert!(drawn.failures.is_empty(), "{:?}", drawn.failures);
+        // Linear: red, then (0.5, 0, 0.5), then (0.25, 0.5, 0.25).
+        let seen = targets.middle(&gpu);
+        assert!(seen[1] > seen[0] && seen[0] == seen[2] && seen[0] > 100, "{seen:?}");
     }
 
     #[test]
@@ -2430,7 +2464,7 @@ fn cs_main() {
                 Painter::new(Drawing::Bundle, [1.0, 0.0, 0.0, 0.5])
                     .deep(depth, false, greater)
                     .blended()
-                    .in_phase(Phase::Blended),
+                    .in_phase(Phase::Near),
             );
             put(
                 &layers,
@@ -2529,11 +2563,12 @@ fn cs_main() {
     }
 
     #[test]
-    fn a_layer_is_timed_drawing_in_both_phases() {
-        // The pass, then a layer: its computing 2 ticks, its opaque drawing 3, its blended 5.
-        let ticks = [0, 100, 10, 12, 20, 23, 30, 35];
+    fn a_layer_is_timed_drawing_in_every_phase() {
+        // The pass, then a layer: its computing 2 ticks, its drawing 3, 5, 7 and 11 in the four
+        // phases.
+        let ticks = [0, 100, 10, 12, 20, 23, 30, 35, 40, 47, 50, 61];
         let (total, layers) = crate::stats::spans(&ticks, 1, 1e6);
-        assert_eq!((total, layers), (100.0, vec![(2.0, 8.0)]));
+        assert_eq!((total, layers), (100.0, vec![(2.0, 26.0)]));
     }
 
     #[test]

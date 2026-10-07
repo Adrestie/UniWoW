@@ -10,6 +10,9 @@ mod blp;
 mod chain;
 mod db2;
 mod dbc;
+mod liquid;
+#[cfg(test)]
+mod liquid_tests;
 mod m2;
 #[cfg(test)]
 mod m2_tests;
@@ -33,7 +36,8 @@ use std::thread::ThreadId;
 
 use uniwow_api::formats::{
     self, AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef,
-    Formats, GameObjectDisplay, HairGeoset, MapRecord, Model, Placements, Texture, Tile, Wdl, Wdt, Wmo,
+    Formats, GameObjectDisplay, HairGeoset, LiquidLayer, LiquidTypeRecord, MapRecord, Model, Placements, Texture, Tile,
+    Wdl, Wdt, Wmo,
 };
 use uniwow_api::vfs::{self, Vfs, VfsState};
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, Registrar, egui, log, rfd, serde_json};
@@ -125,6 +129,22 @@ impl Client {
         let root_path = format!("{stem}.adt");
         let root = read(&root_path)?.ok_or_else(|| format!("{root_path}: named by its WDT, not in the client"))?;
         terrain::placements(&root, None)
+            .map(Some)
+            .map_err(|e| format!("{root_path}: {e}"))
+    }
+
+    fn liquids(&self, directory: &str, x: u32, y: u32) -> Result<Option<Vec<LiquidLayer>>, String> {
+        let wdt = self.wdt(directory)?;
+        if x > 63 || y > 63 || !wdt.tiles[(y * 64 + x) as usize] {
+            return Ok(None);
+        }
+        let root_path = format!("World\\Maps\\{directory}\\{directory}_{x}_{y}.adt");
+        let root = self
+            .chain
+            .read(&root_path)
+            .map_err(|e| format!("{root_path}: {e}"))?
+            .ok_or_else(|| format!("{root_path}: named by its WDT, not in the client"))?;
+        liquid::liquids(&root, [x, y])
             .map(Some)
             .map_err(|e| format!("{root_path}: {e}"))
     }
@@ -337,6 +357,12 @@ impl Formats for Files {
         client.tables.animations(&client.chain)
     }
 
+    fn liquid_types(&self) -> Result<Arc<Vec<LiquidTypeRecord>>, String> {
+        self.check_thread("LiquidType.dbc");
+        let client = self.client()?;
+        client.tables.liquid_types(&client.chain)
+    }
+
     fn model(&self, file: &FileRef) -> Result<Model, String> {
         self.check_thread("a model");
         self.client()?.model(file)
@@ -360,6 +386,11 @@ impl Formats for Files {
     fn placements(&self, directory: &str, x: u32, y: u32) -> Result<Option<Placements>, String> {
         self.check_thread("the placements of a tile");
         self.client()?.placements(directory, x, y)
+    }
+
+    fn liquids(&self, directory: &str, x: u32, y: u32) -> Result<Option<Vec<LiquidLayer>>, String> {
+        self.check_thread("the liquids of a tile");
+        self.client()?.liquids(directory, x, y)
     }
 
     fn wdl(&self, directory: &str) -> Result<Option<Wdl>, String> {

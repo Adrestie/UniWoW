@@ -66,13 +66,22 @@ const WANTED: wgpu::Features = wgpu::Features::TEXTURE_COMPRESSION_BC
 /// them: the models read their arrays of textures by 64 slots.
 const SAMPLED_TEXTURES: u32 = 128;
 
+/// The blocks of memory of the device its allocator places the buffers and textures in, from the
+/// first to the largest: with the 256 MB of `MemoryHints::Performance`, a few small buffers held
+/// long kept gigabytes reserved.
+const MEMORY_BLOCKS: std::ops::Range<u64> = (32 << 20)..(128 << 20);
+
 /// The device as `default` asks for it, with what `WANTED` names when the adapter offers it; as
 /// many layers in an array of textures as the adapter takes (the terrain keeps its textures in
-/// arrays, 256 layers each by default); and up to `SAMPLED_TEXTURES` textures a stage.
+/// arrays, 256 layers each by default); up to `SAMPLED_TEXTURES` textures a stage; and its memory
+/// in blocks of `MEMORY_BLOCKS`.
 fn with_features(default: DeviceDescriptor) -> DeviceDescriptor {
     Arc::new(move |adapter| {
         let mut descriptor = default(adapter);
         descriptor.required_features |= adapter.features() & WANTED;
+        descriptor.memory_hints = wgpu::MemoryHints::Manual {
+            suballocated_device_memory_block_size: MEMORY_BLOCKS,
+        };
         let offered = adapter.limits();
         let limits = &mut descriptor.required_limits;
         limits.max_texture_array_layers = limits.max_texture_array_layers.max(offered.max_texture_array_layers);
@@ -91,7 +100,7 @@ mod tests {
 
     use uniwow_api::wgpu;
 
-    use super::{SAMPLED_TEXTURES, WANTED, with_features};
+    use super::{MEMORY_BLOCKS, SAMPLED_TEXTURES, WANTED, with_features};
 
     fn resolved<F: Future>(future: F) -> Option<F::Output> {
         match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
@@ -101,7 +110,8 @@ mod tests {
     }
 
     #[test]
-    fn the_device_asks_for_the_features_the_layers_and_the_textures_the_adapter_offers() {
+    fn the_device_asks_for_the_features_the_layers_and_the_textures_the_adapter_offers_in_blocks_of_memory_of_its_own()
+    {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let Some(Ok(adapter)) = resolved(instance.request_adapter(&wgpu::RequestAdapterOptions {
             force_fallback_adapter: true,
@@ -129,6 +139,14 @@ mod tests {
                 .limits()
                 .max_sampled_textures_per_shader_stage
                 .min(SAMPLED_TEXTURES)
+        );
+        assert!(
+            matches!(
+                &descriptor.memory_hints,
+                wgpu::MemoryHints::Manual { suballocated_device_memory_block_size } if *suballocated_device_memory_block_size == MEMORY_BLOCKS
+            ),
+            "{:?}",
+            descriptor.memory_hints
         );
         // The device made as asked.
         let made = resolved(adapter.request_device(&descriptor));

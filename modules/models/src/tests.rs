@@ -282,7 +282,7 @@ fn the_same_look_has_the_same_id_and_an_owner_keeps_its_set_until_it_gives_anoth
     service.place("one", &[instance(1, a.0, Vec3::ZERO, 1.0)]);
     service.change("one", &[instance(2, a.0, Vec3::X, 1.0)], &[]);
     assert_eq!(service.owners().len(), 1);
-    assert!(service.owners()[0].published().buffer.is_none());
+    assert!(service.owners()[0].published().written.is_none());
     service.clear("one");
     assert!(service.owners().is_empty());
 }
@@ -1036,7 +1036,7 @@ fn a_blended_instance_lets_what_is_behind_through_and_one_of_alpha_0_is_not_draw
 }
 
 #[test]
-fn moving_instances_are_written_in_place_and_new_groups_into_a_new_buffer_made_filled() {
+fn moving_instances_are_written_in_place_and_new_groups_into_a_new_range_the_old_given_back_once_unheld() {
     let Some(bench) = bench(square(0, 0), [255, 0, 0, 255]) else {
         return;
     };
@@ -1044,25 +1044,35 @@ fn moving_instances_are_written_in_place_and_new_groups_into_a_new_buffer_made_f
     let stride = size_of::<InstanceGpu>();
     service.place("test", &[instance(1, 0, Vec3::ZERO, 1.0), instance(2, 0, Vec3::X, 1.0)]);
     let slot = service.owners()[0].clone();
+    let arena = service.instances().unwrap().clone();
     let first = slot.published();
-    let buffer = first.buffer.clone().unwrap();
-    // Moved within their tile: the same buffer, written in place.
+    let written = first.written.clone().unwrap();
+    // Moved within their tile: the same range, written in place.
     service.change("test", &[instance(2, 0, Vec3::new(3.0, 0.0, 0.0), 1.0)], &[]);
     let moved = slot.published();
-    assert!(Arc::ptr_eq(&buffer, moved.buffer.as_ref().unwrap()));
+    assert!(Arc::ptr_eq(&written, moved.written.as_ref().unwrap()));
     assert_eq!(moved.layout, first.layout);
+    let (buffer, _) = arena.buffer().unwrap();
     let bytes = read_back(&bench.gpu, &buffer, buffer.size());
-    let second: &[f32] = bytemuck::cast_slice(&bytes[stride..2 * stride]);
+    let at = written.first() as usize * stride;
+    let second: &[f32] = bytemuck::cast_slice(&bytes[at + stride..at + 2 * stride]);
     assert_eq!(second[3], 3.0, "the second instance's x, written");
-    // In another tile: a new group, in a new buffer made with them.
+    // In another tile: a new group, in a new range written with them; the old one kept while what
+    // was published names it.
+    let held = arena.bytes().1;
     service.change("test", &[instance(3, 0, Vec3::new(TILE * 2.0, 0.0, 0.0), 1.0)], &[]);
     let grown = slot.published();
-    let new = grown.buffer.clone().unwrap();
-    assert!(!Arc::ptr_eq(&buffer, &new));
+    let new = grown.written.clone().unwrap();
+    assert_ne!(new.first(), written.first());
     assert_eq!((grown.layout, grown.groups.len()), (first.layout + 1, 2));
-    let bytes = read_back(&bench.gpu, &new, 3 * stride as u64);
-    let third: &[f32] = bytemuck::cast_slice(&bytes[2 * stride..]);
-    assert_eq!(third[3], TILE * 2.0, "the third, in the buffer from its making");
+    let (buffer, _) = arena.buffer().unwrap();
+    let bytes = read_back(&bench.gpu, &buffer, buffer.size());
+    let at = new.first() as usize * stride;
+    let third: &[f32] = bytemuck::cast_slice(&bytes[at + 2 * stride..at + 3 * stride]);
+    assert_eq!(third[3], TILE * 2.0, "the third, in the range from its writing");
+    assert_eq!(arena.bytes().1, 2 * held, "the old range kept");
+    drop((first, moved, written));
+    assert_eq!(arena.bytes().1, held, "given back once nothing names it");
 }
 
 #[test]

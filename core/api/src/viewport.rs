@@ -248,30 +248,41 @@ pub enum Drawing {
     Pass,
 }
 
-/// When a layer is drawn among the others in each phase: the ground first, then the scene. Layers
-/// of one stage are drawn in the order they were added.
+/// When a layer is drawn among the others in each phase: the ground first, then the water, then the
+/// scene. Layers of one stage are drawn in the order they were added.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Stage {
     /// The terrain and its sky.
     Ground,
+    /// The liquids.
+    Water,
     /// What stands on the ground, by default.
     #[default]
     Scene,
 }
 
-/// The phases a frame is drawn in: what every layer draws opaque, writing the depth, then what
-/// every layer blends over it, so that a blended batch of a layer is drawn over the opaque ones of
-/// every other, whatever their order. The sky of the ground begins the blended phase, where
-/// nothing opaque is drawn.
+/// The phases a frame is drawn in: what every layer draws opaque, writing the depth; then what
+/// every layer blends over it, split at the surface of the water (`liquids::Surfaces::phase`) so
+/// that a blended batch under the water is seen through it: what lies beyond the surface from the
+/// eye, under it from over it and over it from under it; the water; then what lies on the eye's
+/// side. A blended batch of a layer is drawn over the opaque ones of every other, whatever their
+/// order. The sky of the ground begins the first blended phase, where nothing opaque is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Opaque,
-    Blended,
+    Beyond,
+    Water,
+    Near,
 }
 
 impl Phase {
     /// The phases, in the order they are drawn.
-    pub const ALL: [Phase; 2] = [Phase::Opaque, Phase::Blended];
+    pub const ALL: [Phase; 4] = [Phase::Opaque, Phase::Beyond, Phase::Water, Phase::Near];
+
+    /// Whether what is drawn in it is blended over what is drawn before.
+    pub fn blended(self) -> bool {
+        self != Phase::Opaque
+    }
 }
 
 /// Drawn on the interface thread, but may be created on any thread.

@@ -5,11 +5,13 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use uniwow_api::arena::Arena;
 use uniwow_api::formats::Formats;
 use uniwow_api::models::{Extent, Instance, Look, LookId, LookState, Models};
 use uniwow_api::wgpu;
 
 use crate::display;
+use crate::gpu::InstanceGpu;
 use crate::groups::{self, Slot};
 use crate::lock;
 
@@ -28,10 +30,12 @@ pub struct Service {
     numbers: AtomicU32,
     /// The setting `reach`, as the bits of an `f32`.
     reach: AtomicU32,
-    /// The device of the view, which the owners' buffers are made on; set once: a device made again
-    /// after a loss is not taken, the models asking for a restart of the editor then, as the
-    /// terrain and the markers do.
+    /// The device of the view, which the arena of the owners' instances is made on; set once: a
+    /// device made again after a loss is not taken, the models asking for a restart of the editor
+    /// then, as the terrain and the markers do.
     pub gpu: OnceLock<(wgpu::Device, wgpu::Queue)>,
+    /// The arena of the owners' instances, made with the first written.
+    instances: OnceLock<Arc<Arena>>,
     /// The tables `display` reads, once the module finds them.
     pub formats: Mutex<Option<Arc<dyn Formats>>>,
 }
@@ -84,8 +88,19 @@ impl Service {
             .clone()
     }
 
-    fn device(&self) -> Option<(&wgpu::Device, &wgpu::Queue)> {
-        self.gpu.get().map(|(device, queue)| (device, queue))
+    /// The arena of the owners' instances; none before the view has its device.
+    pub fn instances(&self) -> Option<&Arc<Arena>> {
+        let (device, queue) = self.gpu.get()?;
+        Some(self.instances.get_or_init(|| {
+            Arc::new(Arena::new(
+                device,
+                queue,
+                "models instances",
+                wgpu::BufferUsages::VERTEX,
+                size_of::<InstanceGpu>() as u64,
+                1 << 12,
+            ))
+        }))
     }
 }
 
@@ -113,12 +128,12 @@ impl Models for Service {
 
     fn place(&self, owner: &str, instances: &[Instance]) {
         self.slot(owner)
-            .update(self.device(), |kept| *kept = instances.to_vec());
+            .update(self.instances(), |kept| *kept = instances.to_vec());
     }
 
     fn change(&self, owner: &str, changed: &[Instance], removed: &[u64]) {
         self.slot(owner)
-            .update(self.device(), |kept| *kept = groups::merge(kept, changed, removed));
+            .update(self.instances(), |kept| *kept = groups::merge(kept, changed, removed));
     }
 
     fn clear(&self, owner: &str) {

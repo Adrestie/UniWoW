@@ -1,25 +1,28 @@
 //! The instances of each owner, kept until it gives others, grouped by look and by tile: a group is
-//! an owner, a look and a tile, its instances a range of its owner's buffer. Only the thread of the
-//! owner writes that buffer. A set whose groups keep their places, as moving instances do, is
-//! written in place, out of the lock the layer takes; one whose groups change goes to a new buffer
-//! made filled, then published with its groups under that lock, so that no frame draws new groups
-//! over an old layout, nor an empty buffer.
+//! an owner, a look and a tile, its instances a range of its owner's range in the arena of the
+//! instances, which all owners share. Only the thread of the owner writes its range. A set whose
+//! groups keep their places, as moving instances do, is written in place, out of the lock the layer
+//! takes; one whose groups change goes to a new range written whole, then published with its groups
+//! under that lock, so that no frame draws new groups over an old layout, nor an empty range. A
+//! range is given back to the arena once nothing published names it, the layer holding what a
+//! frame draws until the next.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
+use uniwow_api::arena::Arena;
 use uniwow_api::glam::Vec3;
 use uniwow_api::models::{Instance, LookId};
-use uniwow_api::wgpu::util::DeviceExt;
-use uniwow_api::{bytemuck, wgpu};
+use uniwow_api::{bytemuck, log};
 
 use crate::gpu::InstanceGpu;
 use crate::lock;
 
 /// The side of a tile, in yards: the instances of a look are grouped by it.
 pub const TILE: f32 = 1600.0 / 3.0;
-/// The fewest instances a buffer holds.
+/// The fewest instances a range holds.
 const CAPACITY: u32 = 64;
 
 /// A group: the instances of an owner of one look in one tile.
@@ -27,7 +30,7 @@ const CAPACITY: u32 = 64;
 pub struct Group {
     pub look: LookId,
     pub tile: [i32; 2],
-    /// Its instances in the buffer of its owner.
+    /// Its instances in the range of its owner.
     pub first: u32,
     pub count: u32,
     /// The box of the origins of its instances, and the largest scale among them.
@@ -36,11 +39,30 @@ pub struct Group {
     pub scale: f32,
 }
 
-/// What the thread of an owner hands the layer: its buffer, its groups, the number of its layout,
-/// changed with the buffer, and its instances, in the order of the buffer.
+/// The range of an owner's instances in the arena of the instances, given back when dropped.
+pub struct Written {
+    pub arena: Arc<Arena>,
+    range: Range<u64>,
+}
+
+impl Written {
+    /// Its first instance in the arena.
+    pub fn first(&self) -> u32 {
+        self.range.start as u32
+    }
+}
+
+impl Drop for Written {
+    fn drop(&mut self) {
+        self.arena.give(self.range.clone());
+    }
+}
+
+/// What the thread of an owner hands the layer: its range, its groups, the number of its layout,
+/// changed with the range, and its instances, in the order of the range.
 #[derive(Default)]
 pub struct Published {
-    pub buffer: Option<Arc<wgpu::Buffer>>,
+    pub written: Option<Arc<Written>>,
     pub groups: Vec<Group>,
     pub layout: u64,
     pub instances: Vec<Instance>,
@@ -132,11 +154,11 @@ pub fn merge(instances: &[Instance], changed: &[Instance], removed: &[u64]) -> V
     merged
 }
 
-/// What the thread of an owner keeps: its set, its buffer and its groups.
+/// What the thread of an owner keeps: its set, its range and its groups.
 #[derive(Default)]
 struct Kept {
     instances: Vec<Instance>,
-    buffer: Option<Arc<wgpu::Buffer>>,
+    written: Option<Arc<Written>>,
     groups: Vec<Group>,
     layout: u64,
 }
@@ -166,28 +188,27 @@ impl Slot {
         lock(&self.published).clone()
     }
 
-    /// Changes the set with `update`, then writes it, from the calling thread: none before the
-    /// view has its device, when the set is kept and written by the next change.
-    pub fn update(&self, gpu: Option<(&wgpu::Device, &wgpu::Queue)>, update: impl FnOnce(&mut Vec<Instance>)) {
+    /// Changes the set with `update`, then writes it into `arena`, from the calling thread: none
+    /// before the view has its device, when the set is kept and written by the next change. A set
+    /// the arena cannot hold is kept, unpublished, and said in the log.
+    pub fn update(&self, arena: Option<&Arc<Arena>>, update: impl FnOnce(&mut Vec<Instance>)) {
         let mut kept = lock(&self.kept);
         update(&mut kept.instances);
         let groups = group(&mut kept.instances);
-        let Some((device, queue)) = gpu else {
-            kept.buffer = None;
+        let Some(arena) = arena else {
+            kept.written = None;
             kept.groups = groups;
             return;
         };
         let data: Vec<InstanceGpu> = kept.instances.iter().map(as_gpu).collect();
         let instances = kept.instances.clone();
-        if let Some(buffer) = kept.buffer.clone().filter(|_| same_places(&kept.groups, &groups)) {
+        if let Some(written) = kept.written.clone().filter(|_| same_places(&kept.groups, &groups)) {
             // Out of the lock of the layer: it never waits for the queue of the GPU.
-            if !data.is_empty() {
-                queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&data));
-            }
+            arena.write(written.range.start, bytemuck::cast_slice(&data));
             kept.groups = groups.clone();
             let layout = kept.layout;
             *lock(&self.published) = Arc::new(Published {
-                buffer: Some(buffer),
+                written: Some(written),
                 groups,
                 layout,
                 instances,
@@ -197,17 +218,25 @@ impl Slot {
         let capacity = (data.len() as u32).next_power_of_two().max(CAPACITY);
         let mut filled = data;
         filled.resize(capacity as usize, InstanceGpu::default());
-        let buffer = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("models instances"),
-            contents: bytemuck::cast_slice(&filled),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
-        }));
+        let range = match arena.put(bytemuck::cast_slice(&filled)) {
+            Ok(range) => range,
+            Err(reason) => {
+                log::warn!("the instances of an owner are not drawn: {reason}");
+                kept.written = None;
+                kept.groups = groups;
+                return;
+            }
+        };
+        let written = Arc::new(Written {
+            arena: arena.clone(),
+            range,
+        });
         kept.layout += 1;
-        kept.buffer = Some(buffer.clone());
+        kept.written = Some(written.clone());
         kept.groups = groups.clone();
         let layout = kept.layout;
         *lock(&self.published) = Arc::new(Published {
-            buffer: Some(buffer),
+            written: Some(written),
             groups,
             layout,
             instances,

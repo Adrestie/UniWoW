@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock};
 
 use uniwow_api::formats::{
     AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair,
-    GameObjectDisplay, HairGeoset, MapRecord,
+    GameObjectDisplay, HairGeoset, LiquidTypeRecord, MapRecord,
 };
 
 use crate::chain::Chain;
@@ -100,6 +100,7 @@ pub struct Tables {
     objects: Rows<GameObjectDisplay>,
     sections: Rows<CharSection>,
     animations: Rows<AnimationRecord>,
+    liquids: Rows<LiquidTypeRecord>,
 }
 
 impl Tables {
@@ -119,7 +120,46 @@ impl Tables {
             objects: OnceLock::new(),
             sections: OnceLock::new(),
             animations: OnceLock::new(),
+            liquids: OnceLock::new(),
         }
+    }
+
+    /// The types of liquid, each with the format of the vertices of its material.
+    pub fn liquid_types(&self, chain: &Chain) -> Result<Arc<Vec<LiquidTypeRecord>>, String> {
+        self.liquids
+            .get_or_init(|| {
+                let formats = read(
+                    chain,
+                    "LiquidMaterial.dbc",
+                    3,
+                    |dbc, row| Ok((dbc.u32(row, 0), dbc.u32(row, 1))),
+                    |(id, _)| *id,
+                )?;
+                let row = |dbc: &Dbc, row| {
+                    let material = dbc.u32(row, 14);
+                    Ok(LiquidTypeRecord {
+                        id: dbc.u32(row, 0),
+                        name: dbc.string(row, 1)?,
+                        kind: dbc.u32(row, 3),
+                        material,
+                        vertex_format: formats
+                            .iter()
+                            .find(|(id, _)| *id == material)
+                            .map(|(_, format)| *format),
+                        textures: [
+                            dbc.string(row, 15)?,
+                            dbc.string(row, 16)?,
+                            dbc.string(row, 17)?,
+                            dbc.string(row, 18)?,
+                            dbc.string(row, 19)?,
+                            dbc.string(row, 20)?,
+                        ],
+                        animation: [dbc.f32(row, 23), dbc.f32(row, 24)],
+                    })
+                };
+                read(chain, "LiquidType.dbc", 45, row, |liquid| liquid.id)
+            })
+            .clone()
     }
 
     pub fn animations(&self, chain: &Chain) -> Result<Arc<Vec<AnimationRecord>>, String> {

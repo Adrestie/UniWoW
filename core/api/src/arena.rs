@@ -163,6 +163,17 @@ impl Arena {
         Ok(())
     }
 
+    /// `data` written again from the unit `at` of a range held, under the lock of the holes, so that
+    /// no growth copies the buffer between.
+    pub fn write(&self, at: u64, data: &[u8]) {
+        let _holes = lock(&self.holes);
+        if let Some((buffer, _)) = self.buffer()
+            && !data.is_empty()
+        {
+            self.queue.write_buffer(&buffer, at * self.unit, data);
+        }
+    }
+
     /// `range` given back.
     pub fn give(&self, range: Range<u64>) {
         let length = range.end - range.start;
@@ -251,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn an_arena_keeps_its_ranges_in_place_when_it_grows_and_takes_back_those_given() {
+    fn an_arena_keeps_its_ranges_in_place_when_it_grows_takes_back_those_given_and_writes_those_held() {
         let Some((device, queue)) = device() else {
             return;
         };
@@ -274,6 +285,10 @@ mod tests {
             0..1,
             "a range given back taken again"
         );
+        arena.write(4, bytemuck::cast_slice(&[9u32]));
+        let (buffer, _) = arena.buffer().unwrap();
+        let read: Vec<u32> = bytemuck::cast_slice(&read_back(&device, &queue, &buffer, 24)).to_vec();
+        assert_eq!(read, [7, 2, 3, 4, 9, 6], "a range held written again in place");
     }
 
     #[test]

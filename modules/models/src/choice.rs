@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::models::LookId;
+use uniwow_api::viewport::Phase;
 use uniwow_api::wgpu::util::DeviceExt;
 use uniwow_api::{bytemuck, wgpu};
 
@@ -295,9 +296,11 @@ pub struct Choice {
     blocks_count: u32,
     work_offsets: [u32; 5],
     /// The blended states of this frame, in the order drawn, where their templates begin and how
-    /// many.
+    /// many: those of the instances beyond the surface of the water from the eye, so many, then
+    /// those on the eye's side.
     pub blended_regions: Vec<(State, u32, u32)>,
-    copies: Vec<(Arc<wgpu::Buffer>, u64, u64)>,
+    beyond_regions: usize,
+    copies: Vec<(Arc<wgpu::Buffer>, u64, u64, u64)>,
     readbacks: Vec<Readback>,
     pub drawn: Drawn,
 }
@@ -391,6 +394,7 @@ impl Choice {
             blocks_count: 0,
             work_offsets: [0; 5],
             blended_regions: Vec::new(),
+            beyond_regions: 0,
             copies: Vec::new(),
             readbacks: (0..3)
                 .map(|_| Readback {
@@ -461,19 +465,19 @@ impl Choice {
         self.bone_table.as_ref()
     }
 
-    /// The frame: the owners' instances (each its buffer and its section) to copy into one buffer,
-    /// and the tables of their bones from the buffer of the animations (where each owner's begins,
-    /// where it goes, its bytes), the groups in sight, the instances of looks with blended batches
-    /// in the order they are drawn; its tables of the frame and its parameters written. Whether a
-    /// buffer the vertex shader reads was made again.
+    /// The frame: the owners' instances (each the arena, where its own begin there, and its
+    /// section) to copy into one buffer, and the tables of their bones from the buffer of the
+    /// animations (where each owner's begins, where it goes, its bytes), the groups in sight, the
+    /// instances of looks with blended batches in the order they are drawn; its tables of the frame
+    /// and its parameters written. Whether a buffer the vertex shader reads was made again.
     #[allow(clippy::too_many_arguments)]
     pub fn frame(
         &mut self,
         queue: &wgpu::Queue,
-        owners: &[(Arc<wgpu::Buffer>, Section)],
+        owners: &[(Arc<wgpu::Buffer>, u32, Section)],
         bones: Option<(Arc<wgpu::Buffer>, Vec<Move>)>,
         groups: &[GroupOfFrame],
-        blended: &[Blended],
+        blended: [&[Blended]; 2],
         view_proj: Mat4,
         eye: Vec3,
         reach: f32,
@@ -483,50 +487,63 @@ impl Choice {
         };
         let instances: u32 = owners
             .iter()
-            .map(|(_, (_, _, base, used))| base + used)
+            .map(|(_, _, (_, _, base, used))| base + used)
             .max()
             .unwrap_or(0);
         self.copies = owners
             .iter()
-            .map(|(buffer, (_, _, base, used))| {
-                (buffer.clone(), u64::from(*used) * INSTANCE, u64::from(*base) * INSTANCE)
+            .map(|(buffer, first, (_, _, base, used))| {
+                (
+                    buffer.clone(),
+                    u64::from(*first) * INSTANCE,
+                    u64::from(*used) * INSTANCE,
+                    u64::from(*base) * INSTANCE,
+                )
             })
             .collect();
-        // The templates: each blended state in the order drawn, its instances in theirs, for each
-        // a template at each level.
-        let mut states: Vec<State> = Vec::new();
-        for instance in blended {
-            for records in &tables.looks[instance.slot as usize].blended {
-                for record in records {
-                    if !states.contains(&record.state) {
-                        states.push(record.state);
-                    }
-                }
-            }
-        }
-        states.sort_by_key(rank);
-        let mut template_words: Vec<u32> = Vec::with_capacity(blended.len() * TEMPLATE);
+        // The templates: the instances beyond the water, then those on the eye's side; of each
+        // part each blended state in the order drawn, its instances in theirs, for each a template
+        // at each level.
+        let mut template_words: Vec<u32> = Vec::with_capacity((blended[0].len() + blended[1].len()) * TEMPLATE);
         let mut template_entries: Vec<[u32; 2]> = Vec::new();
-        let mut blended_regions = Vec::with_capacity(states.len());
-        for (region, state) in states.iter().enumerate() {
-            let start = template_entries.len() as u32;
-            for instance in blended {
-                for (level, records) in tables.looks[instance.slot as usize].blended.iter().enumerate() {
-                    for record in records.iter().filter(|record| record.state == *state) {
-                        template_words.extend([
-                            record.count,
-                            record.first_index,
-                            record.base_vertex as u32,
-                            template_entries.len() as u32,
-                            instance.index,
-                            level as u32 + 1,
-                            region as u32,
-                        ]);
-                        template_entries.push([instance.index, record.material]);
+        let mut blended_regions = Vec::new();
+        let mut beyond_regions = 0;
+        for (part, instances) in blended.iter().enumerate() {
+            let mut states: Vec<State> = Vec::new();
+            for instance in *instances {
+                for records in &tables.looks[instance.slot as usize].blended {
+                    for record in records {
+                        if !states.contains(&record.state) {
+                            states.push(record.state);
+                        }
                     }
                 }
             }
-            blended_regions.push((*state, start, template_entries.len() as u32 - start));
+            states.sort_by_key(rank);
+            for state in &states {
+                let region = blended_regions.len();
+                let start = template_entries.len() as u32;
+                for instance in *instances {
+                    for (level, records) in tables.looks[instance.slot as usize].blended.iter().enumerate() {
+                        for record in records.iter().filter(|record| record.state == *state) {
+                            template_words.extend([
+                                record.count,
+                                record.first_index,
+                                record.base_vertex as u32,
+                                template_entries.len() as u32,
+                                instance.index,
+                                level as u32 + 1,
+                                region as u32,
+                            ]);
+                            template_entries.push([instance.index, record.material]);
+                        }
+                    }
+                }
+                blended_regions.push((*state, start, template_entries.len() as u32 - start));
+            }
+            if part == 0 {
+                beyond_regions = blended_regions.len();
+            }
         }
         let templates = template_entries.len() as u32;
         let records = tables.records;
@@ -639,7 +656,7 @@ impl Choice {
             });
             made = true;
         }
-        let sections: Vec<Section> = owners.iter().map(|(_, section)| *section).collect();
+        let sections: Vec<Section> = owners.iter().map(|(_, _, section)| *section).collect();
         self.moved = None;
         if (grown || sections != self.sections)
             && let Some(before) = before
@@ -680,6 +697,7 @@ impl Choice {
         self.blocks_count = blocks;
         self.work_offsets = work_offsets;
         self.blended_regions = blended_regions;
+        self.beyond_regions = beyond_regions;
         read
     }
 
@@ -751,9 +769,9 @@ impl Choice {
         ) else {
             return;
         };
-        for (buffer, bytes, at) in &self.copies {
+        for (buffer, from, bytes, at) in &self.copies {
             if *bytes > 0 {
-                encoder.copy_buffer_to_buffer(buffer, 0, &instances, *at, *bytes);
+                encoder.copy_buffer_to_buffer(buffer, *from, &instances, *at, *bytes);
             }
         }
         if let Some(table) = &self.bone_table {
@@ -819,12 +837,12 @@ impl Choice {
         }
     }
 
-    /// The opaque draws, then the blended ones when `blended`, each state by `pipeline`: one command
-    /// a state, counted by the GPU when packed; how many.
+    /// The draws of `phase`: opaque, blended beyond the water or on the eye's side, each state by
+    /// `pipeline`: one command a state, counted by the GPU when packed; how many.
     pub fn draw(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
-        blended: bool,
+        phase: Phase,
         pipeline: &dyn Fn(State) -> Arc<wgpu::RenderPipeline>,
     ) -> u32 {
         let (Some(tables), Some(args), Some(work)) = (&self.tables, &self.args, &self.work) else {
@@ -834,14 +852,18 @@ impl Choice {
         if self.groups == 0 && self.templates == 0 {
             return 0;
         }
-        let (regions, first, counts): (&[(State, u32, u32)], u32, u32) = if blended {
-            (
-                &self.blended_regions,
+        let blended_counts = self.work_offsets[3] + tables.regions.len() as u32;
+        let beyond = self.beyond_regions.min(self.blended_regions.len());
+        // The regions of the phase, the first of them by its place among those counted.
+        let (regions, first, counts): (&[(State, u32, u32)], u32, u32) = match phase {
+            Phase::Opaque => (&tables.regions, 0, self.work_offsets[3]),
+            Phase::Beyond => (&self.blended_regions[..beyond], tables.records, blended_counts),
+            Phase::Near => (
+                &self.blended_regions[beyond..],
                 tables.records,
-                self.work_offsets[3] + tables.regions.len() as u32,
-            )
-        } else {
-            (&tables.regions, 0, self.work_offsets[3])
+                blended_counts + beyond as u32,
+            ),
+            Phase::Water => return 0,
         };
         for (region, (state, start, count)) in regions.iter().enumerate() {
             pass.set_pipeline(&pipeline(*state));

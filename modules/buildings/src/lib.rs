@@ -24,7 +24,9 @@ use std::time::{Duration, Instant};
 use uniwow_api::formats::{self, Building, DoodadSet, FileRef, TileId, Wdt, WmoDoodad};
 use uniwow_api::serde_json::json;
 use uniwow_api::viewport::Demand;
-use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, PropertyValue, Registrar, egui, log, models, viewport};
+use uniwow_api::{
+    Context, DockArea, JobId, JobOutcome, Module, PropertyValue, Registrar, egui, liquids, log, models, viewport,
+};
 
 use doodads::Owners;
 use gpu::{Shared, WmoGpu};
@@ -273,7 +275,11 @@ impl BuildingsModule {
     fn steer(&mut self, ctx: &mut Context) {
         let start = Instant::now();
         self.steer_tiles(ctx);
-        lock(&self.scene).steering = start.elapsed();
+        let mut scene = lock(&self.scene);
+        if scene.liquids.is_none() {
+            scene.liquids = ctx.service(liquids::SERVICE);
+        }
+        scene.steering = start.elapsed();
     }
 
     fn steer_tiles(&mut self, ctx: &mut Context) {

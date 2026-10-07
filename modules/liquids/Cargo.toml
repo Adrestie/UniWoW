@@ -1,6 +1,6 @@
 [package]
-name = "uniwow-module-buildings"
-description = "The buildings (WMO) of the tiles around the camera, on the map the terrain shows, drawn in a layer of the 3D view, their doodads through the service models"
+name = "uniwow-module-liquids"
+description = "The water, magma and slime of the tiles around the camera, on the map the terrain shows, drawn in a layer of the 3D view, and the surfaces of the water given through the service liquids"
 version.workspace = true
 edition.workspace = true
 
@@ -14,9 +14,9 @@ crate-type = ["cdylib"]
 uniwow-api.workspace = true
 
 [package.metadata.uniwow]
-id = "buildings"
-name = "Buildings"
+id = "liquids"
+name = "Liquids"
 category = "World"
 # Services the module cannot work without, and services it uses when present.
 requires = []
-uses = ["viewport", "models", "formats", "liquids"]
+uses = ["viewport", "formats"]

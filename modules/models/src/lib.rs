@@ -44,8 +44,8 @@ use uniwow_api::glam::{Mat4, Quat, Vec3};
 use uniwow_api::models::{self, Geosets, Instance, Look, LookId, LookState, Models, Motion};
 use uniwow_api::viewport::Demand;
 use uniwow_api::{
-    Context, DockArea, Event, JobId, JobOutcome, MODULE_FAILED_TOPIC, Module, PropertyValue, Registrar, egui, log,
-    serde_json, viewport,
+    Context, DockArea, Event, JobId, JobOutcome, MODULE_FAILED_TOPIC, Module, PropertyValue, Registrar, egui, liquids,
+    log, serde_json, viewport,
 };
 
 use choice::Tables;
@@ -438,7 +438,7 @@ impl ModelsModule {
     /// At each frame, while the view is drawn: the nearest group of each look placed, walked again
     /// only once the camera moved by `WALK` or something was published; the loads it wants
     /// started the nearest first, those beyond what the budget keeps released, and the models'
-    /// demand told to the budget.
+    /// demand made again and told to the budget when the distances were walked whole.
     fn steer(&mut self, ctx: &mut Context) {
         let start = Instant::now();
         if lock(&self.service.formats).is_none()
@@ -463,7 +463,7 @@ impl ModelsModule {
             .iter()
             .map(|slot| (slot.number, slot.published()))
             .collect();
-        let (walked, _) = Walked::update(self.walked.take(), &owners, self.generation, eye, |look| {
+        let (walked, whole) = Walked::update(self.walked.take(), &owners, self.generation, eye, |look| {
             self.held.get(&look).map_or(0.0, |look| look.radius())
         });
         let nearest = &walked.nearest;
@@ -536,8 +536,13 @@ impl ModelsModule {
                 self.service.set_state(id, LookState::Loading);
             }
         }
-        self.tell_budget(&view, nearest);
+        if whole {
+            self.tell_budget(&view, nearest);
+        }
         let mut scene = lock(&self.scene);
+        if scene.liquids.is_none() {
+            scene.liquids = ctx.service(liquids::SERVICE);
+        }
         let (models, textures) = (self.caches.models.counts(), self.caches.textures.counts());
         let own = self
             .held

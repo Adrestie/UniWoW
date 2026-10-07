@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use uniwow_api::glam::{Mat4, Vec3, Vec4};
+use uniwow_api::liquids;
 use uniwow_api::models::LookId;
 use uniwow_api::viewport::{Drawing, Layer, LayerStats, Phase, Target, View};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
@@ -62,6 +63,9 @@ pub struct Scene {
     pub animation: AnimationStats,
     /// The camera of the last frame prepared: its view and projection, its view alone, its eye.
     pub camera: Option<(Mat4, Mat4, Vec3)>,
+    /// The liquids, by which a blended instance is told beyond the surface of the water or on the
+    /// eye's side.
+    pub liquids: Option<liquids::Handle>,
 }
 
 /// A group, by its owner's number, its look and its tile.
@@ -132,13 +136,24 @@ pub fn still_ordered(distances: &[f32]) -> bool {
 struct Drawn {
     key: GroupKey,
     look: Arc<Ready>,
+    /// The arena of the instances, where its owner's begin, and its instances in its owner's.
     buffer: Arc<wgpu::Buffer>,
+    first: u32,
     instances: std::ops::Range<u32>,
     /// Where its owner's instances begin in the buffer of the frame.
     base: u32,
     level: usize,
     distance: f32,
     blended: bool,
+    /// Beyond the surface of the water from the eye, by the middle of its group.
+    beyond: bool,
+}
+
+impl Drawn {
+    /// Its instances in the arena.
+    fn in_arena(&self) -> std::ops::Range<u32> {
+        self.first + self.instances.start..self.first + self.instances.end
+    }
 }
 
 /// The order the blended states are drawn in: alpha and blend add, sorted the farthest first, then
@@ -164,6 +179,11 @@ pub fn rank(state: &State) -> (usize, u16, bool, bool, bool) {
 /// by which its order is kept from a frame to the next.
 type BlendedKey = (u32, u64, u32);
 
+/// What the bundle was recorded with: the generations of the looks and of the arena of the
+/// instances, each group with its layout and level, the blended groups in their order, and those
+/// beyond the water from the eye.
+type Recorded = ([u64; 2], Vec<(GroupKey, u64, usize)>, Vec<GroupKey>, Vec<GroupKey>);
+
 pub struct ModelsLayer {
     service: Arc<Service>,
     scene: Arc<Mutex<Scene>>,
@@ -175,8 +195,7 @@ pub struct ModelsLayer {
     /// The blended groups, the farthest first, as last drawn.
     order: Vec<GroupKey>,
     levels: HashMap<GroupKey, usize>,
-    /// What the bundle was recorded with: the looks, and each group with its layout and level.
-    recorded: (u64, Vec<(GroupKey, u64, usize)>, Vec<GroupKey>),
+    recorded: Recorded,
     version: u64,
     /// When the bundle was recorded, in the last second.
     recordings: VecDeque<Instant>,
@@ -205,7 +224,7 @@ impl ModelsLayer {
             drawn: Vec::new(),
             order: Vec::new(),
             levels: HashMap::new(),
-            recorded: (u64::MAX, Vec::new(), Vec::new()),
+            recorded: ([u64::MAX; 2], Vec::new(), Vec::new(), Vec::new()),
             version: 0,
             recordings: VecDeque::new(),
             choice: None,
@@ -229,17 +248,22 @@ impl ModelsLayer {
 
     /// The batches of the looks with buffers and textures of their own, `pass` saying which: the
     /// blended ones of the blended groups, the farthest first, or the others.
-    fn own(&self, blended: bool) -> Vec<(&Drawn, &LookGpu)> {
+    fn own(&self, phase: Phase) -> Vec<(&Drawn, &LookGpu)> {
         let at: HashMap<GroupKey, usize> = self
             .drawn
             .iter()
             .enumerate()
             .map(|(index, group)| (group.key, index))
             .collect();
-        let groups: Vec<&Drawn> = if blended {
-            self.order.iter().map(|key| &self.drawn[at[key]]).collect()
-        } else {
-            self.drawn.iter().collect()
+        let groups: Vec<&Drawn> = match phase {
+            Phase::Opaque => self.drawn.iter().collect(),
+            Phase::Water => Vec::new(),
+            Phase::Beyond | Phase::Near => self
+                .order
+                .iter()
+                .map(|key| &self.drawn[at[key]])
+                .filter(|group| group.beyond == (phase == Phase::Beyond))
+                .collect(),
         };
         groups
             .into_iter()
@@ -259,7 +283,7 @@ impl Layer for ModelsLayer {
         let Some(shared) = self.shared.clone() else {
             return;
         };
-        let (looks, generation, tables, reach, summary, bytes, steering, animated, animation) = {
+        let (looks, generation, tables, reach, summary, bytes, steering, animated, animation, liquids) = {
             let mut scene = lock(&self.scene);
             scene.camera = Some((view.view_proj, view.view, view.eye));
             (
@@ -272,7 +296,14 @@ impl Layer for ModelsLayer {
                 scene.steering,
                 scene.animated.clone(),
                 scene.animation.clone(),
+                scene.liquids.clone(),
             )
+        };
+        let surfaces = liquids.map(|liquids| liquids.surfaces());
+        let beyond = |point: Vec3| {
+            surfaces
+                .as_ref()
+                .is_some_and(|surfaces| surfaces.phase(view.eye, point) == Phase::Beyond)
         };
         let (camera, _) = self.camera.get_or_insert_with(|| {
             let buffer = shared.device.create_buffer(&wgpu::BufferDescriptor {
@@ -308,10 +339,10 @@ impl Layer for ModelsLayer {
         let levels = std::mem::take(&mut self.levels);
         let mut drawn = Vec::new();
         let mut layouts = Vec::new();
-        let mut owners: Vec<(Arc<wgpu::Buffer>, Section)> = Vec::new();
+        let mut owners: Vec<(Arc<wgpu::Buffer>, u32, Section)> = Vec::new();
         let mut bone_moves: Vec<Move> = Vec::new();
         let mut chosen = Vec::new();
-        let mut candidates: Vec<(f32, BlendedKey, Blended)> = Vec::new();
+        let mut candidates: Vec<(f32, BlendedKey, Blended, bool)> = Vec::new();
         let (mut instances, mut groups, mut seen) = (0u64, 0usize, 0usize);
         let mut base = 0u32;
         // The owners animated as the thread saw them, with where the table of their bones begins.
@@ -321,14 +352,26 @@ impl Layer for ModelsLayer {
             .map(|(number, published, at, count)| (*number, (published, *at, *count)))
             .collect();
         let mut present = HashSet::new();
-        for slot in self.service.owners() {
-            let (published, table) = match snapshots.get(&slot.number) {
-                Some((published, at, count)) => ((*published).clone(), Some((*at, *count))),
-                None => (slot.published(), None),
-            };
-            let Some(buffer) = published.buffer.clone() else {
+        // The arena read after what the owners published: it holds every range they name.
+        let published: Vec<_> = self
+            .service
+            .owners()
+            .into_iter()
+            .map(|slot| match snapshots.get(&slot.number) {
+                Some((published, at, count)) => (slot, (*published).clone(), Some((*at, *count))),
+                None => {
+                    let published = slot.published();
+                    (slot, published, None)
+                }
+            })
+            .collect();
+        let arena = self.service.instances().and_then(|arena| arena.buffer());
+        let arena_generation = arena.as_ref().map_or(0, |(_, generation)| *generation);
+        for (slot, published, table) in published {
+            let (Some(written), Some((buffer, _))) = (&published.written, &arena) else {
                 continue;
             };
+            let first = written.first();
             groups += published.groups.len();
             // An owner hidden, then one out of reach or out of sight by its bounds, is not given to
             // the frame, its instances nor its bones copied.
@@ -360,7 +403,7 @@ impl Layer for ModelsLayer {
                 .map(|group| group.first + group.count)
                 .max()
                 .unwrap_or(0);
-            owners.push((buffer.clone(), (slot.number, published.layout, base, used)));
+            owners.push((buffer.clone(), first, (slot.number, published.layout, base, used)));
             if let Some((at, count)) = table
                 && count.min(used) > 0
             {
@@ -405,6 +448,7 @@ impl Layer for ModelsLayer {
                                     index: base + at,
                                     slot: *look_slot,
                                 },
+                                beyond(origin),
                             ));
                         }
                     }
@@ -419,10 +463,12 @@ impl Layer for ModelsLayer {
                     blended: look.batches(level).iter().any(|(state, _)| state.blended()),
                     look: look.clone(),
                     buffer: buffer.clone(),
+                    first,
                     instances: group.first..group.first + group.count,
                     base,
                     level,
                     distance,
+                    beyond: beyond((group.low + group.high) * 0.5),
                 });
             }
             base += used;
@@ -447,17 +493,32 @@ impl Layer for ModelsLayer {
         let at: HashMap<BlendedKey, usize> = candidates
             .iter()
             .enumerate()
-            .map(|(index, (_, key, _))| (*key, index))
+            .map(|(index, (_, key, _, _))| (*key, index))
             .collect();
         let same_set = self.blended.len() == at.len() && self.blended.iter().all(|key| at.contains_key(key));
         let kept = same_set && still_ordered(&self.blended.iter().map(|key| candidates[at[key]].0).collect::<Vec<_>>());
-        let blended: Vec<Blended> = if kept {
-            self.blended.iter().map(|key| candidates[at[key]].2).collect()
+        let blended: Vec<(Blended, bool)> = if kept {
+            self.blended
+                .iter()
+                .map(|key| (candidates[at[key]].2, candidates[at[key]].3))
+                .collect()
         } else {
             candidates.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-            self.blended = candidates.iter().map(|(_, key, _)| *key).collect();
-            candidates.iter().map(|(_, _, instance)| *instance).collect()
+            self.blended = candidates.iter().map(|(_, key, _, _)| *key).collect();
+            candidates
+                .iter()
+                .map(|(_, _, instance, beyond)| (*instance, *beyond))
+                .collect()
         };
+        // Those beyond the surface of the water from the eye, then those on its side, each in order.
+        let (mut beyond_water, mut near_water) = (Vec::new(), Vec::new());
+        for (instance, beyond) in blended {
+            if beyond {
+                beyond_water.push(instance);
+            } else {
+                near_water.push(instance);
+            }
+        }
 
         // The groups of looks of their own, as in step 9.4c.
         let mut draws = 0;
@@ -478,7 +539,7 @@ impl Layer for ModelsLayer {
                     &owners,
                     bones,
                     &chosen,
-                    &blended,
+                    [&beyond_water, &near_water],
                     view.view_proj,
                     view.eye,
                     reach,
@@ -515,7 +576,13 @@ impl Layer for ModelsLayer {
                 )
             }
             _ => {
-                let recorded = (generation, layouts, self.order.clone());
+                let beyond: Vec<GroupKey> = self
+                    .drawn
+                    .iter()
+                    .filter(|group| group.beyond)
+                    .map(|group| group.key)
+                    .collect();
+                let recorded = ([generation, arena_generation], layouts, self.order.clone(), beyond);
                 if recorded != self.recorded {
                     self.recorded = recorded;
                     self.version += 1;
@@ -588,22 +655,8 @@ impl Layer for ModelsLayer {
             return;
         };
         bundle.set_bind_group(0, camera, &[]);
-        let at: HashMap<GroupKey, usize> = self
-            .drawn
-            .iter()
-            .enumerate()
-            .map(|(index, group)| (group.key, index))
-            .collect();
-        let pass = phase == Phase::Blended;
-        let groups: Vec<&Drawn> = if pass {
-            self.order.iter().map(|key| &self.drawn[at[key]]).collect()
-        } else {
-            self.drawn.iter().collect()
-        };
-        for group in groups {
-            let Ready::Own(look) = &*group.look else {
-                continue;
-            };
+        let pass = phase.blended();
+        for (group, look) in self.own(phase) {
             let model = &look.model;
             let skin = &model.skins[group.level];
             let mut bound = false;
@@ -619,7 +672,7 @@ impl Layer for ModelsLayer {
                 }
                 bundle.set_pipeline(&batch.pipeline);
                 bundle.set_bind_group(1, &batch.group, &[]);
-                bundle.draw_indexed(batch.indices.clone(), 0, group.instances.clone());
+                bundle.draw_indexed(batch.indices.clone(), 0, group.in_arena());
             }
         }
     }
@@ -655,7 +708,7 @@ impl Layer for ModelsLayer {
             }
             _ => None,
         };
-        let blended = phase == Phase::Blended;
+        let blended = phase.blended();
         {
             if let Some((choice, group, skin, vertices, indices)) = &pooled {
                 pass.set_bind_group(0, camera, &[]);
@@ -663,10 +716,10 @@ impl Layer for ModelsLayer {
                 pass.set_bind_group(2, *skin, &[]);
                 pass.set_vertex_buffer(0, vertices.slice(..));
                 pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-                choice.draw(pass, blended, &|state| pool.pipeline(state));
+                choice.draw(pass, phase, &|state| pool.pipeline(state));
             }
             // The looks the pool had no room for, as in step 9.4c.
-            for (group, look) in self.own(blended) {
+            for (group, look) in self.own(phase) {
                 let model = &look.model;
                 let skin = &model.skins[group.level];
                 let mut bound = false;
@@ -692,7 +745,7 @@ impl Layer for ModelsLayer {
                     }
                     let instances = match frame {
                         Some(_) => group.base + group.instances.start..group.base + group.instances.end,
-                        None => group.instances.clone(),
+                        None => group.in_arena(),
                     };
                     pass.set_pipeline(&batch.pipeline);
                     pass.set_bind_group(1, &batch.group, &[]);

@@ -1242,6 +1242,17 @@ fn a_tile_is_one_draw_its_chunks_textured_from_two_arrays_and_the_horizon_beyond
     );
     let [_, _, blue, _, black] = counts(&opaque);
     assert!(blue == 0 && black > 500, "sky {blue}, black {black}");
+    // Nor ground nor sky in the blended phases after the first.
+    let later = render_in(
+        &gpu,
+        &mut layer,
+        &target,
+        Vec3::new(x, y, 50.0),
+        Vec3::new(x + 100.0, y, 60.0),
+        &[Phase::Water, Phase::Near],
+    );
+    let [_, _, _, _, black] = counts(&later);
+    assert!(black == later.len() / 4, "black {black}");
     assert_eq!(layer.stats().draws, 3, "and the sky");
     assert_eq!(layer.stage(), Stage::Ground, "drawn with its sky before the scene");
 }
