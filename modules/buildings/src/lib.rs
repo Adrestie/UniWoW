@@ -6,6 +6,9 @@
 //! undo entry, no file written.
 
 mod budget;
+mod cells;
+#[cfg(test)]
+mod cells_tests;
 mod colours;
 mod doodads;
 mod gpu;
@@ -44,10 +47,13 @@ pub struct WmoFile {
     pub gpu: Arc<WmoGpu>,
     pub sets: Vec<DoodadSet>,
     pub doodads: Vec<WmoDoodad>,
+    /// The groups holding each doodad.
+    pub holders: Vec<Vec<u16>>,
 }
 
 impl WmoFile {
-    /// What it keeps on the CPU: its groups, its sets and its doodads with their names.
+    /// What it keeps on the CPU: its groups, its sets and its doodads with their names and the
+    /// groups holding them.
     fn cpu(&self) -> u64 {
         let named = |file: &FileRef| match file {
             FileRef::Path(path) => path.len(),
@@ -59,6 +65,11 @@ impl WmoFile {
                     .doodads
                     .iter()
                     .map(|doodad| size_of::<WmoDoodad>() + named(&doodad.file))
+                    .sum::<usize>()
+                + self
+                    .holders
+                    .iter()
+                    .map(|held| size_of::<Vec<u16>>() + held.len() * 2)
                     .sum::<usize>()) as u64
     }
 }
@@ -107,9 +118,11 @@ struct BuildingsModule {
     building_files: HashMap<u32, FileRef>,
     grounds: HashMap<u32, [[f32; 2]; 2]>,
     file_jobs: HashMap<JobId, FileRef>,
-    /// The buildings whose doodads were told wanted, and the jobs placing or taking them away.
+    /// The buildings whose doodads were told wanted, the jobs placing or taking them away, and the
+    /// flags of the doodads placed, by building.
     told: HashSet<u32>,
     doodad_jobs: HashSet<JobId>,
+    parts: HashMap<u32, Arc<[doodads::Part]>>,
     refusals: VecDeque<String>,
     /// Whether the buildings drawn changed since the scene was last given them.
     changed: bool,
@@ -147,6 +160,7 @@ impl BuildingsModule {
         self.refused.clear();
         self.refusals.clear();
         self.told.clear();
+        self.parts.clear();
         self.wdt = None;
         self.reading_wdt = None;
         self.took = None;
@@ -184,6 +198,7 @@ impl BuildingsModule {
             let shared = shared.ok_or("no device to draw on")?;
             let wmo = formats.wmo(&read)?;
             let (sets, doodads) = (wmo.doodad_sets.clone(), wmo.doodads.clone());
+            let holders = doodads::holders(&wmo.groups, doodads.len());
             if !wmo.faults.is_empty() {
                 log::warn!("{read:?}: {} faults, the first {}", wmo.faults.len(), wmo.faults[0]);
             }
@@ -192,6 +207,7 @@ impl BuildingsModule {
                 gpu: Arc::new(gpu),
                 sets,
                 doodads,
+                holders,
             })
         });
         self.file_jobs.insert(job, file.clone());
@@ -369,12 +385,17 @@ impl BuildingsModule {
         // The buildings drawn, given to the layer when they change.
         if self.changed {
             self.changed = false;
+            // The flags of the doodads placed, as the jobs placing them left them.
+            if let Ok(owners) = self.owners.try_lock() {
+                self.parts = owners.parts();
+            }
             let placed: Vec<Placed> = self
                 .ready()
                 .into_iter()
-                .map(|(_, building, file)| Placed {
+                .map(|(id, building, file)| Placed {
                     transform: formats::placement(building.position, building.rotation, building.scale),
                     wmo: file.gpu.clone(),
+                    parts: self.parts.get(&id).cloned(),
                 })
                 .collect();
             let cpu = self
@@ -447,8 +468,8 @@ impl BuildingsModule {
             let transform = formats::placement(building.position, building.rotation, building.scale);
             let named = building.doodad_set;
             let job = ctx.spawn(&format!("Place the doodads of the building {id}"), move |_| {
-                let instances = doodads::instances(&*models, &transform, &file.sets, &file.doodads, named);
-                lock(&owners).place(&*models, &map, id, &instances);
+                let parts = doodads::instances(&*models, &transform, &file.sets, &file.doodads, &file.holders, named);
+                lock(&owners).place(&*models, &map, id, &parts);
             });
             self.doodad_jobs.insert(job);
         }
@@ -556,6 +577,8 @@ impl Module for BuildingsModule {
             if let JobOutcome::Panicked(message) = outcome {
                 log::error!("the doodads of a building could not be placed: {message}");
             }
+            // The flags of the doodads placed or taken away, for the layer.
+            self.changed = true;
             return;
         }
         if self.reading_wdt == Some(job) {

@@ -8,8 +8,8 @@
 use std::sync::Mutex;
 
 use uniwow_api::formats::{
-    DoodadSet, FileRef, FogBand, Portal, PortalRef, Wmo, WmoBatch, WmoDoodad, WmoFace, WmoFog, WmoGroup, WmoLight,
-    WmoLiquid, WmoMaterial,
+    BspNode, DoodadSet, FileRef, FogBand, Portal, PortalRef, Wmo, WmoBatch, WmoDoodad, WmoFace, WmoFog, WmoGroup,
+    WmoLight, WmoLiquid, WmoMaterial,
 };
 use uniwow_api::parallel::parallel_for;
 
@@ -22,6 +22,8 @@ const LARGE_MATERIAL: u8 = 0x2;
 const LAST_SHADER_OF_3_3_5A: u32 = 6;
 /// The size of the header of a group.
 const GROUP_HEADER: usize = 68;
+/// The flag of a leaf of a BSP tree.
+const BSP_LEAF: u16 = 0x4;
 
 /// Where a group of a building is: its FileDataID when the root names one, and its path beside
 /// the root, its name followed by its index.
@@ -388,6 +390,18 @@ fn read_group(bytes: &[u8]) -> Result<WmoGroup, String> {
                 })?
             }
             b"MODR" => group.doodad_refs = records(data, 2, |index| u16_at(index, 0))?,
+            b"MOBN" => {
+                group.bsp = records(data, 16, |node| {
+                    Ok(BspNode {
+                        flags: u16_at(node, 0)?,
+                        children: [u16_at(node, 2)? as i16, u16_at(node, 4)? as i16],
+                        count: u16_at(node, 6)?,
+                        first: u32_at(node, 8)?,
+                        distance: f32_at(node, 12)?,
+                    })
+                })?
+            }
+            b"MOBR" => group.bsp_faces = records(data, 2, |index| u16_at(index, 0))?,
             b"MLIQ" => group.liquid = Some(liquid(data).map_err(|reason| format!("its liquid: {reason}"))?),
             _ => {}
         }
@@ -498,4 +512,39 @@ fn check_group(
             first + count
         ));
     }
+    if let Some(reason) = bsp_fault(group) {
+        fault(format!("its BSP tree left out: {reason}"));
+        group.bsp.clear();
+        group.bsp_faces.clear();
+    }
+}
+
+/// Why the BSP tree of `group` does not hold together, if it does not: a child before its parent
+/// or past the nodes, a leaf past the triangles of the leaves, a triangle past those of the group.
+pub(crate) fn bsp_fault(group: &WmoGroup) -> Option<String> {
+    let nodes = group.bsp.len();
+    for (index, node) in group.bsp.iter().enumerate() {
+        if node.flags & BSP_LEAF != 0 {
+            let end = node.first as usize + usize::from(node.count);
+            if end > group.bsp_faces.len() {
+                return Some(format!(
+                    "its leaf {index} holds the triangles {} to {end} of {}",
+                    node.first,
+                    group.bsp_faces.len()
+                ));
+            }
+        } else if let Some(child) = node
+            .children
+            .iter()
+            .find(|child| **child >= 0 && (**child as usize <= index || **child as usize >= nodes))
+        {
+            return Some(format!("its node {index} of {nodes} has the child {child}"));
+        }
+    }
+    let triangles = group.triangles.len() / 3;
+    group
+        .bsp_faces
+        .iter()
+        .find(|face| usize::from(**face) >= triangles)
+        .map(|face| format!("its leaves hold the triangle {face} of {triangles}"))
 }

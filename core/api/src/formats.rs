@@ -395,6 +395,23 @@ pub struct WmoGroup {
     /// The doodads it holds, of `Wmo::doodads`.
     pub doodad_refs: Vec<u16>,
     pub liquid: Option<WmoLiquid>,
+    /// Its BSP tree, its root first; none where it has none, or one that does not hold together.
+    pub bsp: Vec<BspNode>,
+    /// The triangles the leaves of its tree hold, by their number among its triangles.
+    pub bsp_faces: Vec<u16>,
+}
+
+/// A node of the BSP tree of a group: its flags (its axis in the two low bits, X, Y or Z; 0x4 a
+/// leaf), its children on the negative and on the positive side of its plane (none where
+/// negative), the triangles of a leaf (`WmoGroup::bsp_faces` from the first, so many), and where
+/// its plane cuts its axis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BspNode {
+    pub flags: u16,
+    pub children: [i16; 2],
+    pub first: u32,
+    pub count: u16,
+    pub distance: f32,
 }
 
 /// A triangle of a group: its flags, and its material, of `Wmo::materials`; none for a triangle

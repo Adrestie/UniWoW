@@ -6,6 +6,7 @@
 //! over an old layout, nor an empty buffer.
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use uniwow_api::glam::Vec3;
@@ -144,6 +145,8 @@ struct Kept {
 pub struct Slot {
     /// Its number, by which the layer knows its groups.
     pub number: u32,
+    /// Whether its instances are drawn, as its owner sets it.
+    pub shown: Arc<AtomicBool>,
     kept: Mutex<Kept>,
     published: Mutex<Arc<Published>>,
 }
@@ -152,6 +155,7 @@ impl Slot {
     pub fn new(number: u32) -> Self {
         Self {
             number,
+            shown: Arc::new(AtomicBool::new(true)),
             kept: Mutex::default(),
             published: Mutex::default(),
         }

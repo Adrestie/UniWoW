@@ -2,7 +2,8 @@
 //! `models`.
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use uniwow_api::formats::{Doodad, FileRef, Placements, TileId, placement};
 use uniwow_api::glam::{Mat4, Vec3};
@@ -66,6 +67,10 @@ impl Models for Fake {
     }
     fn extent(&self, _look: LookId) -> Option<Extent> {
         None
+    }
+
+    fn shown(&self, _owner: &str) -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(true))
     }
 }
 

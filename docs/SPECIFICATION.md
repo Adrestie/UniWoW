@@ -5138,6 +5138,82 @@ the arrays of textures shared and 16-bit indices, the holes of the terrain under
      the map mixed in as later clients do it, or the lights of the building (`MOLT`, 10 in the inn);
      to decide with the lights of 9.7, the light of the view then that of the game's hour.
 
+#### Step 9.6d2, as built: the buildings seen from inside
+
+- **The BSP trees read** (`formats`): each group's tree (`MOBN`, `BspNode`: its axis and whether a
+  leaf, its two children, the triangles of a leaf, where its plane cuts its axis) and the triangles
+  its leaves hold (`MOBR`); a tree that does not hold together (a child before its parent or past
+  the nodes, a leaf past the triangles of the leaves, a triangle past those of the group) left out
+  and said. The 1,986 buildings of the client read with their trees whole.
+- **Checked over the client** before building on it, by probes not kept: the plane of a portal is
+  `n·p + d = 0` (over the 30,439 vertices of the portals, `|n·p + d|` is 0.0000 on average; one
+  portal has a plane that is not finite, never passed); the side of a portal reference is that of
+  the group listing it; every group is outside (0x8) or inside (0x2000), never both nor neither;
+  62 buildings have groups no portal joins to a group outside (909 groups, 12 of Stormwind), 32 have
+  no group outside, most of them dungeons. Seen from outside, the groups of a building are tested
+  by their bounds, as in 9.6d1, so that a dungeon looked at from outside shows.
+- **The group the camera is in** (`buildings/src/cells.rs`): among the groups inside whose bounds
+  hold it, those with a triangle of their tree under it facing up (by the normals of its vertices),
+  the one whose floor is the nearest under it; the tree walked along the line down from the camera:
+  on the side of the camera of a plane across X or Y, both sides where it lies on it, under a plane
+  across Z, and over it too where the camera is. As the public implementation WebWowViewerCpp,
+  read for its facts, finds it, but without its test of the side of each of the group's portals:
+  the streets of Stormwind are groups inside, open to the sky and concave, which the planes of four
+  of their portals cross where the camera stands.
+- **The portals**: from that group, each portal it lists passed when the camera is on the side of
+  the group (within 0.5 yards of its plane, passed unclipped), its polygon clipped by what the
+  camera sees through the portals before it; past it, the camera sees between the planes through
+  itself and the sides of the polygon, and past the portal's own plane. Eight portals at most one
+  after the other, never back through one already passed. A group outside reached: every group
+  outside is seen, and the groups inside their portals as the camera sees them. In the layer, the
+  groups of a placement whose bounds hold the camera are first tested this way, in the axes of the
+  building: the eye moved by the inverse of its transform, the planes of the view by its transpose.
+- **The doodads of the groups seen**: an owner of `models` for the doodads the same groups hold
+  (`buildings/<map>/<unique id>/<groups>`, `-` for those no group holds), placed again in other
+  owners taking those before away. The service gives each owner a flag
+  (`Models::shown(owner)`, true until set), which the layer of `models` reads before giving the
+  frame an owner; the layer of the buildings sets it at each frame: shown where a group holding
+  the doodads is seen, and every doodad of a building not seen from inside. The layer of `models`
+  is prepared before that of the buildings: the flags it reads are those of the frame before.
+- **Compared with the game** (the client of the user, its character put back where it stood after):
+  in the trade district of Stormwind, a spire of the cathedral that the editor drew over the
+  rampart without the portals is not drawn with them, and the game does not show it either.
+  Seen in the editor with and without the portals, the same picture but for that spire and the
+  creatures walking: the inn of Goldshire (its hall; its door from inside, the street through it),
+  the trade district of Stormwind, Ironforge, a hall of Dalaran.
+- **Measured** on the user's machine, each place held still, the same build with the portals and
+  without (the camera never taken as inside), the game of the user running:
+
+  | Place | Groups seen through the portals | Buildings: groups, batches, triangles | `models`: instances, in groups | View, interface (ms) |
+  |---|---|---|---|---|
+  | Stormwind, trade district | 7 | 31 against 120, 307 against 1,204, 0.08 M against 0.34 M | 708 in 152 groups against 1,302 in 289 | 0.67 to 0.68 against 0.84 |
+  | Ironforge | 4 | 94 against 138, 808 against 1,369, 0.13 M against 0.28 M | 708 in 67 against 837 in 145 | 0.63 to 0.64 against 0.74 |
+  | Dalaran, a hall | 35 | 161 against 187, 2,000 against 2,403, 0.78 M against 0.89 M | 1,017 in 344 against 1,398 in 511 | 1.00 against 1.09 to 1.10 |
+
+  `models` on the interface thread 0.94 to 0.96 ms against 1.05 to 1.08 in Stormwind, 0.91 to
+  0.93 against 0.96 in Ironforge, 1.73 to 1.75 against 1.79 to 1.81 in Dalaran: its steering, which
+  walks every group to tell the budget, unchanged. The layer of the buildings 0.12 to 0.22 ms. The
+  cells kept on the CPU, the trees with the vertices, normals and triangles of the groups inside,
+  take 28 to 46 MB for the buildings held, against 1.8 MB before.
+- **Tested** by 36 changes made on purpose to the reading of the trees, the cells, the layer, the
+  doodads and `models`: 33 made a test fail, two of them once a test was added (a point beside a
+  triangle taken in it; the rooms past a door aside drawn); one changes the work only, not what is
+  seen (passing back through the portal come by, which the limit of eight bounds); two are the
+  lines of the module handing the flags to its layer, not tested apart, their working shown by the
+  measure (fewer instances drawn by `models` with the portals).
+- **Questions:**
+  1. The group of the camera without the test of the portals' sides: the open streets of Stormwind
+     pass it; to compare with the client in more places, or that test kept for the groups that
+     are not open to the sky.
+  2. The doodads of a group a frame late, the layer of `models` prepared before that of the
+     buildings (not seen at 60 frames a second): an order of the layers within the scene, or kept.
+  3. The memory of the cells (28 to 46 MB): the vertices and triangles only of the leaves' triangles,
+     or read again from the arenas; or kept.
+  4. Seen from outside, a building's groups are drawn by their bounds; the client draws its insides
+     through the portals of its groups outside. The same picture, the walls hiding them; the cost
+     only. Kept for the dungeons seen from outside.
+  5. The insides still dark (question 3 of the review points of 9.6d1).
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

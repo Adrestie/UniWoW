@@ -2,6 +2,7 @@
 //! markers kept for what is not seen as a model; against a fake service `models`.
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -74,6 +75,10 @@ impl Models for Fake {
     }
     fn extent(&self, look: LookId) -> Option<Extent> {
         self.extents.lock().unwrap().get(&look).copied()
+    }
+
+    fn shown(&self, _owner: &str) -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(true))
     }
 }
 

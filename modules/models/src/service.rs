@@ -2,7 +2,7 @@
 //! and what the module steering the loads and its layer read of them.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use uniwow_api::formats::Formats;
@@ -123,6 +123,10 @@ impl Models for Service {
 
     fn clear(&self, owner: &str) {
         lock(&self.owners).remove(owner);
+    }
+
+    fn shown(&self, owner: &str) -> Arc<AtomicBool> {
+        self.slot(owner).shown.clone()
     }
 
     fn state(&self, look: LookId) -> LookState {

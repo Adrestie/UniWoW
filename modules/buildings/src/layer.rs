@@ -1,8 +1,11 @@
 //! The layer of the buildings: at each frame, each placement tested by its bounds against the view,
-//! then each of its groups by its own; the batches of the groups seen listed as indirect draws,
-//! the opaque ones by state, the blended ones from the farthest group, and drawn in the pass, a
-//! `multi_draw_indexed_indirect` for each run of one state.
+//! then each of its groups by its own, those of a building the camera is inside of first by what
+//! its portals let it see; the batches of the groups seen listed as indirect draws, the opaque ones
+//! by state, the blended ones from the farthest group, and drawn in the pass, a
+//! `multi_draw_indexed_indirect` for each run of one state. The doodads of a group are shown while
+//! it is seen through the portals, read by `models` at the frame after.
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -10,17 +13,19 @@ use uniwow_api::glam::{Mat4, Vec3, Vec4};
 use uniwow_api::viewport::{Drawing, Layer, LayerStats, Phase, Target, View};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
+use crate::doodads::Part;
 use crate::gpu::{CAMERA, Shared, State, WmoGpu, camera_values};
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// A building drawn: its transform and its file on the GPU.
+/// A building drawn: its transform, its file on the GPU, and the flags of its doodads once placed.
 #[derive(Clone)]
 pub struct Placed {
     pub transform: Mat4,
     pub wmo: Arc<WmoGpu>,
+    pub parts: Option<Arc<[Part]>>,
 }
 
 /// What the module shares with its layer.
@@ -77,23 +82,77 @@ pub(crate) struct Listed {
     pub entry: [u32; 4],
 }
 
-/// The draws of the frame for the batches of the groups in sight: the opaque ones by state, the
-/// blended ones from the farthest; and how many placements and groups are in sight.
-pub(crate) fn list(placed: &[Placed], view: &View) -> (Vec<Listed>, Vec<Listed>, usize, usize) {
+/// The groups of `building`, its bounds in the world `bounds`, seen from `eye` through its portals
+/// within the sides of the view `planes`, when `eye` is in one of its groups inside.
+pub fn seen_inside(building: &Placed, eye: Vec3, planes: &[Vec4; 5], bounds: &[Vec3; 2]) -> Option<Vec<bool>> {
+    if eye.cmplt(bounds[0]).any() || eye.cmpgt(bounds[1]).any() {
+        return None;
+    }
+    let local = building.transform.inverse().transform_point3(eye);
+    let start = building.wmo.cells.holding(local)?;
+    // A plane of the world, in the axes of the building.
+    let turned = building.transform.transpose();
+    let local_planes: Vec<Vec4> = planes.iter().map(|plane| turned * *plane).collect();
+    Some(building.wmo.cells.seen(local, &local_planes, start))
+}
+
+/// Shows the doodads of `parts` held by a group `seen` says is seen, and those no group holds; all
+/// of them without `seen`.
+fn show(parts: Option<&Arc<[Part]>>, seen: Option<&[bool]>) {
+    for (groups, flag) in parts.iter().flat_map(|parts| parts.iter()) {
+        let shown = seen.is_none_or(|seen| {
+            groups.is_empty()
+                || groups
+                    .iter()
+                    .any(|group| seen.get(usize::from(*group)).copied().unwrap_or(false))
+        });
+        flag.store(shown, Ordering::Relaxed);
+    }
+}
+
+/// What the frame draws of the buildings: the draws of the batches of the groups in sight, the
+/// opaque ones by state, the blended ones from the farthest; how many placements and groups are in
+/// sight, how many placements hold the camera in a group inside, and how many groups those see
+/// through their portals.
+#[derive(Default)]
+pub(crate) struct Listing {
+    pub opaque: Vec<Listed>,
+    pub blended: Vec<Listed>,
+    pub buildings: usize,
+    pub groups: usize,
+    pub inside: usize,
+    pub through: usize,
+}
+
+/// What the frame draws of `placed` seen in `view`; the doodads of each shown or hidden.
+pub(crate) fn list(placed: &[Placed], view: &View) -> Listing {
     let planes = planes(&view.view_proj);
-    let (mut opaque, mut blended) = (Vec::new(), Vec::new());
-    let (mut buildings, mut groups) = (0, 0);
+    let mut listing = Listing::default();
     for (instance, building) in placed.iter().enumerate() {
-        if !in_sight(&planes, &world_bounds(&building.transform, &building.wmo.bounds)) {
+        let bounds = world_bounds(&building.transform, &building.wmo.bounds);
+        if !in_sight(&planes, &bounds) {
+            show(building.parts.as_ref(), None);
             continue;
         }
-        buildings += 1;
-        for group in &building.wmo.groups {
+        listing.buildings += 1;
+        let seen = seen_inside(building, view.eye, &planes, &bounds);
+        if let Some(seen) = &seen {
+            listing.inside += 1;
+            listing.through += seen.iter().filter(|seen| **seen).count();
+        }
+        show(building.parts.as_ref(), seen.as_deref());
+        for (index, group) in building.wmo.groups.iter().enumerate() {
+            if seen
+                .as_ref()
+                .is_some_and(|seen| !seen.get(index).copied().unwrap_or(false))
+            {
+                continue;
+            }
             let bounds = world_bounds(&building.transform, &group.bounds);
             if !in_sight(&planes, &bounds) {
                 continue;
             }
-            groups += 1;
+            listing.groups += 1;
             let distance = ((bounds[0] + bounds[1]) * 0.5).distance(view.eye);
             for batch in &group.batches {
                 let listed = Listed {
@@ -103,16 +162,16 @@ pub(crate) fn list(placed: &[Placed], view: &View) -> (Vec<Listed>, Vec<Listed>,
                     entry: [instance as u32, batch.material, group.flags | batch.kind << 8, 0],
                 };
                 if batch.state.blended() {
-                    blended.push(listed);
+                    listing.blended.push(listed);
                 } else {
-                    opaque.push(listed);
+                    listing.opaque.push(listed);
                 }
             }
         }
     }
-    opaque.sort_by_key(|listed| listed.state);
-    blended.sort_by(|a, b| b.distance.total_cmp(&a.distance));
-    (opaque, blended, buildings, groups)
+    listing.opaque.sort_by_key(|listed| listed.state);
+    listing.blended.sort_by(|a, b| b.distance.total_cmp(&a.distance));
+    listing
 }
 
 /// A run of draws of one state: its first command and how many.
@@ -236,7 +295,14 @@ impl Layer for BuildingsLayer {
         gpu.queue
             .write_buffer(camera, 0, bytemuck::cast_slice(&camera_values(view)));
 
-        let (opaque, blended, buildings, groups) = list(&placed, view);
+        let Listing {
+            opaque,
+            blended,
+            buildings,
+            groups,
+            inside,
+            through,
+        } = list(&placed, view);
         let instances: Vec<[f32; 16]> = placed
             .iter()
             .map(|building| {
@@ -286,7 +352,8 @@ impl Layer for BuildingsLayer {
             bytes: shared.bytes(),
             items: format!(
                 "{buildings} buildings in sight of {}, {groups} groups of {all_groups}, {} batches ({} blended)\n  \
-                 the arrays {} textures; on the CPU {:.1} MB",
+                 the camera inside {inside} of them, {through} groups seen through their portals; the arrays {} \
+                 textures; on the CPU {:.1} MB",
                 placed.len(),
                 listed.len(),
                 blended.len(),

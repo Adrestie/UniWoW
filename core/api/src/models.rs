@@ -3,6 +3,7 @@
 //! instances and batch of its model.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use crate::formats::FileRef;
 use crate::{ServiceKey, glam};
@@ -132,6 +133,11 @@ pub trait Models: Send + Sync {
     /// Removes every instance of `owner`. Done for a module that fails, for the owner its id names
     /// and those it names `<id>/…`.
     fn clear(&self, owner: &str);
+
+    /// Whether `owner`'s instances are drawn, true until set otherwise: a flag the owner sets at
+    /// each frame without a call, read by the next frame drawn. The same flag for an owner until it
+    /// is cleared.
+    fn shown(&self, owner: &str) -> Arc<AtomicBool>;
 
     fn state(&self, look: LookId) -> LookState;
 

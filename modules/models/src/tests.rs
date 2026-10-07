@@ -962,6 +962,12 @@ fn a_model_is_drawn_where_its_instance_stands_lit_and_one_sided() {
     assert!(red(seen), "{seen:?}");
     assert!(seen[0] < 255, "lit by the sun and the ambient: {seen:?}");
     assert_eq!(middle(&render(&mut bench, BEHIND, AIM)), BLACK, "its back culled");
+    // Hidden by its owner, then shown again.
+    let shown = bench.service.shown("test");
+    shown.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(middle(&render(&mut bench, FRONT, AIM)), BLACK, "hidden");
+    shown.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(red(middle(&render(&mut bench, FRONT, AIM))), "shown again");
     // Moved out of sight: nothing drawn, nor counted.
     bench
         .service

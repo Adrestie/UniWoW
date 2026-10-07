@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::pin::pin;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
@@ -241,11 +242,12 @@ fn a_box_is_in_sight_when_it_reaches_inside_every_side_of_the_view() {
     assert!(bounds[1].abs_diff_eq(Vec3::new(1.0, 2.0, 1.0), 1e-5), "{bounds:?}");
 }
 
-/// The sets of instances of each owner, as the service keeps them.
+/// The sets of instances of each owner, and their flags, as the service keeps them.
 #[derive(Default)]
 struct FakeModels {
     looks: Mutex<Vec<Look>>,
     owners: Mutex<BTreeMap<String, Vec<Instance>>>,
+    shown: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
 }
 
 impl Models for FakeModels {
@@ -269,6 +271,15 @@ impl Models for FakeModels {
     fn change(&self, _owner: &str, _changed: &[Instance], _removed: &[u64]) {}
     fn clear(&self, owner: &str) {
         self.owners.lock().unwrap().remove(owner);
+        self.shown.lock().unwrap().remove(owner);
+    }
+    fn shown(&self, owner: &str) -> Arc<AtomicBool> {
+        self.shown
+            .lock()
+            .unwrap()
+            .entry(owner.to_owned())
+            .or_insert_with(|| Arc::new(AtomicBool::new(true)))
+            .clone()
     }
     fn state(&self, _look: LookId) -> LookState {
         LookState::Waiting
@@ -314,19 +325,23 @@ fn the_doodads_of_a_building_are_those_of_its_set_0_and_of_the_set_it_names() {
         doodad("c.mdx", [0.0, 0.0, 0.0]),
     ];
     let transform = Mat4::from_translation(Vec3::new(100.0, 0.0, 0.0));
-    let only_first = doodads::instances(&models, &transform, &sets, &doodads, 0);
+    let holders = vec![Vec::new(); doodads.len()];
+    let ids = |parts: &[(Vec<u16>, Vec<Instance>)]| {
+        parts
+            .iter()
+            .flat_map(|(_, instances)| instances.iter().map(|instance| instance.id))
+            .collect::<Vec<_>>()
+    };
+    let only_first = doodads::instances(&models, &transform, &sets, &doodads, &holders, 0);
+    assert_eq!(ids(&only_first), [0], "the empty name left out");
+    let named = doodads::instances(&models, &transform, &sets, &doodads, &holders, 2);
+    assert_eq!(ids(&named), [0, 3]);
     assert_eq!(
-        only_first.iter().map(|i| i.id).collect::<Vec<_>>(),
+        ids(&doodads::instances(&models, &transform, &sets, &doodads, &holders, 9)),
         [0],
-        "the empty name left out"
-    );
-    let named = doodads::instances(&models, &transform, &sets, &doodads, 2);
-    assert_eq!(named.iter().map(|i| i.id).collect::<Vec<_>>(), [0, 3]);
-    assert_eq!(
-        doodads::instances(&models, &transform, &sets, &doodads, 9).len(),
-        1,
         "a set it lacks"
     );
+    let named = &named[0].1;
     // At the building's transform times its own: moved, turned a quarter, scaled.
     let placed = named[0].transform;
     assert!(
@@ -344,17 +359,56 @@ fn the_doodads_of_a_building_are_those_of_its_set_0_and_of_the_set_it_names() {
 }
 
 #[test]
+fn the_groups_holding_each_doodad_are_listed_once_in_order() {
+    let group = |refs: Vec<u16>| WmoGroup {
+        doodad_refs: refs,
+        ..WmoGroup::default()
+    };
+    let groups = [group(vec![0, 1]), group(vec![1, 1, 2])];
+    assert_eq!(doodads::holders(&groups, 4), [vec![0], vec![0, 1], vec![1], vec![]]);
+    assert_eq!(doodads::owner("Map", 7, &[0, 1]), "buildings/Map/7/0+1");
+    assert_eq!(doodads::owner("Map", 7, &[]), "buildings/Map/7/-");
+}
+
+#[test]
 fn the_doodads_of_a_building_are_placed_while_it_is_kept_and_taken_away_after() {
     let models = FakeModels::default();
     let mut owners = Owners::default();
-    let instances = doodads::instances(&models, &Mat4::IDENTITY, &[set(0, 1)], &[doodad("a.mdx", [0.0; 3])], 0);
+    let instances = doodads::instances(
+        &models,
+        &Mat4::IDENTITY,
+        &[set(0, 1)],
+        &[doodad("a.mdx", [0.0; 3])],
+        &[vec![2, 5]],
+        0,
+    );
     owners.want(&models, "Map", HashSet::from([1]));
     assert!(!owners.place(&models, "Map", 2, &instances), "not wanted");
     assert!(!owners.place(&models, "Other", 1, &instances), "of another map");
     assert!(owners.place(&models, "Map", 1, &instances));
     assert_eq!(
         models.owners.lock().unwrap().keys().collect::<Vec<_>>(),
-        ["buildings/Map/1"]
+        ["buildings/Map/1/2+5"]
+    );
+    let parts = owners.parts();
+    assert_eq!(parts[&1][0].0, [2, 5]);
+    assert!(
+        Arc::ptr_eq(&parts[&1][0].1, &models.shown("buildings/Map/1/2+5")),
+        "its flag"
+    );
+    // Placed again in other parts: those before taken away.
+    let moved = doodads::instances(
+        &models,
+        &Mat4::IDENTITY,
+        &[set(0, 1)],
+        &[doodad("a.mdx", [0.0; 3])],
+        &[Vec::new()],
+        0,
+    );
+    assert!(owners.place(&models, "Map", 1, &moved));
+    assert_eq!(
+        models.owners.lock().unwrap().keys().collect::<Vec<_>>(),
+        ["buildings/Map/1/-"]
     );
     assert!(
         owners.want(&models, "Map", HashSet::new()),
@@ -375,7 +429,7 @@ fn the_doodads_of_a_building_are_placed_while_it_is_kept_and_taken_away_after() 
 // Drawn on the software adapter.
 
 /// The formats of the tests: no file, nor any texture.
-struct NoFiles;
+pub(crate) struct NoFiles;
 
 impl Formats for NoFiles {
     fn maps(&self) -> Result<Arc<Vec<MapRecord>>, String> {
@@ -449,7 +503,7 @@ fn resolved<F: Future>(future: F) -> Option<F::Output> {
 
 /// A device of the software adapter of the system, offering what it offers of what the buildings
 /// are drawn with; or none.
-fn device() -> Option<egui_wgpu::RenderState> {
+pub(crate) fn device() -> Option<egui_wgpu::RenderState> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = resolved(instance.request_adapter(&wgpu::RequestAdapterOptions {
         force_fallback_adapter: true,
@@ -478,7 +532,7 @@ fn device() -> Option<egui_wgpu::RenderState> {
     })
 }
 
-const TARGET: Target = Target {
+pub(crate) const TARGET: Target = Target {
     color_format: wgpu::TextureFormat::Rgba8UnormSrgb,
     depth_format: wgpu::TextureFormat::Depth32Float,
     sample_count: 1,
@@ -486,7 +540,7 @@ const TARGET: Target = Target {
 };
 
 /// The view from `eye` towards the origin, 32 × 32 pixels.
-fn view(eye: Vec3) -> View {
+pub(crate) fn view(eye: Vec3) -> View {
     View {
         view_proj: Mat4::perspective_infinite_reverse_rh(60f32.to_radians(), 1.0, 0.1)
             * Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Z),
@@ -598,6 +652,7 @@ fn bench(gpu: &egui_wgpu::RenderState, wmo: Wmo) -> Option<BuildingsLayer> {
     scene.lock().unwrap().placed = vec![Placed {
         transform: Mat4::IDENTITY,
         wmo: Arc::new(uploaded),
+        parts: None,
     }];
     Some(BuildingsLayer::new(shared, scene))
 }
@@ -674,14 +729,17 @@ fn the_opaque_batches_are_drawn_by_state_and_the_blended_from_the_farthest() {
         Placed {
             transform: Mat4::IDENTITY,
             wmo: uploaded.clone(),
+            parts: None,
         },
         Placed {
             transform: Mat4::from_translation(Vec3::new(0.0, 500.0, 0.0)),
             wmo: uploaded,
+            parts: None,
         },
     ];
-    let (opaque, blended, buildings, groups) = layer::list(&placed, &view(Vec3::new(20.0, 0.0, 0.0)));
-    assert_eq!((buildings, groups), (1, 4));
+    let listing = layer::list(&placed, &view(Vec3::new(20.0, 0.0, 0.0)));
+    let (opaque, blended) = (&listing.opaque, &listing.blended);
+    assert_eq!((listing.buildings, listing.groups), (1, 4));
     assert_eq!(
         opaque.iter().map(|listed| listed.state).collect::<Vec<_>>(),
         [
@@ -699,9 +757,9 @@ fn the_opaque_batches_are_drawn_by_state_and_the_blended_from_the_farthest() {
         blended.iter().map(|listed| listed.distance.round()).collect::<Vec<_>>(),
         [30.0, 10.0]
     );
-    let runs = layer::runs(&opaque, 0);
+    let runs = layer::runs(opaque, 0);
     assert_eq!((runs.len(), runs[1].first), (2, 1));
-    assert_eq!(layer::runs(&blended, 2)[0].count, 2, "one state, one run");
+    assert_eq!(layer::runs(blended, 2)[0].count, 2, "one state, one run");
 }
 
 #[test]

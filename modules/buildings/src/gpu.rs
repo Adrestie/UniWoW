@@ -14,6 +14,7 @@ use uniwow_api::texture_arrays::{NONE, Placed, TextureArrays};
 use uniwow_api::viewport::{Target, View};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
+use crate::cells::Cells;
 use crate::colours;
 
 /// The arrays of textures the shader binds at once.
@@ -480,7 +481,8 @@ pub struct GroupGpu {
     pub batches: Vec<BatchGpu>,
 }
 
-/// The CPU side of a file of a building: what its placements and their doodads need.
+/// The CPU side of a file of a building: what its placements and their doodads need, and what
+/// tells the groups seen from inside.
 pub struct WmoGpu {
     shared: Arc<Shared>,
     vertices: Range<u64>,
@@ -496,10 +498,11 @@ pub struct WmoGpu {
     pub ambient: [f32; 3],
     /// What it takes on the GPU, its textures apart.
     pub bytes: u64,
+    pub cells: Cells,
 }
 
 impl WmoGpu {
-    /// What it keeps on the CPU: its groups and their batches.
+    /// What it keeps on the CPU: its groups and their batches, and its cells.
     pub fn cpu(&self) -> u64 {
         (size_of::<Self>()
             + self
@@ -507,6 +510,7 @@ impl WmoGpu {
                 .iter()
                 .map(|group| size_of::<GroupGpu>() + group.batches.len() * size_of::<BatchGpu>())
                 .sum::<usize>()) as u64
+            + self.cells.bytes()
     }
 }
 
@@ -567,6 +571,7 @@ pub fn geometry(wmo: &mut Wmo) -> (Vec<Vertex>, Vec<u32>, Vec<u32>) {
 /// `wmo` put on the GPU of `shared`, its textures read through `formats`: its geometry in the
 /// arenas, its materials in the table, its textures in the arrays.
 pub fn upload(shared: &Arc<Shared>, formats: &dyn Formats, mut wmo: Wmo) -> Result<WmoGpu, String> {
+    let cells = Cells::new(&wmo);
     let (vertices, indices, starts) = geometry(&mut wmo);
     let mut textures = Vec::new();
     let materials: Vec<MaterialGpu> = wmo
@@ -661,5 +666,6 @@ pub fn upload(shared: &Arc<Shared>, formats: &dyn Formats, mut wmo: Wmo) -> Resu
         groups,
         bounds: wmo.bounds,
         ambient: [r, g, b].map(|value| f32::from(value) / 255.0),
+        cells,
     })
 }

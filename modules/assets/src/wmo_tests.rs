@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use uniwow_api::formats::{
-    DoodadSet, FileRef, FogBand, Portal, PortalRef, Wmo, WmoBatch, WmoDoodad, WmoFace, WmoFog, WmoLight, WmoLiquid,
-    WmoMaterial,
+    BspNode, DoodadSet, FileRef, FogBand, Portal, PortalRef, Wmo, WmoBatch, WmoDoodad, WmoFace, WmoFog, WmoGroup,
+    WmoLight, WmoLiquid, WmoMaterial,
 };
 use uniwow_api::serde_json;
 
@@ -94,9 +94,17 @@ fn batch(first: u32, count: u16, vertices: [u16; 2], flags: u8, material: u16) -
     out
 }
 
+/// A node of a BSP tree as the file holds it.
+fn bsp_node(flags: u16, children: [i16; 2], count: u16, first: u32, distance: f32) -> Vec<u8> {
+    let mut out = halves(&[flags, children[0] as u16, children[1] as u16, count]);
+    out.extend(words(&[first]));
+    out.extend(floats(&[distance]));
+    out
+}
+
 /// The first group of the test buildings: two triangles over four vertices, both sets of
-/// coordinates and of colours, a batch, a doodad and a liquid; its triangles of `MPY2` when
-/// `modern`, its batch then of the material 1 given as a large one.
+/// coordinates and of colours, a batch, a doodad, a BSP tree and a liquid; its triangles of `MPY2`
+/// when `modern`, its batch then of the material 1 given as a large one.
 fn group_one(modern: bool) -> Vec<u8> {
     let mut inside = group_header(
         0x1000 | 0x800 | 0x4 | 0x2000 | 0x100_0000 | 0x200_0000,
@@ -119,6 +127,17 @@ fn group_one(modern: bool) -> Vec<u8> {
     let flags = if modern { 0x2 } else { 0 };
     inside.extend(tagged(b"MOBA", &batch(0, 6, [0, 3], flags, material)));
     inside.extend(tagged(b"MODR", &halves(&[1])));
+    // Its tree: cut across X at 0.5, a triangle on each side.
+    inside.extend(tagged(
+        b"MOBN",
+        &[
+            bsp_node(0, [1, 2], 0, 0, 0.5),
+            bsp_node(0x4, [-1, -1], 1, 0, 0.0),
+            bsp_node(0x4, [-1, -1], 1, 1, 0.0),
+        ]
+        .concat(),
+    ));
+    inside.extend(tagged(b"MOBR", &halves(&[0, 1])));
     inside.extend(tagged(b"MOCV", &[10, 20, 30, 40].repeat(4)));
     let mut liquid = words(&[2, 2, 1, 1]);
     liquid.extend(floats(&[5.0, 6.0, 7.0]));
@@ -420,6 +439,28 @@ fn a_building_of_3_3_5a_reads_its_root_and_its_groups_beside_it() {
         }]
     );
     assert_eq!(one.doodad_refs, [1]);
+    let leaf = |first| BspNode {
+        flags: 0x4,
+        children: [-1, -1],
+        first,
+        count: 1,
+        distance: 0.0,
+    };
+    assert_eq!(
+        one.bsp,
+        [
+            BspNode {
+                flags: 0,
+                children: [1, 2],
+                first: 0,
+                count: 0,
+                distance: 0.5
+            },
+            leaf(0),
+            leaf(1)
+        ]
+    );
+    assert_eq!(one.bsp_faces, [0, 1]);
     assert_eq!(
         one.liquid,
         Some(WmoLiquid {
@@ -482,8 +523,8 @@ fn a_modern_building_names_its_groups_doodads_and_textures_by_file_data_id() {
 #[test]
 fn what_a_building_lacks_is_said_and_left_out() {
     // A batch past its triangles, a triangle and a batch of a material it does not have, a doodad
-    // it does not have, a set past its doodads, a portal reference to a group it does not have,
-    // and a group missing.
+    // it does not have, a BSP tree whose root has a child past its nodes, a set past its doodads, a
+    // portal reference to a group it does not have, and a group missing.
     let mut inside = group_header(0x8, [1, 4], [0, 0, 3]);
     inside.extend(tagged(b"MOPY", &[0, 9]));
     inside.extend(tagged(b"MOVI", &halves(&[0, 1, 2])));
@@ -500,6 +541,8 @@ fn what_a_building_lacks_is_said_and_left_out() {
         .concat(),
     ));
     inside.extend(tagged(b"MODR", &halves(&[1, 5])));
+    inside.extend(tagged(b"MOBN", &bsp_node(0, [-1, 5], 0, 0, 0.0)));
+    inside.extend(tagged(b"MOBR", &halves(&[0])));
     let mut group = tagged(b"MVER", &words(&[17]));
     group.extend(tagged(b"MOGP", &inside));
     let mut root = root(false);
@@ -522,6 +565,7 @@ fn what_a_building_lacks_is_said_and_left_out() {
     );
     assert_eq!(one.faces[0].material, None);
     assert_eq!(one.doodad_refs, [1]);
+    assert!(one.bsp.is_empty() && one.bsp_faces.is_empty());
     assert_eq!(wmo.doodad_sets[0].count, 2);
     let two = &wmo.groups[1];
     assert_eq!(
@@ -536,13 +580,53 @@ fn what_a_building_lacks_is_said_and_left_out() {
         "group 0: its batch 2",
         "group 0: 1 of its doodads past the 2 of the building",
         "group 0: its portals 1 to 5 past the 2 references",
+        "group 0: its BSP tree left out: its node 0 of 1 has the child 5",
         r"group 1 (world\wmo\test_001.wmo): world\wmo\test_001.wmo: not written",
         "the portal reference 1: the portal 0 of 1, the group 7 of 2",
         "the doodad set \"Set_$DefaultGlobal\": 5 doodads from 0, of 2",
     ] {
         assert!(said.contains(fault), "{fault} not in {said}");
     }
-    assert_eq!(wmo.faults.len(), 8, "{said}");
+    assert_eq!(wmo.faults.len(), 9, "{said}");
+}
+
+#[test]
+fn a_bsp_tree_that_does_not_hold_together_is_said() {
+    let node = |flags, children, first, count| BspNode {
+        flags,
+        children,
+        first,
+        count,
+        distance: 0.0,
+    };
+    let tree = |nodes: Vec<BspNode>, faces: Vec<u16>| WmoGroup {
+        triangles: vec![0; 6],
+        bsp: nodes,
+        bsp_faces: faces,
+        ..WmoGroup::default()
+    };
+    let leaf = |first, count| node(0x4, [-1, -1], first, count);
+    assert_eq!(
+        wmo::bsp_fault(&tree(vec![node(0, [1, 2], 0, 0), leaf(0, 1), leaf(1, 1)], vec![0, 1])),
+        None
+    );
+    for (nodes, faces, said) in [
+        (vec![node(0, [-1, 0], 0, 0)], vec![], "its node 0 of 1 has the child 0"),
+        (
+            vec![node(0, [1, -1], 0, 0), node(0, [0, -1], 0, 0)],
+            vec![],
+            "its node 1 of 2 has the child 0",
+        ),
+        (
+            vec![node(0, [1, 2], 0, 0), leaf(0, 1)],
+            vec![0],
+            "its node 0 of 2 has the child 2",
+        ),
+        (vec![leaf(1, 1)], vec![0], "its leaf 0 holds the triangles 1 to 2 of 1"),
+        (vec![leaf(0, 1)], vec![2], "its leaves hold the triangle 2 of 2"),
+    ] {
+        assert_eq!(wmo::bsp_fault(&tree(nodes, faces)).as_deref(), Some(said));
+    }
 }
 
 #[test]

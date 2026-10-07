@@ -16,6 +16,7 @@
 //! them; without the pool, they stay at rest.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -329,8 +330,12 @@ impl Layer for ModelsLayer {
                 continue;
             };
             groups += published.groups.len();
-            // The bounds of the owner tested before its groups: one out of reach or out of sight is
-            // not given to the frame, its instances nor its bones copied.
+            // An owner hidden, then one out of reach or out of sight by its bounds, is not given to
+            // the frame, its instances nor its bones copied.
+            if !slot.shown.load(Ordering::Relaxed) {
+                present.push(slot.number);
+                continue;
+            }
             let owner = match self.owner_bounds.get(&slot.number) {
                 Some((made_of, made_at, bounds)) if Arc::ptr_eq(made_of, &published) && *made_at == generation => {
                     *bounds
