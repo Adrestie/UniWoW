@@ -7,6 +7,7 @@
 
 use std::future::Future;
 use std::pin::pin;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
@@ -17,7 +18,7 @@ use uniwow_api::formats::{
     Texture, TextureFormat, Tile, TileId, Wdl, Wdt, Wmo,
 };
 use uniwow_api::glam::{Mat4, Vec3};
-use uniwow_api::liquids::{CELL, Surfaces};
+use uniwow_api::liquids::{CELL, Liquids, Placed, Surfaces};
 use uniwow_api::viewport::{Layer, Phase, Target, View};
 use uniwow_api::{bytemuck, egui, egui_wgpu, wgpu};
 
@@ -628,5 +629,110 @@ fn the_water_is_drawn_over_what_lies_under_it_without_hiding_what_is_blended_bey
             Some((&under_magma, Phase::Near))
         ),
         through
+    );
+}
+
+/// A square liquid of `liquid` over the origin at `height`, placed by another module.
+fn square_placed(liquid: u16, height: f32) -> Placed {
+    Placed {
+        liquid,
+        positions: vec![
+            [-50.0, -50.0, height],
+            [50.0, -50.0, height],
+            [50.0, 50.0, height],
+            [-50.0, 50.0, height],
+        ],
+        coordinates: vec![[0.0, 0.0]; 4],
+        depths: vec![0.0; 4],
+        triangles: vec![0, 1, 2, 0, 2, 3, 0, 1, 9],
+    }
+}
+
+#[test]
+fn a_liquid_placed_is_drawn_as_given_its_water_under_the_surfaces() {
+    let kind = |liquid: u16| match liquid {
+        5 => Some((0, true)),
+        7 => Some((1, false)),
+        _ => None,
+    };
+    let water = mesh::placed(&square_placed(5, 3.0), kind);
+    assert_eq!(
+        (water.vertices.len(), water.water.as_slice()),
+        (4, [0, 1, 2, 0, 2, 3].as_slice()),
+        "a triangle out of its vertices left out"
+    );
+    assert_eq!(water.surfaces.len(), 8);
+    assert!(water.surfaces.iter().all(|(_, height)| *height == 3.0));
+    let magma = mesh::placed(&square_placed(7, 3.0), kind);
+    assert_eq!((magma.opaque.len(), magma.surfaces.len()), (6, 0), "magma no water");
+    assert_eq!(mesh::placed(&square_placed(99, 3.0), kind), mesh::Meshes::default());
+    // Placed through the service: a flag each, shown; taken away.
+    let service = crate::Water::default();
+    let flags = service.place(
+        "buildings/Azeroth/7",
+        vec![square_placed(5, 3.0), square_placed(7, 1.0)],
+    );
+    assert_eq!(flags.len(), 2);
+    assert!(flags.iter().all(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)));
+    assert_eq!(
+        service.placed.lock().unwrap()["buildings/Azeroth/7"]
+            .as_ref()
+            .map(Vec::len),
+        Some(2)
+    );
+    service.clear("buildings/Azeroth/7");
+    assert!(service.placed.lock().unwrap()["buildings/Azeroth/7"].is_none());
+}
+
+#[test]
+fn a_liquid_placed_is_put_on_the_gpu_and_drawn_while_its_owner_shows_it() {
+    let Some(gpu) = device() else {
+        eprintln!("skipped: no software adapter for a device");
+        return;
+    };
+    let shared = Arc::new(Shared::new(&gpu, &TARGET).expect("the liquids on the device"));
+    let shown = Arc::new(AtomicBool::new(true));
+    let pour = [
+        (square_placed(7, -2.0), shown.clone()),
+        (square_placed(5, 0.0), Arc::new(AtomicBool::new(false))),
+    ];
+    let poured = crate::pour(&Liquid, &shared, &pour).unwrap();
+    assert_eq!(poured.liquids.len(), 2);
+    assert_eq!(
+        (
+            poured.surfaces.surface(50.0 / 3.0, -50.0 / 3.0),
+            poured.surfaces.surface(100.0, 10.0)
+        ),
+        (Some(0.0), None),
+        "the water's alone, under the middle of a triangle"
+    );
+    assert_eq!(
+        poured.liquids[0].bounds,
+        [Vec3::new(-50.0, -50.0, -2.0), Vec3::new(50.0, 50.0, -2.0)]
+    );
+    let scene = Arc::new(Mutex::new(Scene {
+        placed: poured.liquids,
+        ..Scene::default()
+    }));
+    let mut layer = LiquidsLayer::new(shared, scene);
+    let above = view(Vec3::new(0.0, 0.0, 20.0), Vec3::new(0.0, 0.0, -30.0));
+    assert_eq!(
+        middle(&gpu, &mut layer, &above, None),
+        [255, 0, 0, 255],
+        "the magma shown, the water not"
+    );
+    shown.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        middle(&gpu, &mut layer, &above, None),
+        [0, 0, 0, 255],
+        "hidden by its owner"
+    );
+    shown.store(true, std::sync::atomic::Ordering::Relaxed);
+    let away = view(Vec3::new(500.0, 0.0, 20.0), Vec3::new(1000.0, 0.0, 20.0));
+    middle(&gpu, &mut layer, &away, None);
+    assert!(
+        layer.stats().items.starts_with("0 tiles, and 0 drawn of the 2 liquids"),
+        "out of sight: {}",
+        layer.stats().items
     );
 }

@@ -2,10 +2,11 @@
 //! then each of its groups by its own, those of a building the camera is inside of first by what
 //! its portals let it see; the batches of the groups seen listed as indirect draws, the opaque ones
 //! by state, the blended ones from the farthest group, and drawn in the pass, a
-//! `multi_draw_indexed_indirect` for each run of one state. The doodads of a group are shown while
-//! it is seen through the portals, read by `models` at the frame after.
+//! `multi_draw_indexed_indirect` for each run of one state. The doodads and the liquid of a group
+//! are shown while it is seen through the portals, read by `models` and `liquids` at the frame
+//! after.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -21,12 +22,17 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// A building drawn: its transform, its file on the GPU, and the flags of its doodads once placed.
+/// The liquids of a building placed through the service `liquids`: the flag of each, with its group.
+pub type Poured = Arc<[(u16, Arc<AtomicBool>)]>;
+
+/// A building drawn: its transform, its file on the GPU, the flags of its doodads once placed, and
+/// those of its liquids, each with its group.
 #[derive(Clone)]
 pub struct Placed {
     pub transform: Mat4,
     pub wmo: Arc<WmoGpu>,
     pub parts: Option<Arc<[Part]>>,
+    pub liquids: Option<Poured>,
 }
 
 /// What the module shares with its layer.
@@ -114,6 +120,14 @@ fn show(parts: Option<&Arc<[Part]>>, seen: Option<&[bool]>) {
     }
 }
 
+/// Shows the liquids of `liquids` whose group `seen` says is seen; all of them without `seen`.
+fn show_liquids(liquids: Option<&Poured>, seen: Option<&[bool]>) {
+    for (group, flag) in liquids.iter().flat_map(|liquids| liquids.iter()) {
+        let shown = seen.is_none_or(|seen| seen.get(usize::from(*group)).copied().unwrap_or(false));
+        flag.store(shown, Ordering::Relaxed);
+    }
+}
+
 /// What the frame draws of the buildings: the draws of the batches of the groups in sight, the
 /// opaque ones by state, the blended ones from the farthest, those beyond the surface of the water
 /// from the eye apart from those on its side; how many placements and groups are in sight, how
@@ -139,6 +153,7 @@ pub(crate) fn list(placed: &[Placed], view: &View, surfaces: Option<&Surfaces>) 
         let bounds = world_bounds(&building.transform, &building.wmo.bounds);
         if !in_sight(&planes, &bounds) {
             show(building.parts.as_ref(), None);
+            show_liquids(building.liquids.as_ref(), None);
             continue;
         }
         listing.buildings += 1;
@@ -148,6 +163,7 @@ pub(crate) fn list(placed: &[Placed], view: &View, surfaces: Option<&Surfaces>) 
             listing.through += seen.iter().filter(|seen| **seen).count();
         }
         show(building.parts.as_ref(), seen.as_deref());
+        show_liquids(building.liquids.as_ref(), seen.as_deref());
         for (index, group) in building.wmo.groups.iter().enumerate() {
             if seen
                 .as_ref()

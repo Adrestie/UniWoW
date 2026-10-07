@@ -277,7 +277,7 @@ fn the_groups_seen_are_those_the_portals_in_sight_lead_to_from_the_side_of_the_c
 }
 
 #[test]
-fn a_building_the_camera_is_inside_of_draws_and_shows_the_doodads_of_the_groups_its_portals_let_it_see() {
+fn a_building_the_camera_is_inside_of_draws_and_shows_the_doodads_and_liquids_of_the_groups_its_portals_let_it_see() {
     let Some(gpu) = device() else {
         return;
     };
@@ -293,6 +293,7 @@ fn a_building_the_camera_is_inside_of_draws_and_shows_the_doodads_of_the_groups_
         (vec![1, 3], flag()),
         (vec![], flag()),
     ];
+    let liquids = vec![(0, flag()), (2, flag())];
     // Turned a quarter about Z, then moved: X of the building along Y of the world.
     let transform = Mat4::from_rotation_translation(
         Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
@@ -302,12 +303,14 @@ fn a_building_the_camera_is_inside_of_draws_and_shows_the_doodads_of_the_groups_
         transform,
         wmo,
         parts: Some(parts.clone().into()),
+        liquids: Some(liquids.clone().into()),
     }];
     let at = |x: f32, z: f32| transform.transform_point3(Vec3::new(x, 0.0, z));
     let shown = || {
         parts
             .iter()
             .map(|(_, flag)| flag.load(Ordering::Relaxed))
+            .chain(liquids.iter().map(|(_, flag)| flag.load(Ordering::Relaxed)))
             .collect::<Vec<_>>()
     };
     let view = |eye: Vec3, target: Vec3| {
@@ -319,26 +322,27 @@ fn a_building_the_camera_is_inside_of_draws_and_shows_the_doodads_of_the_groups_
     // In the first room looking back: itself alone, drawn alone.
     let listing = layer::list(&placed, &view(at(5.0, 2.0), at(-100.0, 2.0)), None);
     assert_eq!((listing.inside, listing.through, listing.groups), (1, 1, 1));
-    assert_eq!(shown(), [true, false, false, true]);
+    assert_eq!(shown(), [true, false, false, true, true, false]);
     // Out of sight: all shown again, for when it is seen from outside.
     let listing = layer::list(&placed, &view(at(-50.0, 2.0), at(-100.0, 2.0)), None);
     assert_eq!(listing.buildings, 0);
-    assert_eq!(shown(), [true; 4]);
+    assert_eq!(shown(), [true; 6]);
     layer::list(&placed, &view(at(5.0, 2.0), at(-100.0, 2.0)), None);
     // Along the row: every group.
     let listing = layer::list(&placed, &view(at(5.0, 2.0), at(100.0, 2.0)), None);
     assert_eq!((listing.inside, listing.through), (1, 4));
-    assert_eq!(shown(), [true; 4]);
+    assert_eq!(shown(), [true; 6]);
     // From outside the building: all of them, its groups by their bounds.
     layer::list(&placed, &view(at(5.0, 2.0), at(-100.0, 2.0)), None);
     let listing = layer::list(&placed, &view(at(-50.0, 2.0), at(100.0, 2.0)), None);
     assert_eq!((listing.inside, listing.groups), (0, 4));
-    assert_eq!(shown(), [true; 4]);
+    assert_eq!(shown(), [true; 6]);
     // The second door aside: the rooms past it in sight, not drawn.
     let aside = [Placed {
         transform,
         wmo: Arc::new(gpu::upload(&shared, &NoFiles, row([4.0, 5.0])).unwrap()),
         parts: None,
+        liquids: None,
     }];
     let listing = layer::list(&aside, &view(at(5.0, 2.0), at(100.0, 2.0)), None);
     assert_eq!((listing.through, listing.groups), (2, 2));

@@ -4,7 +4,9 @@
 //! beyond the reach it lets keep; their meshes put on the GPU and drawn by the layer of the module;
 //! the surfaces of their water given through the service `liquids`, by which the other layers tell
 //! what they blend beyond the water from what is on the eye's side. A tile refused for want of room
-//! is read again once the arenas gave a range back or the camera moved. Nothing is changed: no undo
+//! is read again once the arenas gave a range back or the camera moved. The liquids other modules
+//! place through the service, as `buildings` those of its groups, are put on the GPU by jobs, drawn
+//! while their owners show them, and their water added to the surfaces. Nothing is changed: no undo
 //! entry, no file written.
 
 mod gpu;
@@ -14,18 +16,20 @@ mod mesh;
 mod tests;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use uniwow_api::arena::{self, Refusal};
 use uniwow_api::formats::{self, TILE, TileId, Wdt};
-use uniwow_api::liquids::{self, Grid, Liquids, Surfaces};
+use uniwow_api::glam::Vec3;
+use uniwow_api::liquids::{self, Grid, Liquids, Placed, Surfaces};
 use uniwow_api::serde_json::json;
 use uniwow_api::viewport::Demand;
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, PropertyValue, Registrar, egui, log, viewport};
 
 use gpu::{Shared, TileGpu};
-use layer::{LiquidsLayer, Scene};
+use layer::{LiquidsLayer, Poured, Scene};
 
 /// The distance of the terrain, in tiles, until it says it.
 const DEFAULT_DISTANCE: u32 = 3;
@@ -41,16 +45,88 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The surfaces of the water held, given to the other modules.
+/// The liquids an owner placed, each with its flag.
+type Pouring = Vec<(Placed, Arc<AtomicBool>)>;
+type Pour = Arc<Pouring>;
+
+/// The surfaces of the water held, given to the other modules; and the liquids they placed or took
+/// away since the module last took them, by owner, none for those taken away.
 #[derive(Default)]
 struct Water {
     surfaces: Mutex<Arc<Surfaces>>,
+    placed: Mutex<HashMap<String, Option<Pouring>>>,
 }
 
 impl Liquids for Water {
     fn surfaces(&self) -> Arc<Surfaces> {
         lock(&self.surfaces).clone()
     }
+
+    fn place(&self, owner: &str, liquids: Vec<Placed>) -> Vec<Arc<AtomicBool>> {
+        let flags: Vec<Arc<AtomicBool>> = liquids.iter().map(|_| Arc::new(AtomicBool::new(true))).collect();
+        lock(&self.placed).insert(
+            owner.to_owned(),
+            Some(liquids.into_iter().zip(flags.iter().cloned()).collect()),
+        );
+        flags
+    }
+
+    fn clear(&self, owner: &str) {
+        lock(&self.placed).insert(owner.to_owned(), None);
+    }
+}
+
+/// The liquids of an owner on the GPU, the surfaces of their water, and what they take.
+struct PouredOwner {
+    liquids: Vec<Poured>,
+    surfaces: Surfaces,
+    bytes: u64,
+}
+
+/// Where the liquids an owner placed stand: waiting to be put on the GPU, refused for want of room
+/// when the arenas had given back so many ranges and the camera stood there; being put there by a
+/// job, the arenas having given back so many ranges when it started; on it; or refused.
+enum Owned {
+    Waiting(Pour, Option<(u64, [f32; 2])>),
+    Pouring(JobId, u64, Pour),
+    Held(PouredOwner),
+    Refused,
+}
+
+/// Puts the liquids `pour` on the GPU of `shared`, their types read through `formats`.
+fn pour(
+    formats: &dyn formats::Formats,
+    shared: &Arc<Shared>,
+    pour: &[(Placed, Arc<AtomicBool>)],
+) -> Result<PouredOwner, Refusal> {
+    let types = formats.liquid_types()?;
+    let mut poured = PouredOwner {
+        liquids: Vec::new(),
+        surfaces: Surfaces::default(),
+        bytes: 0,
+    };
+    let mut cells = Vec::new();
+    for (placed, shown) in pour {
+        let meshes = mesh::placed(placed, |liquid| {
+            let record = types.iter().find(|record| record.id == u32::from(liquid))?;
+            Some((shared.slot(formats, record)?, mesh::is_water(record.kind)))
+        });
+        cells.extend(meshes.surfaces.iter().copied());
+        if let Some(gpu) = gpu::upload(shared, &meshes)? {
+            poured.bytes += gpu.bytes;
+            let bounds = placed.positions.iter().fold(
+                [Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)],
+                |[low, high], position| [low.min(Vec3::from(*position)), high.max(Vec3::from(*position))],
+            );
+            poured.liquids.push(Poured {
+                gpu: Arc::new(gpu),
+                shown: shown.clone(),
+                bounds,
+            });
+        }
+    }
+    poured.surfaces = Surfaces::from_cells(cells);
+    Ok(poured)
 }
 
 /// The liquids of a tile read: on the GPU, none where it has none; the surface of its water.
@@ -153,7 +229,11 @@ struct LiquidsModule {
     refused: HashSet<TileId>,
     no_room: HashMap<TileId, (u64, [f32; 2])>,
     refusals: VecDeque<String>,
-    /// Whether the tiles held changed since the layer and the surfaces were given them.
+    /// The liquids other modules placed, by owner, and the jobs putting them on the GPU.
+    owners: HashMap<String, Owned>,
+    owner_jobs: HashMap<JobId, String>,
+    /// Whether the tiles or the liquids held changed since the layer and the surfaces were given
+    /// them.
     changed: bool,
     told_budget: Option<Demand>,
     /// The last frame signal seen, and the camera then.
@@ -273,8 +353,16 @@ impl LiquidsModule {
 
         // Told to the budget: those held in the band of their distance, those wanted the arenas
         // have room for at what they are expected to take.
+        let poured: u64 = self
+            .owners
+            .values()
+            .map(|owned| match owned {
+                Owned::Held(poured) => poured.bytes,
+                _ => 0,
+            })
+            .sum();
         let mut demand = Demand {
-            fixed: shared.arrays.bytes() + shared.table.size(),
+            fixed: shared.arrays.bytes() + shared.table.size() + poured,
             ..Demand::default()
         };
         for (tile, (distance, _)) in wanted.iter().zip(&sizes) {
@@ -350,8 +438,64 @@ impl LiquidsModule {
             self.reading.insert(tile, (job, given));
             self.jobs.insert(job, tile);
         }
+        self.steer_owners(&formats, &shared, given, eye, slots, ctx);
         self.publish();
         lock(&self.scene).steering = start.elapsed();
+    }
+
+    /// Takes the liquids the other modules placed or took away since the last frame; puts those
+    /// waiting on the GPU by jobs, no more than `slots` at once, those refused for want of room once
+    /// room may have been made, the arenas having given back `given` ranges and the camera at `eye`.
+    fn steer_owners(
+        &mut self,
+        formats: &Arc<dyn formats::Formats>,
+        shared: &Arc<Shared>,
+        given: u64,
+        eye: [f32; 2],
+        slots: usize,
+        ctx: &mut Context,
+    ) {
+        let changes: Vec<(String, Option<Pouring>)> = lock(&self.water.placed).drain().collect();
+        for (owner, change) in changes {
+            match self.owners.remove(&owner) {
+                Some(Owned::Pouring(job, ..)) => {
+                    ctx.cancel(job);
+                    self.owner_jobs.remove(&job);
+                }
+                Some(Owned::Held(_)) => self.changed = true,
+                _ => {}
+            }
+            if let Some(liquids) = change {
+                self.owners.insert(owner, Owned::Waiting(Arc::new(liquids), None));
+            }
+        }
+        let ready: Vec<String> = self
+            .owners
+            .iter()
+            .filter(|(_, owned)| {
+                matches!(owned, Owned::Waiting(_, refused)
+                    if refused.is_none_or(|(then, at)| arena::room_made(then, at, given, eye)))
+            })
+            .map(|(owner, _)| owner.clone())
+            .take(slots.saturating_sub(self.owner_jobs.len()))
+            .collect();
+        for owner in ready {
+            let Some(Owned::Waiting(liquids, _)) = self.owners.remove(&owner) else {
+                continue;
+            };
+            let (formats, shared, poured) = (formats.clone(), shared.clone(), liquids.clone());
+            let job = ctx.spawn(
+                &format!("Put the liquids of {owner} on the GPU"),
+                move |job| -> Option<Result<PouredOwner, Refusal>> {
+                    if job.is_cancelled() {
+                        return None;
+                    }
+                    Some(pour(&*formats, &shared, &poured))
+                },
+            );
+            self.owner_jobs.insert(job, owner.clone());
+            self.owners.insert(owner, Owned::Pouring(job, given, liquids));
+        }
     }
 
     /// Gives the layer and the surfaces the tiles held, when they changed: the grids of their water
@@ -362,9 +506,25 @@ impl LiquidsModule {
         }
         let start = Instant::now();
         self.changed = false;
-        *lock(&self.water.surfaces) = Arc::new(surfaces(&self.held));
+        let poured: Vec<&PouredOwner> = self
+            .owners
+            .values()
+            .filter_map(|owned| match owned {
+                Owned::Held(poured) => Some(poured),
+                _ => None,
+            })
+            .collect();
+        let mut surfaces = surfaces(&self.held);
+        for poured in &poured {
+            surfaces.merge(&poured.surfaces);
+        }
+        *lock(&self.water.surfaces) = Arc::new(surfaces);
         let mut scene = lock(&self.scene);
         scene.tiles = self.held.values().filter_map(|held| held.gpu.clone()).collect();
+        scene.placed = poured
+            .iter()
+            .flat_map(|poured| poured.liquids.iter().cloned())
+            .collect();
         scene.publishing = scene.publishing.max(start.elapsed());
     }
 }
@@ -431,6 +591,34 @@ impl Module for LiquidsModule {
     }
 
     fn on_job(&mut self, job: JobId, outcome: JobOutcome, _ctx: &mut Context) {
+        if let Some(owner) = self.owner_jobs.remove(&job) {
+            let Some(Owned::Pouring(pouring, given, liquids)) = self.owners.get(&owner) else {
+                return;
+            };
+            if *pouring != job {
+                return;
+            }
+            let (given, liquids) = (*given, liquids.clone());
+            let refused = |reason: &str| {
+                log::warn!("the liquids of {owner} are not drawn: {reason}");
+                Owned::Refused
+            };
+            let owned = match outcome {
+                JobOutcome::Panicked(message) => refused(&message),
+                JobOutcome::Cancelled => return,
+                outcome => match outcome.take::<Option<Result<PouredOwner, Refusal>>>() {
+                    Some(Some(Ok(poured))) => {
+                        self.changed = true;
+                        Owned::Held(poured)
+                    }
+                    Some(Some(Err(Refusal::NoRoom(_)))) => Owned::Waiting(liquids, Some((given, self.eye))),
+                    Some(Some(Err(Refusal::Failed(reason)))) => refused(&reason),
+                    _ => return,
+                },
+            };
+            self.owners.insert(owner, owned);
+            return;
+        }
         if self.reading_wdt == Some(job) {
             self.reading_wdt = None;
             self.wdt = Some(match outcome {

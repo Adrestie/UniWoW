@@ -13,7 +13,7 @@ use uniwow_api::arena::Refusal;
 use uniwow_api::formats::{
     AnimationRecord, AreaRecord, Building, CharSection, CreatureDisplay, CreatureLook, CreatureModel, DoodadSet,
     FacialHair, FileRef, Formats, GameObjectDisplay, HairGeoset, MapRecord, Model, ORIGIN, Texture, TextureFormat,
-    Tile, TileId, Wdl, Wdt, Wmo, WmoBatch, WmoDoodad, WmoGroup, WmoMaterial,
+    Tile, TileId, Wdl, Wdt, Wmo, WmoBatch, WmoDoodad, WmoGroup, WmoLiquid, WmoMaterial,
 };
 use uniwow_api::glam::{Mat4, Quat, Vec3};
 use uniwow_api::liquids::{Liquids, Surfaces};
@@ -27,6 +27,7 @@ use crate::doodads::{self, Owners};
 use crate::gpu::{self, Shared, State};
 use crate::keeping::Kept;
 use crate::layer::{self, BuildingsLayer, Placed, Scene};
+use crate::liquid;
 
 fn building(unique_id: u32, file: &str) -> Building {
     Building {
@@ -666,6 +667,7 @@ fn bench(gpu: &egui_wgpu::RenderState, wmo: Wmo) -> Option<BuildingsLayer> {
         transform: Mat4::IDENTITY,
         wmo: Arc::new(uploaded),
         parts: None,
+        liquids: None,
     }];
     Some(BuildingsLayer::new(shared, scene))
 }
@@ -743,11 +745,13 @@ fn the_opaque_batches_are_drawn_by_state_and_the_blended_from_the_farthest() {
             transform: Mat4::IDENTITY,
             wmo: uploaded.clone(),
             parts: None,
+            liquids: None,
         },
         Placed {
             transform: Mat4::from_translation(Vec3::new(0.0, 500.0, 0.0)),
             wmo: uploaded,
             parts: None,
+            liquids: None,
         },
     ];
     let listing = layer::list(&placed, &view(Vec3::new(20.0, 0.0, 0.0)), None);
@@ -1077,6 +1081,7 @@ fn a_blended_group_beyond_the_surface_of_the_water_from_the_eye_is_drawn_before_
         transform: Mat4::IDENTITY,
         wmo: Arc::new(gpu::upload(&Arc::new(shared), &NoFiles, wmo).unwrap()),
         parts: None,
+        liquids: None,
     }];
     let surfaces = Surfaces::from_cells(
         (-40..=40).flat_map(|x| (-10..=10).map(move |y| (Surfaces::cell(x as f32, y as f32), 0.0))),
@@ -1121,6 +1126,7 @@ fn a_blended_group_beyond_the_surface_of_the_water_from_the_eye_is_drawn_before_
             transform: Mat4::IDENTITY,
             wmo: Arc::new(gpu::upload(&shared, &NoFiles, white).unwrap()),
             parts: None,
+            liquids: None,
         }];
         scene.liquids = Some(Arc::new(Pond(Arc::new(surfaces))));
     }
@@ -1137,4 +1143,88 @@ impl Liquids for Pond {
     fn surfaces(&self) -> Arc<Surfaces> {
         self.0.clone()
     }
+}
+
+#[test]
+fn the_type_of_a_liquid_of_a_building_is_that_of_the_table_or_of_its_basic_kind() {
+    let group = |liquid_type, flags| WmoGroup {
+        liquid_type,
+        flags,
+        ..WmoGroup::default()
+    };
+    // The building naming the types of the table: below 21 by the basic kind of the type before.
+    for (kind, expected) in [(1, 13), (3, 19), (4, 20), (5, 13), (7, 19), (8, 20), (14, 14), (41, 41)] {
+        assert_eq!(liquid::liquid_type(0x4, &group(kind, 0), 0), expected, "{kind}");
+    }
+    assert_eq!(
+        liquid::liquid_type(0x4, &group(1, 0x80000), 0),
+        14,
+        "the water of a group of the ocean"
+    );
+    // Otherwise the type 15 by each cell's basic kind, the others by their own.
+    for (cell, expected) in [(0, 13), (2, 19), (3, 20), (4, 13), (6, 19), (7, 20)] {
+        assert_eq!(liquid::liquid_type(0, &group(15, 0), cell), expected, "{cell}");
+    }
+    assert_eq!(liquid::liquid_type(0, &group(2, 0), 0), 19);
+    assert_eq!(liquid::liquid_type(0, &group(17, 0), 0), 14, "a basic kind up to 19");
+    assert_eq!(liquid::liquid_type(0, &group(25, 0), 0), 26);
+}
+
+#[test]
+fn the_liquid_of_a_group_is_two_triangles_a_cell_drawn_by_its_type_in_the_axes_of_the_building() {
+    let cell = uniwow_api::liquids::CELL;
+    let liquid = |cells: Vec<u8>| WmoGroup {
+        liquid_type: 15,
+        liquid: Some(WmoLiquid {
+            size: [3, 2],
+            tiles: [2, 1],
+            corner: [10.0, 20.0, 5.0],
+            material: 0,
+            heights: vec![5.0, 5.0, 6.0, 5.0, 5.0, 6.0],
+            data: vec![[51, 0, 0, 0]; 6],
+            tile_flags: cells,
+        }),
+        ..WmoGroup::default()
+    };
+    // Of its second group: a cell of water, then one of magma.
+    let wmo = Wmo {
+        groups: vec![WmoGroup::default(), liquid(vec![0x0, 0x2])],
+        ..Wmo::default()
+    };
+    let liquids = liquid::liquids(&wmo);
+    assert_eq!(
+        liquids
+            .iter()
+            .map(|liquid| (liquid.group, liquid.liquid))
+            .collect::<Vec<_>>(),
+        [(1, 13), (1, 19)]
+    );
+    let water = &liquids[0];
+    assert_eq!(
+        water.positions,
+        [
+            [10.0, 20.0, 5.0],
+            [10.0 + cell, 20.0, 5.0],
+            [10.0 + cell, 20.0 + cell, 5.0],
+            [10.0, 20.0 + cell, 5.0]
+        ]
+    );
+    assert_eq!(
+        (water.depths[0], water.coordinates[2], water.triangles.as_slice()),
+        (0.2, [0.25, 0.25], [0, 1, 2, 0, 2, 3].as_slice()),
+        "its depth from its flow, two repeats a chunk"
+    );
+    let magma = &liquids[1];
+    assert_eq!(magma.positions[1], [10.0 + 2.0 * cell, 20.0, 6.0]);
+    assert_eq!(
+        (magma.coordinates[0], magma.depths[0]),
+        ([0.2, 0.0], 1.0),
+        "its coordinates from its vertex"
+    );
+    // Cells not drawn: none.
+    let dry = Wmo {
+        groups: vec![liquid(vec![0x0F, 0x08])],
+        ..Wmo::default()
+    };
+    assert!(liquid::liquids(&dry).is_empty());
 }

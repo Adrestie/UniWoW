@@ -14,6 +14,7 @@ mod doodads;
 mod gpu;
 mod keeping;
 mod layer;
+mod liquid;
 #[cfg(test)]
 mod tests;
 
@@ -23,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use uniwow_api::arena::{self, Refusal};
 use uniwow_api::formats::{self, Building, DoodadSet, FileRef, TileId, Wdt, WmoDoodad};
+use uniwow_api::glam::Vec3;
 use uniwow_api::serde_json::json;
 use uniwow_api::viewport::Demand;
 use uniwow_api::{
@@ -32,7 +34,7 @@ use uniwow_api::{
 use doodads::Owners;
 use gpu::{Shared, WmoGpu};
 use keeping::Kept;
-use layer::{BuildingsLayer, Placed, Scene};
+use layer::{BuildingsLayer, Placed, Poured, Scene};
 
 /// The setting of how far around the camera tiles are read, in tiles.
 const DISTANCE: &str = "distance";
@@ -45,13 +47,14 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// A file of a building read: on the GPU, and what its doodads need.
+/// A file of a building read: on the GPU, what its doodads need, and the liquids of its groups.
 pub struct WmoFile {
     pub gpu: Arc<WmoGpu>,
     pub sets: Vec<DoodadSet>,
     pub doodads: Vec<WmoDoodad>,
     /// The groups holding each doodad.
     pub holders: Vec<Vec<u16>>,
+    pub liquids: Vec<liquid::GroupLiquid>,
 }
 
 impl WmoFile {
@@ -107,6 +110,11 @@ fn held(state: &FileState, given: u64, eye: [f32; 2]) -> budget::Held {
     }
 }
 
+/// The owner of the liquids of the building `id` of the map `directory`.
+fn owner(directory: &str, id: u32) -> String {
+    format!("buildings/{directory}/{id}")
+}
+
 /// The buildings a tile lists, or why it could not be read.
 type Read = Result<Vec<Building>, String>;
 /// A file read and put on the GPU, or why not.
@@ -142,6 +150,9 @@ struct BuildingsModule {
     told: HashSet<u32>,
     doodad_jobs: HashSet<JobId>,
     parts: HashMap<u32, Arc<[doodads::Part]>>,
+    /// The liquids of the buildings drawn, placed through the service `liquids`: by building, the
+    /// flag of each with its group.
+    poured: HashMap<u32, Poured>,
     refusals: VecDeque<String>,
     /// Whether the buildings drawn changed since the scene was last given them.
     changed: bool,
@@ -220,6 +231,7 @@ impl BuildingsModule {
             let wmo = formats.wmo(&read)?;
             let (sets, doodads) = (wmo.doodad_sets.clone(), wmo.doodads.clone());
             let holders = doodads::holders(&wmo.groups, doodads.len());
+            let liquids = liquid::liquids(&wmo);
             if !wmo.faults.is_empty() {
                 log::warn!("{read:?}: {} faults, the first {}", wmo.faults.len(), wmo.faults[0]);
             }
@@ -229,6 +241,7 @@ impl BuildingsModule {
                 sets,
                 doodads,
                 holders,
+                liquids,
             })
         });
         self.file_jobs.insert(job, (file.clone(), given));
@@ -315,7 +328,14 @@ impl BuildingsModule {
             .call("terrain.map", json!({}))
             .ok()
             .and_then(|map| Some(map.get("directory")?.as_str()?.to_owned()));
+        let liquids = ctx.service(liquids::SERVICE);
         if map != self.map {
+            if let (Some(liquids), Some(directory)) = (&liquids, &self.map) {
+                for id in self.poured.keys() {
+                    liquids.clear(&owner(directory, *id));
+                }
+            }
+            self.poured.clear();
             self.show(map, models.as_deref(), ctx);
         }
         let Some(directory) = self.map.clone() else {
@@ -423,6 +443,9 @@ impl BuildingsModule {
             if let Ok(owners) = self.owners.try_lock() {
                 self.parts = owners.parts();
             }
+            if let Some(liquids) = &liquids {
+                self.pour(&directory, &**liquids);
+            }
             let placed: Vec<Placed> = self
                 .ready()
                 .into_iter()
@@ -430,6 +453,7 @@ impl BuildingsModule {
                     transform: formats::placement(building.position, building.rotation, building.scale),
                     wmo: file.gpu.clone(),
                     parts: self.parts.get(&id).cloned(),
+                    liquids: self.poured.get(&id).cloned(),
                 })
                 .collect();
             let cpu = self
@@ -467,6 +491,44 @@ impl BuildingsModule {
                 self.distance,
                 took.as_secs_f32()
             );
+        }
+    }
+
+    /// Places the liquids of the buildings drawn of the map `directory` in the world through
+    /// `service`, those of the buildings let go taken away.
+    fn pour(&mut self, directory: &str, service: &dyn liquids::Liquids) {
+        let ready = self.ready();
+        let drawn: HashSet<u32> = ready.iter().map(|(id, _, _)| *id).collect();
+        self.poured.retain(|id, _| {
+            let kept = drawn.contains(id);
+            if !kept {
+                service.clear(&owner(directory, *id));
+            }
+            kept
+        });
+        for (id, building, file) in ready {
+            if file.liquids.is_empty() || self.poured.contains_key(&id) {
+                continue;
+            }
+            let transform = formats::placement(building.position, building.rotation, building.scale);
+            let placed = file
+                .liquids
+                .iter()
+                .map(|liquid| liquids::Placed {
+                    liquid: liquid.liquid,
+                    positions: liquid
+                        .positions
+                        .iter()
+                        .map(|position| transform.transform_point3(Vec3::from(*position)).to_array())
+                        .collect(),
+                    coordinates: liquid.coordinates.clone(),
+                    depths: liquid.depths.clone(),
+                    triangles: liquid.triangles.clone(),
+                })
+                .collect();
+            let flags = service.place(&owner(directory, id), placed);
+            let groups = file.liquids.iter().map(|liquid| liquid.group).zip(flags).collect();
+            self.poured.insert(id, groups);
         }
     }
 

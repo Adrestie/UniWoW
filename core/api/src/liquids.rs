@@ -1,10 +1,13 @@
 //! Interface of the "liquids" service: the surfaces of the water the module `liquids` holds, by
 //! which a layer tells whether what it blends lies beyond the surface from the eye or on its side
 //! (`viewport::Phase`). They are kept by tile of the map, each tile a grid of its cells of liquid,
-//! made by the job reading the tile, so that giving them anew shares those grids.
+//! made by the job reading the tile, so that giving them anew shares those grids. Other modules
+//! place liquids of their own through it, as `buildings` the liquids of its groups, each shown
+//! while its owner says so.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use crate::formats::{CHUNK, ORIGIN};
 use crate::viewport::Phase;
@@ -25,6 +28,30 @@ pub trait Liquids: Send + Sync {
     /// The surfaces of the water as they are now; the same until the liquids held change, so that
     /// a layer takes them once a frame.
     fn surfaces(&self) -> Arc<Surfaces>;
+
+    /// Places the liquids `liquids` of `owner`, in place of those it placed before; a flag for each,
+    /// in their order, drawn while it is true, as the owner sets it. None by default.
+    fn place(&self, owner: &str, liquids: Vec<Placed>) -> Vec<Arc<AtomicBool>> {
+        let _ = (owner, liquids);
+        Vec::new()
+    }
+
+    /// Takes the liquids of `owner` away.
+    fn clear(&self, owner: &str) {
+        let _ = owner;
+    }
+}
+
+/// A liquid another module places, in the world: its type of `LiquidType.dbc`; its vertices, each
+/// its place, its coordinates of texture and its depth from 0 to 1; its triangles, three indices
+/// into them each.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Placed {
+    pub liquid: u16,
+    pub positions: Vec<[f32; 3]>,
+    pub coordinates: Vec<[f32; 2]>,
+    pub depths: Vec<f32>,
+    pub triangles: Vec<u32>,
 }
 
 /// The water over a tile of the map: one height over all its cells, or the height over each, NaN
@@ -70,6 +97,29 @@ impl Grid {
         }
     }
 
+    /// The water of `other` over the same tile added, the highest kept where both have water.
+    fn merge(&mut self, other: &Grid) {
+        if let (Grid::Flat(kept), Grid::Flat(added)) = (&*self, other) {
+            *self = Grid::Flat(kept.max(*added));
+            return;
+        }
+        if let Grid::Flat(flat) = *self {
+            *self = Grid::Cells(vec![flat; (SIDE * SIDE) as usize].into_boxed_slice());
+        }
+        let Grid::Cells(heights) = self else {
+            return;
+        };
+        for (at, height) in heights.iter_mut().enumerate() {
+            let added = match other {
+                Grid::Flat(added) => *added,
+                Grid::Cells(added) => added[at],
+            };
+            if !added.is_nan() {
+                *height = if height.is_nan() { added } else { height.max(added) };
+            }
+        }
+    }
+
     /// What it takes in memory.
     pub fn bytes(&self) -> usize {
         size_of::<Self>()
@@ -104,6 +154,19 @@ impl Surfaces {
     /// The water `grid` over the tile `tile`.
     pub fn insert(&mut self, tile: [i32; 2], grid: Arc<Grid>) {
         self.tiles.insert(tile, grid);
+    }
+
+    /// The water of `other` added, the highest kept where both have water: the grid of a tile only
+    /// `other` has shared, those of the tiles both have made one, copied when shared.
+    pub fn merge(&mut self, other: &Surfaces) {
+        for (tile, grid) in &other.tiles {
+            match self.tiles.get_mut(tile) {
+                Some(kept) => Arc::make_mut(kept).merge(grid),
+                None => {
+                    self.tiles.insert(*tile, grid.clone());
+                }
+            }
+        }
     }
 
     /// The water over `cells` at their heights, the highest where a cell is given several.
@@ -205,5 +268,39 @@ mod tests {
             (surfaces.len(), Surfaces::tile(Surfaces::cell(corner[0], corner[1]))),
             (1, tile)
         );
+        // Water merged over it: the highest kept, a grid shared not changed, a tile of the other
+        // shared.
+        let ocean = Arc::new(Grid::Flat(-1.0));
+        let mut added = Surfaces::default();
+        added.insert(tile, ocean.clone());
+        let beside = [corner[0] - CELL * 200.0, corner[1]];
+        let pool = Surfaces::from_cells([
+            (Surfaces::cell(corner[0] - 0.5, corner[1] - 0.5), 4.0),
+            (Surfaces::cell(corner[0] - 0.5, corner[1] - CELL - 0.5), -3.0),
+            (Surfaces::cell(beside[0], beside[1]), 2.0),
+        ]);
+        added.merge(&pool);
+        assert_eq!(added.surface(corner[0] - 0.5, corner[1] - 0.5), Some(4.0));
+        assert_eq!(
+            added.surface(corner[0] - 0.5, corner[1] - CELL - 0.5),
+            Some(-1.0),
+            "the highest"
+        );
+        assert_eq!(
+            added.surface(corner[0] - CELL * 9.0, corner[1] - 0.5),
+            Some(-1.0),
+            "the ocean still"
+        );
+        assert_eq!((added.surface(beside[0], beside[1]), added.len()), (Some(2.0), 2));
+        assert_eq!(*ocean, Grid::Flat(-1.0), "the grid shared left as it was");
+        let other = Surfaces::tile(Surfaces::cell(beside[0], beside[1]));
+        assert!(Arc::ptr_eq(&added.tiles[&other], &pool.tiles[&other]), "shared");
+        // Two flat: one height, the highest.
+        let mut flat = Surfaces::default();
+        flat.insert(tile, Arc::new(Grid::Flat(-1.0)));
+        let mut higher = Surfaces::default();
+        higher.insert(tile, Arc::new(Grid::Flat(3.0)));
+        flat.merge(&higher);
+        assert_eq!(*flat.tiles[&tile], Grid::Flat(3.0));
     }
 }

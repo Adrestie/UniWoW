@@ -5605,6 +5605,66 @@ fog under the water with 9.7; `Manual` from 32 to 128 MB kept.
   2. At 64 tiles, the water costs the GPU 1.2 ms (a draw for each of 1,022 tiles): one draw for all
      of them, or kept.
 
+#### Step 9.6e2, as built: the water of the buildings
+
+- **Checked over the client** before building on it, by probes not kept: 406 groups have a liquid,
+  255 vertices at the median, 29,673 at most. 200 are of buildings whose flag 0x4 names the types of
+  `LiquidType.dbc`, their types 1, 3, 4, 5, 7, 8 and 14; the 206 others all name the type 15, the
+  low nibbles of their cells 0, 2, 3, 4, 6 and 7. No group has cells of two basic kinds, none the
+  flag 0x80000 of the ocean. The rows of a grid go up the Y of the building: of 340,938 vertices,
+  325,968 lie within the bounds of their group so, 50,633 down Y.
+- **The type of a liquid** (`buildings/src/liquid.rs`), as the client takes it, read for the facts
+  in the public description of the format and in Noggit: of a building of the flag 0x4, the group's
+  own type from 21, below it the basic kind of the type before; otherwise the basic kind of the
+  group's type below 20, of each cell's for the type 15, the type after from 20. A basic kind, the
+  two low bits, is the water of the buildings (13), their ocean (14) in a group of the flag 0x80000,
+  their magma (19) or their slime (20). Those of the client come to 13, 19, 20 and, for one group,
+  14; the water of the procedural material (`lake_a`), the magma `magma0`, the slime `slime.%d`.
+- **The meshes**: each cell drawn (not of the flag 0x8) two triangles over its four vertices, a
+  liquid for each type of a group's cells; the water its depth from the first byte of each vertex,
+  its flow, over 255, and two repeats of its texture a chunk as the tiles; magma and slime their
+  coordinates from their vertices, two numbers of 16 bits over 255. Made once by the job reading the
+  file (`WmoFile::liquids`), in the axes of the building.
+- **Handed to `liquids`** (`core/api/src/liquids.rs`): `Liquids::place(owner, liquids)` places
+  liquids in the world, those of the owner before taken away, and gives a flag for each, drawn while
+  true; `Liquids::clear(owner)` takes them away. `buildings` places those of each building drawn,
+  moved by its placement, its owner `buildings/<map>/<unique id>`; it clears them once the building
+  is let go or the map changes.
+- **Shown** as the doodads: the layer of the buildings sets the flag of each liquid, shown when its
+  group is seen through the portals from inside, all of them seen from outside or out of sight; the
+  layer of `liquids` draws one while its flag is set and its bounds are in sight, the frame after,
+  as `models` the doodads.
+- **In `liquids`**: the liquids placed put on the GPU by jobs, their types and textures as the
+  tiles', a refusal for want of room tried again once room may have been made; magma and slime
+  opaque, the water in its phase. The surfaces of their water, the cells under the middle of each
+  triangle and of its sides, made by the job for each owner; merged into those of the tiles when
+  given, a tile of an owner's alone shared, one of the ground too made one, copied once. What they
+  take on the GPU counted in the fixed part of the demand.
+- **Seen in the editor**: the canals of Stormwind by the trade district and the mage quarter, and
+  from over the city; the fountain of Dalaran.
+- **Measured** on the user's machine, the buildings at 8 tiles: Stormwind, 50 liquids placed by the
+  buildings, 2 or 3 drawn; Dalaran, 29 placed, 4 drawn. Giving the liquids held took 0.34 ms at the
+  longest in Stormwind and 0.14 ms in Dalaran, against 6.06 and 1.01 ms when the first build added
+  the cells of the owners one by one on the interface thread; the frame at 16.7 ms. Once, while the
+  window of the editor was widened by the recette, the kernel said a validation error of wgpu
+  (`Surface::configure`, the GPU not idle in time); not seen again in the next launches.
+- **Not done**: the fog under the water and the light of the insides (9.7); the material the liquid
+  of a group names, which Noggit does not read either.
+- **Tested** by 19 changes made on purpose to the type, the meshes, the flags, the merging of the
+  surfaces and the liquids placed: all made a test fail, one once a case was added (a type from 15
+  to 19 of a building without the flag 0x4, of its basic kind). Added: the types of the table and of
+  the cells; a group's liquid, a cell of water and one of magma, a cell not drawn; the flags of the
+  liquids of the groups seen from inside, out of sight and from outside; the surfaces merged, a tile
+  shared, two flat; a liquid placed meshed as given, its water under the surfaces; placed through
+  the service, a flag each, taken away; put on the GPU and drawn while shown and in sight.
+- **Questions:**
+  1. The surfaces are one height a cell: the water of a building over a floor, a pool upstairs,
+     makes what lies under it on the floor below beyond the surface for the order of the blended.
+     Kept, or the water of each building kept apart and tested against its bounds.
+  2. A building seen from outside draws its groups by their bounds, the walls hiding its insides;
+     their liquids are shown with them, as the doodads. Seen from under Dalaran, its sewers show
+     through the faces turned away. Kept.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

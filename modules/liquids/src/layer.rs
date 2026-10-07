@@ -2,8 +2,11 @@
 //! with the opaque, their water in the phase of the water, between what is blended beyond its
 //! surface and what is blended on the eye's side, from over it and from under it.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
+
+use uniwow_api::glam::{Mat4, Vec3, Vec4};
 
 use uniwow_api::viewport::{Drawing, Layer, LayerStats, Phase, Stage, Target, View};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
@@ -14,13 +17,38 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// What the module shares with its layer: the tiles held, the time it spent steering, and the
-/// longest it took to give the tiles held since the map was shown.
+/// A liquid another module placed, on the GPU: drawn while its flag is set and its bounds, in the
+/// world, are in sight.
+#[derive(Clone)]
+pub struct Poured {
+    pub gpu: Arc<TileGpu>,
+    pub shown: Arc<AtomicBool>,
+    pub bounds: [Vec3; 2],
+}
+
+/// What the module shares with its layer: the tiles held and the liquids other modules placed, the
+/// time it spent steering, and the longest it took to give them since the map was shown.
 #[derive(Default)]
 pub struct Scene {
     pub tiles: Vec<Arc<TileGpu>>,
+    pub placed: Vec<Poured>,
     pub steering: Duration,
     pub publishing: Duration,
+}
+
+/// Whether the box `bounds` lies, even in part, within the sides of the view of `view_proj`, its
+/// far plane left out.
+fn in_sight(view_proj: &Mat4, bounds: &[Vec3; 2]) -> bool {
+    let [x, y, z, w] = [0, 1, 2, 3].map(|row| view_proj.row(row));
+    // Reverse Z: the near plane where the depth is 1.
+    [w + x, w - x, w + y, w - y, w - z].iter().all(|plane: &Vec4| {
+        let nearest = Vec3::new(
+            if plane.x >= 0.0 { bounds[1].x } else { bounds[0].x },
+            if plane.y >= 0.0 { bounds[1].y } else { bounds[0].y },
+            if plane.z >= 0.0 { bounds[1].z } else { bounds[0].z },
+        );
+        plane.truncate().dot(nearest) + plane.w >= 0.0
+    })
 }
 
 pub struct LiquidsLayer {
@@ -49,10 +77,22 @@ impl LiquidsLayer {
 impl Layer for LiquidsLayer {
     fn prepare(&mut self, gpu: &egui_wgpu::RenderState, view: &View) {
         let shared = self.shared.clone();
-        let (tiles, steering, publishing) = {
+        let (mut tiles, placed, steering, publishing) = {
             let scene = lock(&self.scene);
-            (scene.tiles.clone(), scene.steering, scene.publishing)
+            (
+                scene.tiles.clone(),
+                scene.placed.clone(),
+                scene.steering,
+                scene.publishing,
+            )
         };
+        let tiles_held = tiles.len();
+        let shown = placed
+            .iter()
+            .filter(|poured| poured.shown.load(Ordering::Relaxed) && in_sight(&view.view_proj, &poured.bounds));
+        let before = tiles.len();
+        tiles.extend(shown.map(|poured| poured.gpu.clone()));
+        let drawn_placed = tiles.len() - before;
         let (camera, _) = self.camera.get_or_insert_with(|| {
             let buffer = shared.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("liquids camera"),
@@ -90,8 +130,10 @@ impl Layer for LiquidsLayer {
             triangles: (water + opaque) / 3,
             bytes: shared.bytes(),
             items: format!(
-                "{} tiles, {} triangles of water and {} of magma and slime; arenas of {} and {} MB ({} and {}                  used), of {} MB at most each; given in {:.2} ms at the longest",
-                tiles.len(),
+                "{tiles_held} tiles, and {drawn_placed} drawn of the {} liquids other modules placed; {} \
+                 triangles of water and {} of magma and slime; arenas of {} and {} MB ({} and {} used), of {} MB at \
+                 most each; given in {:.2} ms at the longest",
+                placed.len(),
                 water / 3,
                 opaque / 3,
                 shared.vertices.bytes().0 >> 20,

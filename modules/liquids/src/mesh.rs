@@ -3,9 +3,11 @@
 //! cell it covers, the mean of its corners. A layer whose vertices are all at one height and one
 //! depth, its coordinates those by default, as are those without vertices, is drawn by a quad for
 //! each rectangle of the cells it covers; another by two triangles a cell over its 9 × 9 vertices.
+//! A liquid another module places is drawn as it gives it.
 
 use uniwow_api::formats::{LIQUID_SIDE, LiquidLayer};
-use uniwow_api::liquids::{CELL, Surfaces};
+use uniwow_api::glam::Vec3;
+use uniwow_api::liquids::{CELL, Placed, Surfaces};
 
 /// The kinds of a type of liquid that are not water.
 const MAGMA: u32 = 2;
@@ -172,6 +174,47 @@ pub fn meshes(layers: &[LiquidLayer], kind: impl Fn(u16) -> Option<(u32, bool)>)
                     let y = layer.corner[1] - (column as f32 + 0.5) * CELL;
                     meshes.surfaces.push((Surfaces::cell(x, y), height));
                 }
+            }
+        }
+    }
+    meshes
+}
+
+/// The meshes of the liquid `placed` by another module, its type given its slot in the table and
+/// whether it is water by `kind`; none for a type it does not know. The surfaces of its water by
+/// the cells under the middle of each triangle and of its sides, at the heights there.
+pub fn placed(placed: &Placed, kind: impl Fn(u16) -> Option<(u32, bool)>) -> Meshes {
+    let mut meshes = Meshes::default();
+    let Some((slot, water)) = kind(placed.liquid) else {
+        return meshes;
+    };
+    meshes.vertices = placed
+        .positions
+        .iter()
+        .enumerate()
+        .map(|(at, position)| Vertex {
+            position: *position,
+            uv: placed.coordinates.get(at).copied().unwrap_or_default(),
+            depth: placed.depths.get(at).copied().unwrap_or(1.0),
+            slot,
+        })
+        .collect();
+    let count = meshes.vertices.len() as u32;
+    let triangles: Vec<[u32; 3]> = placed
+        .triangles
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .copied()
+        .filter(|corners| corners.iter().all(|corner| *corner < count))
+        .collect();
+    let indices = if water { &mut meshes.water } else { &mut meshes.opaque };
+    indices.extend(triangles.iter().flatten());
+    if water {
+        for corners in &triangles {
+            let [a, b, c] = corners.map(|corner| Vec3::from(placed.positions[corner as usize]));
+            for point in [(a + b + c) / 3.0, (a + b) / 2.0, (b + c) / 2.0, (c + a) / 2.0] {
+                meshes.surfaces.push((Surfaces::cell(point.x, point.y), point.z));
             }
         }
     }
