@@ -14,6 +14,7 @@ use crate::tests::{NoFiles, TARGET, device};
 
 const INSIDE: u32 = 0x2000;
 const OUTSIDE: u32 = 0x8;
+const OPEN: u32 = 0x40;
 
 /// The sides of the view from `eye` towards `target`.
 fn sides(eye: Vec3, target: Vec3) -> [Vec4; 5] {
@@ -60,10 +61,20 @@ fn room(low: [f32; 3], high: [f32; 3], portals: [u16; 2]) -> WmoGroup {
 }
 
 #[test]
-fn the_camera_is_in_the_group_inside_whose_floor_is_the_nearest_under_it() {
-    let mut open = room([20.0, 0.0, 0.0], [30.0, 10.0, 4.0], [0, 0]);
-    open.bsp = vec![leaf(0, 2)];
-    open.bsp_faces = vec![0, 1];
+fn the_camera_is_in_the_group_inside_whose_floor_is_the_nearest_under_it_under_its_ceiling() {
+    // A street lit as outside, open to the sky, and a room without a ceiling.
+    let mut street = room([20.0, 0.0, 0.0], [30.0, 10.0, 4.0], [0, 0]);
+    street.bsp = vec![leaf(0, 2)];
+    street.bsp_faces = vec![0, 1];
+    street.flags |= OPEN;
+    street.bounds[1][2] = 20.0;
+    let mut roofless = street.clone();
+    roofless.flags = INSIDE;
+    roofless.bounds = [[30.0, 0.0, 0.0], [40.0, 10.0, 4.0]];
+    roofless.vertices.iter_mut().for_each(|vertex| vertex[0] += 10.0);
+    // A room whose bounds reach past its roof, as a sloped roof's do.
+    let mut attic = room([50.0, 0.0, 0.0], [60.0, 10.0, 4.0], [0, 0]);
+    attic.bounds[1][2] = 8.0;
     let mut outside = room([0.0, 0.0, 0.0], [10.0, 10.0, 12.0], [0, 0]);
     outside.flags = OUTSIDE;
     let wmo = Wmo {
@@ -73,8 +84,9 @@ fn the_camera_is_in_the_group_inside_whose_floor_is_the_nearest_under_it() {
             // A platform in the first room.
             room([2.0, 2.0, 2.0], [8.0, 8.0, 4.0], [0, 0]),
             outside,
-            // A room open to the sky.
-            open,
+            street,
+            roofless,
+            attic,
         ],
         ..Wmo::default()
     };
@@ -93,13 +105,18 @@ fn the_camera_is_in_the_group_inside_whose_floor_is_the_nearest_under_it() {
         Some(1),
         "over the ceiling of the first, facing down"
     );
-    assert_eq!(holding(25.0, 5.0, 1.0), Some(4), "open to the sky");
+    assert_eq!(holding(25.0, 5.0, 1.0), Some(4), "a street open to the sky");
+    assert_eq!(holding(25.0, 5.0, 7.5), Some(4));
+    assert_eq!(holding(25.0, 5.0, 12.0), None, "high over the street");
+    assert_eq!(holding(35.0, 5.0, 1.0), None, "a room without a ceiling");
+    assert_eq!(holding(55.0, 5.0, 2.0), Some(6));
+    assert_eq!(holding(55.0, 5.0, 6.0), None, "over its roof");
     assert_eq!(holding(15.0, 5.0, 1.0), None);
     assert_eq!(holding(5.0, 5.0, 10.0), None, "in a group outside only");
 }
 
 #[test]
-fn the_tree_gives_the_nearest_triangle_under_the_camera_facing_up() {
+fn the_tree_gives_the_nearest_triangle_under_the_camera_facing_up_and_one_over_it_facing_down() {
     // Two floors side by side cut across X at 5; over the right one a ceiling, cut from its floor
     // across Z at 2; and a ramp on the left, rising along X from 1 to 2.
     let floor = Floor {
@@ -150,16 +167,19 @@ fn the_tree_gives_the_nearest_triangle_under_the_camera_facing_up() {
             .collect(),
         triangles: vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7, 8, 10, 9, 8, 11, 10, 12, 13, 14],
     };
-    let under = |x, y, z| {
-        floor
-            .under(Vec3::new(x, y, z))
-            .map(|height| (height * 100.0).round() / 100.0)
+    let around = |x, y, z| {
+        let (under, over) = floor.around(Vec3::new(x, y, z));
+        (under.map(|height| (height * 100.0).round() / 100.0), over)
     };
-    assert_eq!(under(2.0, 5.0, 3.0), Some(1.4), "the ramp the nearest");
-    assert_eq!(under(2.0, 5.0, 0.5), Some(0.0));
-    assert_eq!(under(7.0, 5.0, 1.0), Some(0.0));
-    assert_eq!(under(7.0, 5.0, 5.0), Some(0.0), "the ceiling under it facing down");
-    assert_eq!(under(7.0, 5.0, -1.0), None);
+    assert_eq!(around(2.0, 5.0, 3.0), (Some(1.4), false), "the ramp the nearest");
+    assert_eq!(around(2.0, 5.0, 0.5), (Some(0.0), false), "the ramp over it facing up");
+    assert_eq!(around(7.0, 5.0, 1.0), (Some(0.0), true), "under the ceiling");
+    assert_eq!(
+        around(7.0, 5.0, 5.0),
+        (Some(0.0), false),
+        "the ceiling under it facing down"
+    );
+    assert_eq!(around(7.0, 5.0, -1.0), (None, true));
     // Beside the ramp, past each of its three sides: its floor alone under it, or nothing.
     let ramp = Floor {
         nodes: vec![leaf(0, 1)],
@@ -173,9 +193,9 @@ fn the_tree_gives_the_nearest_triangle_under_the_camera_facing_up() {
         Vec3::new(-1.0, 5.0, 1.0),
         Vec3::new(5.0, -1.0, 1.0),
     ] {
-        assert_eq!(ramp.under(beside), None, "{beside}");
+        assert_eq!(ramp.around(beside), (None, false), "{beside}");
     }
-    assert_eq!(ramp.under(Vec3::new(2.0, 2.0, 1.0)), Some(0.0));
+    assert_eq!(ramp.around(Vec3::new(2.0, 2.0, 1.0)), (Some(0.0), false));
 }
 
 #[test]

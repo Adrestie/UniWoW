@@ -50,12 +50,148 @@ use uniwow_api::{
 
 use choice::Tables;
 use gpu::Shared;
+use groups::Published;
 use layer::{ModelsLayer, Scene};
 use loading::{Caches, Ready};
 use service::Service;
 
 pub fn lock<T>(shared: &Mutex<T>) -> MutexGuard<'_, T> {
     shared.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// How far the camera moves before the distances of the looks placed are taken again, in yards: a
+/// sixteenth of a band of the budget of the view.
+const WALK: f32 = viewport::BAND / 16.0;
+
+/// The owners of instances, by their number, with their publications.
+pub(crate) type Owners = [(u32, Arc<Published>)];
+
+/// The distance from the eye of the nearest group of each look placed, as walked: whole from where
+/// the camera stood, after which publication of the looks held, those over the owners that do not
+/// move kept; the owners that move, seen to publish again at the last whole walk, walked again at
+/// each frame.
+pub(crate) struct Walked {
+    pub eye: Vec3,
+    pub generation: u64,
+    /// Each owner with its publication as last seen.
+    pub owners: HashMap<u32, Arc<Published>>,
+    pub moving: HashSet<u32>,
+    pub fixed: HashMap<LookId, f32>,
+    pub nearest: HashMap<LookId, f32>,
+}
+
+impl Walked {
+    /// The distances for `eye`, the looks held at `generation` and `owners`, from those of `before`;
+    /// whether all were walked again: when the camera moved past `WALK`, the looks held were
+    /// published, an owner came or went, or one that did not move published again.
+    pub fn update(
+        before: Option<Walked>,
+        owners: &Owners,
+        generation: u64,
+        eye: Vec3,
+        radius: impl Fn(LookId) -> f32,
+    ) -> (Walked, bool) {
+        let seen: HashMap<u32, Arc<Published>> = owners.iter().cloned().collect();
+        let changed: HashSet<u32> = owners
+            .iter()
+            .filter(|(number, published)| {
+                before
+                    .as_ref()
+                    .and_then(|before| before.owners.get(number))
+                    .is_none_or(|kept| !Arc::ptr_eq(kept, published))
+            })
+            .map(|(number, _)| *number)
+            .collect();
+        if let Some(before) = before
+            && before.generation == generation
+            && before.eye.distance(eye) <= WALK
+            && before.owners.len() == seen.len()
+            && changed.is_subset(&before.moving)
+        {
+            let mut nearest = before.fixed.clone();
+            merge(
+                &mut nearest,
+                nearest_looks(
+                    owners
+                        .iter()
+                        .filter(|(number, _)| before.moving.contains(number))
+                        .map(|(_, published)| &**published),
+                    &radius,
+                    eye,
+                ),
+            );
+            let walked = Walked {
+                owners: seen,
+                nearest,
+                ..before
+            };
+            return (walked, false);
+        }
+        let moving = if changed.len() == owners.len() {
+            HashSet::new()
+        } else {
+            changed
+        };
+        let fixed = nearest_looks(
+            owners
+                .iter()
+                .filter(|(number, _)| !moving.contains(number))
+                .map(|(_, published)| &**published),
+            &radius,
+            eye,
+        );
+        let mut nearest = fixed.clone();
+        merge(
+            &mut nearest,
+            nearest_looks(
+                owners
+                    .iter()
+                    .filter(|(number, _)| moving.contains(number))
+                    .map(|(_, published)| &**published),
+                &radius,
+                eye,
+            ),
+        );
+        let walked = Walked {
+            eye,
+            generation,
+            owners: seen,
+            moving,
+            fixed,
+            nearest,
+        };
+        (walked, true)
+    }
+}
+
+/// The nearer of the distances of `into` and `from` for each look, in `into`.
+fn merge(into: &mut HashMap<LookId, f32>, from: HashMap<LookId, f32>) {
+    for (look, distance) in from {
+        into.entry(look)
+            .and_modify(|at| *at = at.min(distance))
+            .or_insert(distance);
+    }
+}
+
+/// The distance from `eye` of the nearest group of each look of the owners `published`, its bounds
+/// grown by the radius `radius` gives its look, at its scale.
+pub(crate) fn nearest_looks<'a>(
+    published: impl Iterator<Item = &'a Published>,
+    radius: impl Fn(LookId) -> f32,
+    eye: Vec3,
+) -> HashMap<LookId, f32> {
+    let mut nearest: HashMap<LookId, f32> = HashMap::new();
+    for published in published {
+        for group in &published.groups {
+            let radius = radius(group.look) * group.scale;
+            let distance = layer::nearest(eye, [group.low - Vec3::splat(radius), group.high + Vec3::splat(radius)]);
+            nearest
+                .entry(group.look)
+                .and_modify(|at| *at = at.min(distance))
+                .or_insert(distance);
+        }
+    }
+    nearest
 }
 
 /// The setting of how far an instance is drawn, in radii of it, and its least and most.
@@ -229,8 +365,10 @@ struct ModelsModule {
     loading: HashMap<LookId, JobId>,
     jobs: HashMap<JobId, LookId>,
     generation: u64,
-    /// What the models told the budget of the view last.
+    /// What the models told the budget of the view last, and the distances of the looks placed as
+    /// last walked.
     told: Option<Demand>,
+    walked: Option<Walked>,
     frame: u64,
     reach: f32,
     preview: Preview,
@@ -254,6 +392,7 @@ impl Default for ModelsModule {
             jobs: HashMap::new(),
             generation: 0,
             told: None,
+            walked: None,
             frame: 0,
             reach: DEFAULT_REACH,
             preview: Preview::default(),
@@ -296,9 +435,10 @@ impl ModelsModule {
         }
     }
 
-    /// At each frame, while the view is drawn: the nearest group of each look placed, the loads it
-    /// wants started the nearest first, those beyond what the budget keeps released, and the
-    /// models' demand told to the budget.
+    /// At each frame, while the view is drawn: the nearest group of each look placed, walked again
+    /// only once the camera moved by `WALK` or something was published; the loads it wants
+    /// started the nearest first, those beyond what the budget keeps released, and the models'
+    /// demand told to the budget.
     fn steer(&mut self, ctx: &mut Context) {
         let start = Instant::now();
         if lock(&self.service.formats).is_none()
@@ -317,18 +457,16 @@ impl ModelsModule {
             Ok(PropertyValue::Vector([x, y, z])) => Vec3::new(x as f32, y as f32, z as f32),
             _ => return,
         };
-        let mut nearest: HashMap<LookId, f32> = HashMap::new();
-        for slot in self.service.owners() {
-            for group in &slot.published().groups {
-                let radius = self.held.get(&group.look).map_or(0.0, |look| look.radius()) * group.scale;
-                let bounds = [group.low - Vec3::splat(radius), group.high + Vec3::splat(radius)];
-                let distance = layer::nearest(eye, bounds);
-                nearest
-                    .entry(group.look)
-                    .and_modify(|at| *at = at.min(distance))
-                    .or_insert(distance);
-            }
-        }
+        let owners: Vec<(u32, Arc<Published>)> = self
+            .service
+            .owners()
+            .iter()
+            .map(|slot| (slot.number, slot.published()))
+            .collect();
+        let (walked, _) = Walked::update(self.walked.take(), &owners, self.generation, eye, |look| {
+            self.held.get(&look).map_or(0.0, |look| look.radius())
+        });
+        let nearest = &walked.nearest;
         let allowance = view.allowance();
         // Released beyond what the budget keeps, or placed no more, the farthest first.
         let released: Vec<LookId> = self
@@ -398,7 +536,7 @@ impl ModelsModule {
                 self.service.set_state(id, LookState::Loading);
             }
         }
-        self.tell_budget(&view, &nearest);
+        self.tell_budget(&view, nearest);
         let mut scene = lock(&self.scene);
         let (models, textures) = (self.caches.models.counts(), self.caches.textures.counts());
         let own = self
@@ -457,6 +595,8 @@ impl ModelsModule {
             cpu[1] as f64 / MB
         );
         scene.steering = start.elapsed();
+        drop(scene);
+        self.walked = Some(walked);
     }
 
     /// Tells the budget of the view what the models hold and want, each model and texture once, in

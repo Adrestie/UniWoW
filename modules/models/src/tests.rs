@@ -1240,3 +1240,91 @@ fn the_bounds_of_an_owner_hold_its_groups_drawn_grown_by_their_largest_radius() 
     };
     assert_eq!(layer::owner_bounds(&undrawn, &looks), None, "no look of it drawn");
 }
+
+#[test]
+fn the_distances_of_the_looks_are_walked_whole_only_once_the_camera_moved_or_an_owner_not_moving_changed() {
+    let group = |look: u32, x: f32| Group {
+        look: LookId(look),
+        tile: [0, 0],
+        first: 0,
+        count: 1,
+        low: Vec3::new(x, 0.0, 0.0),
+        high: Vec3::new(x, 0.0, 0.0),
+        scale: 2.0,
+    };
+    let published = |groups: Vec<Group>| {
+        Arc::new(groups::Published {
+            groups,
+            ..groups::Published::default()
+        })
+    };
+    // A building, its look 0 twice; a creature of the look 1.
+    let building = published(vec![group(0, 30.0), group(0, 10.0)]);
+    let creature = |x| published(vec![group(1, x)]);
+    let radius = |look: LookId| if look == LookId(0) { 1.5 } else { 0.0 };
+    let update = |before, owners: &[(u32, Arc<groups::Published>)], generation, eye| {
+        crate::Walked::update(before, owners, generation, eye, radius)
+    };
+    let (walked, whole) = update(None, &[(1, building.clone()), (2, creature(50.0))], 3, Vec3::ZERO);
+    assert!(whole);
+    assert_eq!(
+        (walked.nearest[&LookId(0)], walked.nearest[&LookId(1)]),
+        (7.0, 50.0),
+        "the nearest group of each look, grown by its radius at its scale"
+    );
+    // The creature moves: walked whole once, then it alone at each frame.
+    let (walked, whole) = update(
+        Some(walked),
+        &[(1, building.clone()), (2, creature(40.0))],
+        3,
+        Vec3::ZERO,
+    );
+    assert!(whole && walked.moving.contains(&2));
+    let (walked, whole) = update(
+        Some(walked),
+        &[(1, building.clone()), (2, creature(20.0))],
+        3,
+        Vec3::ZERO,
+    );
+    assert!(!whole);
+    assert_eq!(walked.nearest[&LookId(1)], 20.0);
+    let (walked, whole) = update(
+        Some(walked),
+        &[(1, building.clone()), (2, creature(60.0))],
+        3,
+        Vec3::ZERO,
+    );
+    assert!(!whole);
+    assert_eq!(walked.nearest[&LookId(1)], 60.0, "farther than at the whole walk");
+    let (walked, _) = update(
+        Some(walked),
+        &[(1, building.clone()), (2, creature(20.0))],
+        3,
+        Vec3::ZERO,
+    );
+    let (walked, whole) = update(
+        Some(walked),
+        &[(1, building.clone()), (2, creature(20.0))],
+        3,
+        Vec3::new(crate::WALK, 0.0, 0.0),
+    );
+    assert!(!whole, "moved within the margin");
+    // Walked whole: past the margin, the looks held published, the building published again, an
+    // owner more.
+    let still = [(1, building.clone()), (2, creature(20.0))];
+    let (walked, whole) = update(Some(walked), &still, 3, Vec3::new(crate::WALK + 0.5, 0.0, 0.0));
+    assert!(whole, "the camera moved past");
+    let (walked, whole) = update(Some(walked), &still, 4, Vec3::new(crate::WALK + 0.5, 0.0, 0.0));
+    assert!(whole, "the looks held published");
+    let moved = [(1, published(vec![group(0, 30.0)])), (2, creature(20.0))];
+    let (walked, whole) = update(Some(walked), &moved, 4, Vec3::new(crate::WALK + 0.5, 0.0, 0.0));
+    assert!(whole, "the building published again");
+    assert_eq!(walked.nearest[&LookId(0)], 30.0 - crate::WALK - 0.5 - 3.0);
+    let more = [moved[0].clone(), moved[1].clone(), (3, creature(5.0))];
+    let (walked, whole) = update(Some(walked), &more, 4, Vec3::ZERO);
+    assert!(whole, "an owner more");
+    assert_eq!(walked.nearest[&LookId(1)], 5.0);
+    let (walked, whole) = update(Some(walked), &[more[1].clone(), more[2].clone()], 4, Vec3::ZERO);
+    assert!(whole, "an owner gone");
+    assert!(!walked.nearest.contains_key(&LookId(0)));
+}

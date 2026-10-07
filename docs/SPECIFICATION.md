@@ -5214,6 +5214,88 @@ the arrays of textures shared and 16-bit indices, the holes of the terrain under
      only. Kept for the dungeons seen from outside.
   5. The insides still dark (question 3 of the review points of 9.6d1).
 
+#### Step 9.6d2, after its review
+
+The points of 9.6d1 validated, and 9.6d2: the recursion through the portals and their clipping, the
+planes moved into the axes of the building by the transpose, `Models::shown` read again after each
+place. Two points before 9.6e: the camera over a roof taken for inside a room, and the insides too
+dark, the chain of the colour of a vertex of the floor of the inn traced to the pixel. Minor: the
+owners present kept in a set. Answered: the blocks of the allocator detailed, those visible by the
+CPU told apart; the groups of `models` walked again only when the camera moved by a margin or the
+owners changed; the doodads a frame late, the memory of the cells and the insides drawn by their
+bounds from outside kept.
+
+#### Step 9.6d2, its review points as built
+
+- **The insides too dark: an error found in the chain, after the pixel.** For a vertex of the floor
+  of the hall of the inn of Goldshire, under the camera of the captures (group 5, flags 0x2805, its
+  vertex colours set, 0x4): the colours read, red first, (60, 47, 34), (57, 44, 28), (86, 68, 46),
+  their alpha 0; at the camera (79.0, 62.2, 41.9); the ambient colour of `MOHD` (19, 16, 14); fixed
+  (30.4, 23.1, 13.9); the light inside, in gamma `c·2 + ambient` (0.313, 0.244, 0.164), linear
+  (0.080, 0.049, 0.023); the texel of its texture (101, 79, 51): the pixel expected (26, 12, 3), the
+  pixel stored by the frame (22, 8, 1), as expected. Shown (2, 1, 0): egui read the texture of the
+  view through its view of sRGB, decoded to linear when sampled, then took the value for one in
+  gamma and decoded it again, which darkened the whole view, terrain, sky and models as the
+  buildings. The view now gives egui a second view of the same texture, `Rgba8Unorm`, which reads
+  its bytes as stored (`resolve_target`); a test writes a grey of 0.5 through each view and reads
+  the byte back, 188 through the view of the pass, 128 through the one egui shows. The other texture
+  egui shows, the scene of the kernel, was already `Rgba8Unorm`. Compared again with the captures
+  of the game at the same places: a plaster panel by the door 86, 72, 53 against 92, 74, 53; an
+  outer wall 76, 54, 35 against 71, 53, 37; the floor by the door 34, 20, 5 against 43, 30, 14. The
+  outside now as the game shows it but for the sky; the insides about 0.8 times as bright and less
+  blue: left to the lights of 9.7. Every view of the editor is brighter than when its steps were
+  validated: they were seen through that darkening.
+- **The camera over a roof.** Flown low over the inn and the roofs of Dalaran, the fault was worse
+  than holes: in the attic of the inn and in a hall of Dalaran, groups outside by their flags
+  (0x8, `upstairs` and `interior_petshop`), the camera was taken for inside a room under it whose
+  bounds hold it, its floor 16 to 19 yards lower and nothing of it over the camera; drawn through
+  that room's portals, the building disappeared. The group the camera is in now needs, besides a
+  triangle of its tree under the camera facing up, one over it facing down, a ceiling; or, for a
+  group lit as outside (0x40), inside but open to the sky, its floor within 8 yards under the
+  camera. Of the 350 groups lit as outside, in 37 buildings, are the streets of Stormwind and the
+  Valley of Honor of Orgrimmar; no room of the inn or of Dalaran is. The 8 yards keep the camera
+  among the houses of a street, whose portals reach 15 to 19 yards over it: over Stormwind's roofs,
+  at 18 and 31 yards over the street, the camera was still inside before and the buildings past
+  the portals, a dome of the mage quarter and ramparts, were missing; it is outside now. The test of
+  the sides of the portals of the public implementation (WebWowViewerCpp, read for its facts)
+  rejects only a camera on a portal's plane, within 0.01 yards and its box: it answers neither case.
+- **Seen again**, each view with the portals and without, in the editor: the attic of the inn three
+  times and Dalaran three times, outside now, the same picture but for the creatures walking; the
+  hall of the inn, its door from inside, the street of Stormwind, Ironforge and a hall of Dalaran
+  still inside (2, 4, 7, 4 and 35 groups seen through their portals), the second spire of
+  Stormwind's cathedral hidden in the street as the game hides it.
+- **The blocks of the allocator**, in Dalaran with the terrain at 3 tiles and the buildings at 4: 23
+  blocks, 5,440 MB reserved, 1,956 MB allocated. The report gives no memory type; told apart by the
+  allocations they hold, the memory of a block being of one type: visible by the CPU, the block of
+  the staging of wgpu (`(wgpu internal) Staging`, 128 MB, empty then) and one of the readbacks
+  (statistics and timestamps, 64 MB), 192 MB; in the memory of the device, the 21 others, 5,248 MB,
+  of which 11 of 256 MB use 0 to 12 MB each, held by small allocations that live long: the buffers
+  of instances of the owners of `models` (478 of them, one each), the frame's buffers of the
+  buildings, small arrays of textures. The private memory, 6,682 MB, is about what the process
+  holds in memory and all the blocks reserved (1,129 + 5,440): on this machine (Vulkan, NVIDIA,
+  Windows) the blocks of the device count in it, not only those visible by the CPU.
+- **The walk of `models`**: the distance of the nearest group of each look, walked whole only when
+  the camera moved past a sixteenth of a band of the budget (8.3 yards), the looks held were
+  published, an owner came or went, or an owner that did not move published again; the owners that
+  move, seen to publish again at the last whole walk (the creatures, which publish at each frame),
+  walked again at each frame over the distances of the others kept. In Dalaran, the steering of
+  `models` on the interface thread 0.91 to 0.93 ms held still against 1.13, 0.93 to 0.95 in flight
+  against 1.22 to 1.24. Of what remains, by a timing not kept: what the models tell the budget,
+  0.53 ms, and their summary, 0.13 ms.
+- **Minor**: the owners present kept in a set, the bounds of those gone let go in a time linear in
+  their number.
+- **Tested** by 13 changes made on purpose: all made a test fail, two of them once two cases were
+  added to the test of the walk (an owner that did not move gone; a creature farther than at the
+  whole walk).
+- **Questions:**
+  1. The 8 yards over the floor of a street: from the portals of Stormwind's streets; to keep, or
+     taken from the portals of each street (their lowest top over its floor).
+  2. The insides 0.8 times as bright as the game's and less blue: with the lights of 9.7.
+  3. The demand of the models told to the budget at each frame (0.53 ms): made again only when the
+     distances are walked whole or the looks held change.
+  4. The blocks of the device held by small buffers: the buffers of instances of the owners in an
+     arena, as the vertices are, so that the blocks emptied are given back; to measure first.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

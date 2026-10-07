@@ -1,6 +1,8 @@
 //! The groups of a building seen from inside, in its own axes. The group the camera is in: among
 //! the groups inside whose bounds hold it, those with a triangle of their BSP tree under it facing
-//! up, the one whose floor is the nearest under it. From it, the groups seen through the portals: a
+//! up and one over it facing down, or for one open to the sky its floor near under it; the one
+//! whose floor is the nearest under it. A camera over a roof within the bounds of a room, or high
+//! over a street, is not in it. From it, the groups seen through the portals: a
 //! portal passed from the side of the group listing it, clipped by what the camera sees through the
 //! portals before it, which then sees through its sides only; to a group outside, the outside is
 //! seen, and through the portals of the groups outside the groups inside them.
@@ -10,8 +12,10 @@ use std::ops::Range;
 use uniwow_api::formats::{BspNode, Wmo};
 use uniwow_api::glam::{Vec3, Vec4, Vec4Swizzles};
 
-/// The flag of a group outside, and of a leaf of a BSP tree.
+/// The flags of a group: outside; lit as outside, inside but open to the sky, as the streets of a
+/// city are. The flag of a leaf of a BSP tree.
 const OUTSIDE: u32 = 0x8;
+const OPEN: u32 = 0x40;
 const LEAF: u16 = 0x4;
 /// The most portals passed one after the other.
 const DEPTH: usize = 8;
@@ -19,12 +23,16 @@ const DEPTH: usize = 8;
 const NEAR: f32 = 0.5;
 /// How far the bounds of a group are taken past their faces, in yards.
 const MARGIN: f32 = 0.1;
+/// The most the camera rises over the floor of a group open to the sky and is in it, in yards:
+/// below the eaves of the houses along a street, whose portals reach 15 to 19 yards over it.
+const OPEN_HEIGHT: f32 = 8.0;
 
-/// A group: its bounds, whether outside, its portals among the references, and the triangles of its
-/// tree for one inside.
+/// A group: its bounds, whether outside, whether open to the sky, its portals among the
+/// references, and the triangles of its tree for one inside.
 pub struct Cell {
     pub bounds: [Vec3; 2],
     pub outside: bool,
+    pub open: bool,
     pub portals: Range<usize>,
     pub floor: Option<Floor>,
 }
@@ -62,9 +70,10 @@ pub struct Cells {
 }
 
 impl Floor {
-    /// The height of the nearest triangle of the tree under `eye` facing up.
-    pub fn under(&self, eye: Vec3) -> Option<f32> {
-        let mut under: Option<f32> = None;
+    /// The height of the nearest triangle of the tree under `eye` facing up, and whether one over
+    /// it faces down.
+    pub fn around(&self, eye: Vec3) -> (Option<f32>, bool) {
+        let (mut under, mut over): (Option<f32>, bool) = (None, false);
         let mut nodes = vec![0usize];
         while let Some(index) = nodes.pop() {
             let Some(node) = self.nodes.get(index) else {
@@ -73,28 +82,30 @@ impl Floor {
             if node.flags & LEAF != 0 {
                 let first = node.first as usize;
                 for face in self.faces.iter().skip(first).take(usize::from(node.count)) {
-                    if let Some((height, up)) = self.height(usize::from(*face), eye)
-                        && height <= eye.z
-                        && up > 0.0
-                    {
+                    let Some((height, up)) = self.height(usize::from(*face), eye) else {
+                        continue;
+                    };
+                    if height <= eye.z && up > 0.0 {
                         under = Some(under.map_or(height, |at| at.max(height)));
+                    } else if height > eye.z && up < 0.0 {
+                        over = true;
                     }
                 }
                 continue;
             }
-            // The line down from the eye: on the side of the eye of a plane across X or Y, both
-            // where it lies on it; under a plane across Z, and over it too when the eye is.
+            // The vertical line through the eye: on the side of the eye of a plane across X or Y,
+            // both where it lies on it; on both sides of a plane across Z.
             let [negative, positive] = node.children;
             let axis = usize::from(node.flags & 0x3).min(2);
             let at = eye[axis] - node.distance;
             if (axis == 2 || at <= 0.0) && negative >= 0 {
                 nodes.push(negative as usize);
             }
-            if at >= 0.0 && positive >= 0 {
+            if (axis == 2 || at >= 0.0) && positive >= 0 {
                 nodes.push(positive as usize);
             }
         }
-        under
+        (under, over)
     }
 
     /// The height of the triangle `face` at the place of `eye` on the ground, where it lies over
@@ -181,6 +192,7 @@ impl Cells {
                 Cell {
                     bounds: group.bounds.map(Vec3::from),
                     outside,
+                    open: group.flags & OPEN != 0,
                     portals: first..(first + count).min(wmo.portal_refs.len()),
                     floor: (!outside && !group.bsp.is_empty()).then(|| Floor {
                         nodes: group.bsp.clone(),
@@ -242,7 +254,8 @@ impl Cells {
     }
 
     /// The group inside that `eye` is in: of those whose bounds hold it, with a triangle of their
-    /// tree under it facing up, the one whose triangle under it is the nearest.
+    /// tree under it facing up and one over it facing down, or for one open to the sky that
+    /// triangle under it within `OPEN_HEIGHT`, the one whose triangle under it is the nearest.
     pub fn holding(&self, eye: Vec3) -> Option<usize> {
         let mut found: Option<(f32, usize)> = None;
         for (index, cell) in self.groups.iter().enumerate() {
@@ -253,7 +266,9 @@ impl Cells {
             let Some(floor) = &cell.floor else {
                 continue;
             };
-            if let Some(under) = floor.under(eye) {
+            if let (Some(under), over) = floor.around(eye)
+                && (over || cell.open && eye.z - under <= OPEN_HEIGHT)
+            {
                 let gap = eye.z - under;
                 if found.is_none_or(|(nearest, _)| gap < nearest) {
                     found = Some((gap, index));

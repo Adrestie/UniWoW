@@ -15,7 +15,7 @@
 //! pass, read their instances from the buffer of the frame, where the table of the bones finds
 //! them; without the pool, they stay at rest.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -320,7 +320,7 @@ impl Layer for ModelsLayer {
             .flat_map(|animated| &animated.owners)
             .map(|(number, published, at, count)| (*number, (published, *at, *count)))
             .collect();
-        let mut present = Vec::new();
+        let mut present = HashSet::new();
         for slot in self.service.owners() {
             let (published, table) = match snapshots.get(&slot.number) {
                 Some((published, at, count)) => ((*published).clone(), Some((*at, *count))),
@@ -333,7 +333,7 @@ impl Layer for ModelsLayer {
             // An owner hidden, then one out of reach or out of sight by its bounds, is not given to
             // the frame, its instances nor its bones copied.
             if !slot.shown.load(Ordering::Relaxed) {
-                present.push(slot.number);
+                present.insert(slot.number);
                 continue;
             }
             let owner = match self.owner_bounds.get(&slot.number) {
@@ -347,7 +347,7 @@ impl Layer for ModelsLayer {
                     bounds
                 }
             };
-            present.push(slot.number);
+            present.insert(slot.number);
             let owner_seen = owner.is_some_and(|(bounds, radius)| {
                 nearest(view.eye, bounds) <= reach * radius.max(1.0) && in_sight(view.view_proj, bounds)
             });

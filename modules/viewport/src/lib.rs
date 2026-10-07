@@ -370,6 +370,34 @@ impl Default for CameraKeys {
     }
 }
 
+/// The texture the frame is resolved into, of `extent` and `usage`: its view for the pass, which
+/// encodes to sRGB, and the view egui shows, which reads the bytes as stored. egui takes the values
+/// of a texture as already encoded: through a view of sRGB they would be decoded twice, and the
+/// whole view darkened.
+fn resolve_target(
+    device: &wgpu::Device,
+    extent: wgpu::Extent3d,
+    usage: wgpu::TextureUsages,
+) -> (wgpu::Texture, wgpu::TextureView, wgpu::TextureView) {
+    let stored = TARGET.color_format.remove_srgb_suffix();
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("viewport colour"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: TARGET.color_format,
+        usage,
+        view_formats: &[stored],
+    });
+    let resolve = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let shown = texture.create_view(&wgpu::TextureViewDescriptor {
+        format: Some(stored),
+        ..wgpu::TextureViewDescriptor::default()
+    });
+    (texture, resolve, shown)
+}
+
 /// Offscreen textures, recreated when the panel changes size.
 struct Targets {
     size: [u32; 2],
@@ -683,10 +711,9 @@ impl ViewportModule {
             TARGET.sample_count,
             wgpu::TextureUsages::RENDER_ATTACHMENT,
         );
-        let resolved = texture(
-            "viewport colour",
-            TARGET.color_format,
-            1,
+        let (_, resolved, shown) = resolve_target(
+            device,
+            extent,
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         );
         let depth = texture(
@@ -701,13 +728,13 @@ impl ViewportModule {
             Some(old) => {
                 renderer.update_egui_texture_from_wgpu_texture(
                     device,
-                    &resolved,
+                    &shown,
                     wgpu::FilterMode::Linear,
                     old.texture_id,
                 );
                 old.texture_id
             }
-            None => renderer.register_native_texture(device, &resolved, wgpu::FilterMode::Linear),
+            None => renderer.register_native_texture(device, &shown, wgpu::FilterMode::Linear),
         };
         self.targets = Some(Targets {
             size,
@@ -2245,6 +2272,73 @@ fn cs_main() {
 
     const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
     const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+
+    #[test]
+    fn egui_is_shown_the_bytes_the_frame_stores_in_srgb() {
+        let Some(gpu) = gpu() else {
+            return;
+        };
+        let extent = wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        };
+        let (texture, resolve, shown) = super::resolve_target(
+            &gpu.device,
+            extent,
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+        );
+        // A grey of 0.5 written through a view, then the byte stored read back.
+        let stored = |view: &wgpu::TextureView| {
+            let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: 256,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.5,
+                            g: 0.5,
+                            b: 0.5,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            encoder.copy_texture_to_buffer(
+                texture.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(1),
+                    },
+                },
+                extent,
+            );
+            gpu.queue.submit([encoder.finish()]);
+            buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+            gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            buffer.slice(..).get_mapped_range().expect("mapped")[0]
+        };
+        // Through the view of the pass, encoded to sRGB; through the view egui shows, as it is:
+        // what egui reads there is what is stored.
+        assert_eq!(stored(&resolve), 188);
+        assert_eq!(stored(&shown), 128);
+    }
 
     #[test]
     fn layers_drawn_in_the_pass_and_in_bundles_are_drawn_in_their_order_each_with_its_own_state() {
