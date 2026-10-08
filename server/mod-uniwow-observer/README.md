@@ -13,8 +13,8 @@ speaks to it only through its protocol, over the network: they are two separate 
 - It reads a zone at the end of the update of its map, on the thread updating that map. No object
   of the game is touched by its network thread.
 - The zone looked at stays alive without a player: at each update of its map, the creatures and game
-  objects the last reading found are put back in the map's list of objects to update, as the sight
-  of a player does. They move, follow their paths and respawn as they would near a player, which
+  objects the last reading sent, the `MaxEntities` nearest, are put back in the map's list of
+  objects to update, as the sight of a player does. They move, follow their paths and respawn as they would near a player, which
   costs the server some work. `UniwowObserver.KeepAlive = 0` turns that off.
 - The grids of a zone are loaded when it is subscribed to. **They stay loaded until the server
   starts again**, as those a player crossed (AzerothCore unloads grids only when a map is unloaded

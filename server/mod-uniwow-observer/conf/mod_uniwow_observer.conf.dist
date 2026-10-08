@@ -65,7 +65,8 @@ UniwowObserver.Heartbeat = 10
 #
 #    UniwowObserver.KeepAlive
 #        Description: Whether the creatures and game objects of a zone subscribed to are kept
-#                     updated without a player near them, as the sight of a player does.
+#                     updated without a player near them, as the sight of a player does: those
+#                     sent, the MaxEntities nearest, no more.
 #        Default:     1 - (Enabled)
 #                     0 - (Disabled: they stop moving once no player is near)
 

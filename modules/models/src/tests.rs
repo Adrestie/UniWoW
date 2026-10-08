@@ -1351,3 +1351,14 @@ fn the_distances_of_the_looks_are_walked_whole_only_once_the_camera_moved_or_an_
     assert!(whole, "an owner gone");
     assert!(!walked.nearest.contains_key(&LookId(0)));
 }
+
+#[test]
+fn the_animations_ended_leave_the_models_at_rest_and_say_why_when_they_panicked() {
+    let scene = Mutex::new(crate::layer::Scene::default());
+    assert_eq!(
+        crate::animations_ended(&scene, uniwow_api::JobOutcome::Panicked("broken".to_owned())),
+        Some("broken".to_owned())
+    );
+    assert!(scene.lock().unwrap().animated.is_none(), "drawn at rest");
+    assert_eq!(crate::animations_ended(&scene, uniwow_api::JobOutcome::Cancelled), None);
+}

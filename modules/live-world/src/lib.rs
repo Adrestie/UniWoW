@@ -247,6 +247,10 @@ struct LiveWorld {
     /// What the thread placing the markers shares with their layer, and that thread.
     drawing: Arc<markers::Drawing>,
     animating: Option<JobId>,
+    /// Why the thread placing the entities stopped, until Apply starts it again.
+    markers_stopped: Option<String>,
+    /// The 3D view and the GPU the entities are placed with, where there is a view.
+    view: Option<(viewport::Handle, uniwow_api::egui_wgpu::RenderState)>,
     /// The service drawing the models, the looks of the displays, and the job reading them.
     models: Option<models::Handle>,
     looks: Arc<Looks>,
@@ -261,6 +265,24 @@ impl LiveWorld {
     /// Starts the connection thread again with the settings in use. The entities of the one
     /// before are said to leave first, through the same queue of events its thread told them
     /// through, and it tells nothing more.
+    /// Starts the thread placing the entities at each frame, where there is a 3D view.
+    fn start_markers(&mut self, ctx: &mut Context) {
+        let Some((view, gpu)) = self.view.clone() else {
+            return;
+        };
+        self.markers_stopped = None;
+        let (drawing, current) = (self.drawing.clone(), self.current.clone());
+        let (service, looks) = (self.models.clone(), self.looks.clone());
+        self.animating = Some(
+            ctx.spawn_thread("Place the entities of the live world at each frame", move |job| {
+                let models = service.as_deref().map(|service| (&*looks, service));
+                markers::animate(&view, &gpu, &drawing, &|| lock(&current).world(), models, &|| {
+                    job.is_cancelled()
+                });
+            }),
+        );
+    }
+
     fn start(&mut self, ctx: &mut Context) {
         let change = self.shared().retire();
         if !change.is_empty() {
@@ -339,16 +361,8 @@ impl Module for LiveWorld {
         };
         view.add_layer(ctx.module_id(), Box::new(markers::Markers::new(self.drawing.clone())));
         self.models = ctx.service(models::SERVICE);
-        let (drawing, current) = (self.drawing.clone(), self.current.clone());
-        let (service, looks) = (self.models.clone(), self.looks.clone());
-        self.animating = Some(
-            ctx.spawn_thread("Place the entities of the live world at each frame", move |job| {
-                let models = service.as_deref().map(|service| (&*looks, service));
-                markers::animate(&view, &gpu, &drawing, &|| lock(&current).world(), models, &|| {
-                    job.is_cancelled()
-                });
-            }),
-        );
+        self.view = Some((view, gpu));
+        self.start_markers(ctx);
     }
 
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
@@ -401,13 +415,22 @@ impl Module for LiveWorld {
             ui.end_row();
         });
         // Also when the thread stopped, to start it again.
+        if let Some(why) = &self.markers_stopped {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!("The entities stopped moving ({why}): Apply starts them again."),
+            );
+        }
         if ui
             .add_enabled(
-                self.editing != settings || self.thread.is_none(),
+                self.editing != settings || self.thread.is_none() || self.markers_stopped.is_some(),
                 egui::Button::new("Apply"),
             )
             .clicked()
         {
+            if self.animating.is_none() {
+                self.start_markers(ctx);
+            }
             ctx.set_setting(PORT, json!(self.editing.port));
             ctx.set_setting(WORLD_PORT, json!(self.editing.world_port));
             ctx.set_setting(TOKEN, json!(self.editing.token));
@@ -447,6 +470,7 @@ impl Module for LiveWorld {
             self.animating = None;
             if let JobOutcome::Panicked(message) = outcome {
                 log::error!("the markers of the live world stopped: {message}");
+                self.markers_stopped = Some(message);
             }
             return;
         }

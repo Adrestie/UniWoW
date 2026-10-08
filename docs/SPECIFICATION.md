@@ -2822,7 +2822,7 @@ The parts:
 - The module:
   - `Observer`, on the threads of the maps: at the end of each update of a map
     (`AllMapScript::OnMapUpdate`), for each subscription to that map and instance, the objects of
-    the last reading put back in the update list from their GUIDs (`Map::GetCreature`,
+    the last reading, those sent and no more, put back in the update list from their GUIDs (`Map::GetCreature`,
     `Map::GetGameObject`, `Map::AddObjectToPendingUpdateList`); 10 times a second, the zone read by
     a visitor of the cells (`Cell::VisitObjects`), the circle applied, the nearest 2,000 kept, into
     plain records; the grids of the zone loaded when it changes (`Map::LoadGridsInRange`). The
@@ -3009,6 +3009,10 @@ The parts:
   `draw`, inside `catch_unwind` as `stats` is. The view projects each through the transform of the
   frame, leaves out those behind the eye or out of the view, and writes them over its image on a
   dark ground.
+- A thread of `live-world` placing the entities, or of `models` animating them, that panics is
+  said in its panel until the user starts it again (*Apply*, *Animate again*), the entities still
+  and the models at rest meanwhile; neither starts again by itself, which a panic at each start
+  would make a loop of.
 - The markers of `live-world`:
   - an octahedron each, standing on the position of its entity, its height that of a person by the
     scale of the entity, never smaller than a few pixels however far; orange a creature, blue a game

@@ -77,7 +77,6 @@ namespace UniwowObserver
                     record.event = _observer.EventOf(Kind::Creature, record.spawn);
                 }
                 ReadUnit(creature, record);
-                kept.push_back(creature->GetGUID());
                 records.push_back(std::move(record));
             }
         }
@@ -106,7 +105,6 @@ namespace UniwowObserver
                 G3D::Quat const& rotation = object->GetWorldRotation();
                 record.rotation = { rotation.x, rotation.y, rotation.z, rotation.w };
                 record.state = uint8(object->GetGoState());
-                kept.push_back(object->GetGUID());
                 records.push_back(std::move(record));
             }
         }
@@ -130,7 +128,6 @@ namespace UniwowObserver
         template<class Other> void Visit(GridRefMgr<Other>&) { }
 
         std::vector<Record> records;
-        std::vector<ObjectGuid> kept;
 
     private:
         // What every object gives; false when it lies outside the circle.
@@ -369,8 +366,13 @@ namespace UniwowObserver
             std::nth_element(records.begin(), records.begin() + _settings.maxEntities, records.end(), nearer);
             records.resize(_settings.maxEntities);
         }
+        // Kept updated: the creatures and game objects sent, the nearest, never more than sent.
+        kept.clear();
+        kept.reserve(records.size());
+        for (Record const& record : records)
+            if (record.kind != Kind::Player)
+                kept.push_back(ObjectGuid(record.guid));
         reading.records = std::move(records);
-        kept = std::move(visitor.kept);
     }
 
     int16 Observer::EventOf(Kind kind, uint32 spawn) const

@@ -320,12 +320,14 @@ fn forget_failed(service: &Service, event: &Event) {
 }
 
 /// The thread of the animations ended, as `outcome` says: the bones it published last forgotten,
-/// so that each owner is drawn from its last publication, at rest.
-fn animations_ended(scene: &Mutex<Scene>, outcome: JobOutcome) {
+/// so that each owner is drawn from its last publication, at rest. Returns why, when it panicked.
+fn animations_ended(scene: &Mutex<Scene>, outcome: JobOutcome) -> Option<String> {
     lock(scene).animated = None;
-    if let JobOutcome::Panicked(message) = outcome {
-        log::error!("the animations of the models stopped: {message}");
-    }
+    let JobOutcome::Panicked(message) = outcome else {
+        return None;
+    };
+    log::error!("the animations of the models stopped: {message}");
+    Some(message)
 }
 
 /// The preview of the panel: a display, or a model when its path is given.
@@ -358,6 +360,8 @@ struct ModelsModule {
     setup: Option<JobId>,
     /// The thread of the animations, once the pool is made.
     animating: Option<JobId>,
+    /// Why the thread of the animations stopped, until the user starts it again.
+    animations_stopped: Option<String>,
     view: Option<viewport::Handle>,
     caches: Arc<Caches>,
     /// The looks on the GPU, those loading by their job, and the jobs by look.
@@ -386,6 +390,7 @@ impl Default for ModelsModule {
             shared: None,
             setup: None,
             animating: None,
+            animations_stopped: None,
             view: None,
             caches: Arc::default(),
             held: HashMap::new(),
@@ -697,6 +702,26 @@ impl ModelsModule {
     }
 }
 
+impl ModelsModule {
+    /// Starts the thread animating the models, where the view and the pool of the GPU are.
+    fn start_animations(&mut self, ctx: &mut Context) {
+        let Some((view, shared)) = self
+            .view
+            .clone()
+            .zip(self.shared.clone().filter(|shared| shared.pool.is_some()))
+        else {
+            return;
+        };
+        self.animations_stopped = None;
+        let (scene, service) = (self.scene.clone(), self.service.clone());
+        self.animating = Some(ctx.spawn_thread("Animate the models at each frame", move |job| {
+            animator::run(&view, &scene, &service, &shared.device, &shared.queue, &|| {
+                job.is_cancelled()
+            });
+        }));
+    }
+}
+
 impl Module for ModelsModule {
     fn register(&mut self, reg: &mut Registrar) {
         let service: models::Handle = self.service.clone();
@@ -747,6 +772,17 @@ impl Module for ModelsModule {
     }
 
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
+        if let Some(why) = self.animations_stopped.clone() {
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!("The animations stopped ({why}): the models are drawn at rest."),
+                );
+                if ui.button("Animate again").clicked() {
+                    self.start_animations(ctx);
+                }
+            });
+        }
         ui.horizontal(|ui| {
             ui.label("Instances drawn up to");
             let changed = ui
@@ -828,19 +864,12 @@ impl Module for ModelsModule {
             self.setup = None;
             if let Some(shared) = outcome.take::<Arc<Shared>>() {
                 *lock(&self.incoming) = Some(shared.clone());
-                if let (Some(view), Some(_)) = (self.view.clone(), &shared.pool) {
-                    let (scene, service, shared) = (self.scene.clone(), self.service.clone(), shared.clone());
-                    self.animating = Some(ctx.spawn_thread("Animate the models at each frame", move |job| {
-                        animator::run(&view, &scene, &service, &shared.device, &shared.queue, &|| {
-                            job.is_cancelled()
-                        });
-                    }));
-                }
                 self.shared = Some(shared);
+                self.start_animations(ctx);
             }
         } else if self.animating == Some(job) {
             self.animating = None;
-            animations_ended(&self.scene, outcome);
+            self.animations_stopped = animations_ended(&self.scene, outcome);
         } else if self.preview.job == Some(job) {
             self.preview.job = None;
             if let Some(said) = outcome.take::<Result<String, String>>() {

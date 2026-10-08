@@ -494,3 +494,90 @@ fn the_port_of_the_worldserver_is_looked_at_once_whatever_the_failures_to_connec
     });
     assert_eq!(looked, 1);
 }
+
+/// A host whose jobs and threads are numbered and never run.
+#[derive(Default)]
+struct Host {
+    spawned: Vec<String>,
+}
+
+impl uniwow_api::Host for Host {
+    fn publish(&mut self, _source: &str, _topic: &str, _payload: uniwow_api::serde_json::Value) {}
+
+    fn execute(&mut self, _owner: &str, _command: Box<dyn uniwow_api::Command>) {}
+
+    fn forget_document(&mut self, _owner: &str, _document: &str) {}
+
+    fn service(&self, _id: &str) -> Option<&(dyn std::any::Any + Send + Sync)> {
+        None
+    }
+
+    fn service_provider(&self, _id: &str) -> Option<String> {
+        None
+    }
+
+    fn gpu(&self) -> Option<&uniwow_api::egui_wgpu::RenderState> {
+        None
+    }
+
+    fn gpu_memory(&self) -> Option<u64> {
+        None
+    }
+
+    fn draw_panel(
+        &mut self,
+        _owner: &str,
+        _objects: &uniwow_api::ui::SharedUi,
+        _panel: &str,
+        _ui: &mut uniwow_api::egui::Ui,
+    ) {
+    }
+
+    fn draw_dialogs(&mut self, _owner: &str, _objects: &uniwow_api::ui::SharedUi, _egui: &uniwow_api::egui::Context) {}
+
+    fn adopt_objects(&mut self, _owner: &str, _objects: &uniwow_api::ui::SharedUi) {}
+
+    fn setting(&self, _module: &str, _key: &str) -> Option<uniwow_api::serde_json::Value> {
+        None
+    }
+
+    fn set_setting(&mut self, _module: &str, _key: &str, _value: uniwow_api::serde_json::Value) {}
+
+    fn report_failure(&mut self, _reporter: &str, _culprit: &str, _message: &str) {}
+
+    fn spawn(&mut self, _owner: &str, label: &str, _job: uniwow_api::JobFn) -> uniwow_api::JobId {
+        self.spawned.push(label.to_owned());
+        uniwow_api::JobId(self.spawned.len() as u64)
+    }
+
+    fn spawn_thread(&mut self, owner: &str, label: &str, job: uniwow_api::JobFn) -> uniwow_api::JobId {
+        self.spawn(owner, label, job)
+    }
+
+    fn cancel(&mut self, _owner: &str, _job: uniwow_api::JobId) {}
+
+    fn call(&mut self, _caller: &str, _name: &str, _arguments: uniwow_api::serde_json::Value) -> uniwow_api::CallId {
+        uniwow_api::CallId(1)
+    }
+
+    fn editor(&self, _caller: &str) -> uniwow_api::Editor {
+        unimplemented!("no editor here")
+    }
+}
+
+#[test]
+fn the_thread_placing_the_entities_stopped_is_said_until_started_again() {
+    use uniwow_api::Module;
+    let mut live = crate::LiveWorld {
+        animating: Some(uniwow_api::JobId(7)),
+        ..crate::LiveWorld::default()
+    };
+    let mut host = Host::default();
+    live.on_job(
+        uniwow_api::JobId(7),
+        uniwow_api::JobOutcome::Panicked("broken".to_owned()),
+        &mut uniwow_api::Context::new(&mut host, "live-world"),
+    );
+    assert_eq!(live.markers_stopped.as_deref(), Some("broken"));
+    assert!(live.animating.is_none());
+}
