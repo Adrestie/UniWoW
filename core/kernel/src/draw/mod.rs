@@ -699,7 +699,7 @@ impl PanelView {
                 let Some(editor) = self.curve_editor.clone() else {
                     self.drop_editing(store, handle);
                     return Some(
-                        ui.allocate_ui(size, |ui| ui.weak("No curve editor: the module curves is not running."))
+                        ui.allocate_ui(size, |ui| ui.weak("No curve editor: no running module provides one."))
                             .response,
                     );
                 };
@@ -712,7 +712,7 @@ impl PanelView {
                     return Some(response);
                 }
                 self.drop_editing(store, handle);
-                let mut curves = object.curves.clone();
+                let mut curves = object.curves.to_vec();
                 let time = self.time_axis(handle, object, None);
                 let inner = ui.allocate_ui(size, |ui| {
                     let id = ui.id().with(("uniwow-curves", handle));
@@ -735,7 +735,7 @@ impl PanelView {
                         ..signal(Signal::CurvesChanged)
                     });
                     if let Some(target) = store.object_mut(handle) {
-                        target.curves = curves;
+                        target.curves = std::sync::Arc::new(curves);
                     }
                 }
                 Some(inner.response)
@@ -748,7 +748,7 @@ impl PanelView {
                 let Some(sheet) = self.dopesheet.clone() else {
                     self.drop_editing(store, handle);
                     return Some(
-                        ui.allocate_ui(size, |ui| ui.weak("No dopesheet: the module dopesheet is not running."))
+                        ui.allocate_ui(size, |ui| ui.weak("No dopesheet: no running module provides one."))
                             .response,
                     );
                 };
@@ -2452,6 +2452,432 @@ mod tests {
             })
             .collect();
         assert!(texts.contains(&"sorting…"), "{texts:?}");
+    }
+
+    /// A panel filled with one widget, drawn on a screen of 800 by 600 with time going on: the
+    /// signals of `senders` its slots receive, and the labels the module would record.
+    struct Interactive {
+        ctx: egui::Context,
+        shared: SharedUi,
+        jobs: Jobs,
+        signals: Arc<Mutex<Vec<SignalData>>>,
+        recorded: Arc<Mutex<Vec<String>>>,
+        time: std::cell::Cell<f64>,
+    }
+
+    impl Interactive {
+        /// A panel holding, one under the other, the widgets `fill` makes in the store, connected
+        /// for `signals` on the objects `fill` returns besides them.
+        fn new(fill: impl FnOnce(&mut Ui) -> (Vec<Handle>, Vec<Handle>), signals: &[Signal]) -> Self {
+            let jobs: Jobs = Arc::default();
+            let queue = jobs.clone();
+            let shared = Ui::new(Arc::new(move |job| queue.lock().unwrap().push(job)));
+            let seen: Arc<Mutex<Vec<SignalData>>> = Arc::default();
+            let recorded: Arc<Mutex<Vec<String>>> = Arc::default();
+            {
+                let mut store = lock(&shared);
+                let panel = store.panel("p");
+                let layout = store.create(Kind::VBoxLayout, None).unwrap();
+                store.add_to(panel, layout, [0, 0, 1, 1]).unwrap();
+                let (widgets, senders) = fill(&mut store);
+                for (row, widget) in (0..).zip(widgets) {
+                    store.add_to(layout, widget, [row, 0, 1, 1]).unwrap();
+                }
+                for sender in senders {
+                    for signal in signals {
+                        let seen = seen.clone();
+                        store
+                            .connect(
+                                sender,
+                                *signal,
+                                Arc::new(move |data: &SignalData| seen.lock().unwrap().push(data.clone())),
+                            )
+                            .unwrap();
+                    }
+                }
+                let labels = recorded.clone();
+                store.set_recorder(Arc::new(move |label, _change| {
+                    labels.lock().unwrap().push(label.to_owned());
+                    Ok(())
+                }));
+            }
+            Self {
+                ctx: egui::Context::default(),
+                shared,
+                jobs,
+                signals: seen,
+                recorded,
+                time: std::cell::Cell::new(0.0),
+            }
+        }
+
+        /// A frame `after` seconds after the last, with `events`; then the slots run. Returns
+        /// the rectangle of the widget's background and the texts drawn.
+        fn frame(
+            &self,
+            panels: &mut PanelView,
+            after: f64,
+            events: Vec<egui::Event>,
+        ) -> (Option<egui::Rect>, Vec<String>) {
+            self.time.set(self.time.get() + after);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                time: Some(self.time.get()),
+                events,
+                ..egui::RawInput::default()
+            };
+            let mut output = self.ctx.run_ui(input, |ui| panels.show(&self.shared, "p", ui, None));
+            output.textures_delta.clear();
+            for job in std::mem::take(&mut *self.jobs.lock().unwrap()) {
+                job();
+            }
+            let background = self.ctx.global_style().visuals.extreme_bg_color;
+            let mut rect = None;
+            let mut texts = Vec::new();
+            for clipped in &output.shapes {
+                match &clipped.shape {
+                    egui::Shape::Rect(shape) if shape.fill == background => rect = Some(shape.rect),
+                    egui::Shape::Text(text) => texts.push(text.galley.text().to_owned()),
+                    _ => {}
+                }
+            }
+            (rect, texts)
+        }
+
+        /// The signals received, emptied.
+        fn signals(&self) -> Vec<SignalData> {
+            std::mem::take(&mut *self.signals.lock().unwrap())
+        }
+    }
+
+    fn pointer(at: egui::Pos2, button: egui::PointerButton, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: at,
+            button,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// A view of a scene: a group, movable, with a tooltip, holding a selectable card from -100 to
+    /// 100 on both axes; the view, the scene, the group and the card.
+    fn card_scene(store: &mut Ui) -> (Handle, Handle, Handle, Handle) {
+        let view = store.create(Kind::GraphicsView, None).unwrap();
+        let scene = store.create(Kind::GraphicsScene, None).unwrap();
+        store.set_scene(view, scene).unwrap();
+        let group = store.create(Kind::ItemGroup, Some(scene)).unwrap();
+        store.set_numbers(group, Property::Movable, &[3.0]).unwrap();
+        store.set_text(group, Property::ToolTip, "the card").unwrap();
+        let card = store.create(Kind::RectItem, Some(group)).unwrap();
+        store
+            .set_numbers(card, Property::Rect, &[-100.0, -100.0, 200.0, 200.0])
+            .unwrap();
+        store.set_numbers(card, Property::Selectable, &[1.0]).unwrap();
+        (view, scene, group, card)
+    }
+
+    const SCENE_SIGNALS: [Signal; 4] = [
+        Signal::ItemPressed,
+        Signal::ItemMoved,
+        Signal::ItemDoubleClicked,
+        Signal::SelectionChanged,
+    ];
+
+    fn scene_fixture() -> (Interactive, Handle, Handle, Handle) {
+        let handles = std::cell::Cell::new((0, 0, 0));
+        let fixture = Interactive::new(
+            |store| {
+                let (view, scene, group, card) = card_scene(store);
+                handles.set((view, group, card));
+                (vec![view], vec![scene])
+            },
+            &SCENE_SIGNALS,
+        );
+        let (view, group, card) = handles.get();
+        (fixture, view, group, card)
+    }
+
+    /// Drags with the primary button from `from` by `by`, in frames a sixtieth of a second apart.
+    fn drag(fixture: &Interactive, panels: &mut PanelView, from: egui::Pos2, by: egui::Vec2) {
+        let step = 1.0 / 60.0;
+        fixture.frame(panels, step, vec![egui::Event::PointerMoved(from)]);
+        fixture.frame(panels, step, vec![pointer(from, egui::PointerButton::Primary, true)]);
+        fixture.frame(panels, step, vec![egui::Event::PointerMoved(from + by / 2.0)]);
+        fixture.frame(panels, step, vec![egui::Event::PointerMoved(from + by)]);
+        fixture.frame(
+            panels,
+            step,
+            vec![pointer(from + by, egui::PointerButton::Primary, false)],
+        );
+    }
+
+    #[test]
+    fn an_item_of_a_scene_pressed_and_dragged_moves_its_group_and_tells_the_module_only() {
+        let (fixture, _view, group, card) = scene_fixture();
+        let mut panels = PanelView::default();
+        let (rect, _) = fixture.frame(&mut panels, 0.0, Vec::new());
+        let middle = rect.expect("the view is drawn").center();
+        drag(&fixture, &mut panels, middle, egui::vec2(50.0, 20.0));
+        assert_eq!(
+            lock(&fixture.shared).numbers(group, Property::Pos).unwrap(),
+            vec![50.0, 20.0]
+        );
+        let told: Vec<(Signal, Handle, f64, f64)> = fixture
+            .signals()
+            .iter()
+            .map(|data| (Signal::from_u32(data.signal).unwrap(), data.item, data.dx, data.dy))
+            .collect();
+        assert_eq!(
+            told,
+            vec![
+                (Signal::ItemPressed, card, 0.0, 0.0),
+                (Signal::SelectionChanged, 0, 0.0, 0.0),
+                (Signal::ItemMoved, group, 50.0, 20.0),
+            ]
+        );
+        assert!(lock(&fixture.shared).object(card).unwrap().selected);
+        assert!(
+            fixture.recorded.lock().unwrap().is_empty(),
+            "the module records the move itself"
+        );
+    }
+
+    #[test]
+    fn the_bounds_of_an_item_hold_it_while_it_is_dragged() {
+        let (fixture, _view, group, _card) = scene_fixture();
+        lock(&fixture.shared)
+            .set_numbers(group, Property::MoveBounds, &[0.0, 0.0, 10.0, 10.0])
+            .unwrap();
+        let mut panels = PanelView::default();
+        let (rect, _) = fixture.frame(&mut panels, 0.0, Vec::new());
+        drag(
+            &fixture,
+            &mut panels,
+            rect.expect("drawn").center(),
+            egui::vec2(50.0, 20.0),
+        );
+        assert_eq!(
+            lock(&fixture.shared).numbers(group, Property::Pos).unwrap(),
+            vec![10.0, 10.0]
+        );
+        let moved = fixture
+            .signals()
+            .into_iter()
+            .find(|data| data.signal == Signal::ItemMoved as u32);
+        assert_eq!(moved.map(|data| (data.dx, data.dy)), Some((10.0, 10.0)));
+    }
+
+    #[test]
+    fn the_wheel_zooms_around_the_pointer_and_the_middle_button_scrolls_outside_the_history() {
+        let (fixture, view, _group, _card) = scene_fixture();
+        let mut panels = PanelView::default();
+        let (rect, _) = fixture.frame(&mut panels, 0.0, Vec::new());
+        let rect = rect.expect("drawn");
+        let at = rect.center() + egui::vec2(100.0, 50.0);
+        let shown = || {
+            let store = lock(&fixture.shared);
+            let scale = store.numbers(view, Property::ViewScale).unwrap()[0];
+            let center = store.numbers(view, Property::ViewCenter).unwrap();
+            (scale, [center[0], center[1]])
+        };
+        // The scene point under the screen point `at`, as the view places it.
+        let under = |scale: f64, center: [f64; 2]| {
+            let local = at - rect.center();
+            [
+                center[0] + f64::from(local.x) / scale,
+                center[1] + f64::from(local.y) / scale,
+            ]
+        };
+        let before = under(1.0, [0.0, 0.0]);
+        fixture.frame(&mut panels, 1.0 / 60.0, vec![egui::Event::PointerMoved(at)]);
+        fixture.frame(
+            &mut panels,
+            1.0 / 60.0,
+            vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, 60.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        for _ in 0..60 {
+            fixture.frame(&mut panels, 1.0 / 60.0, Vec::new());
+        }
+        let (scale, center) = shown();
+        assert!(scale > 1.0, "zoomed in: {scale}");
+        let after = under(scale, center);
+        assert!(
+            (after[0] - before[0]).abs() < 1e-6 && (after[1] - before[1]).abs() < 1e-6,
+            "the point under the pointer stays: {before:?} then {after:?}"
+        );
+        let step = 1.0 / 60.0;
+        fixture.frame(&mut panels, step, vec![pointer(at, egui::PointerButton::Middle, true)]);
+        fixture.frame(
+            &mut panels,
+            step,
+            vec![egui::Event::PointerMoved(at + egui::vec2(20.0, 0.0))],
+        );
+        fixture.frame(
+            &mut panels,
+            step,
+            vec![egui::Event::PointerMoved(at + egui::vec2(40.0, 0.0))],
+        );
+        fixture.frame(
+            &mut panels,
+            step,
+            vec![pointer(at + egui::vec2(40.0, 0.0), egui::PointerButton::Middle, false)],
+        );
+        let (_, scrolled) = shown();
+        assert!(
+            (scrolled[0] - (center[0] - 40.0 / scale)).abs() < 1e-6,
+            "{center:?} then {scrolled:?}"
+        );
+        assert_eq!(scrolled[1], center[1]);
+        assert!(fixture.signals().is_empty(), "nothing told");
+        assert!(
+            fixture.recorded.lock().unwrap().is_empty(),
+            "nothing enters the history"
+        );
+    }
+
+    #[test]
+    fn a_double_click_on_an_item_tells_the_module() {
+        let (fixture, _view, _group, card) = scene_fixture();
+        let mut panels = PanelView::default();
+        let (rect, _) = fixture.frame(&mut panels, 0.0, Vec::new());
+        let middle = rect.expect("drawn").center();
+        let step = 1.0 / 60.0;
+        fixture.frame(&mut panels, step, vec![egui::Event::PointerMoved(middle)]);
+        for pressed in [true, false, true, false] {
+            fixture.frame(
+                &mut panels,
+                step,
+                vec![pointer(middle, egui::PointerButton::Primary, pressed)],
+            );
+        }
+        let double: Vec<Handle> = fixture
+            .signals()
+            .iter()
+            .filter(|data| data.signal == Signal::ItemDoubleClicked as u32)
+            .map(|data| data.item)
+            .collect();
+        assert_eq!(double, vec![card]);
+    }
+
+    #[test]
+    fn the_tooltip_of_an_item_or_of_its_group_shows_once_the_pointer_rests_on_it() {
+        let (fixture, _view, _group, _card) = scene_fixture();
+        let mut panels = PanelView::default();
+        let (rect, _) = fixture.frame(&mut panels, 0.0, Vec::new());
+        let rect = rect.expect("drawn");
+        fixture.frame(&mut panels, 0.1, vec![egui::Event::PointerMoved(rect.center())]);
+        let mut shown = Vec::new();
+        for _ in 0..20 {
+            shown = fixture.frame(&mut panels, 0.1, Vec::new()).1;
+        }
+        assert!(shown.iter().any(|text| text == "the card"), "{shown:?}");
+        // Off the card, on the background: none.
+        fixture.frame(
+            &mut panels,
+            0.1,
+            vec![egui::Event::PointerMoved(rect.min + egui::vec2(5.0, 5.0))],
+        );
+        for _ in 0..20 {
+            shown = fixture.frame(&mut panels, 0.1, Vec::new()).1;
+        }
+        assert!(!shown.iter().any(|text| text == "the card"), "{shown:?}");
+    }
+
+    #[test]
+    fn the_mouse_over_a_painting_area_reaches_its_module_where_it_is_in_the_area() {
+        let area = std::cell::Cell::new(0);
+        let fixture = Interactive::new(
+            |store| {
+                // A label above, for the area not to start where the screen does.
+                let label = store.create(Kind::Label, None).unwrap();
+                store.set_text(label, Property::Text, "above").unwrap();
+                let made = store.create(Kind::PaintArea, None).unwrap();
+                area.set(made);
+                (vec![label, made], vec![made])
+            },
+            &[
+                Signal::MousePress,
+                Signal::MouseMove,
+                Signal::MouseRelease,
+                Signal::Wheel,
+            ],
+        );
+        let mut panels = PanelView::default();
+        let step = 1.0 / 60.0;
+        let at = egui::pos2(100.0, 100.0);
+        fixture.frame(&mut panels, step, Vec::new());
+        fixture.frame(&mut panels, step, vec![egui::Event::PointerMoved(at)]);
+        fixture.frame(
+            &mut panels,
+            step,
+            vec![pointer(at, egui::PointerButton::Secondary, true)],
+        );
+        fixture.frame(
+            &mut panels,
+            step,
+            vec![egui::Event::PointerMoved(at + egui::vec2(15.0, 20.0))],
+        );
+        fixture.frame(
+            &mut panels,
+            step,
+            vec![egui::Event::PointerMoved(at + egui::vec2(30.0, 40.0))],
+        );
+        fixture.frame(
+            &mut panels,
+            step,
+            vec![pointer(
+                at + egui::vec2(30.0, 40.0),
+                egui::PointerButton::Secondary,
+                false,
+            )],
+        );
+        fixture.frame(
+            &mut panels,
+            step,
+            vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, 10.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        for _ in 0..30 {
+            fixture.frame(&mut panels, step, Vec::new());
+        }
+        let told = fixture.signals();
+        assert!(told.iter().all(|data| data.sender == area.get()));
+        let press = told
+            .iter()
+            .find(|data| data.signal == Signal::MousePress as u32)
+            .expect("pressed");
+        assert_eq!(press.button, 2, "the right button");
+        // Where the area is on screen, under the label: the press tells it.
+        let (x, y) = (100.0 - press.x, 100.0 - press.y);
+        assert!(
+            (0.0..20.0).contains(&x) && (10.0..40.0).contains(&y),
+            "the area starts at ({x}, {y})"
+        );
+        let moved = told
+            .iter()
+            .rfind(|data| data.signal == Signal::MouseMove as u32)
+            .expect("moved");
+        assert_eq!((moved.x, moved.y), (press.x + 30.0, press.y + 40.0));
+        let released = told
+            .iter()
+            .find(|data| data.signal == Signal::MouseRelease as u32)
+            .expect("released");
+        assert_eq!((released.x, released.y), (moved.x, moved.y));
+        let wheeled: f64 = told
+            .iter()
+            .filter(|data| data.signal == Signal::Wheel as u32)
+            .map(|data| data.dy)
+            .sum();
+        assert!(wheeled > 0.0, "the wheel told");
     }
 
     /// A tree of `count` items at the top, each unfolded with `children` children.

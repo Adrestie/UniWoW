@@ -195,7 +195,8 @@ and Python receive theirs in milestones 10 and 11.
 
 Every widget is enabled or not, visible or not, and has a tooltip. Every item has a position in its
 parent, a pen, a brush, a stacking order, a tooltip, and is visible, movable (along x, y or both,
-within bounds), selectable and selected or not. Colours are `0xRRGGBBAA`, sizes are in points.
+within bounds), selectable and selected or not. Colours are `0xRRGGBBAA`, sizes are in points. A
+range changed holds the value in it, as in Qt.
 
 - **Handles**: an object is a number, 0 being none. A module creates its objects, except its
   panels, which it declares when it starts and finds by their id; destroying an object destroys
@@ -209,9 +210,13 @@ within bounds), selectable and selected or not. Colours are `0xRRGGBBAA`, sizes 
   pointer without waiting for the module, which learns where it was dropped and how far it moved.
   Items are drawn by stacking order, then in the order they were created; texts above the shapes.
   The view scrolls with the middle or right button and zooms with the wheel, outside the history.
+  The tooltip of the item under the pointer shows once the pointer rests on it; an item without
+  one shows that of its nearest group that has one.
 - **Painting**: a painting area asks its module to paint when it is shown, resized, or after
   `update()`. The module paints in points from the top left corner of the area, a text placed by its
-  top left corner; the picture stays until the next painting.
+  top left corner; the picture stays until the next painting. As in Qt, a painting asked while no
+  function is connected to `paint` is not kept: a module connecting it once the area is shown calls
+  `update()`.
 - **Dialogs**: a dialog is a floating window, created hidden. While it is shown, the rest of the
   editor takes neither clicks nor shortcuts. The user closing it, with Escape or its close button,
   hides it and sends `rejected`.
@@ -454,7 +459,7 @@ Shared state and locks:
 | Catalogue of commands, running modules, properties, settings | Read-write locks of the bridge | Any thread, briefly. Only the set of running modules is held while another is read (the catalogue or the properties, to list them); only the interface thread writes them |
 | Events and failures from other threads | Lock of the bridge | Pushed by any thread, taken by the interface thread at each frame |
 | Subscriptions | Lock of the bridge, then one queue per subscription | Delivered by the interface thread, read by the subscriber's thread |
-| Interface objects of a compiled module | One lock per module | The interface thread while it draws them, any thread in the C functions. Never held while module code runs: slots, paintings and replies are called once it is released. In C++ and C#, the lock of the classes' connections is taken before it, never after |
+| Interface objects of a compiled module | One lock per module | The interface thread while it draws them, any thread in the C functions. Never held while the code of the module owning them runs: slots, paintings and replies are called once it is released. The services drawing curve views, dopesheets and property grids, code of other modules, run while it is held: they touch no module's objects, and the properties they show are read before it is taken. In C++ and C#, the lock of the classes' connections is taken before it, never after |
 | Queues of the pool: the jobs and the kernel's work, then the slices | One lock | Released before a job or a slice runs; the count of jobs waiting is read without it between two slices |
 
 No lock is held while the kernel calls a module.

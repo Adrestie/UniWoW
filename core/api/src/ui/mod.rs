@@ -7,7 +7,7 @@
 pub mod data;
 mod painter;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
@@ -191,7 +191,8 @@ pub struct Object {
     pub maximum: f64,
     pub step: f64,
     pub decimals: u32,
-    pub items: Vec<String>,
+    /// The entries of a combo box, shared with the copies drawn.
+    pub items: Arc<Vec<String>>,
     pub current_index: i64,
     /// Position in the parent, for scene items.
     pub pos: [f64; 2],
@@ -223,8 +224,8 @@ pub struct Object {
     pub repaint: bool,
     /// Changed at each change of the object, so that the scene draws it again.
     pub generation: u64,
-    /// The curves of a curve view.
-    pub curves: Vec<ShownCurve>,
+    /// The curves of a curve view, shared with the copies drawn.
+    pub curves: Arc<Vec<ShownCurve>>,
     /// A sequence's frame rate, length and tracks, shared with the kernel playing it.
     pub sequence: Option<Arc<Sequence>>,
     /// The sequence a player plays, or a view shows.
@@ -273,7 +274,7 @@ impl Object {
             },
             step: 1.0,
             decimals: 0,
-            items: Vec::new(),
+            items: Arc::default(),
             current_index: -1,
             pos: [0.0; 2],
             rect: [0.0; 4],
@@ -308,7 +309,7 @@ impl Object {
             picture: Arc::default(),
             repaint: true,
             generation: 0,
-            curves: Vec::new(),
+            curves: Arc::default(),
             sequence: (kind == Kind::Sequence).then(|| Arc::new(Sequence::default())),
             plays: None,
             player: None,
@@ -599,28 +600,29 @@ impl Ui {
             self.changed_structure(parent);
         }
         let mut doomed = vec![handle];
+        let mut gone = HashSet::new();
         while let Some(next) = doomed.pop() {
             if let Some(object) = self.objects.remove(&next) {
                 doomed.extend(object.children);
             }
-            self.connections.retain(|c| c.sender != next);
+            gone.insert(next);
             self.structure.remove(&next);
             self.times.remove(&next);
             self.players.remove(&next);
             self.sequence_views.remove(&next);
             self.grids.remove(&next);
         }
+        self.connections.retain(|c| !gone.contains(&c.sender));
         // Views showing a destroyed scene show nothing; players of a destroyed sequence play
         // nothing.
-        let alive: Vec<Handle> = self.objects.keys().copied().collect();
         for object in self.objects.values_mut() {
-            if object.scene.is_some_and(|scene| !alive.contains(&scene)) {
+            if object.scene.is_some_and(|scene| gone.contains(&scene)) {
                 object.scene = None;
             }
-            if object.plays.is_some_and(|sequence| !alive.contains(&sequence)) {
+            if object.plays.is_some_and(|sequence| gone.contains(&sequence)) {
                 object.plays = None;
             }
-            if object.player.is_some_and(|player| !alive.contains(&player)) {
+            if object.player.is_some_and(|player| gone.contains(&player)) {
                 object.player = None;
             }
         }
@@ -712,14 +714,14 @@ impl Ui {
 
     /// Sets the curves a curve view shows.
     pub fn set_curves(&mut self, handle: Handle, curves: Vec<ShownCurve>) -> Result<(), String> {
-        self.get_mut(handle)?.curves = curves;
+        self.get_mut(handle)?.curves = Arc::new(curves);
         self.changed(handle);
         Ok(())
     }
 
     /// A copy of the curves a curve view shows.
     pub fn curves(&self, handle: Handle) -> Result<Vec<ShownCurve>, String> {
-        Ok(self.get(handle)?.curves.clone())
+        Ok(self.get(handle)?.curves.to_vec())
     }
 
     /// The items of a tree view.
@@ -1031,8 +1033,17 @@ impl Ui {
             Property::Value => {
                 object.value = first.clamp(object.minimum.min(object.maximum), object.maximum.max(object.minimum))
             }
-            Property::Minimum => object.minimum = first,
-            Property::Maximum => object.maximum = first,
+            // As in Qt, the value is held in the new range.
+            Property::Minimum | Property::Maximum => {
+                if property == Property::Minimum {
+                    object.minimum = first;
+                } else {
+                    object.maximum = first;
+                }
+                object.value = object
+                    .value
+                    .clamp(object.minimum.min(object.maximum), object.maximum.max(object.minimum));
+            }
             Property::Step => object.step = first.max(0.0),
             Property::Decimals => object.decimals = first.clamp(0.0, 10.0) as u32,
             Property::CurrentIndex => object.current_index = first as i64,
@@ -1384,7 +1395,7 @@ impl Ui {
         if object.kind != Kind::ComboBox {
             return Err(format!("a {:?} has no entries", object.kind));
         }
-        object.items.push(text.to_owned());
+        Arc::make_mut(&mut object.items).push(text.to_owned());
         if object.current_index < 0 {
             object.current_index = 0;
         }
@@ -1394,7 +1405,7 @@ impl Ui {
 
     pub fn clear_entries(&mut self, handle: Handle) -> Result<(), String> {
         let object = self.get_mut(handle)?;
-        object.items.clear();
+        object.items = Arc::default();
         object.current_index = -1;
         self.changed(handle);
         Ok(())
@@ -1692,6 +1703,55 @@ mod tests {
         ui.destroy(layout).unwrap();
         assert!(ui.object(button).is_none());
         assert!(ui.connections.is_empty());
+    }
+
+    #[test]
+    fn what_shows_or_plays_a_destroyed_object_lets_it_go_and_the_others_stay() {
+        let shared = ui();
+        let mut ui = lock(&shared);
+        let (view, other_view) = (
+            ui.create(Kind::GraphicsView, None).unwrap(),
+            ui.create(Kind::GraphicsView, None).unwrap(),
+        );
+        let (scene, kept) = (
+            ui.create(Kind::GraphicsScene, None).unwrap(),
+            ui.create(Kind::GraphicsScene, None).unwrap(),
+        );
+        ui.set_scene(view, scene).unwrap();
+        ui.set_scene(other_view, kept).unwrap();
+        let item = ui.create(Kind::RectItem, Some(scene)).unwrap();
+        ui.connect(scene, Signal::ItemPressed, Arc::new(|_| {})).unwrap();
+        ui.connect(kept, Signal::ItemPressed, Arc::new(|_| {})).unwrap();
+        let sequence = ui.create(Kind::Sequence, None).unwrap();
+        let player = ui.create(Kind::Player, None).unwrap();
+        ui.set_numbers(player, Property::Sequence, &[sequence as f64]).unwrap();
+        ui.destroy(scene).unwrap();
+        assert!(ui.object(item).is_none(), "its items with it");
+        assert_eq!(ui.object(view).unwrap().scene, None);
+        assert_eq!(ui.object(other_view).unwrap().scene, Some(kept));
+        assert_eq!(ui.connections.len(), 1, "the other scene keeps its connection");
+        ui.destroy(sequence).unwrap();
+        assert_eq!(ui.object(player).unwrap().plays, None);
+    }
+
+    #[test]
+    fn a_range_changed_holds_the_value_in_it() {
+        let shared = ui();
+        let mut ui = lock(&shared);
+        let slider = ui.create(Kind::Slider, None).unwrap();
+        ui.set_numbers(slider, Property::Maximum, &[100.0]).unwrap();
+        ui.set_numbers(slider, Property::Value, &[80.0]).unwrap();
+        ui.set_numbers(slider, Property::Maximum, &[50.0]).unwrap();
+        assert_eq!(ui.numbers(slider, Property::Value).unwrap(), vec![50.0]);
+        ui.set_numbers(slider, Property::Minimum, &[60.0]).unwrap();
+        assert_eq!(
+            ui.numbers(slider, Property::Value).unwrap(),
+            vec![50.0],
+            "a range given backwards"
+        );
+        ui.set_numbers(slider, Property::Minimum, &[20.0]).unwrap();
+        ui.set_numbers(slider, Property::Value, &[10.0]).unwrap();
+        assert_eq!(ui.numbers(slider, Property::Value).unwrap(), vec![20.0]);
     }
 
     #[test]

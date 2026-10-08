@@ -232,6 +232,22 @@ fn bounds(object: &Object, at: [f64; 2]) -> [f64; 4] {
     }
 }
 
+/// The tooltip of `item`, or of the nearest of its groups that has one.
+fn tooltip(store: &Ui, item: Handle) -> Option<String> {
+    let mut next = Some(item);
+    while let Some(current) = next {
+        let object = store.object(current)?;
+        if object.kind == Kind::GraphicsScene {
+            return None;
+        }
+        if !object.tooltip.is_empty() {
+            return Some(object.tooltip.clone());
+        }
+        next = object.parent;
+    }
+    None
+}
+
 /// The modifier keys held, as `uniwow.h` numbers them.
 pub(crate) fn modifiers(ui: &egui::Ui) -> u32 {
     ui.input(|i| {
@@ -277,6 +293,15 @@ impl SceneView {
             return;
         };
         let (scale, center) = (view.view_scale, view.view_center);
+        // The tooltip of the item under the pointer, or of its nearest group that has one.
+        if self.drag.is_none()
+            && let Some(pointer) = response.hover_pos()
+            && let Some(tip) = self
+                .hit(store, to_scene(pointer, scale, center), scale)
+                .and_then(|item| tooltip(store, item))
+        {
+            response.clone().on_hover_text_at_pointer(tip);
+        }
         let offset = [
             local_center.x - (center[0] * scale) as f32,
             local_center.y - (center[1] * scale) as f32,

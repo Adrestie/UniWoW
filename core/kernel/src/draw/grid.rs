@@ -142,9 +142,7 @@ impl Grids {
         let Some(service) = service else {
             self.drop_edit(handle);
             return ui
-                .allocate_ui(size, |ui| {
-                    ui.weak("No property grid: the module properties is not running.")
-                })
+                .allocate_ui(size, |ui| ui.weak("No property grid: no running module provides one."))
                 .response;
         };
         let (first, rows) = self.rows.remove(&handle).unwrap_or_default();
