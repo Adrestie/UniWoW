@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use uniwow_api::arena::{Arena, Refusal};
 use uniwow_api::formats::{FileRef, Formats, LiquidTypeRecord};
+use uniwow_api::glam::Vec3;
 use uniwow_api::texture_arrays::{Placed, TextureArrays};
 use uniwow_api::viewport::{Target, View};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
@@ -379,6 +380,8 @@ pub struct TileGpu {
     shared: Arc<Shared>,
     vertices: Range<u64>,
     indices: Range<u64>,
+    /// The box of its vertices in the world, which the view tests before drawing it.
+    pub bounds: [Vec3; 2],
     pub base_vertex: i32,
     pub water: Range<u32>,
     pub opaque: Range<u32>,
@@ -409,8 +412,16 @@ pub fn upload(shared: &Arc<Shared>, meshes: &Meshes) -> Result<Option<TileGpu>, 
     };
     let first = indices.start as u32;
     let water = first..first + meshes.water.len() as u32;
+    let bounds = meshes
+        .vertices
+        .iter()
+        .fold([Vec3::INFINITY, Vec3::NEG_INFINITY], |[low, high], vertex| {
+            let at = Vec3::from(vertex.position);
+            [low.min(at), high.max(at)]
+        });
     Ok(Some(TileGpu {
         shared: shared.clone(),
+        bounds,
         base_vertex: vertices.start as i32,
         opaque: water.end..water.end + meshes.opaque.len() as u32,
         water,

@@ -589,9 +589,21 @@ fn the_water_is_drawn_over_what_lies_under_it_without_hiding_what_is_blended_bey
         Vec3::new(83.0, 83.0, -30.0),
         Vec3::new(83.0, 83.0, 30.0),
     );
-    // The magma alone: red, opaque and unlit.
+    // The magma alone: red, opaque and unlit; its tile out of sight, not drawn.
     let (mut magma, _) = bench(&gpu, &[layer(7, corner, -2.0, u64::MAX, 255)]);
     assert_eq!(middle(&gpu, &mut magma, &view(above, down), None), [255, 0, 0, 255]);
+    assert!(
+        magma.stats().items.starts_with("1 drawn of 1 tiles"),
+        "{}",
+        magma.stats().items
+    );
+    let away = view(above + Vec3::new(500.0, 0.0, 0.0), above + Vec3::new(1000.0, 0.0, 0.0));
+    middle(&gpu, &mut magma, &away, None);
+    assert!(
+        magma.stats().items.starts_with("0 drawn of 1 tiles"),
+        "{}",
+        magma.stats().items
+    );
     // Under the shallow water, seen through it: tinted.
     let (mut liquids, surfaces) = bench(
         &gpu,
@@ -731,7 +743,10 @@ fn a_liquid_placed_is_put_on_the_gpu_and_drawn_while_its_owner_shows_it() {
     let away = view(Vec3::new(500.0, 0.0, 20.0), Vec3::new(1000.0, 0.0, 20.0));
     middle(&gpu, &mut layer, &away, None);
     assert!(
-        layer.stats().items.starts_with("0 tiles, and 0 drawn of the 2 liquids"),
+        layer
+            .stats()
+            .items
+            .starts_with("0 drawn of 0 tiles, and 0 of the 2 liquids"),
         "out of sight: {}",
         layer.stats().items
     );

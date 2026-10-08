@@ -83,7 +83,10 @@ impl Layer for LiquidsLayer {
                 scene.publishing,
             )
         };
+        // Only the tiles in sight are drawn, as the liquids placed.
         let tiles_held = tiles.len();
+        tiles.retain(|tile| in_sight(&view.view_proj, &tile.bounds));
+        let tiles_drawn = tiles.len();
         let shown = placed
             .iter()
             .filter(|poured| poured.shown.load(Ordering::Relaxed) && in_sight(&view.view_proj, &poured.bounds));
@@ -127,7 +130,7 @@ impl Layer for LiquidsLayer {
             triangles: (water + opaque) / 3,
             bytes: shared.bytes(),
             items: format!(
-                "{tiles_held} tiles, and {drawn_placed} drawn of the {} liquids other modules placed; {} \
+                "{tiles_drawn} drawn of {tiles_held} tiles, and {drawn_placed} of the {} liquids other modules placed; {} \
                  triangles of water and {} of magma and slime; arenas of {} and {} MB ({} and {} used), of {} MB at \
                  most each; given in {:.2} ms at the longest",
                 placed.len(),

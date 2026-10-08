@@ -5668,6 +5668,10 @@ fog under the water with 9.7; `Manual` from 32 to 128 MB kept.
   Northrend 1,022 tiles, 3.18 M triangles, 180 MB, the GPU 1.2 ms; at sea 544 tiles, 2.44 M
   triangles, 91 MB, the GPU 1.26 ms. The frame at 16.7 ms, the longest 17.3 ms, but 34.5 ms once at
   sea while the terrain streamed at 64 tiles.
+- **The tiles of water in sight**, after the full verification of the milestones: each tile kept
+  on the GPU has the box of its vertices, tested against the view before it is drawn, as the
+  liquids the buildings place were; the statistics say how many of those held are drawn. The
+  measure above, every tile held drawn, is to be made again where it was.
 - **Publishing** the tiles of liquids: the longest 0.26 to 0.36 ms with 544 to 1,022 tiles held,
   while they arrive one by one; flying over the sea with the terrain at 3 tiles, 41 tiles held and
   read as the camera passes, 0.03 ms.
