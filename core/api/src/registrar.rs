@@ -94,11 +94,15 @@ pub struct Registrar {
     pub hotkeys: Vec<HotkeySpec>,
     /// Its category of the window *Settings*.
     pub settings: Option<SettingsCategory>,
+    /// Given by the kernel: the memory of the GPU's own, when the system tells it, for the settings
+    /// whose default follows it.
+    pub gpu_memory: Option<u64>,
 }
 
 impl Registrar {
     /// Declares the module's category of the window *Settings*, titled `title`; declared again, the
-    /// last one is kept.
+    /// last one is kept. The categories of several modules under one title are shown as one, the
+    /// settings of each module in the order of their ids.
     pub fn settings(&mut self, title: &str, settings: Vec<SettingSpec>) -> &mut Self {
         self.settings = Some(SettingsCategory {
             title: title.to_owned(),

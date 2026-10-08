@@ -202,7 +202,10 @@ impl Shell {
             let Some(module) = slot.module.as_deref_mut().filter(|_| slot.state.is_running()) else {
                 continue;
             };
-            let mut reg = Registrar::default();
+            let mut reg = Registrar {
+                gpu_memory: self.host.gpu_memory,
+                ..Registrar::default()
+            };
             if let Err(message) = guarded_as(&slot.id, || module.register(&mut reg)) {
                 log::error!("module '{}' failed in register: {message}", slot.id);
                 slot.state = State::Failed(format!("register: {message}"));

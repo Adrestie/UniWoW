@@ -1,28 +1,50 @@
-//! The window *Edit > Settings*: a category for each running module that declares one, titled as it
-//! says, its settings drawn as it declared them; a value chosen is kept in the module's settings,
-//! which the module reads. A module stopped or failed shows no category.
+//! The window *Edit > Settings*: the categories the running modules declare, those of one title
+//! shown as one, the settings of each module in the order of their ids, each drawn as declared; a
+//! value chosen is kept in its module's settings, which the module reads. A module stopped or
+//! failed shows none of its settings.
 
-use uniwow_api::SettingsCategory;
+use uniwow_api::SettingSpec;
 
 use super::*;
 
 #[derive(Default)]
 pub(super) struct SettingsWindow {
     pub open: bool,
-    /// The module whose category is shown; the first by its title when none is chosen.
+    /// The title of the category shown; the first when none is chosen.
     pub shown: Option<String>,
 }
 
+/// A category of the window: its title, and the settings of every module declaring it, each with
+/// its module.
+pub(super) struct Category {
+    pub title: String,
+    pub settings: Vec<(String, SettingSpec)>,
+}
+
 impl Shell {
-    /// The categories of the running modules, by module, sorted by their titles.
-    pub(super) fn settings_categories(&self) -> Vec<(String, SettingsCategory)> {
-        let mut categories: Vec<(String, SettingsCategory)> = self
+    /// The categories of the running modules, those of one title merged, sorted by their titles.
+    pub(super) fn settings_categories(&self) -> Vec<Category> {
+        let mut declaring: Vec<&Slot> = self
             .slots
             .iter()
-            .filter(|slot| slot.state.is_running())
-            .filter_map(|slot| Some((slot.id.clone(), slot.settings.clone()?)))
+            .filter(|slot| slot.state.is_running() && slot.settings.is_some())
             .collect();
-        categories.sort_by(|a, b| a.1.title.cmp(&b.1.title).then(a.0.cmp(&b.0)));
+        declaring.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut categories: Vec<Category> = Vec::new();
+        for slot in declaring {
+            let Some(declared) = &slot.settings else {
+                continue;
+            };
+            let settings = declared.settings.iter().map(|spec| (slot.id.clone(), spec.clone()));
+            match categories.iter_mut().find(|category| category.title == declared.title) {
+                Some(category) => category.settings.extend(settings),
+                None => categories.push(Category {
+                    title: declared.title.clone(),
+                    settings: settings.collect(),
+                }),
+            }
+        }
+        categories.sort_by(|a, b| a.title.cmp(&b.title));
         categories
     }
 
@@ -36,8 +58,8 @@ impl Shell {
             .settings_window
             .shown
             .clone()
-            .filter(|id| categories.iter().any(|(owner, _)| owner == id))
-            .or_else(|| categories.first().map(|(id, _)| id.clone()));
+            .filter(|title| categories.iter().any(|category| category.title == *title))
+            .or_else(|| categories.first().map(|category| category.title.clone()));
         let mut chosen = None;
         let mut changes: Vec<(String, String, i64)> = Vec::new();
         let mut open = true;
@@ -52,37 +74,40 @@ impl Shell {
                 }
                 ui.horizontal_top(|ui| {
                     ui.vertical(|ui| {
-                        for (id, category) in &categories {
+                        for category in &categories {
                             if ui
-                                .selectable_label(shown.as_deref() == Some(id.as_str()), &category.title)
+                                .selectable_label(shown.as_ref() == Some(&category.title), &category.title)
                                 .clicked()
                             {
-                                chosen = Some(id.clone());
+                                chosen = Some(category.title.clone());
                             }
                         }
                     });
                     ui.separator();
                     ui.vertical(|ui| {
-                        let Some((id, category)) = categories.iter().find(|(id, _)| shown.as_ref() == Some(id)) else {
+                        let Some(category) = categories
+                            .iter()
+                            .find(|category| shown.as_ref() == Some(&category.title))
+                        else {
                             return;
                         };
                         ui.heading(&category.title);
                         egui::Grid::new("settings").num_columns(3).show(ui, |ui| {
-                            for spec in &category.settings {
-                                let mut value = spec.value(host.setting(id, &spec.key).as_ref());
+                            for (module, spec) in &category.settings {
+                                let mut value = spec.value(host.setting(module, &spec.key).as_ref());
                                 ui.label(&spec.label);
                                 if ui
                                     .add(egui::Slider::new(&mut value, spec.range[0]..=spec.range[1]))
                                     .changed()
                                 {
-                                    changes.push((id.clone(), spec.key.clone(), value));
+                                    changes.push((module.clone(), spec.key.clone(), value));
                                 }
                                 if ui
                                     .add_enabled(value != spec.default, egui::Button::new("Default"))
                                     .on_hover_text(spec.default.to_string())
                                     .clicked()
                                 {
-                                    changes.push((id.clone(), spec.key.clone(), spec.default));
+                                    changes.push((module.clone(), spec.key.clone(), spec.default));
                                 }
                                 ui.end_row();
                             }

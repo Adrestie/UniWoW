@@ -28,8 +28,8 @@ use uniwow_api::viewport::{
     self, Allowance, Demand, Drawing, Fog, Frame, Label, Layer, MAX_FRAME_WAIT, Phase, Pyramid, Sun, Target, View,
 };
 use uniwow_api::{
-    Context, DockArea, Event, MODULE_FAILED_TOPIC, Module, PropertyKind, PropertyValue, Registrar, egui, egui_wgpu,
-    log, wgpu,
+    Context, DockArea, Event, MODULE_FAILED_TOPIC, Module, PropertyKind, PropertyValue, Registrar, SettingSpec, egui,
+    egui_wgpu, log, wgpu,
 };
 
 use camera::{FOV, OrbitCamera, REACH};
@@ -254,6 +254,17 @@ fn default_budget(gpu_memory: Option<u64>) -> u64 {
     gpu_memory
         .map_or(FALLBACK_BUDGET, |bytes| bytes / 2 / MB)
         .clamp(BUDGETS[0], BUDGETS[1])
+}
+
+/// The setting of the budget in the window *Settings*, in the category *View*, its default
+/// following `gpu_memory`.
+fn budget_setting(gpu_memory: Option<u64>) -> SettingSpec {
+    SettingSpec::integer(
+        BUDGET,
+        "GPU budget (MB)",
+        [BUDGETS[0] as i64, BUDGETS[1] as i64],
+        default_budget(gpu_memory) as i64,
+    )
 }
 
 /// Implementation of the service, sharing the layer list, the frame signal and the budget with the
@@ -486,7 +497,9 @@ impl Module for ViewportModule {
             budget: self.budget.clone(),
             fog: self.fog.clone(),
         });
+        let gpu_memory = reg.gpu_memory;
         reg.panel("view", "3D View", DockArea::Center)
+            .settings("View", vec![budget_setting(gpu_memory)])
             .provide(viewport::SERVICE, service)
             .subscribe(MODULE_FAILED_TOPIC)
             .menu_item("View", "Reset camera", "reset_camera")
@@ -555,13 +568,22 @@ impl Module for ViewportModule {
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
         let mut state = budget(&self.budget);
-        state.bytes = ctx
-            .setting(BUDGET)
-            .and_then(|value| value.as_u64())
-            .unwrap_or_else(|| default_budget(ctx.gpu_memory()))
-            .clamp(BUDGETS[0], BUDGETS[1])
-            * MB;
+        state.bytes = budget_setting(ctx.gpu_memory()).value(ctx.setting(BUDGET).as_ref()) as u64 * MB;
         state.allow();
+    }
+
+    fn windows_ui(&mut self, _egui: &egui::Context, ctx: &mut Context) {
+        // The only call at every frame, whatever panel is shown: a budget set through the service
+        // kept, then the one the window *Settings* holds taken.
+        let mut state = budget(&self.budget);
+        if let Some(bytes) = state.unsaved.take() {
+            ctx.set_setting(BUDGET, json!(bytes / MB));
+        }
+        let bytes = budget_setting(ctx.gpu_memory()).value(ctx.setting(BUDGET).as_ref()) as u64 * MB;
+        if bytes != state.bytes {
+            state.bytes = bytes;
+            state.allow();
+        }
     }
 
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
@@ -633,9 +655,6 @@ impl Module for ViewportModule {
             let back = egui::Rect::from_min_size(at, galley.size()).expand(4.0);
             painter.rect_filled(back, 3.0, egui::Color32::from_black_alpha(170));
             painter.galley(at, galley, colour);
-        }
-        if let Some(bytes) = budget(&self.budget).unsaved.take() {
-            ctx.set_setting(BUDGET, json!(bytes / MB));
         }
         ui.ctx().request_repaint();
     }
@@ -1756,6 +1775,117 @@ mod tests {
             "given back once it is gone"
         );
         assert_eq!(super::budget(&shared).unsaved, Some(100 << 20), "kept in the settings");
+    }
+
+    /// A host keeping the settings of the module, on a GPU of `gpu_memory` bytes.
+    #[derive(Default)]
+    struct SettingsHost {
+        settings: std::collections::HashMap<String, uniwow_api::serde_json::Value>,
+        gpu_memory: Option<u64>,
+    }
+
+    impl uniwow_api::Host for SettingsHost {
+        fn publish(&mut self, _source: &str, _topic: &str, _payload: uniwow_api::serde_json::Value) {}
+
+        fn execute(&mut self, _owner: &str, _command: Box<dyn uniwow_api::Command>) {}
+
+        fn forget_document(&mut self, _owner: &str, _document: &str) {}
+
+        fn service(&self, _id: &str) -> Option<&(dyn std::any::Any + Send + Sync)> {
+            None
+        }
+
+        fn service_provider(&self, _id: &str) -> Option<String> {
+            None
+        }
+
+        fn gpu(&self) -> Option<&egui_wgpu::RenderState> {
+            None
+        }
+
+        fn gpu_memory(&self) -> Option<u64> {
+            self.gpu_memory
+        }
+
+        fn draw_panel(&mut self, _owner: &str, _objects: &uniwow_api::ui::SharedUi, _panel: &str, _ui: &mut egui::Ui) {}
+
+        fn draw_dialogs(&mut self, _owner: &str, _objects: &uniwow_api::ui::SharedUi, _egui: &egui::Context) {}
+
+        fn adopt_objects(&mut self, _owner: &str, _objects: &uniwow_api::ui::SharedUi) {}
+
+        fn setting(&self, _module: &str, key: &str) -> Option<uniwow_api::serde_json::Value> {
+            self.settings.get(key).cloned()
+        }
+
+        fn set_setting(&mut self, _module: &str, key: &str, value: uniwow_api::serde_json::Value) {
+            self.settings.insert(key.to_owned(), value);
+        }
+
+        fn report_failure(&mut self, _reporter: &str, _culprit: &str, _message: &str) {}
+
+        fn spawn(&mut self, _owner: &str, _label: &str, _job: uniwow_api::JobFn) -> uniwow_api::JobId {
+            unimplemented!("the view starts no job here")
+        }
+
+        fn spawn_thread(&mut self, _owner: &str, _label: &str, _job: uniwow_api::JobFn) -> uniwow_api::JobId {
+            unimplemented!("the view starts no job here")
+        }
+
+        fn cancel(&mut self, _owner: &str, _job: uniwow_api::JobId) {}
+
+        fn call(
+            &mut self,
+            _caller: &str,
+            _name: &str,
+            _arguments: uniwow_api::serde_json::Value,
+        ) -> uniwow_api::CallId {
+            uniwow_api::CallId(1)
+        }
+
+        fn editor(&self, _caller: &str) -> uniwow_api::Editor {
+            unimplemented!("the tests give the view no editor")
+        }
+    }
+
+    #[test]
+    fn the_budget_is_a_setting_of_the_category_view_taken_at_each_frame() {
+        use uniwow_api::{Context, Module, Registrar};
+        let mut module = ViewportModule::default();
+        let mut reg = Registrar {
+            gpu_memory: Some(12 << 30),
+            ..Registrar::default()
+        };
+        module.register(&mut reg);
+        let category = reg.settings.expect("declared");
+        assert_eq!(category.title, "View");
+        let setting = &category.settings[0];
+        assert_eq!(
+            (setting.key.as_str(), setting.range, setting.default),
+            ("gpu_budget_mb", [64, 65_536], 6144),
+            "half the memory of a GPU of 12 GB by default"
+        );
+        let mut host = SettingsHost {
+            gpu_memory: Some(12 << 30),
+            ..SettingsHost::default()
+        };
+        module.init(&mut Context::new(&mut host, "viewport"));
+        assert_eq!(super::budget(&module.budget).bytes, 6144 << 20);
+        let egui = egui::Context::default();
+        host.settings.insert("gpu_budget_mb".to_owned(), json!(2048));
+        module.windows_ui(&egui, &mut Context::new(&mut host, "viewport"));
+        assert_eq!(super::budget(&module.budget).bytes, 2048 << 20, "chosen in the window");
+        // Set through the service, as the terrain gives its budget of before once: kept.
+        let service = super::Service {
+            layers: Layers::default(),
+            frames: Arc::default(),
+            budget: module.budget.clone(),
+            fog: Arc::default(),
+        };
+        use uniwow_api::viewport::Viewport as _;
+        service.set_budget(512 << 20);
+        module.windows_ui(&egui, &mut Context::new(&mut host, "viewport"));
+        assert_eq!(host.settings["gpu_budget_mb"], json!(512));
+        assert_eq!(super::budget(&module.budget).bytes, 512 << 20);
     }
 
     #[test]

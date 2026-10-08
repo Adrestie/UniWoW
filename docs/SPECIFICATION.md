@@ -5965,6 +5965,17 @@ disabled; by default at half the most that shows everything at all times, from a
   modules having no harness of their own.
 - **Not offered yet**: the categories of the compiled modules, of C++ and C#, and of Lua and
   Python.
+- **Then, asked by the user**: the categories of several modules under one title shown as one, the
+  settings of each module in the order of their ids; a module stopped takes its settings away, the
+  category staying while another of its modules runs. The GPU budget of the view in the category
+  *View* the module `viewport` declares (`gpu_budget_mb`, from 64 to 65,536 MB, half the memory of
+  the GPU's own by default, 1,024 MB when not told), taken at each frame, the terrain's panel no
+  longer holding it; a budget set through the service, as the terrain gives its own of before once,
+  kept in the setting. `Registrar::gpu_memory`, given by the kernel, tells the modules the memory of
+  the GPU when they register, for the defaults following it. Tested: the merge, its order, a module
+  of the category failed; a module told the memory of the GPU; the budget declared, its default,
+  taken from the setting at each frame, kept when set through the service. 8 changes made on
+  purpose, all caught, one once the order of the titles differed from that of the ids.
 
 #### Tests
 

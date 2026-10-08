@@ -37,6 +37,11 @@ impl Harness {
 
     /// The modules start as in the editor; the settings stay in memory.
     fn with_slots(slots: Vec<Slot>) -> Self {
+        Self::on_gpu(slots, None)
+    }
+
+    /// As `with_slots`, on a GPU of `gpu_memory` bytes of its own.
+    fn on_gpu(slots: Vec<Slot>, gpu_memory: Option<u64>) -> Self {
         let ctx = egui::Context::default();
         let (bridge, requests) = Bridge::new(Some(ctx.clone()));
         let pool = Pool::new(2, Some(ctx.clone()), Some(bridge.clone()));
@@ -44,7 +49,8 @@ impl Harness {
             in_memory: true,
             ..Settings::default()
         };
-        let host = KernelHost::new(None, settings, pool, bridge);
+        let mut host = KernelHost::new(None, settings, pool, bridge);
+        host.gpu_memory = gpu_memory;
         let shell = Shell::start(host, requests, slots, None, PathBuf::new());
         Self { shell, ctx }
     }
@@ -1696,36 +1702,49 @@ impl Module for Configured {
 }
 
 #[test]
-fn the_window_settings_shows_the_category_of_each_running_module_and_keeps_its_values() {
+fn the_window_settings_shows_the_categories_of_the_running_modules_merged_by_title_and_keeps_their_values() {
     let mut harness = Harness::new(vec![
-        ("zeta", Box::new(Configured("Zeta"))),
+        ("aaa", Box::new(Configured("Zeta"))),
+        ("beta", Box::new(Configured("Alpha"))),
         ("alpha", Box::new(Configured("Alpha"))),
         ("plain", counter("plain").0),
     ]);
-    let titles = |shell: &Shell| -> Vec<(String, String)> {
+    let categories = |shell: &Shell| -> Vec<(String, Vec<String>)> {
         shell
             .settings_categories()
             .into_iter()
-            .map(|(id, category)| (id, category.title))
+            .map(|category| {
+                let settings = category
+                    .settings
+                    .into_iter()
+                    .map(|(module, spec)| format!("{module}/{}", spec.key))
+                    .collect();
+                (category.title, settings)
+            })
             .collect()
     };
     assert_eq!(
-        titles(&harness.shell),
+        categories(&harness.shell),
         [
-            ("alpha".to_owned(), "Alpha".to_owned()),
-            ("zeta".to_owned(), "Zeta".to_owned())
+            ("Alpha".to_owned(), vec!["alpha/far".to_owned(), "beta/far".to_owned()]),
+            ("Zeta".to_owned(), vec!["aaa/far".to_owned()])
         ],
-        "by their titles, none for a module declaring none"
+        "by their titles, not by the ids of their modules; one title merged, its modules by their ids; none for a module declaring none"
     );
-    // The first category shown, its value as stored; back to its default by its button.
+    // The first category shown, its values as stored; back to its default by its button.
     harness.shell.host.set_setting("alpha", "far", json!(8));
     harness.shell.settings_window.open = true;
     let texts = harness.frame_texts(Vec::new());
-    for shown in ["Settings", "Alpha", "Zeta", "Far (tiles)", "8"] {
+    for shown in ["Settings", "Alpha", "Zeta", "Far (tiles)", "8", "45"] {
         assert!(texts.iter().any(|(text, _)| text == shown), "'{shown}' in {texts:?}");
     }
     harness.click_text(&texts, "Default");
     assert_eq!(harness.shell.host.setting("alpha", "far"), Some(json!(45)));
+    assert_eq!(
+        harness.shell.host.setting("beta", "far"),
+        None,
+        "another module's untouched"
+    );
     // A value typed in the field of the slider.
     let texts = harness.frame_texts(Vec::new());
     harness.click_text(&texts, "45");
@@ -1746,19 +1765,36 @@ fn the_window_settings_shows_the_category_of_each_running_module_and_keeps_its_v
     harness.frame_texts(vec![select_all, egui::Event::Text("30".to_owned())]);
     harness.frame_texts(vec![key(egui::Key::Enter, true), key(egui::Key::Enter, false)]);
     assert_eq!(harness.shell.host.setting("alpha", "far"), Some(json!(30)), "typed");
-    assert_eq!(
-        harness.shell.host.setting("zeta", "far"),
-        None,
-        "another module's untouched"
-    );
+    assert_eq!(harness.shell.host.setting("beta", "far"), None);
     // Another category chosen.
     let texts = harness.frame_texts(Vec::new());
     harness.click_text(&texts, "Zeta");
-    assert_eq!(harness.shell.settings_window.shown.as_deref(), Some("zeta"));
-    // A module failed: its category gone.
-    let index = harness.index("zeta");
-    harness.shell.fail(index, "on purpose".to_owned());
-    assert_eq!(titles(&harness.shell), [("alpha".to_owned(), "Alpha".to_owned())]);
+    assert_eq!(harness.shell.settings_window.shown.as_deref(), Some("Zeta"));
+    // Modules failed: their settings gone, a category kept while one of its modules runs.
+    for module in ["beta", "aaa"] {
+        let index = harness.index(module);
+        harness.shell.fail(index, "on purpose".to_owned());
+    }
+    assert_eq!(
+        categories(&harness.shell),
+        [("Alpha".to_owned(), vec!["alpha/far".to_owned()])]
+    );
     let texts = harness.frame_texts(Vec::new());
     assert!(!texts.iter().any(|(text, _)| text == "Zeta"), "{texts:?}");
+}
+
+/// A module keeping the memory of the GPU it is told when it registers.
+struct Told(Arc<Mutex<Option<Option<u64>>>>);
+
+impl Module for Told {
+    fn register(&mut self, reg: &mut Registrar) {
+        *lock(&self.0) = Some(reg.gpu_memory);
+    }
+}
+
+#[test]
+fn a_module_is_told_the_memory_of_the_gpu_when_it_registers() {
+    let told = Arc::new(Mutex::new(None));
+    Harness::on_gpu(vec![Slot::loaded("told", Box::new(Told(told.clone())))], Some(8 << 30));
+    assert_eq!(*lock(&told), Some(Some(8 << 30)));
 }

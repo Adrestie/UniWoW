@@ -39,8 +39,6 @@ use model::{TILE, TileId, TileModel};
 const MAP: &str = "map";
 const DISTANCE: &str = "view_distance";
 const OLD_BUDGET: &str = "gpu_budget_mb";
-/// The least and most budget of the view the panel sets, in MB.
-const BUDGETS: [u64; 2] = [64, 65_536];
 const MB: u64 = 1024 * 1024;
 
 /// The time a frame gives to handing ready tiles to the drawing.
@@ -698,17 +696,6 @@ impl Module for TerrainModule {
                 took.as_secs_f32()
             ));
         }
-        ui.horizontal(|ui| {
-            ui.label("GPU budget of the view (MB)");
-            let mut mb = allowance.budget / MB;
-            if ui
-                .add(egui::DragValue::new(&mut mb).range(BUDGETS[0]..=BUDGETS[1]).speed(16))
-                .changed()
-                && let Some(view) = &self.view
-            {
-                view.set_budget(mb * MB);
-            }
-        });
         for refusal in &self.refusals {
             ui.colored_label(ui.visuals().warn_fg_color, refusal);
         }
