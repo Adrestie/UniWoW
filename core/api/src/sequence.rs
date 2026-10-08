@@ -1,7 +1,7 @@
 //! A sequence: its frame rate, its length, and one track per animated property, holding a curve
 //! per number of the property, kept in a readable JSON file.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use serde_json::{Value, json};
 
@@ -20,6 +20,14 @@ pub struct Track {
 
 /// A key of a sequence: its track's property, the number its curve stands for, and its frame.
 pub type KeyId = (String, usize, u32);
+
+/// The keys among `keys` of the track of `property`, by number and frame.
+fn of_track(keys: &BTreeSet<KeyId>, property: &str) -> HashSet<(usize, u32)> {
+    keys.iter()
+        .filter(|(of, _, _)| of == property)
+        .map(|(_, number, frame)| (*number, *frame))
+        .collect()
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sequence {
@@ -170,10 +178,9 @@ impl Sequence {
 
     pub fn remove_keys(&mut self, keys: &BTreeSet<KeyId>) {
         for track in &mut self.tracks {
+            let chosen = of_track(keys, &track.property);
             for (number, curve) in track.curves.iter_mut().enumerate() {
-                curve
-                    .keys
-                    .retain(|key| !keys.contains(&(track.property.clone(), number, frame_of(key))));
+                curve.keys.retain(|key| !chosen.contains(&(number, frame_of(key))));
                 curve.update_tangents();
             }
         }
@@ -186,10 +193,11 @@ impl Sequence {
         let offset = offset.max(-i64::from(lowest));
         let mut moved = BTreeSet::new();
         for track in &mut self.tracks {
+            let chosen = of_track(keys, &track.property);
             for (number, curve) in track.curves.iter_mut().enumerate() {
                 let (going, staying): (Vec<CurveKey>, Vec<CurveKey>) = std::mem::take(&mut curve.keys)
                     .into_iter()
-                    .partition(|key| keys.contains(&(track.property.clone(), number, frame_of(key))));
+                    .partition(|key| chosen.contains(&(number, frame_of(key))));
                 curve.keys = staying;
                 for mut key in going {
                     let frame = u32::try_from(i64::from(frame_of(&key)) + offset).unwrap_or(0);

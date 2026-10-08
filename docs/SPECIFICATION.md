@@ -225,7 +225,7 @@ range changed holds the value in it, as in Qt.
   plays, the kernel moves it on at each frame by the time elapsed, times its speed; at the end it
   stops and sends `finished`, or starts again with *loop*. Whenever its time or its sequence
   changes, the kernel writes the value of each track at that time into its property, through the
-  catalogue of animatable properties, and only the values that changed. The dopesheet views and the
+  catalogue of animatable properties; when only its keys change, only the values that changed. The dopesheet views and the
   curve views showing the same sequence with the same player share their time axis, zoom and
   scrolling; a sequence no view shows with that player any more is forgotten, and fitted again as
   when first shown once a view shows it again.
@@ -481,6 +481,9 @@ Not guaranteed:
 - The order, relative to an open group, of a change made by hand meanwhile (S4).
 - `disconnect` from another thread does not wait for a call already under way.
 - An event published during a frame is delivered at the next one.
+- The order, within one frame, between a module's undo entries recorded through its interface
+  objects, such as the keys of a sequence, served with the requests of the threads, and those of
+  its commands (`Context::execute`), applied at the end of the kernel's pass.
 - Every event reaching a subscription: one whose reader leaves 4,096 events unread is closed, with
   a warning in the log, and its reader then gets the error of a closed subscription.
 
@@ -1027,8 +1030,8 @@ Content:
     keys, then one row per track with its keys as diamonds. A click selects a key, Ctrl+click adds
     or removes one, a box drawn on the rows selects the keys inside; dragging moves the selected
     keys by whole frames, a key landing on another of its track replacing it; Delete removes them.
-    Dragging a diamond of the summary row moves every key of its frame. The wheel zooms the time,
-    the middle button scrolls it.
+    Dragging a diamond of the summary row moves every key of its frame. The wheel over the keys
+    zooms the time, the middle button scrolls it; the rows scroll by their bar.
   - **Playhead**: clicked or dragged in the ruler. Each time it moves, every track is evaluated and
     its value written to its property, so the 3D view follows it while it is dragged. Between two
     keys the values change smoothly without overshooting them (as the *Clamped Auto* keys of Unity),
@@ -1043,7 +1046,8 @@ Content:
     timeline writes only when the playhead or the keys change: a value changed elsewhere meanwhile,
     in the cube's panel or by `cube.paint`, stays until then.
   - **Files**: one sequence per file, readable JSON, in `sequences\` beside the executable until the
-    project model exists (section 10). The panel lists them, creates one with a name, and saves the
+    project model exists (section 10). The panel lists them, read again each time the list opens,
+    creates one with a name, and saves the
     one shown, marked while it has unsaved changes; changing sequence with unsaved changes asks
     whether to save them. A track whose property is not declared (its module absent or stopped) is
     shown greyed, its keys kept and saved.
@@ -1081,8 +1085,9 @@ As built:
   or the property's current value while the track has no keys. The playhead shows its frame in the
   ruler, and the frame and time (`2:15`) beside it.
 - **File**: JSON with each track's property first and one key per line.
-- **Limits**: the playhead moves and the values are written only while the *Timeline* panel is
-  shown.
+- **Limits**: until step 8.6b, the playhead moved and the values were written only while the
+  *Timeline* panel was shown; since then, the kernel moves the players adopted at each frame, the
+  panel shown or not.
 
 Complement asked before validation (done): a module of the interface shows modal windows for
 the other modules, as `QDialog`. The module that opens one gives its text and its buttons, and does
@@ -1103,7 +1108,8 @@ what the button chosen calls for. Changes that would be lost are asked about thi
   it answers with the window's number. When the user clicks a button, or presses Escape, the window
   closes and the module publishes the event `ui.dialog_answered`, with the window's number and the
   button's id: the module that opened the window does what it decided for that button. Windows
-  asked for while one is shown wait their turn.
+  asked for while one is shown wait their turn. A window that cannot be built is answered at once
+  with the button Escape stands for, so that its module waits no more.
 - **Unsaved changes, a contract of the core**: a Rust module tells which of its documents have
   unsaved changes and saves them on request (compiled, Lua and Python modules in a later
   milestone). When the editor is closed while modules have some, the kernel opens a window through
@@ -1400,8 +1406,10 @@ table up to date, and its review checks it.
     counted, which greyed out Undo while a player played, and merged only when nothing else was
     posted in between.
   - The values are written whenever the player's time changes, and also when its sequence changes:
-    the values at the playhead follow the keys, as in the Timeline. Only the values that changed
-    since the player last wrote are written. A track whose property no running module declares, or
+    the values at the playhead follow the keys, as in the Timeline. Where its time or its sequence
+    changed, every track is written, so that a value changed elsewhere gives way to the track once
+    the playhead moves; where only the keys changed, the playhead still, only the values that
+    changed since the player last wrote. A track whose property no running module declares, or
     of another kind, is told once per player in the log.
   - Each change of `TRACKS` is one undo entry, *edit a sequence*, owned by the module and in its
     open group; Undo and Redo set the tracks back without recording. Tracks set while the module

@@ -5,7 +5,7 @@
 //! service; the core also has it draw the `DopesheetView` objects of every language, and the left
 //! of the `CurveView` objects showing a sequence.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use uniwow_api::curve::{self, TimeAxis};
@@ -63,6 +63,7 @@ impl State {
         if sequence.tracks != self.seen {
             self.gesture = Gesture::None;
             self.shown_offset = 0;
+            self.seen.clone_from(&sequence.tracks);
         }
         // During a drag, the keys selected are where the drag began.
         if matches!(self.gesture, Gesture::None) {
@@ -70,12 +71,12 @@ impl State {
         }
     }
 
-    /// What the next frame should show: the tracks given to the caller, or those it showed.
-    fn expect(&mut self, keys: &KeysChange, sequence: &Sequence) {
-        self.seen = match keys {
-            KeysChange::Changing(tracks) | KeysChange::Finished { tracks, .. } => tracks.clone(),
-            KeysChange::None => sequence.tracks.clone(),
-        };
+    /// What the next frame should show: the tracks given to the caller, or, as `notice` left them,
+    /// those it showed.
+    fn expect(&mut self, keys: &KeysChange) {
+        if let KeysChange::Changing(tracks) | KeysChange::Finished { tracks, .. } = keys {
+            self.seen.clone_from(tracks);
+        }
     }
 }
 
@@ -175,9 +176,16 @@ fn rows(sequence: &Sequence, unfolded: &BTreeSet<String>) -> Vec<Row> {
     rows
 }
 
+/// A key of a sequence as `KeyId` names it, its property borrowed from the sequence.
+type KeyRef<'a> = (&'a str, usize, u32);
+
+fn owned(key: &KeyRef) -> KeyId {
+    (key.0.to_owned(), key.1, key.2)
+}
+
 /// The keys a row shows, by frame.
-fn row_keys(sequence: &Sequence, row: &Row) -> BTreeMap<u32, Vec<KeyId>> {
-    let mut keys: BTreeMap<u32, Vec<KeyId>> = BTreeMap::new();
+fn row_keys<'a>(sequence: &'a Sequence, row: &Row) -> BTreeMap<u32, Vec<KeyRef<'a>>> {
+    let mut keys: BTreeMap<u32, Vec<KeyRef<'a>>> = BTreeMap::new();
     let (tracks, only): (Vec<&Track>, Option<usize>) = match row {
         Row::Summary => (sequence.tracks.iter().collect(), None),
         Row::Group(name) => (
@@ -200,7 +208,7 @@ fn row_keys(sequence: &Sequence, row: &Row) -> BTreeMap<u32, Vec<KeyId>> {
                 let frame = frame_of(key);
                 keys.entry(frame)
                     .or_default()
-                    .push((track.property.clone(), number, frame));
+                    .push((track.property.as_str(), number, frame));
             }
         }
     }
@@ -307,7 +315,7 @@ impl Dopesheet for Sheet {
                     delete(state, sequence, keys, &self.delete, ui)
                 };
             });
-        state.expect(&output.keys, sequence);
+        state.expect(&output.keys);
         output
     }
 
@@ -325,7 +333,7 @@ impl Dopesheet for Sheet {
                 let (area, _) = ui.allocate_exact_size(egui::vec2(width, rows.len() as f32 * ROW), Sense::hover());
                 edited = left_column(state, input, input.playhead, &rows, area, width, true, ui);
             });
-        state.expect(&edited.keys, input.sequence);
+        state.expect(&edited.keys);
         CurveProperties {
             keys: edited.keys,
             playhead: edited.playhead,
@@ -854,7 +862,7 @@ fn keys_area(
     let response = ui.interact(area, id.with("keys"), Sense::click_and_drag());
     let command = ui.input(|i| i.modifiers.command);
     let centre_y = |index: usize| area.top() + (index as f32 + 0.5) * ROW;
-    let diamonds: Vec<(usize, Pos2, Vec<KeyId>)> = rows
+    let diamonds: Vec<(usize, Pos2, Vec<KeyRef>)> = rows
         .iter()
         .enumerate()
         .flat_map(|(index, row)| {
@@ -868,7 +876,7 @@ fn keys_area(
             .iter()
             .filter(|(_, centre, _)| (centre.x - at.x).abs() <= DIAMOND + 3.0 && (centre.y - at.y).abs() <= ROW / 2.0)
             .min_by(|a, b| (a.1.x - at.x).abs().total_cmp(&(b.1.x - at.x).abs()))
-            .map(|(_, _, keys)| keys.clone())
+            .map(|(_, _, keys)| keys.iter().map(owned).collect())
     };
     if response.drag_started_by(egui::PointerButton::Primary)
         && let Some(origin) = ui.input(|i| i.pointer.press_origin())
@@ -927,16 +935,18 @@ fn keys_area(
         Gesture::Select { from, to } => Some(Rect::from_two_pos(from, to)),
         _ => None,
     };
-    // During a drag, the keys as they began, moved.
-    let (shown, selected, offset) = match &state.gesture {
+    // During a drag, the keys as they began, moved, and where the selected ones went.
+    let moving = match &state.gesture {
         Gesture::Move { from, to, start } => {
             let offset = ((to - from) / view.pixels_per_frame).round() as i64;
             let mut moved = start.clone();
             let selected = moved.move_keys(&state.selection, offset);
-            (moved, selected, offset)
+            Some((moved, selected, offset))
         }
-        _ => (sequence.clone(), state.selection.clone(), 0),
+        _ => None,
     };
+    let offset = moving.as_ref().map_or(0, |(_, _, offset)| *offset);
+    let shown: &Sequence = moving.as_ref().map_or(sequence, |(moved, _, _)| moved);
     let mut change = KeysChange::None;
     if offset != state.shown_offset {
         change = KeysChange::Changing(shown.tracks.clone());
@@ -948,12 +958,14 @@ fn keys_area(
                 label: "move keys".to_owned(),
                 tracks: shown.tracks.clone(),
             };
-            state.selection = selected.clone();
+            if let Some((_, selected, _)) = &moving {
+                state.selection.clone_from(selected);
+            }
         }
         if let Some(rect) = selecting {
             for (index, centre, keys) in &diamonds {
                 if matches!(rows[*index], Row::Track(_) | Row::Number(..)) && rect.contains(*centre) {
-                    state.selection.extend(keys.iter().cloned());
+                    state.selection.extend(keys.iter().map(owned));
                 }
             }
         }
@@ -961,6 +973,11 @@ fn keys_area(
         state.shown_offset = 0;
     }
 
+    let selected = moving.as_ref().map_or(&state.selection, |(_, selected, _)| selected);
+    let chosen: HashSet<KeyRef> = selected
+        .iter()
+        .map(|(property, number, frame)| (property.as_str(), *number, *frame))
+        .collect();
     let painter = ui.painter_at(area);
     let visuals = ui.visuals();
     for (index, row) in rows.iter().enumerate() {
@@ -988,10 +1005,9 @@ fn keys_area(
     for (index, row) in rows.iter().enumerate() {
         let missing = matches!(row, Row::Track(i) | Row::Number(i, _)
             if !input.properties.get(&sequence.tracks[*i].property).is_some_and(|p| p.declared));
-        for (frame, keys) in row_keys(&shown, row) {
+        for (frame, keys) in row_keys(shown, row) {
             let centre = egui::pos2(view.x(f64::from(frame)), centre_y(index));
-            let chosen = keys.iter().all(|key| selected.contains(key));
-            let fill = if chosen {
+            let fill = if keys.iter().all(|key| chosen.contains(key)) {
                 visuals.selection.bg_fill
             } else if missing {
                 visuals.weak_text_color()
@@ -1093,6 +1109,16 @@ mod tests {
     /// Frames of a dopesheet of 800 by 600 points, 10 points a frame from frame 0, starting with
     /// `state`, each with its events; returns what the last one gave and the state then.
     fn frames(state: State, sequence: &Sequence, frames: Vec<Vec<egui::Event>>) -> (DopesheetOutput, State) {
+        frames_held(state, sequence, egui::Modifiers::NONE, frames)
+    }
+
+    /// As `frames`, with `modifiers` held throughout.
+    fn frames_held(
+        state: State,
+        sequence: &Sequence,
+        modifiers: egui::Modifiers,
+        frames: Vec<Vec<egui::Event>>,
+    ) -> (DopesheetOutput, State) {
         let sheet = Sheet::default();
         let id = egui::Id::new("dopesheet");
         lock(&sheet.states).insert(id, state);
@@ -1100,9 +1126,11 @@ mod tests {
         let properties = HashMap::new();
         let mut output = None;
         for events in frames {
+            let mut held = vec![egui::Event::ModifiersChanged(modifiers)];
+            held.extend(events);
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
-                events,
+                events: held,
                 ..egui::RawInput::default()
             };
             let mut rendered = ctx.run_ui(input, |ui| {
@@ -1180,6 +1208,115 @@ mod tests {
         let (output, state) = frame(dragging(&shown, 470.0), &changed, Vec::new());
         assert_eq!(output.keys, KeysChange::None, "no key changes");
         assert!(matches!(state.gesture, Gesture::None), "the drag ends");
+    }
+
+    /// Where the key of frame `frame` is drawn on the row `row`: rows of 22 points under the ruler
+    /// of 22, frames from x 404, 10 points apart.
+    fn key_at(row: usize, frame: u32) -> egui::Pos2 {
+        egui::pos2(404.0 + 10.0 * frame as f32, 22.0 + (row as f32 + 0.5) * 22.0)
+    }
+
+    fn button(at: egui::Pos2, pressed: bool, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers,
+        }
+    }
+
+    /// The keys selected, by property and frame.
+    fn chosen(state: &State) -> Vec<(&str, u32)> {
+        state
+            .selection
+            .iter()
+            .map(|(property, _, frame)| (property.as_str(), *frame))
+            .collect()
+    }
+
+    #[test]
+    fn a_box_drawn_over_the_rows_selects_the_keys_of_the_tracks_inside() {
+        let sequence = sequence();
+        let state = State {
+            seen: sequence.tracks.clone(),
+            ..State::default()
+        };
+        // From before frame 10 on the position's row to past it on the opacity's: not frame 20.
+        let (from, to) = (
+            key_at(2, 7) - egui::vec2(0.0, 8.0),
+            key_at(3, 15) + egui::vec2(0.0, 8.0),
+        );
+        let none = egui::Modifiers::NONE;
+        let (_, state) = frames(
+            state,
+            &sequence,
+            vec![
+                vec![egui::Event::PointerMoved(from)],
+                vec![button(from, true, none)],
+                vec![egui::Event::PointerMoved(from.lerp(to, 0.5))],
+                vec![egui::Event::PointerMoved(to)],
+                vec![button(to, false, none)],
+            ],
+        );
+        assert_eq!(chosen(&state), vec![("cube/opacity", 10), ("cube/position", 10)]);
+        assert!(matches!(state.gesture, Gesture::None));
+    }
+
+    #[test]
+    fn a_click_with_ctrl_adds_or_removes_a_key_and_one_without_selects_it_alone() {
+        let sequence = sequence();
+        let click = |state: State, at: egui::Pos2, modifiers: egui::Modifiers| {
+            frames_held(
+                state,
+                &sequence,
+                modifiers,
+                vec![
+                    vec![egui::Event::PointerMoved(at)],
+                    vec![button(at, true, modifiers)],
+                    vec![button(at, false, modifiers)],
+                ],
+            )
+            .1
+        };
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..egui::Modifiers::NONE
+        };
+        let state = State {
+            selection: BTreeSet::from([("cube/position".to_owned(), 0, 10)]),
+            seen: sequence.tracks.clone(),
+            ..State::default()
+        };
+        let state = click(state, key_at(3, 10), ctrl);
+        assert_eq!(
+            chosen(&state),
+            vec![("cube/opacity", 10), ("cube/position", 10)],
+            "added"
+        );
+        let state = click(state, key_at(2, 10), ctrl);
+        assert_eq!(chosen(&state), vec![("cube/opacity", 10)], "removed");
+        let state = click(state, key_at(2, 20), egui::Modifiers::NONE);
+        assert_eq!(chosen(&state), vec![("cube/position", 20)], "alone");
+    }
+
+    #[test]
+    fn a_gesture_begun_once_the_tracks_changed_elsewhere_is_kept_while_they_stay() {
+        let sequence = sequence();
+        let mut state = State::default();
+        // The tracks differ from what the dopesheet saw: noticed once.
+        state.notice(&sequence);
+        state.gesture = Gesture::Select {
+            from: egui::Pos2::ZERO,
+            to: egui::Pos2::ZERO,
+        };
+        state.expect(&KeysChange::None);
+        state.notice(&sequence);
+        assert!(matches!(state.gesture, Gesture::Select { .. }), "the same tracks: kept");
+        let mut changed = sequence.clone();
+        changed.tracks.pop();
+        state.notice(&changed);
+        assert!(matches!(state.gesture, Gesture::None), "changed elsewhere: ended");
     }
 
     #[test]

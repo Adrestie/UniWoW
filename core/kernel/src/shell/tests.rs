@@ -937,6 +937,46 @@ fn level_at(module: &capi::ModuleContext, sequence: u64, frame: f64) -> f64 {
 }
 
 #[test]
+fn a_value_changed_elsewhere_gives_way_to_the_track_once_the_playhead_moves() {
+    let native = CompiledModule::started(capi::testing::native("native"));
+    let mut harness = Harness::with_slots(vec![Slot::compiled("native", native)]);
+    let thread = harness.shell.slots[0].compiled.expect("compiled");
+    let player = {
+        let mut objects = ui::lock(&thread.ui);
+        let sequence = objects.create(Kind::Sequence, None).unwrap();
+        objects.set_numbers(sequence, Property::Length, &[60.0]).unwrap();
+        objects
+            .set_text(sequence, Property::Tracks, &level_tracks(&[(0, 5.0), (60, 5.0)]))
+            .unwrap();
+        let player = objects.create(Kind::Player, None).unwrap();
+        objects
+            .set_numbers(player, Property::Sequence, &[sequence as f64])
+            .unwrap();
+        objects.set_numbers(player, Property::Time, &[30.0]).unwrap();
+        player
+    };
+    let now = Instant::now();
+    harness.play_at(now, thread);
+    assert_eq!(capi::testing::level(thread).0, 5.0, "the track's value");
+    assert_eq!(capi::testing::write_numbers(thread, c"native/level", &[9.0]), 0);
+    harness.play_at(now, thread);
+    assert_eq!(
+        capi::testing::level(thread).0,
+        9.0,
+        "changed elsewhere, the playhead still"
+    );
+    ui::lock(&thread.ui)
+        .set_numbers(player, Property::Time, &[40.0])
+        .unwrap();
+    harness.play_at(now, thread);
+    assert_eq!(
+        capi::testing::level(thread).0,
+        5.0,
+        "the playhead moved: the track's value again"
+    );
+}
+
+#[test]
 fn a_player_writes_its_values_through_the_catalogue_where_they_change() {
     let native = CompiledModule::started(capi::testing::native("native"));
     let mut harness = Harness::with_slots(vec![Slot::compiled("native", native)]);

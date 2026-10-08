@@ -445,9 +445,16 @@ uniwow_api::export_module!(TimelineModule::default());
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
     use uniwow_api::sequence::{Sequence, Track};
+    use uniwow_api::serde_json::{Value, json};
     use uniwow_api::ui::Property;
-    use uniwow_api::{Command, Module, PropertyKind};
+    use uniwow_api::{
+        CallId, Command, CommandInfo, DIALOG_ANSWERED_TOPIC, DIALOG_COMMAND, Editor, EditorBackend, Event, Module,
+        PropertyKind,
+    };
 
     use super::{NumberEdit, TimelineModule};
     use crate::testing::FakeHost;
@@ -534,6 +541,132 @@ mod tests {
             "its object destroyed"
         );
         assert_eq!(timeline.current.as_deref(), Some("outro"));
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    /// An editor offering the command that opens a modal window, and nothing else.
+    struct WithDialogs;
+
+    impl EditorBackend for WithDialogs {
+        fn commands(&self) -> Vec<CommandInfo> {
+            vec![CommandInfo {
+                name: DIALOG_COMMAND.to_owned(),
+                owner: "dialogs".to_owned(),
+                description: String::new(),
+                arguments: json!({}),
+                result: json!({}),
+                on_caller: false,
+            }]
+        }
+
+        fn call(&self, _caller: &str, _name: &str, _arguments: Value) -> Result<Value, String> {
+            Err("not in the tests".to_owned())
+        }
+
+        fn publish(&self, _source: &str, _topic: &str, _payload: Value) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn subscribe(&self, _caller: &str, _topic: &str) -> Result<u64, String> {
+            Ok(1)
+        }
+
+        fn next_event(&self, _caller: &str, _subscription: u64, _timeout: Duration) -> Result<Option<Event>, String> {
+            Ok(None)
+        }
+
+        fn unsubscribe(&self, _subscription: u64) {}
+
+        fn setting(&self, _caller: &str, _space: &str, _key: &str) -> Result<Option<Value>, String> {
+            Ok(None)
+        }
+
+        fn set_setting(&self, _caller: &str, _space: &str, _key: &str, _value: Value) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn begin_group(&self, _caller: &str, _label: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn end_group(&self, _caller: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// A Timeline showing `intro` with an unsaved change, `outro` saved beside it, asking about
+    /// the change in window 5 before showing `outro`.
+    fn asking(name: &str) -> (TimelineModule, std::path::PathBuf, FakeHost) {
+        let (mut timeline, folder) = timeline(name);
+        timeline.editor = Some(Editor::new(Arc::new(WithDialogs), "timeline"));
+        std::fs::write(folder.join("outro.json"), Sequence::default().to_text()).unwrap();
+        timeline.create("intro").unwrap();
+        timeline.open("intro").unwrap();
+        timeline.set_number("intro", Property::Length, 60.0);
+        let mut host = FakeHost::default();
+        crate::panel::switch(&mut timeline, &mut host.context(), "outro".to_owned(), true);
+        timeline.on_reply(CallId(1), Ok(json!({ "dialog": 5 })), &mut host.context());
+        assert_eq!(timeline.current.as_deref(), Some("intro"), "shown until answered");
+        (timeline, folder, host)
+    }
+
+    fn answer(timeline: &mut TimelineModule, host: &mut FakeHost, button: &str) {
+        let event = Event {
+            topic: DIALOG_ANSWERED_TOPIC.to_owned(),
+            source: "dialogs".to_owned(),
+            payload: json!({ "dialog": 5, "button": button }),
+        };
+        timeline.on_event(&event, &mut host.context());
+    }
+
+    #[test]
+    fn the_unsaved_changes_asked_about_are_dropped_kept_or_saved_as_the_user_answers() {
+        let (mut timeline, folder, mut host) = asking("answers");
+        answer(&mut timeline, &mut host, "discard");
+        assert_eq!(host.forgotten, vec!["intro".to_owned()]);
+        assert!(!timeline.documents.contains_key("intro"));
+        assert_eq!(timeline.current.as_deref(), Some("outro"));
+        std::fs::remove_dir_all(&folder).unwrap();
+
+        let (mut timeline, folder, mut host) = asking("cancel");
+        answer(&mut timeline, &mut host, "cancel");
+        assert!(host.forgotten.is_empty());
+        assert_eq!(timeline.current.as_deref(), Some("intro"), "nothing moves");
+        assert!(timeline.dirty("intro"));
+        assert!(timeline.question.is_none(), "asked again next time");
+        std::fs::remove_dir_all(&folder).unwrap();
+
+        let (mut timeline, folder, mut host) = asking("save");
+        answer(&mut timeline, &mut host, "save");
+        assert!(!timeline.dirty("intro"));
+        assert!(folder.join("intro.json").exists());
+        assert_eq!(timeline.current.as_deref(), Some("outro"));
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn a_save_that_fails_says_why_and_shows_the_sequence_still() {
+        let (mut timeline, folder, mut host) = asking("unsaved");
+        std::fs::remove_dir_all(&folder).unwrap();
+        answer(&mut timeline, &mut host, "save");
+        assert!(timeline.panel.message().is_some(), "the panel says why");
+        assert_eq!(timeline.current.as_deref(), Some("intro"));
+        assert!(timeline.question.is_none());
+    }
+
+    #[test]
+    fn a_window_that_could_not_be_opened_is_said_and_nothing_waits_for_it() {
+        let (mut timeline, folder) = timeline("unasked");
+        timeline.editor = Some(Editor::new(Arc::new(WithDialogs), "timeline"));
+        timeline.create("intro").unwrap();
+        timeline.open("intro").unwrap();
+        timeline.set_number("intro", Property::Length, 60.0);
+        let mut host = FakeHost::default();
+        crate::panel::switch(&mut timeline, &mut host.context(), "outro".to_owned(), true);
+        timeline.on_reply(CallId(1), Err("too many windows".to_owned()), &mut host.context());
+        assert!(timeline.question.is_none());
+        assert!(timeline.panel.message().is_some());
+        assert_eq!(timeline.current.as_deref(), Some("intro"));
         std::fs::remove_dir_all(&folder).unwrap();
     }
 

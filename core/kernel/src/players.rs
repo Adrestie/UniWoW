@@ -34,9 +34,10 @@ pub struct Players {
 }
 
 impl Players {
-    /// Moves the players of `stores` on to `now`, then writes the values of their tracks wherever
-    /// their time or their sequence changed, and only the values that changed. Returns whether one
-    /// plays on, for the next frame to come.
+    /// Moves the players of `stores` on to `now`, then writes the values of their tracks: every
+    /// one where their time or their sequence changed, so that a value changed elsewhere gives way
+    /// to the track once the playhead moves; where only the keys changed, the values that changed
+    /// since the player last wrote. Returns whether one plays on, for the next frame to come.
     pub fn tick(&mut self, stores: &[Store], now: Instant) -> bool {
         let seconds = self.last.map_or(0.0, |last| now.duration_since(last).as_secs_f64());
         let mut playing = false;
@@ -51,6 +52,12 @@ impl Players {
                 let at = (frame.time, frame.sequence, frame.generation);
                 if written.at == Some(at) {
                     continue;
+                }
+                if written
+                    .at
+                    .is_none_or(|(time, sequence, _)| (time, sequence) != (at.0, at.1))
+                {
+                    written.values.clear();
                 }
                 written.at = Some(at);
                 for track in &frame.data.tracks {

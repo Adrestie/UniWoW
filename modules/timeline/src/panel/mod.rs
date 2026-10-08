@@ -35,6 +35,12 @@ impl State {
     pub fn say(&mut self, message: &str) {
         self.message = Some(message.to_owned());
     }
+
+    /// The message shown, for the tests.
+    #[cfg(test)]
+    pub fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
 }
 
 pub fn show(timeline: &mut TimelineModule, ui: &mut egui::Ui, ctx: &mut Context) {
@@ -63,7 +69,7 @@ fn sequence_bar(timeline: &mut TimelineModule, ui: &mut egui::Ui, ctx: &mut Cont
             None => "none".to_owned(),
         };
         let mut chosen = None;
-        egui::ComboBox::from_id_salt("timeline-sequence")
+        let list = egui::ComboBox::from_id_salt("timeline-sequence")
             .selected_text(shown)
             .show_ui(ui, |ui| {
                 for name in &timeline.names {
@@ -75,6 +81,10 @@ fn sequence_bar(timeline: &mut TimelineModule, ui: &mut egui::Ui, ctx: &mut Cont
                     }
                 }
             });
+        // The files of the folder read again when the list opens: one added meanwhile shows.
+        if list.response.clicked() {
+            timeline.refresh_names();
+        }
         if let Some(name) = chosen.filter(|name| timeline.current.as_ref() != Some(name)) {
             switch(timeline, ctx, name, dirty);
         }

@@ -109,20 +109,9 @@ pub(super) fn playback_bar(timeline: &mut TimelineModule, sequence: &Sequence, u
     });
 }
 
-/// The menu adding a track for a property of a running module the sequence does not animate yet.
+/// The menu adding a track for a property of a running module the sequence does not animate yet;
+/// the properties are listed only while it is open.
 fn add_property(timeline: &mut TimelineModule, sequence: &Sequence, ui: &mut egui::Ui) {
-    let declared: BTreeMap<String, PropertyInfo> = timeline
-        .editor
-        .as_ref()
-        .map(|editor| editor.properties())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|info| (info.path.clone(), info))
-        .collect();
-    let addable: Vec<&PropertyInfo> = declared
-        .values()
-        .filter(|info| sequence.track(&info.path).is_none())
-        .collect();
     let Some(handle) = timeline
         .current
         .as_ref()
@@ -131,19 +120,32 @@ fn add_property(timeline: &mut TimelineModule, sequence: &Sequence, ui: &mut egu
     else {
         return;
     };
-    ui.add_enabled_ui(!addable.is_empty(), |ui| {
-        ui.menu_button("Add property", |ui| {
-            for info in addable {
-                if ui.button(format!("{}: {}", info.owner, info.label)).clicked() {
-                    let mut tracks = sequence.tracks.clone();
-                    tracks.push(Track::new(&info.path, info.kind));
-                    let label = format!("add {}", info.label);
-                    if let Err(error) = timeline.objects.lock().change_tracks(handle, tracks, &label) {
-                        log::warn!("{error}");
-                    }
-                    ui.close();
+    ui.menu_button("Add property", |ui| {
+        let declared: BTreeMap<String, PropertyInfo> = timeline
+            .editor
+            .as_ref()
+            .map(|editor| editor.properties())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|info| (info.path.clone(), info))
+            .collect();
+        let addable: Vec<&PropertyInfo> = declared
+            .values()
+            .filter(|info| sequence.track(&info.path).is_none())
+            .collect();
+        if addable.is_empty() {
+            ui.weak("No other property to animate");
+        }
+        for info in addable {
+            if ui.button(format!("{}: {}", info.owner, info.label)).clicked() {
+                let mut tracks = sequence.tracks.clone();
+                tracks.push(Track::new(&info.path, info.kind));
+                let label = format!("add {}", info.label);
+                if let Err(error) = timeline.objects.lock().change_tracks(handle, tracks, &label) {
+                    log::warn!("{error}");
                 }
+                ui.close();
             }
-        });
+        }
     });
 }

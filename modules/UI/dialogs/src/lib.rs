@@ -94,7 +94,7 @@ impl Module for DialogsModule {
         let caller = ctx.command_caller().unwrap_or("unknown");
         let first = arguments["first"].as_bool() == Some(true);
         let number = self.ask(request(self.next, caller, &arguments)?, first)?;
-        self.show_next()?;
+        Self::answer_unshown(self.show_next(), ctx);
         Ok(json!({ "dialog": number }))
     }
 
@@ -113,9 +113,7 @@ impl Module for DialogsModule {
             let _ = ui::lock(&self.ui).destroy(dialog);
             ctx.publish(DIALOG_ANSWERED_TOPIC, json!({ "dialog": number, "button": button }));
         }
-        if let Err(error) = self.show_next() {
-            log::error!("a window could not be shown: {error}");
-        }
+        Self::answer_unshown(self.show_next(), ctx);
     }
 }
 
@@ -139,38 +137,78 @@ impl DialogsModule {
         Ok(number)
     }
 
-    /// Shows the next window waiting, unless one is shown.
-    fn show_next(&mut self) -> Result<(), String> {
-        if self.shown.is_some() {
-            return Ok(());
+    /// Shows the next window waiting, unless one is shown. Returns the windows that could not be
+    /// built, each with the button Escape stands for; the next one is tried after each.
+    fn show_next(&mut self) -> Vec<(u64, String)> {
+        let mut unshown = Vec::new();
+        while self.shown.is_none() {
+            let Some(request) = self.waiting.pop_front() else {
+                break;
+            };
+            let (number, escape) = (request.number, request.escape.clone());
+            if let Err(error) = self.build(request) {
+                log::error!("window {number} could not be shown: {error}");
+                unshown.push((number, escape));
+            }
         }
-        let Some(request) = self.waiting.pop_front() else {
-            return Ok(());
-        };
+        unshown
+    }
+
+    /// Answers each window of `unshown` with the button Escape stands for, so that the module that
+    /// asked for it waits no more.
+    fn answer_unshown(unshown: Vec<(u64, String)>, ctx: &mut Context) {
+        for (number, escape) in unshown {
+            ctx.publish(DIALOG_ANSWERED_TOPIC, json!({ "dialog": number, "button": escape }));
+        }
+    }
+
+    /// Builds the window of `request` and shows it; on failure, the objects made for it go.
+    fn build(&mut self, request: Request) -> Result<(), String> {
         let mut store = ui::lock(&self.ui);
-        let cell = [0, 0, 1, 1];
         let dialog = store.create(Kind::Dialog, None)?;
+        let built = Self::fill(&mut store, dialog, request, &self.answers);
+        match built {
+            Ok(number) => {
+                self.shown = Some((number, dialog));
+                Ok(())
+            }
+            Err(error) => {
+                let _ = store.destroy(dialog);
+                Err(error)
+            }
+        }
+    }
+
+    /// Fills the window `dialog` with the text and the buttons of `request`, each button telling
+    /// `answers`, and shows it; returns its number.
+    fn fill(
+        store: &mut Ui,
+        dialog: Handle,
+        request: Request,
+        answers: &Arc<Mutex<Vec<(u64, String)>>>,
+    ) -> Result<u64, String> {
+        let cell = [0, 0, 1, 1];
         store.set_text(dialog, Property::Title, &request.title)?;
         let layout = store.create(Kind::VBoxLayout, None)?;
         store.add_to(dialog, layout, cell)?;
         let text = store.create(Kind::Label, None)?;
-        store.set_text(text, Property::Text, &request.text)?;
         store.add_to(layout, text, cell)?;
+        store.set_text(text, Property::Text, &request.text)?;
         let row = store.create(Kind::HBoxLayout, None)?;
         store.add_to(layout, row, cell)?;
         let number = request.number;
         for (id, label) in request.buttons {
             let button = store.create(Kind::PushButton, None)?;
-            store.set_text(button, Property::Text, &label)?;
             store.add_to(row, button, cell)?;
-            let answers = self.answers.clone();
+            store.set_text(button, Property::Text, &label)?;
+            let answers = answers.clone();
             store.connect(
                 button,
                 Signal::Clicked,
                 Arc::new(move |_| lock(&answers).push((number, id.clone()))),
             )?;
         }
-        let answers = self.answers.clone();
+        let answers = answers.clone();
         let escape = request.escape;
         store.connect(
             dialog,
@@ -178,8 +216,7 @@ impl DialogsModule {
             Arc::new(move |_| lock(&answers).push((number, escape.clone()))),
         )?;
         store.set_numbers(dialog, Property::Visible, &[1.0])?;
-        self.shown = Some((number, dialog));
-        Ok(())
+        Ok(number)
     }
 }
 
@@ -248,8 +285,8 @@ mod tests {
         let asked = json!({ "text": "x", "buttons": [{ "id": "ok", "label": "OK" }] });
         dialogs.waiting.push_back(request(1, "timeline", &asked).unwrap());
         dialogs.waiting.push_back(request(2, "timeline", &asked).unwrap());
-        dialogs.show_next().unwrap();
-        dialogs.show_next().unwrap();
+        assert!(dialogs.show_next().is_empty());
+        assert!(dialogs.show_next().is_empty());
         assert_eq!(ui::lock(&dialogs.ui).dialogs().len(), 1);
         assert_eq!(dialogs.shown.map(|(number, _)| number), Some(1));
         assert_eq!(dialogs.waiting.len(), 1);
