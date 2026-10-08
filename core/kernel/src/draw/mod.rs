@@ -46,6 +46,9 @@ pub struct PanelView {
     rows: HashMap<Handle, HashMap<String, RowProperty>>,
     /// The id each dopesheet view was drawn under, for the dopesheet to forget it once it is gone.
     sheet_ids: HashMap<Handle, egui::Id>,
+    /// The ids each curve view was drawn under, for the curve editor to forget them once it is
+    /// gone.
+    curve_ids: HashMap<Handle, HashSet<egui::Id>>,
     /// The frame `rows` were read for: once a frame, whatever the panels and dialogs drawn.
     prepared: Option<u64>,
     /// The time axis of each curve view and dopesheet view.
@@ -367,6 +370,16 @@ impl PanelView {
             let kept = alive(handle);
             if !kept && let Some(sheet) = &sheet {
                 sheet.forget(*id);
+            }
+            kept
+        });
+        let editor = self.curve_editor.clone();
+        self.curve_ids.retain(|handle, ids| {
+            let kept = alive(handle);
+            if !kept && let Some(editor) = &editor {
+                for id in ids.iter() {
+                    editor.forget(*id);
+                }
             }
             kept
         });
@@ -716,11 +729,14 @@ impl PanelView {
                 let time = self.time_axis(handle, object, None);
                 let inner = ui.allocate_ui(size, |ui| {
                     let id = ui.id().with(("uniwow-curves", handle));
-                    catch_unwind(AssertUnwindSafe(|| {
+                    let shown = catch_unwind(AssertUnwindSafe(|| {
                         editor.show(ui, id, &mut curves, time, &CurveOptions::default())
-                    }))
+                    }));
+                    (id, shown)
                 });
-                let change = match inner.inner {
+                let (id, shown) = inner.inner;
+                self.curve_ids.entry(handle).or_default().insert(id);
+                let change = match shown {
                     Ok(output) => output.change,
                     Err(panic) => {
                         let message = format!("the curve editor panicked: {}", panic_text(&*panic));
@@ -972,6 +988,7 @@ impl PanelView {
         };
         let area = egui::Rect::from_min_max(egui::pos2(rect.left() + left_width, rect.top()), rect.max);
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area));
+        self.curve_ids.entry(view).or_default().insert(id.with("curves"));
         let time = self.time_axis(view, object, Some(sequence));
         let shown = catch_unwind(AssertUnwindSafe(|| {
             editor.show(&mut child, id.with("curves"), &mut curves, time, &options)
@@ -1631,6 +1648,8 @@ mod tests {
                 ..unchanged()
             }
         }
+
+        fn forget(&self, _id: egui::Id) {}
     }
 
     /// The left of a curve view hiding nothing and changing nothing.
@@ -1685,6 +1704,8 @@ mod tests {
             *self.0.lock().unwrap() = curves.iter().map(|shown| shown.visible).collect();
             unchanged()
         }
+
+        fn forget(&self, _id: egui::Id) {}
     }
     /// The signals a view sent: which, its text, its boolean and its number.
     type Sent = Arc<Mutex<Vec<(Signal, String, bool, f64)>>>;
@@ -1846,6 +1867,8 @@ mod tests {
                 playhead: None,
             }
         }
+
+        fn forget(&self, _id: egui::Id) {}
     }
 
     /// A panel holding a view of `kind` on a sequence with a key of 0.5 at frame 0 on
@@ -2121,6 +2144,8 @@ mod tests {
         ) -> CurveOutput {
             panic!("broken editor")
         }
+
+        fn forget(&self, _id: egui::Id) {}
     }
 
     #[test]
@@ -2971,6 +2996,43 @@ mod tests {
         fixture.frame(&mut panels);
         assert_eq!(sheet.0.lock().unwrap().len(), 1);
         assert!(panels.sheet_ids.is_empty());
+    }
+
+    /// A curve editor noting the editors it is told to forget.
+    #[derive(Default)]
+    struct ForgettingCurves(Mutex<Vec<egui::Id>>);
+
+    impl CurveEditor for ForgettingCurves {
+        fn show(
+            &self,
+            _ui: &mut egui::Ui,
+            _id: egui::Id,
+            _curves: &mut [ShownCurve],
+            _time: &mut TimeAxis,
+            _options: &CurveOptions,
+        ) -> CurveOutput {
+            unchanged()
+        }
+
+        fn forget(&self, id: egui::Id) {
+            self.0.lock().unwrap().push(id);
+        }
+    }
+
+    #[test]
+    fn the_curve_editor_forgets_a_view_that_is_gone() {
+        let fixture = fixture(Kind::CurveView);
+        let editor = Arc::new(ForgettingCurves::default());
+        let mut panels = PanelView {
+            curve_editor: Some(editor.clone()),
+            ..PanelView::default()
+        };
+        fixture.frame(&mut panels);
+        assert!(editor.0.lock().unwrap().is_empty());
+        lock(&fixture.shared).destroy(fixture.view).unwrap();
+        fixture.frame(&mut panels);
+        assert_eq!(editor.0.lock().unwrap().len(), 1);
+        assert!(panels.curve_ids.is_empty());
     }
 
     #[test]

@@ -359,6 +359,9 @@ pub trait CurveEditor: Send + Sync {
         time: &mut TimeAxis,
         options: &CurveOptions,
     ) -> CurveOutput;
+
+    /// Forgets what it keeps of the editor `id`, whose view is gone.
+    fn forget(&self, id: egui::Id);
 }
 
 /// The service of the curve editor.

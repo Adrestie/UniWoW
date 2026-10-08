@@ -73,6 +73,22 @@ fn keys_of(curves: &[ShownCurve]) -> Vec<Vec<(f64, f64)>> {
         .collect()
 }
 
+/// The keys of `selection`, numbered among the keys `before`, numbered among the keys `now`, found
+/// by their time; those no longer there are let go, and all of them when the curves changed.
+fn reselect(selection: &BTreeSet<KeyRef>, before: &[Vec<(f64, f64)>], now: &[Vec<(f64, f64)>]) -> BTreeSet<KeyRef> {
+    if before.len() != now.len() {
+        return BTreeSet::new();
+    }
+    selection
+        .iter()
+        .filter_map(|&(c, k)| {
+            let time = before.get(c)?.get(k)?.0;
+            let index = now.get(c)?.iter().position(|(at, _)| *at == time)?;
+            Some((c, index))
+        })
+        .collect()
+}
+
 /// Where times and values are drawn.
 #[derive(Clone, Copy)]
 struct Graph {
@@ -329,14 +345,20 @@ fn move_keys(curves: &mut [ShownCurve], start: &[(KeyRef, f64, f64)], dt: f64, d
     let [low, high] = admissible(curves, start, options);
     let wanted = options.snap.map_or(dt, |step| (dt / step).round() * step);
     let dt = if low <= high { wanted.clamp(low, high) } else { 0.0 };
-    let before: Vec<Curve> = curves.iter().map(|shown| shown.curve.clone()).collect();
+    // Only the curves of the keys moved, kept to come back to.
+    let touched: BTreeSet<usize> = start.iter().map(|((c, _), _, _)| *c).collect();
+    let before: Vec<(usize, Curve)> = touched
+        .iter()
+        .filter_map(|&c| Some((c, curves.get(c)?.curve.clone())))
+        .collect();
     for &((c, k), time, value) in start {
         if let Some(key) = curves.get_mut(c).and_then(|shown| shown.curve.keys.get_mut(k)) {
             key.time = time + dt;
             key.value = (value + dv).clamp(-curve::LIMIT, curve::LIMIT);
         }
     }
-    for (shown, before) in curves.iter_mut().zip(before) {
+    for (c, before) in before {
+        let shown = &mut curves[c];
         if shown.curve.check().is_err() {
             shown.curve = before;
         }
@@ -512,7 +534,8 @@ fn grid_lines(first: f64, last: f64, step: f64) -> Vec<f64> {
 }
 
 fn number_label(value: f64, step: f64) -> String {
-    let decimals = if step >= 1.0 {
+    // A step that is no number, the zoom unusable, gives no decimals.
+    let decimals = if step >= 1.0 || !step.is_finite() || step <= 0.0 {
         0
     } else {
         (-step.log10()).ceil() as usize
@@ -544,10 +567,14 @@ impl CurveEditor for Editor {
             bottom: state.bottom,
             pixels_per_value: state.pixels_per_value,
         };
-        // Keys changed elsewhere: the gesture and the menu would act on keys that are no more.
-        if keys_of(curves) != state.left {
+        // Keys changed elsewhere: the gesture and the menu would act on keys that are no more, and
+        // the keys selected are found again by their time.
+        let shown_keys = keys_of(curves);
+        if shown_keys != state.left {
             state.gesture = Gesture::None;
             state.menu.clear();
+            state.selection = reselect(&state.selection, &state.left, &shown_keys);
+            state.left = shown_keys;
         }
         state.selection.retain(|(c, k)| {
             curves
@@ -772,11 +799,17 @@ impl CurveEditor for Editor {
             draw_ruler(ui, ruler, &graph, playhead.or(options.playhead), options);
         }
         draw(ui, curves, state, &graph, options);
-        state.left = keys_of(curves);
+        if change != CurveChange::None {
+            state.left = keys_of(curves);
+        }
         *time = graph.time;
         state.bottom = graph.bottom;
         state.pixels_per_value = graph.pixels_per_value;
         CurveOutput { change, playhead }
+    }
+
+    fn forget(&self, id: egui::Id) {
+        lock(&self.states).remove(&id);
     }
 }
 
@@ -945,7 +978,9 @@ uniwow_api::export_module!(CurvesModule);
 mod tests {
     use std::collections::BTreeSet;
 
-    use uniwow_api::curve::{Curve, CurveEditor, CurveOptions, ShownCurve, SideMode, TangentMode, TimeAxis};
+    use uniwow_api::curve::{
+        Curve, CurveChange, CurveEditor, CurveOptions, ShownCurve, SideMode, TangentMode, TimeAxis,
+    };
     use uniwow_api::egui;
 
     use super::{
@@ -1054,6 +1089,190 @@ mod tests {
         });
         output.textures_delta.clear();
         lock(&editor.states).remove(&id).expect("kept")
+    }
+
+    #[test]
+    fn a_key_selected_stays_itself_when_a_key_is_put_before_it_elsewhere() {
+        let state = State {
+            selection: BTreeSet::from([(0, 1)]),
+            left: vec![vec![(5.0, 1.0), (10.0, 2.0)]],
+            ..State::default()
+        };
+        // An undo, a module or the dopesheet put a key at 0 meanwhile.
+        let mut curves = vec![shown(&[(0.0, 0.0), (5.0, 1.0), (10.0, 2.0)])];
+        let state = press_delete(state, &mut curves);
+        let times: Vec<f64> = curves[0].curve.keys.iter().map(|key| key.time).collect();
+        assert_eq!(
+            times,
+            vec![0.0, 5.0],
+            "the key of frame 10 removed, not the one now second"
+        );
+        assert!(state.selection.is_empty());
+    }
+
+    /// Frames of an editor of 800 by 600 points showing `curves` from `state`, 10 points a frame
+    /// and 10 a value from 0 at the bottom left, each frame with its events; the change each frame
+    /// gave, the state and the time axis then.
+    fn frames(
+        state: State,
+        curves: &mut [ShownCurve],
+        frames: Vec<Vec<egui::Event>>,
+    ) -> (Vec<CurveChange>, State, TimeAxis) {
+        let editor = Editor::default();
+        let id = egui::Id::new("curves");
+        lock(&editor.states).insert(id, state);
+        let ctx = egui::Context::default();
+        let mut time = TimeAxis {
+            first: 0.0,
+            pixels_per_unit: 10.0,
+        };
+        let mut changes = Vec::new();
+        for events in frames {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                events,
+                ..egui::RawInput::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                changes.push(editor.show(ui, id, curves, &mut time, &CurveOptions::default()).change);
+            });
+            output.textures_delta.clear();
+        }
+        (changes, lock(&editor.states).remove(&id).expect("kept"), time)
+    }
+
+    /// The state of an editor showing `curves` as `frames` lays them out, nothing selected.
+    fn laid_out(curves: &[ShownCurve]) -> State {
+        State {
+            bottom: 0.0,
+            pixels_per_value: 10.0,
+            left: keys_of(curves),
+            ..State::default()
+        }
+    }
+
+    /// Where the key at `time` and `value` is drawn.
+    fn at(time: f64, value: f64) -> egui::Pos2 {
+        egui::pos2(10.0 * time as f32, 600.0 - 10.0 * value as f32)
+    }
+
+    fn button(at: egui::Pos2, button: egui::PointerButton, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: at,
+            button,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// A drag with the primary button from `from` by `by`.
+    fn drag(from: egui::Pos2, by: egui::Vec2) -> Vec<Vec<egui::Event>> {
+        vec![
+            vec![egui::Event::PointerMoved(from)],
+            vec![button(from, egui::PointerButton::Primary, true)],
+            vec![egui::Event::PointerMoved(from + by / 2.0)],
+            vec![egui::Event::PointerMoved(from + by)],
+            vec![button(from + by, egui::PointerButton::Primary, false)],
+        ]
+    }
+
+    #[test]
+    fn a_key_dragged_in_value_then_in_time_gives_one_finished_change_each() {
+        let mut curves = vec![shown(&[(0.0, 0.0), (10.0, 5.0), (20.0, 0.0)])];
+        let (changes, state, _) = frames(
+            laid_out(&curves),
+            &mut curves,
+            drag(at(10.0, 5.0), egui::vec2(0.0, 20.0)),
+        );
+        assert!(changes.contains(&CurveChange::Changing), "{changes:?}");
+        assert_eq!(changes.last(), Some(&CurveChange::Finished));
+        assert_eq!(changes.iter().filter(|c| **c == CurveChange::Finished).count(), 1);
+        assert_eq!(keys_of(&curves)[0][1], (10.0, 3.0), "down by 2");
+        let (changes, _, _) = frames(state, &mut curves, drag(at(10.0, 3.0), egui::vec2(30.0, 0.0)));
+        assert_eq!(changes.iter().filter(|c| **c == CurveChange::Finished).count(), 1);
+        assert_eq!(keys_of(&curves)[0][1], (13.0, 3.0), "on by 3 frames");
+    }
+
+    #[test]
+    fn a_box_drawn_on_the_curves_selects_the_keys_inside() {
+        let mut curves = vec![shown(&[(0.0, 0.0), (10.0, 5.0), (20.0, 0.0)])];
+        let from = at(6.0, 10.0);
+        let (changes, state, _) = frames(laid_out(&curves), &mut curves, drag(from, at(14.0, 2.0) - from));
+        assert_eq!(state.selection, BTreeSet::from([(0, 1)]));
+        assert!(
+            changes.iter().all(|change| *change == CurveChange::None),
+            "nothing changed"
+        );
+    }
+
+    #[test]
+    fn a_double_click_on_a_curve_adds_a_key_there() {
+        let mut curves = vec![shown(&[(0.0, 0.0), (10.0, 5.0), (20.0, 0.0)])];
+        let on = at(5.0, curves[0].curve.evaluate(5.0));
+        let primary = egui::PointerButton::Primary;
+        let (changes, state, _) = frames(
+            laid_out(&curves),
+            &mut curves,
+            vec![
+                vec![egui::Event::PointerMoved(on)],
+                vec![button(on, primary, true)],
+                vec![button(on, primary, false)],
+                vec![button(on, primary, true)],
+                vec![button(on, primary, false)],
+            ],
+        );
+        let times: Vec<f64> = curves[0].curve.keys.iter().map(|key| key.time).collect();
+        assert_eq!(times, vec![0.0, 5.0, 10.0, 20.0]);
+        assert_eq!(changes.iter().filter(|c| **c == CurveChange::Finished).count(), 1);
+        assert_eq!(state.selection, BTreeSet::from([(0, 1)]), "the new key selected");
+    }
+
+    #[test]
+    fn the_wheel_with_shift_zooms_the_values_only() {
+        let mut curves = vec![shown(&[(0.0, 0.0), (10.0, 5.0)])];
+        let mut events = vec![
+            vec![
+                egui::Event::ModifiersChanged(egui::Modifiers::SHIFT),
+                egui::Event::PointerMoved(at(30.0, 20.0)),
+            ],
+            vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, 60.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::SHIFT,
+            }],
+        ];
+        events.extend((0..30).map(|_| Vec::new()));
+        let (_, state, time) = frames(laid_out(&curves), &mut curves, events);
+        assert!(state.pixels_per_value > 10.0, "{}", state.pixels_per_value);
+        assert_eq!((time.first, time.pixels_per_unit), (0.0, 10.0), "the time stays");
+    }
+
+    #[test]
+    fn a_right_click_on_a_key_selects_it_for_the_menu() {
+        let mut curves = vec![shown(&[(0.0, 0.0), (10.0, 5.0), (20.0, 0.0)])];
+        let key = at(10.0, 5.0);
+        let secondary = egui::PointerButton::Secondary;
+        let (_, state, _) = frames(
+            laid_out(&curves),
+            &mut curves,
+            vec![
+                vec![egui::Event::PointerMoved(key)],
+                vec![button(key, secondary, true)],
+                vec![button(key, secondary, false)],
+            ],
+        );
+        assert_eq!(state.menu, vec![(0, 1)]);
+        assert_eq!(state.selection, BTreeSet::from([(0, 1)]));
+    }
+
+    #[test]
+    fn an_editor_forgotten_keeps_nothing_of_its_view() {
+        let editor = Editor::default();
+        let id = egui::Id::new("curves");
+        lock(&editor.states).insert(id, State::default());
+        editor.forget(id);
+        assert!(lock(&editor.states).is_empty());
     }
 
     #[test]

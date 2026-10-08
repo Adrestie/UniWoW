@@ -1187,9 +1187,12 @@ Content:
   value; the handles of the selected keys' tangents are dragged; a right click on a key chooses
   its mode (the modes above, then Left, Right or Both tangents: Free, Linear, Constant, Weighted);
   Delete removes keys; a double click on a curve adds a key; the wheel zooms (with Ctrl the time
-  only, with Shift the values only), the middle button scrolls, F frames the selected keys, or all
-  of them. It tells its caller that the curves changed, while a drag goes on and when it ends, so
-  that the caller records one undo entry per change. It is offered:
+  only, through the zoom egui makes of Ctrl and the wheel; with Shift the values only), the middle
+  button scrolls, F frames the selected keys, or all of them. Keys changed elsewhere end the
+  gesture and the menu under way; the keys selected are found again by their time, and let go
+  when they are no more. It tells its caller that the curves changed, while a drag goes on and
+  when it ends, so that the caller records one undo entry per change; told that an editor's view
+  is gone, it forgets what it kept of it. It is offered:
   - to Rust modules, as a service the Timeline uses in its panel;
   - to every language, as an object of the Qt of the core, `CurveView`, as a `QWidget`: its curves
     are set and read as JSON (the property `CURVES` through `set_text` and `text`), and its signal

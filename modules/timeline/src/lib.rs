@@ -459,8 +459,16 @@ mod tests {
     use super::{NumberEdit, TimelineModule};
     use crate::testing::FakeHost;
 
+    /// The folder names the tests took: tests run at once, each must have its own.
+    static TAKEN: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+
     /// A Timeline over a folder of its own, made for the test `name`.
     fn timeline(name: &str) -> (TimelineModule, std::path::PathBuf) {
+        assert!(
+            TAKEN.lock().unwrap().insert(name.to_owned()),
+            "the folder '{name}' is another test's"
+        );
         let folder = std::env::temp_dir().join(format!("uniwow-timeline-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&folder).unwrap();
         let timeline = TimelineModule {
@@ -621,14 +629,14 @@ mod tests {
 
     #[test]
     fn the_unsaved_changes_asked_about_are_dropped_kept_or_saved_as_the_user_answers() {
-        let (mut timeline, folder, mut host) = asking("answers");
+        let (mut timeline, folder, mut host) = asking("answers-discard");
         answer(&mut timeline, &mut host, "discard");
         assert_eq!(host.forgotten, vec!["intro".to_owned()]);
         assert!(!timeline.documents.contains_key("intro"));
         assert_eq!(timeline.current.as_deref(), Some("outro"));
         std::fs::remove_dir_all(&folder).unwrap();
 
-        let (mut timeline, folder, mut host) = asking("cancel");
+        let (mut timeline, folder, mut host) = asking("answers-cancel");
         answer(&mut timeline, &mut host, "cancel");
         assert!(host.forgotten.is_empty());
         assert_eq!(timeline.current.as_deref(), Some("intro"), "nothing moves");
@@ -636,7 +644,7 @@ mod tests {
         assert!(timeline.question.is_none(), "asked again next time");
         std::fs::remove_dir_all(&folder).unwrap();
 
-        let (mut timeline, folder, mut host) = asking("save");
+        let (mut timeline, folder, mut host) = asking("answers-save");
         answer(&mut timeline, &mut host, "save");
         assert!(!timeline.dirty("intro"));
         assert!(folder.join("intro.json").exists());
@@ -646,7 +654,7 @@ mod tests {
 
     #[test]
     fn a_save_that_fails_says_why_and_shows_the_sequence_still() {
-        let (mut timeline, folder, mut host) = asking("unsaved");
+        let (mut timeline, folder, mut host) = asking("answers-save-fails");
         std::fs::remove_dir_all(&folder).unwrap();
         answer(&mut timeline, &mut host, "save");
         assert!(timeline.panel.message().is_some(), "the panel says why");
