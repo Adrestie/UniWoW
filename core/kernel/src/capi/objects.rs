@@ -279,7 +279,7 @@ pub(super) extern "C" fn remove_rows(context: *mut c_void, table: u64, rows: *co
             // SAFETY: the module passes `count` ids.
             unsafe { std::slice::from_raw_parts(rows, count as usize) }
         };
-        ui.remove_rows(table, ids).map(|_| 0)
+        status(ui.remove_rows(table, ids))
     })
 }
 
@@ -556,8 +556,13 @@ mod tests {
         assert_eq!(insert_rows(context, table, 1, third.as_ptr()), 0);
         assert_eq!(insert_rows(context, table, 0, third.as_ptr()), 1, "an id taken");
         assert_eq!(insert_rows(context, table, 0, c"[{".as_ptr()), 1, "not JSON");
-        let gone = [1u64, 9];
-        assert_eq!(remove_rows(context, table, gone.as_ptr(), 2), 0);
+        let absent = [1u64, 9];
+        assert_eq!(
+            remove_rows(context, table, absent.as_ptr(), 2),
+            1,
+            "a row it does not hold, none removed"
+        );
+        assert_eq!(remove_rows(context, table, absent.as_ptr(), 1), 0);
         assert_eq!(remove_rows(context, table, std::ptr::null(), 1), 1, "no ids");
         assert_eq!(remove_rows(context, table, std::ptr::null(), 0), 0, "none to remove");
         let mut seen = Seen {

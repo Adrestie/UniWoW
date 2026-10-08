@@ -1326,7 +1326,10 @@ table up to date, and its review checks it.
     not wait for writes, would otherwise cross a change recorded there. Since step 8.4, the module's
     thread marks every job that records nothing, the slots of `timeChanged` as well (*nothing is
     recorded in a property's write or a player's timeChanged, which Undo does not wait for*).
-  - `set_property` refuses a count that is not the kind's, and numbers that are not finite.
+  - `set_property` refuses a count that is not the kind's, and numbers that are not finite. Since
+    the full verification of the milestones, a property whose name is empty or holds a '/' or a
+    space, or whose range goes down, is refused as soon as the module declares it, as in Rust, the
+    reason in the log: `set_property` refuses it too, rather than keep a value nobody reads.
   - C++ also has `describeProperties(info)`, `readProperty` and `writeProperty`, and
     `Property::set`; C# also has `Editor.SetProperty`.
   - The C# *Counter* keeps whole values from 0 to 100, and has *Fail to write the value* to check
@@ -1546,10 +1549,12 @@ As built, second part (8.6b), the Timeline a client:
   sight are drawn, so that 100,000 rows scroll smoothly; columns beyond the width of the view are
   reached by scrolling sideways, the headers with them. A cell being edited that scrolls out of
   sight keeps its text, as leaving its field does; a cell given back with the text it had tells
-  nothing. A column to sort by beyond the columns sorts nothing, the rows staying in the module's
-  order; the classes of C++ and C# set the column, then the order, which sorts twice when the order
-  changes too. Besides the rows given at once, functions change one cell,
-  insert rows and remove rows, without giving the whole table again. The kernel sorts, keeping the
+  nothing. Since the full verification of the milestones, a column to sort by that the table does
+  not have is refused, its sort staying, and `SORT_COLUMN` holds the order too, as a second number:
+  the classes of C++ and C# set both at once and sort once; the column alone keeps the order.
+  Besides the rows given at once, functions change one cell, insert rows and remove rows, without
+  giving the whole table again; a removal naming a row the table does not hold is refused, none
+  removed. The kernel sorts, keeping the
   id of each row, which the signals and these functions use, whatever the order shown. The SQL
   tool of milestone 12 relies on it.
 - `PropertyGrid`, drawn by a new module of the interface, `modules/UI/properties/`, through a

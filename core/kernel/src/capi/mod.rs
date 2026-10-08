@@ -919,6 +919,17 @@ pub(crate) mod testing {
                 write: Some(write_free),
                 user,
             },
+            // Refused: its range goes down.
+            PropertyEntry {
+                name: c"wrong".as_ptr(),
+                label: c"Wrong".as_ptr(),
+                kind: uniwow_api::PropertyKind::Number as u32,
+                minimum: 5.0,
+                maximum: 1.0,
+                initial: [0.0; 3],
+                write: Some(write_free),
+                user,
+            },
         ]));
         info.properties = properties.as_ptr();
         info.property_count = properties.len() as u32;

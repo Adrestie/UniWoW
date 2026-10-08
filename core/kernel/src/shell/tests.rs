@@ -816,6 +816,19 @@ fn a_compiled_module_lists_reads_writes_and_tells_properties_through_the_c_funct
     assert_eq!(capi::testing::read_number(module, c"native/level"), (1, 5.0));
     assert_eq!(capi::testing::tell_numbers(module, c"level", &[f64::NAN]), 1);
     assert_eq!(capi::testing::tell_numbers(module, c"other", &[1.0]), 1);
+    assert!(
+        !listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["path"] == json!("native/wrong")),
+        "its range goes down"
+    );
+    assert_eq!(
+        capi::testing::tell_numbers(module, c"wrong", &[3.0]),
+        1,
+        "a property refused when the module started"
+    );
     assert_eq!(capi::testing::tell_numbers(module, c"level", &[50.0]), 0);
     assert_eq!(
         capi::testing::read_number(module, c"native/level"),

@@ -57,14 +57,19 @@ static unsafe class Fake
     [UnmanagedCallersOnly]
     public static void Collect(IntPtr context, byte* text) => Error = Utf8.Read(text);
 
-    /// <summary>The last numbers set: on which object, which property, and the first number.</summary>
+    /// <summary>The last numbers set: on which object, which property, and the first number; all of
+    /// them, and how many writes. A sort by the column 99 is refused, as by a table without it.</summary>
     public static (ulong Handle, uint Property, double Value) Numbers;
+    public static double[] NumbersWritten = [];
+    public static int NumbersCalls;
 
     [UnmanagedCallersOnly]
     public static int SetNumbers(IntPtr context, ulong handle, uint property, double* values, uint count)
     {
         Numbers = (handle, property, count > 0 ? values[0] : -1);
-        return 0;
+        NumbersWritten = new ReadOnlySpan<double>(values, (int)count).ToArray();
+        NumbersCalls++;
+        return property == (uint)Property.SortColumn && Numbers.Value == 99 ? 1 : 0;
     }
 
     /// <summary>The last cell set and the last ids removed from a table view.</summary>
@@ -261,6 +266,12 @@ static unsafe class Program
         var sorting = table.SortChanged.Connect(given => sort = given);
         Fake.CallWith(Fake.Connections[sorting], new SignalData { Integer = 3, Boolean = 1 });
         Expect(sort == (3, true), "SortChanged gives the column and whether from the highest");
+        int writes = Fake.NumbersCalls;
+        Expect(table.SortByColumn(2, true) && Fake.NumbersCalls == writes + 1 &&
+               Fake.Numbers.Handle == table.Handle && Fake.Numbers.Property == (uint)Property.SortColumn &&
+               Fake.NumbersWritten.SequenceEqual([2.0, 1.0]),
+               "SortByColumn writes the column and the direction at once");
+        Expect(!table.SortByColumn(99), "SortByColumn tells a column refused");
 
         var grid = new PropertyGrid();
         grid.SetPaths("""["cube/colour"]""");

@@ -128,9 +128,11 @@ enum {
     UNIWOW_PROPERTY_CURRENT_ITEM = 44,    /* tree view, table view: the id of the current item or row, 0 for none; an
                                              id the view does not hold is refused, and an item or row removed is no
                                              longer current */
-    UNIWOW_PROPERTY_SORT_COLUMN = 45,     /* table view: the column the rows are shown sorted by, -1 for the module's
-                                             order; a table of 50000 rows or more is sorted off the interface's
-                                             thread, its former order shown meanwhile */
+    UNIWOW_PROPERTY_SORT_COLUMN = 45,     /* table view: two numbers, the column the rows are shown sorted by, -1 for
+                                             the module's order, and 1 when from the highest, sorted once; the column
+                                             alone keeps the direction; a column the table does not have is refused;
+                                             a table of 50000 rows or more is sorted off the interface's thread, its
+                                             former order shown meanwhile */
     UNIWOW_PROPERTY_SORT_DESCENDING = 46, /* table view: sorted from the highest */
     UNIWOW_PROPERTY_PATHS = 47            /* property grid, text: JSON [path, ...], the paths of the properties
                                              shown, `<module>/<name>`; 100000 at most */
@@ -312,7 +314,8 @@ typedef struct uniwow_api {
        receives it on its thread. Returns 0, or non-zero when refused. */
     int32_t (*write_property)(void *context, const char *path, const double *values, uint32_t count);
     /* Tells the value the module's own property `name` now has, for the readers to see; kept
-       within its range. Returns 0, or non-zero when refused. */
+       within its range. Returns 0, or non-zero when refused: a property it did not declare, or one
+       refused when it started. */
     int32_t (*set_property)(void *context, const char *name, const double *values, uint32_t count);
 
     /* --- Table views (version 5): rows changed without giving the whole table again. Each returns
@@ -323,7 +326,7 @@ typedef struct uniwow_api {
     /* Rows inserted at `at` in the module's order, given as the JSON of UNIWOW_PROPERTY_ROWS; their
        ids are new. */
     int32_t (*insert_rows)(void *context, uniwow_handle table, uint32_t at, const char *rows_json);
-    /* The rows of these ids removed. */
+    /* The rows of these ids removed; refused, none removed, when one of them is not a row of it. */
     int32_t (*remove_rows)(void *context, uniwow_handle table, const uint64_t *rows, uint32_t count);
 } uniwow_api;
 
@@ -362,7 +365,9 @@ typedef int32_t (*uniwow_property_write)(void *user, double *values, uint32_t co
                                          void *error_context);
 
 /* An animatable property the module declares: kind is a UNIWOW_VALUE_*, the range the lowest and
-   highest value of each number, initial the value it has at start (its first numbers used). */
+   highest value of each number, initial the value it has at start (its first numbers used). One
+   whose name is empty or holds a '/' or a space, or whose range goes down, is refused, the reason
+   in the log; the module goes on without it. */
 typedef struct uniwow_property {
     const char *name;
     const char *label;

@@ -134,9 +134,10 @@ numbered!(
         /// tree view, table view: the id of the current item or row, 0 for none; an id the view
         /// does not hold is refused, and an item or row removed is no longer current
         CurrentItem = 44,
-        /// table view: the column the rows are shown sorted by, -1 for the module's order; a table
-        /// of 50000 rows or more is sorted off the interface's thread, its former order shown
-        /// meanwhile
+        /// table view: two numbers, the column the rows are shown sorted by, -1 for the module's
+        /// order, and 1 when from the highest, sorted once; the column alone keeps the direction; a
+        /// column the table does not have is refused; a table of 50000 rows or more is sorted off
+        /// the interface's thread, its former order shown meanwhile
         SortColumn = 45,
         /// table view: sorted from the highest
         SortDescending = 46,

@@ -93,7 +93,7 @@ entries = [
     [42, "Columns", "COLUMNS", "table view, text: JSON [header, ...], 1000 columns at most"],
     [43, "Rows", "ROWS", "table view, text: JSON [{id, cells: [text, ...]}] in the module's order; ids whole numbers from 1, each of its own; 1000000 rows at most"],
     [44, "CurrentItem", "CURRENT_ITEM", "tree view, table view: the id of the current item or row, 0 for none; an id the view does not hold is refused, and an item or row removed is no longer current"],
-    [45, "SortColumn", "SORT_COLUMN", "table view: the column the rows are shown sorted by, -1 for the module's order; a table of 50000 rows or more is sorted off the interface's thread, its former order shown meanwhile"],
+    [45, "SortColumn", "SORT_COLUMN", "table view: two numbers, the column the rows are shown sorted by, -1 for the module's order, and 1 when from the highest, sorted once; the column alone keeps the direction; a column the table does not have is refused; a table of 50000 rows or more is sorted off the interface's thread, its former order shown meanwhile"],
     [46, "SortDescending", "SORT_DESCENDING", "table view: sorted from the highest"],
     [47, "Paths", "PATHS", "property grid, text: JSON [path, ...], the paths of the properties shown, `<module>/<name>`; 100000 at most"],
 ]

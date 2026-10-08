@@ -237,7 +237,9 @@ static unsafe class Module
         remove.Clicked.Connect(() =>
         {
             ulong id = table.CurrentRow();
-            dataEvent.SetText(id != 0 && table.RemoveRows(id) ? Invariant($"Row {id} removed") : "No current row.");
+            dataEvent.SetText(id == 0 ? "No current row."
+                : table.RemoveRows(id) ? Invariant($"Row {id} removed")
+                : Invariant($"Row {id} not removed"));
         });
         var buttons = new HBoxLayout();
         buttons.AddWidget(insert);

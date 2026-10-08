@@ -648,10 +648,11 @@ class TableView : public Widget {
     // The id of the current row, 0 for none.
     void setCurrentRow(uint64_t id) const { setNumbers(UNIWOW_PROPERTY_CURRENT_ITEM, {double(id)}); }
     uint64_t currentRow() const { return uint64_t(number(UNIWOW_PROPERTY_CURRENT_ITEM)); }
-    // -1 for the module's order.
-    void sortByColumn(int column, bool descending = false) const {
-        setNumbers(UNIWOW_PROPERTY_SORT_COLUMN, {double(column)});
-        setNumbers(UNIWOW_PROPERTY_SORT_DESCENDING, {descending ? 1.0 : 0.0});
+    // -1 for the module's order; the column and the direction in one write, sorted once. False
+    // when refused: a column the table does not have.
+    bool sortByColumn(int column, bool descending = false) const {
+        const double values[2] = {double(column), descending ? 1.0 : 0.0};
+        return api().set_numbers(detail::context(), handle_, UNIWOW_PROPERTY_SORT_COLUMN, values, 2) == 0;
     }
     int sortColumn() const { return int(number(UNIWOW_PROPERTY_SORT_COLUMN)); }
     bool sortDescending() const { return number(UNIWOW_PROPERTY_SORT_DESCENDING) != 0.0; }

@@ -228,8 +228,10 @@ public enum Property : uint
                          // from 1, each of its own; 1000000 rows at most
     CurrentItem = 44,    // tree view, table view: the id of the current item or row, 0 for none; an id the view does
                          // not hold is refused, and an item or row removed is no longer current
-    SortColumn = 45,     // table view: the column the rows are shown sorted by, -1 for the module's order; a table of
-                         // 50000 rows or more is sorted off the interface's thread, its former order shown meanwhile
+    SortColumn = 45,     // table view: two numbers, the column the rows are shown sorted by, -1 for the module's order,
+                         // and 1 when from the highest, sorted once; the column alone keeps the direction; a column the
+                         // table does not have is refused; a table of 50000 rows or more is sorted off the interface's
+                         // thread, its former order shown meanwhile
     SortDescending = 46, // table view: sorted from the highest
     Paths = 47,          // property grid, text: JSON [path, ...], the paths of the properties shown, `<module>/<name>`;
                          // 100000 at most
@@ -1133,11 +1135,12 @@ public unsafe class TableView : Widget
     public void SetCurrentRow(ulong id) => WriteNumbers(Property.CurrentItem, id);
     public ulong CurrentRow() => (ulong)ReadNumber(Property.CurrentItem);
 
-    /// <summary>-1 for the module's order.</summary>
-    public void SortByColumn(int column, bool descending = false)
+    /// <summary>-1 for the module's order; the column and the direction in one write, sorted once.
+    /// False when refused: a column the table does not have.</summary>
+    public bool SortByColumn(int column, bool descending = false)
     {
-        WriteNumbers(Property.SortColumn, column);
-        WriteNumbers(Property.SortDescending, Flag(descending));
+        double* values = stackalloc double[] { column, Flag(descending) };
+        return Table->SetNumbers(Context, Handle, (uint)Property.SortColumn, values, 2) == 0;
     }
 
     public int SortColumn() => (int)ReadNumber(Property.SortColumn);

@@ -43,15 +43,20 @@ int32_t fake_set_property(void *, const char *name, const double *values, uint32
     return 0;
 }
 void into(void *target, const char *text) { *static_cast<std::string *>(target) = text; }
-// The last numbers set: on which object, which property, and the first number.
+// The last numbers set: on which object, which property, the first number and all of them; how
+// many writes. A sort by the column 99 is refused, as by a table without it.
 uniwow_handle numbers_object = 0;
 uint32_t numbers_property = 0;
 double numbers_value = 0.0;
+std::vector<double> numbers_values;
+int numbers_calls = 0;
 int32_t fake_set_numbers(void *, uniwow_handle object, uint32_t property, const double *values, uint32_t count) {
     numbers_object = object;
     numbers_property = property;
     numbers_value = count > 0 ? values[0] : -1.0;
-    return 0;
+    numbers_values.assign(values, values + count);
+    ++numbers_calls;
+    return property == UNIWOW_PROPERTY_SORT_COLUMN && numbers_value == 99.0 ? 1 : 0;
 }
 
 // The last cell set and the last ids removed from a table view.
@@ -237,6 +242,11 @@ int main() {
     sorted.boolean = 1;
     fake_connections[sorting].slot(fake_connections[sorting].user, &sorted);
     expect(sorted_column == 3 && from_highest, "sortChanged gives the column and whether from the highest");
+    const int writes = numbers_calls;
+    expect(table.sortByColumn(2, true) && numbers_calls == writes + 1 && numbers_object == table.handle() &&
+               numbers_property == UNIWOW_PROPERTY_SORT_COLUMN && numbers_values == std::vector<double>{2.0, 1.0},
+           "sortByColumn writes the column and the direction at once");
+    expect(!table.sortByColumn(99), "sortByColumn tells a column refused");
 
     uniwow::PropertyGrid grid;
     grid.setPaths(R"(["cube/colour"])");

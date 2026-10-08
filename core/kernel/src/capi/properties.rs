@@ -7,7 +7,7 @@ use std::ffi::{c_char, c_void};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use uniwow_api::serde_json::{Value, json};
-use uniwow_api::{PropertyKind, PropertyValue, log, ui};
+use uniwow_api::{PropertyKind, PropertyValue, log, name_error, range_error, ui};
 
 use super::{ModuleContext, Reply, UserPointer, collect, editor, guarded, module, read, reply_with, text_target};
 
@@ -133,6 +133,11 @@ pub fn declared(
             .write
             .ok_or_else(|| format!("property '{name}' has no write function"))?;
         let range = [entry.minimum, entry.maximum];
+        // Refused as the shell refuses a module's property, before `set_property` can reach it.
+        if let Some(reason) = name_error(&name).or_else(|| range_error(range)) {
+            log::warn!("property '{}/{name}' refused: {reason}", context.id);
+            continue;
+        }
         let initial = PropertyValue::from_components(kind, &entry.initial).clamped(range);
         properties.push(Arc::new(CompiledProperty {
             label: read(entry.label).unwrap_or_else(|_| name.clone()),

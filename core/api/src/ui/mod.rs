@@ -841,9 +841,15 @@ impl Ui {
         self.change_table(handle, |table| Ok(table.set_rows(rows)))
     }
 
-    /// The sort of a table view: a column and whether from the highest, or the module's order.
+    /// The sort of a table view: a column and whether from the highest, or the module's order. A
+    /// column it does not have is refused.
     pub fn set_sort(&mut self, handle: Handle, sort: Option<(usize, bool)>) -> Result<(), String> {
         self.change_table(handle, |table| {
+            if let Some((column, _)) = sort
+                && column >= table.columns().len()
+            {
+                return Err(format!("no column {column}: the table has {}", table.columns().len()));
+            }
             table.set_sort(sort);
             Ok(())
         })
@@ -897,9 +903,16 @@ impl Ui {
         self.change_table(handle, |table| table.insert_rows(at, rows))
     }
 
-    /// The rows of these ids removed from a table view; returns how many there were.
-    pub fn remove_rows(&mut self, handle: Handle, ids: &[u64]) -> Result<usize, String> {
-        self.change_table(handle, |table| Ok(table.remove_rows(ids)))
+    /// The rows of these ids removed from a table view; refused, none removed, when one of them is
+    /// not a row of it.
+    pub fn remove_rows(&mut self, handle: Handle, ids: &[u64]) -> Result<(), String> {
+        self.change_table(handle, |table| match ids.iter().find(|&&id| table.row(id).is_none()) {
+            Some(id) => Err(format!("no row {id}")),
+            None => {
+                table.remove_rows(ids);
+                Ok(())
+            }
+        })
     }
 
     /// The frame rate, length and tracks of a sequence.
@@ -1010,7 +1023,9 @@ impl Ui {
     /// position (2), a rectangle or a line (4).
     pub fn set_numbers(&mut self, handle: Handle, property: Property, values: &[f64]) -> Result<(), String> {
         let expected = Self::count(property);
-        if values.len() != expected {
+        // The column of a sort alone keeps its direction.
+        let fewer = property == Property::SortColumn && values.len() == 1;
+        if values.len() != expected && !fewer {
             return Err(format!("{property:?} takes {expected} numbers, not {}", values.len()));
         }
         let first = values[0];
@@ -1021,7 +1036,7 @@ impl Ui {
             property,
             Property::CurrentItem | Property::SortColumn | Property::SortDescending
         ) {
-            return self.set_data_number(handle, property, first);
+            return self.set_data_number(handle, property, values);
         }
         let object = self.get_mut(handle)?;
         // Which items a scene draws, and in which order.
@@ -1080,7 +1095,7 @@ impl Ui {
     /// How many numbers a property takes.
     pub fn count(property: Property) -> usize {
         match property {
-            Property::Pos | Property::ViewCenter => 2,
+            Property::Pos | Property::ViewCenter | Property::SortColumn => 2,
             Property::Rect | Property::Line | Property::MoveBounds => 4,
             _ => 1,
         }
@@ -1097,7 +1112,10 @@ impl Ui {
                 return Ok(vec![object.current_item as f64]);
             }
             Property::SortColumn if object.kind == Kind::TableView => {
-                return Ok(vec![sort.map_or(-1.0, |(column, _)| column as f64)]);
+                return Ok(match sort {
+                    Some((column, descending)) => vec![column as f64, if descending { 1.0 } else { 0.0 }],
+                    None => vec![-1.0, 0.0],
+                });
             }
             Property::SortDescending if object.kind == Kind::TableView => {
                 return Ok(vec![if sort.is_some_and(|(_, descending)| descending) {
@@ -1140,8 +1158,9 @@ impl Ui {
         })
     }
 
-    /// The current item of a tree view or a table view, or the sort of a table view.
-    fn set_data_number(&mut self, handle: Handle, property: Property, value: f64) -> Result<(), String> {
+    /// The current item of a tree view or a table view, or the sort of a table view: its column, and
+    /// whether from the highest, kept when left out.
+    fn set_data_number(&mut self, handle: Handle, property: Property, values: &[f64]) -> Result<(), String> {
         let object = self.get(handle)?;
         let kind = object.kind;
         let fits = match property {
@@ -1151,9 +1170,10 @@ impl Ui {
         if !fits {
             return Err(format!("a {kind:?} has no {property:?}"));
         }
-        if !value.is_finite() || value.fract() != 0.0 {
-            return Err(format!("{property:?} is a whole number"));
+        if values.iter().any(|value| !value.is_finite() || value.fract() != 0.0) {
+            return Err(format!("{property:?} takes whole numbers"));
         }
+        let value = values[0];
         let sort = object.table.as_ref().and_then(|table| table.sort());
         match property {
             Property::CurrentItem => {
@@ -1171,7 +1191,9 @@ impl Ui {
                 Ok(())
             }
             Property::SortColumn => {
-                let descending = sort.is_some_and(|(_, descending)| descending);
+                let descending = values
+                    .get(1)
+                    .map_or(sort.is_some_and(|(_, descending)| descending), |&flag| flag != 0.0);
                 self.set_sort(handle, (value >= 0.0).then_some((value as usize, descending)))
             }
             _ => self.set_sort(handle, sort.map(|(column, _)| (column, value != 0.0))),
@@ -2282,6 +2304,12 @@ mod tests {
         )
         .unwrap();
         ui.set_numbers(table, Property::CurrentItem, &[2.0]).unwrap();
+        assert!(ui.remove_rows(table, &[2, 9]).is_err(), "a row it does not hold");
+        assert_eq!(
+            ui.numbers(table, Property::CurrentItem).unwrap(),
+            vec![2.0],
+            "none removed"
+        );
         ui.remove_rows(table, &[2]).unwrap();
         assert_eq!(
             ui.numbers(table, Property::CurrentItem).unwrap(),
@@ -2342,7 +2370,7 @@ mod tests {
             ui.set_numbers(table, Property::SortColumn, &[0.0]).unwrap();
             assert_eq!(
                 ui.numbers(table, Property::SortColumn).unwrap(),
-                vec![0.0],
+                vec![0.0, 0.0],
                 "the sort asked"
             );
             assert!(ui.table(table).unwrap().is_sorting());
@@ -2406,12 +2434,29 @@ mod tests {
         ui.set_numbers(table, Property::SortColumn, &[0.0]).unwrap();
         assert_eq!(sort(&ui), (0.0, 1.0), "another column keeps the direction");
         assert!(ui.set_numbers(table, Property::SortColumn, &[0.5]).is_err());
+        ui.set_numbers(table, Property::SortColumn, &[1.0, 0.0]).unwrap();
+        assert_eq!(sort(&ui), (1.0, 0.0), "the column and the direction in one write");
+        assert_eq!(ui.numbers(table, Property::SortColumn).unwrap(), vec![1.0, 0.0]);
+        ui.set_numbers(table, Property::SortColumn, &[0.0, 1.0]).unwrap();
+        assert_eq!(ui.numbers(table, Property::SortColumn).unwrap(), vec![0.0, 1.0]);
+        assert!(ui.set_numbers(table, Property::SortColumn, &[1.0, 0.5]).is_err());
+        assert!(ui.set_numbers(table, Property::SortColumn, &[1.0, 0.0, 0.0]).is_err());
+        assert_eq!(sort(&ui), (0.0, 1.0), "nothing changed by the writes refused");
         ui.set_text(table, Property::Columns, r#"["a"]"#).unwrap();
-        ui.set_numbers(table, Property::SortColumn, &[1.0]).unwrap();
-        assert_eq!(sort(&ui), (-1.0, 0.0), "a column it does not have");
-        ui.set_numbers(table, Property::SortColumn, &[0.0]).unwrap();
+        assert!(
+            ui.set_numbers(table, Property::SortColumn, &[1.0]).is_err(),
+            "a column it does not have"
+        );
+        assert!(ui.set_numbers(table, Property::SortColumn, &[1.0, 0.0]).is_err());
+        assert_eq!(sort(&ui), (0.0, 1.0), "the sort kept");
         ui.set_numbers(table, Property::SortColumn, &[-1.0]).unwrap();
         assert_eq!(sort(&ui), (-1.0, 0.0));
+        assert_eq!(ui.numbers(table, Property::SortColumn).unwrap(), vec![-1.0, 0.0]);
+        ui.set_text(table, Property::Columns, "[]").unwrap();
+        assert!(
+            ui.set_numbers(table, Property::SortColumn, &[0.0]).is_err(),
+            "no column at all"
+        );
     }
 
     #[test]
