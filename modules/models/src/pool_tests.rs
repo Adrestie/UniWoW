@@ -104,6 +104,7 @@ impl Pooled {
                 service,
                 layer,
                 scene,
+                wall: crate::tests::flat(0.0),
             },
             shared,
             caches: Caches::default(),

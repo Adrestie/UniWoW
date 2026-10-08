@@ -1,7 +1,9 @@
 //! The instances drawn from the pool, chosen by the GPU at each frame (`choice.wgsl`): in sight,
 //! within the reach of their size and at the level of skin their distance chooses, each instance
 //! by itself; the opaque batches of every look gathered by state into one list of draws each,
-//! packed in the order of their records. The blended batches are drawn by templates the CPU writes
+//! packed in the order of their records. Chosen twice: before the first pass of the view, those
+//! drawn at the frame before; between the passes, those the pyramid of the depth the first pass
+//! left does not hide, drawn in the second pass unless the first drew them. The blended batches are drawn by templates the CPU writes
 //! each frame, an instance at a time the farthest first and, for each, one at each level of its
 //! look: the GPU keeps those of the level it chose, in that order. The CPU still finds the groups
 //! in sight, to give the GPU only those; the tables of the looks are made by a job of the module
@@ -14,7 +16,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::journal;
 use uniwow_api::models::LookId;
-use uniwow_api::viewport::Phase;
+use uniwow_api::viewport::{Phase, Pyramid};
 use uniwow_api::wgpu::util::DeviceExt;
 use uniwow_api::{bytemuck, wgpu};
 
@@ -34,7 +36,7 @@ const TEMPLATE: usize = 7;
 /// The bytes of the arguments of a draw.
 const ARGS: u64 = 20;
 /// The words of the statistics: the draws, the pairs of an instance and a batch, the triangles,
-/// unused, and the instances drawn at each level.
+/// the instances the pyramid hid, and the instances drawn at each level.
 const STATS: usize = 8;
 
 /// What the shader of the choice reads of a frame.
@@ -50,6 +52,7 @@ struct Params {
     frames: [u32; 4],
     work: [u32; 4],
     blocks: [u32; 4],
+    view_proj: [[f32; 4]; 4],
 }
 
 // SAFETY: plain numbers laid out by `repr(C)` without padding, any bit pattern valid.
@@ -226,14 +229,22 @@ struct Readback {
     state: Arc<AtomicU8>,
 }
 
-/// What the GPU drew, read back: the draws, the pairs of an instance and a batch, the triangles, and
-/// the instances at each level.
+/// What the GPU drew, read back: the draws, the pairs of an instance and a batch, the triangles, the
+/// instances at each level, and those in sight the pyramid hid.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Drawn {
     pub draws: u32,
     pub pairs: u32,
     pub triangles: u32,
     pub levels: [u32; LEVELS],
+    pub hidden: u32,
+}
+
+/// The pipelines of a phase of the choice: its choosing, its templates and its scattering.
+struct PhasePipelines {
+    choose: wgpu::ComputePipeline,
+    tops: wgpu::ComputePipeline,
+    scatter: wgpu::ComputePipeline,
 }
 
 /// A buffer of at least `bytes`, kept while large enough, else one twice the size it needs; whether
@@ -260,12 +271,15 @@ fn sized(
 pub struct Choice {
     device: wgpu::Device,
     layout: wgpu::BindGroupLayout,
-    choose: wgpu::ComputePipeline,
+    /// The pyramid of the depth, which the second phase tests against, and its bind group by the
+    /// generation of the pyramid.
+    pyramid_layout: wgpu::BindGroupLayout,
+    pyramid_group: Option<(u64, wgpu::BindGroup)>,
+    first: PhasePipelines,
+    second: PhasePipelines,
     blocks: wgpu::ComputePipeline,
-    tops: wgpu::ComputePipeline,
     place: wgpu::ComputePipeline,
     pack: wgpu::ComputePipeline,
-    scatter: wgpu::ComputePipeline,
     params: wgpu::Buffer,
     /// Whether the draws are packed and counted by the GPU (`MULTI_DRAW_INDIRECT_COUNT`); every
     /// record drawn otherwise, those without instances drawing none.
@@ -342,34 +356,62 @@ impl Choice {
                 storage(8, false),
             ],
         });
+        let pyramid_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("models choice pyramid"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("models choice"),
             bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let tested_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("models choice against the depth"),
+            bind_group_layouts: &[Some(&layout), Some(&pyramid_layout)],
             immediate_size: 0,
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("models choice"),
             source: wgpu::ShaderSource::Wgsl(include_str!("choice.wgsl").into()),
         });
-        let pipeline = |entry: &str| {
+        let pipeline_of = |layout: &wgpu::PipelineLayout, entry: &str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("models choice"),
-                layout: Some(&pipeline_layout),
+                layout: Some(layout),
                 module: &shader,
                 entry_point: Some(entry),
                 compilation_options: Default::default(),
                 cache: None,
             })
         };
+        let pipeline = |entry: &str| pipeline_of(&pipeline_layout, entry);
         Self {
             device: device.clone(),
-            choose: pipeline("choose"),
+            first: PhasePipelines {
+                choose: pipeline("choose_first"),
+                tops: pipeline("tops_first"),
+                scatter: pipeline("scatter_first"),
+            },
+            second: PhasePipelines {
+                choose: pipeline_of(&tested_layout, "choose_second"),
+                tops: pipeline("tops_second"),
+                scatter: pipeline("scatter_second"),
+            },
             blocks: pipeline("blocks"),
-            tops: pipeline("tops"),
             place: pipeline("place"),
             pack: pipeline("pack"),
-            scatter: pipeline("scatter"),
             layout,
+            pyramid_layout,
+            pyramid_group: None,
             params: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("models choice"),
                 size: size_of::<Params>() as u64,
@@ -446,6 +488,7 @@ impl Choice {
                             pairs: words[1],
                             triangles: words[2],
                             levels: std::array::from_fn(|level| words[4 + level]),
+                            hidden: words[3],
                         };
                     }
                     readback.buffer.unmap();
@@ -592,6 +635,7 @@ impl Choice {
             frames: [frame_offsets[0], frame_offsets[1], frame_offsets[2], 0],
             work: [work_offsets[0], work_offsets[1], work_offsets[2], work_offsets[3]],
             blocks: [blocks_at, blocks, blocks_at + 2 * blocks, 0],
+            view_proj: view_proj.to_cols_array_2d(),
         };
 
         let device = self.device.clone();
@@ -759,9 +803,9 @@ impl Choice {
         self.bind_groups.as_ref()
     }
 
-    /// The computing of the frame: the owners' instances copied, the levels before put where the
-    /// owners are now, the instances chosen, their draws packed and their entries written, the
-    /// statistics copied to be read back.
+    /// The computing of the frame before its first pass: the owners' instances copied, the levels
+    /// before put where the owners are now, the instances drawn at the frame before chosen, their
+    /// draws packed and their entries written.
     pub fn compute(&mut self, encoder: &mut wgpu::CommandEncoder) {
         let (Some(instances), Some(work), Some(read), Some(written)) = (
             self.instances.clone(),
@@ -804,25 +848,79 @@ impl Choice {
             return;
         };
         let bind_group = bind_groups[writing].clone();
-        if groups > 0 || templates > 0 {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("models choice"),
-                timestamp_writes: None,
-            });
-            pass.set_bind_group(0, &bind_group, &[]);
-            let mut dispatch = |pipeline: &wgpu::ComputePipeline, workgroups: u32| {
-                if workgroups > 0 {
-                    pass.set_pipeline(pipeline);
-                    pass.dispatch_workgroups(workgroups, 1, 1);
-                }
-            };
-            dispatch(&self.choose, groups);
-            dispatch(&self.blocks, blocks);
-            dispatch(&self.tops, 1);
-            dispatch(&self.place, blocks);
-            dispatch(&self.pack, blocks);
-            dispatch(&self.scatter, groups);
+        self.choose(encoder, &bind_group, None, groups, templates, blocks);
+    }
+
+    /// The phase of the choice of `phase`, the first without a pyramid, the second with its bind
+    /// group: its instances chosen, their draws packed and their entries written.
+    fn choose(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        bind_group: &wgpu::BindGroup,
+        pyramid: Option<&wgpu::BindGroup>,
+        groups: u32,
+        templates: u32,
+        blocks: u32,
+    ) {
+        if groups == 0 && templates == 0 {
+            return;
         }
+        let phase = if pyramid.is_some() { &self.second } else { &self.first };
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("models choice"),
+            timestamp_writes: None,
+        });
+        pass.set_bind_group(0, bind_group, &[]);
+        if let Some(pyramid) = pyramid {
+            pass.set_bind_group(1, pyramid, &[]);
+        }
+        let mut dispatch = |pipeline: &wgpu::ComputePipeline, workgroups: u32| {
+            if workgroups > 0 {
+                pass.set_pipeline(pipeline);
+                pass.dispatch_workgroups(workgroups, 1, 1);
+            }
+        };
+        dispatch(&phase.choose, groups);
+        dispatch(&self.blocks, blocks);
+        dispatch(&phase.tops, 1);
+        dispatch(&self.place, blocks);
+        dispatch(&self.pack, blocks);
+        dispatch(&phase.scatter, groups);
+    }
+
+    /// The computing of the frame between its passes: the instances in sight tested against
+    /// `pyramid`, those not hidden that the first phase did not draw chosen for the second pass,
+    /// the blended with them, and those not hidden kept for the next frame; the statistics of both
+    /// phases copied to be read back.
+    pub fn occlude(&mut self, encoder: &mut wgpu::CommandEncoder, pyramid: &Pyramid<'_>) {
+        let Some(work) = self.work.clone() else {
+            return;
+        };
+        if self
+            .pyramid_group
+            .as_ref()
+            .is_none_or(|(generation, _)| *generation != pyramid.generation)
+        {
+            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("models choice pyramid"),
+                layout: &self.pyramid_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(pyramid.view),
+                }],
+            });
+            self.pyramid_group = Some((pyramid.generation, group));
+        }
+        // The work of the first phase cleared but its statistics, which the second adds to.
+        let stats = u64::from(self.work_offsets[4]) * 4;
+        encoder.clear_buffer(&work, 0, Some(stats));
+        encoder.clear_buffer(&work, stats + (STATS * 4) as u64, None);
+        let (groups, templates, blocks, writing) = (self.groups, self.templates, self.blocks_count, self.last);
+        let Some(bind_group) = self.bind_groups().map(|groups| groups[writing].clone()) else {
+            return;
+        };
+        let pyramid_group = self.pyramid_group.as_ref().map(|(_, group)| group.clone());
+        self.choose(encoder, &bind_group, pyramid_group.as_ref(), groups, templates, blocks);
         if let Some(readback) = self
             .readbacks
             .iter()
@@ -858,14 +956,15 @@ impl Choice {
         let beyond = self.beyond_regions.min(self.blended_regions.len());
         // The regions of the phase, the first of them by its place among those counted.
         let (regions, first, counts): (&[(State, u32, u32)], u32, u32) = match phase {
-            Phase::Opaque => (&tables.regions, 0, self.work_offsets[3]),
+            // The opaque the first phase chose, then those the second did.
+            Phase::Opaque | Phase::Revealed => (&tables.regions, 0, self.work_offsets[3]),
             Phase::Beyond => (&self.blended_regions[..beyond], tables.records, blended_counts),
             Phase::Near => (
                 &self.blended_regions[beyond..],
                 tables.records,
                 blended_counts + beyond as u32,
             ),
-            Phase::Revealed | Phase::Water => return 0,
+            Phase::Water => return 0,
         };
         for (region, (state, start, count)) in regions.iter().enumerate() {
             pass.set_pipeline(&pipeline(*state));
@@ -888,7 +987,8 @@ impl Choice {
 
 #[cfg(test)]
 impl Choice {
-    /// The arguments of the opaque draws and the counts of the draws of their states, read back.
+    /// The arguments of the opaque draws of the second phase and the counts of the draws of their
+    /// states, read back.
     pub fn written(&self, gpu: &uniwow_api::egui_wgpu::RenderState) -> (Vec<u32>, Vec<u32>) {
         let (Some(tables), Some(args), Some(work)) = (&self.tables, &self.args, &self.work) else {
             return (Vec::new(), Vec::new());

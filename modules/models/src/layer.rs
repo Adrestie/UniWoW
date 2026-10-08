@@ -24,7 +24,7 @@ use uniwow_api::glam::{Mat4, Vec3, Vec4};
 use uniwow_api::journal;
 use uniwow_api::liquids;
 use uniwow_api::models::LookId;
-use uniwow_api::viewport::{Drawing, Layer, LayerStats, Phase, Target, View};
+use uniwow_api::viewport::{Drawing, Layer, LayerStats, Phase, Pyramid, Target, View};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
 use crate::animator::{Animated, AnimationStats};
@@ -570,9 +570,10 @@ impl Layer for ModelsLayer {
                 draws += u64::from(gpu_drawn.draws);
                 triangles += u64::from(gpu_drawn.triangles);
                 format!(
-                    "{commands} commands in the pass; chosen by the GPU: {} pairs, levels {:?}; {} groups of looks of their own",
+                    "{commands} commands in the pass; chosen by the GPU: {} pairs, levels {:?}, {} hidden by the depth; {} groups of looks of their own",
                     gpu_drawn.pairs,
                     gpu_drawn.levels,
+                    gpu_drawn.hidden,
                     self.drawn.len(),
                 )
             }
@@ -633,6 +634,22 @@ impl Layer for ModelsLayer {
     }
 
     fn computes(&self) -> bool {
+        self.choice.is_some()
+    }
+
+    fn occlude(
+        &mut self,
+        _gpu: &egui_wgpu::RenderState,
+        _view: &View,
+        pyramid: &Pyramid<'_>,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        if let Some(choice) = &mut self.choice {
+            choice.occlude(encoder, pyramid);
+        }
+    }
+
+    fn occludes(&self) -> bool {
         self.choice.is_some()
     }
 

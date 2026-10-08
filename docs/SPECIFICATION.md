@@ -5853,6 +5853,50 @@ Measured where the user flew, with and without, as 9.6f says: the four cities an
 - **To measure by the user**: the frames a second and the line *GPU* of the statistics, before and
   after this step, on the whole maps and in the cities.
 
+#### Step 9.6f1, measured by the user
+
+The pyramid of the depth takes 0.10 to 0.15 ms of the GPU a frame on the user's machine.
+
+#### Step 9.6f2, as built: the instances of `models`
+
+- **The choice by the GPU in two phases**, in the submission of the frame:
+  - before the first pass (`Layer::compute`), `choose_first` chooses, among the instances of the
+    groups in sight, those drawn at the frame before (their level then not 0), in sight and within
+    the reach of their size, at their level; their opaque batches are drawn in `Phase::Opaque`;
+  - between the passes (`Layer::occlude`), the work is cleared but its statistics, and
+    `choose_second` tests every instance in sight against the pyramid: the eight corners of its box
+    projected, its nearest depth (reverse Z: the greatest) against the least of the pyramid over
+    the rectangle the box covers, read at the level where that rectangle spans two texels at most;
+    a box reaching behind the eye is seen. Those found in sight that the first phase did not draw
+    are drawn in `Phase::Revealed`; the templates of the blended are kept only for those found in
+    sight; the levels written are those found in sight, which the next frame draws first.
+  - An instance coming into sight is drawn in that frame, by the second phase; one hidden since
+    the frame before is drawn one frame more, by the first.
+- **The pipelines**: the choosing, the templates and the scattering of each phase apart
+  (`choose_first` and `choose_second`, `tops_first` and `tops_second`, `scatter_first` and
+  `scatter_second`), the others shared; the second's choosing reads the pyramid from a group of
+  its own, whose bind group is made again with the generation of the pyramid. `Params` holds the
+  view's matrix.
+- **The statistics**: both phases summed, and the instances the depth hid, in the word of the
+  statistics left unused before: *N hidden by the depth*.
+- **Not tested against the depth**: the looks of their own, those the pool had no room for and
+  all of them without the pool, drawn in the first pass as before.
+- **Tested**: the bench of the module draws as the view does, its two passes around the layer's
+  computing against a pyramid it makes of a wall at a depth by quarter of the view. An instance
+  behind the wall is not drawn; drawn once the wall is farther; drawn by the first phase at the
+  next frame though hidden, then no longer, its count of the hidden said; a blended one likewise,
+  counted once; two looks, one seen at the frame before and one new, each drawn once at its place;
+  the wall over the left, then the upper half of the view hides the instances there only. The
+  tests of the packing read the draws of a frame where every instance is new. 16 changes made on
+  purpose (every box seen, the farthest corner for the nearest, the axes of the view, the first
+  phase drawing what was not seen, the second drawing or scattering again what the first drew, a
+  hidden instance kept, the hidden not counted, the templates kept in the first phase, `Revealed`
+  not drawn, the work not cleared or its statistics cleared, the pyramid of an earlier frame kept,
+  the layer not testing, the statistics not read) all made a test fail, one once the blended were
+  counted.
+- **To measure by the user**: the frames a second over the whole maps and in the cities, and the
+  count of the hidden in the statistics of the layer.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

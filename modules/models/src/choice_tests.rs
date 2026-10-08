@@ -15,12 +15,19 @@ use uniwow_api::wgpu;
 use crate::lock;
 use crate::pool;
 use crate::pool_tests::{LEFT, Pooled, RIGHT, colours, only, pixel, skin};
-use crate::tests::{AIM, FRONT, Fake, instance, middle, plain, render, settled, square};
+use crate::tests::{AIM, FRONT, Fake, depth_at, instance, middle, plain, render, settled, square};
 
 /// Unlit and unfogged: a pixel is the colour of its texture.
 const PLAIN: u16 = 0x03;
 
 /// The look of the model `file` of `fake`, its textures its own.
+/// Draws looking away from the instances, so that none is seen at the frame before, then towards
+/// them: every one is found in sight by the second phase, whose draws `Choice::written` reads.
+fn revealed(bench: &mut crate::tests::Bench) {
+    render(bench, FRONT, FRONT * 2.0);
+    render(bench, FRONT, AIM);
+}
+
 fn look(file: &str) -> Look {
     Look {
         model: FileRef::Path(file.to_owned()),
@@ -422,6 +429,94 @@ fn a_template_is_kept_only_at_the_level_the_gpu_chose() {
 }
 
 #[test]
+fn what_the_first_phase_drew_is_not_drawn_again_and_what_the_second_found_is_drawn_in_its_place() {
+    let fake = Fake {
+        model: Some({
+            let mut model = square(0, 0);
+            model.textures[0].source = ModelTextureSource::Filled(11);
+            model
+        }),
+        textures: colours(),
+        ..Fake::default()
+    };
+    let Some(mut pooled) = Pooled::new(pool::SLOTS) else {
+        return;
+    };
+    for file in ["red.blp", "green.blp"] {
+        assert!(pooled.add(&fake, &skin(file)));
+    }
+    let bench = &mut pooled.bench;
+    bench
+        .service
+        .place("left", &[instance(1, 0, Vec3::new(0.0, -1.5, 0.0), 0.5)]);
+    render(bench, FRONT, AIM);
+    // The red seen at the frame before, drawn by the first phase; the green new, by the second.
+    bench
+        .service
+        .place("right", &[instance(1, 1, Vec3::new(0.0, 1.5, 0.0), 0.5)]);
+    let image = render(bench, FRONT, AIM);
+    for ((row, column), channel) in [(LEFT, 0), (RIGHT, 1)] {
+        let seen = pixel(&image, row, column);
+        assert!(only(seen, channel), "{seen:?} at column {column}");
+    }
+    // Both seen since: drawn by the first phase, once each.
+    for _ in 0..4 {
+        render(bench, FRONT, AIM);
+    }
+    let items = bench.layer.stats().items;
+    assert!(items.contains("chosen by the GPU: 2 pairs"), "{items}");
+}
+
+#[test]
+fn an_instance_is_tested_against_the_depth_where_it_falls_in_the_view() {
+    let fake = Fake {
+        model: Some({
+            let mut model = square(0, 0);
+            model.textures[0].source = ModelTextureSource::Filled(11);
+            model
+        }),
+        textures: colours(),
+        ..Fake::default()
+    };
+    let Some(mut pooled) = Pooled::new(pool::SLOTS) else {
+        return;
+    };
+    for file in ["red.blp", "green.blp"] {
+        assert!(pooled.add(&fake, &skin(file)));
+    }
+    let bench = &mut pooled.bench;
+    let far = depth_at(3.0);
+    // Left and right: the wall over the left half only.
+    bench.service.place(
+        "test",
+        &[
+            instance(1, 0, Vec3::new(0.0, -1.5, 0.0), 0.5),
+            instance(2, 1, Vec3::new(0.0, 1.5, 0.0), 0.5),
+        ],
+    );
+    bench.wall = [[far, 0.0], [far, 0.0]];
+    let image = render(bench, FRONT, AIM);
+    assert_eq!(pixel(&image, LEFT.0, LEFT.1), [0, 0, 0, 255], "hidden on the left");
+    assert!(only(pixel(&image, RIGHT.0, RIGHT.1), 1), "seen on the right");
+    // Above and below: the wall over the upper half only.
+    bench.service.place(
+        "test",
+        &[
+            instance(3, 0, Vec3::new(0.0, 0.0, 2.0), 0.5),
+            instance(4, 1, Vec3::new(0.0, 0.0, -1.0), 0.5),
+        ],
+    );
+    bench.wall = [[far, far], [0.0, 0.0]];
+    let image = render(bench, FRONT, AIM);
+    let coloured = |rows: std::ops::Range<usize>, channel: usize| {
+        rows.flat_map(|row| (0..32).map(move |column| (row, column)))
+            .any(|(row, column)| only(pixel(&image, row, column), channel))
+    };
+    assert!(!coloured(0..16, 0), "hidden above");
+    assert!(coloured(16..32, 1), "seen below");
+}
+
+#[test]
 fn the_draws_of_a_state_are_packed_in_the_order_of_their_records_and_counted() {
     let fake = Fake {
         model: Some({
@@ -454,7 +549,7 @@ fn the_draws_of_a_state_are_packed_in_the_order_of_their_records_and_counted() {
     for packed in [false, true] {
         render(&mut pooled.bench, FRONT, AIM);
         pooled.bench.layer.choice().expect("with the pool").packed = packed;
-        render(&mut pooled.bench, FRONT, AIM);
+        revealed(&mut pooled.bench);
         let gpu = pooled.bench.gpu.clone();
         let (args, counts) = pooled.bench.layer.choice().expect("with the pool").written(&gpu);
         let drawn: Vec<u32> = args.chunks(5).map(|draw| draw[1]).collect();
@@ -519,7 +614,7 @@ fn the_draws_are_packed_across_the_blocks_of_records() {
     );
     render(&mut pooled.bench, FRONT, AIM);
     pooled.bench.layer.choice().expect("with the pool").packed = true;
-    render(&mut pooled.bench, FRONT, AIM);
+    revealed(&mut pooled.bench);
     let gpu = pooled.bench.gpu.clone();
     let (args, counts) = pooled.bench.layer.choice().expect("with the pool").written(&gpu);
     let draws: Vec<&[u32]> = args.chunks(5).take(240).collect();

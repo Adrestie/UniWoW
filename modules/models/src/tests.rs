@@ -16,7 +16,7 @@ use uniwow_api::formats::{
 };
 use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::models::{Extent, Geosets, Instance, Look, LookId, LookState, Models, Motion};
-use uniwow_api::viewport::{Drawing, Layer, Phase, Target, View};
+use uniwow_api::viewport::{Drawing, Layer, Phase, Pyramid, Target, View};
 use uniwow_api::{Event, MODULE_FAILED_TOPIC, bytemuck, egui, egui_wgpu, serde_json, wgpu};
 
 use crate::cache::Cache;
@@ -741,6 +741,15 @@ pub struct Bench {
     pub service: Arc<Service>,
     pub layer: ModelsLayer,
     pub scene: Arc<Mutex<Scene>>,
+    /// The depth the first pass is taken to leave over each quarter of the view, the upper ones
+    /// first, the left first in each, as the pyramid the layer tests against gives it: 0, the
+    /// farthest, hides nothing.
+    pub wall: [[f32; 2]; 2],
+}
+
+/// A wall at `depth` over the whole view.
+pub fn flat(depth: f32) -> [[f32; 2]; 2] {
+    [[depth; 2]; 2]
 }
 
 fn bench(model: Model, red: [u8; 4]) -> Option<Bench> {
@@ -776,7 +785,75 @@ pub fn bench_on(model: Model, red: [u8; 4], pooled: bool) -> Option<Bench> {
         service,
         layer,
         scene,
+        wall: flat(0.0),
     })
+}
+
+/// Counts the pyramids `render` makes, a new one each frame as when the view changes size.
+static PYRAMIDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// The depth of a point `distance` yards before the eye, in reverse Z with the near plane of `render`.
+pub fn depth_at(distance: f32) -> f32 {
+    0.1 / distance
+}
+
+/// A pyramid of the depth of a view of `size` × `size`, its first level at the depth of `wall` in
+/// each quarter, each next one the least of the 2 × 2 texels under each texel.
+fn pyramid_of(gpu: &egui_wgpu::RenderState, size: u32, wall: [[f32; 2]; 2]) -> (wgpu::TextureView, u32) {
+    let levels = u32::BITS - size.leading_zeros();
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: levels,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let mut texels: Vec<f32> = (0..size * size)
+        .map(|at| wall[usize::from(at / size >= size / 2)][usize::from(at % size >= size / 2)])
+        .collect();
+    for level in 0..levels {
+        let side = size >> level;
+        if level > 0 {
+            let under = &texels;
+            texels = (0..side * side)
+                .map(|at| {
+                    let (x, y) = (2 * (at % side), 2 * (at / side));
+                    let texel = |x: u32, y: u32| under[(y * 2 * side + x) as usize];
+                    texel(x, y)
+                        .min(texel(x + 1, y))
+                        .min(texel(x, y + 1))
+                        .min(texel(x + 1, y + 1))
+                })
+                .collect();
+        }
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: level,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&texels),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * side),
+                rows_per_image: Some(side),
+            },
+            wgpu::Extent3d {
+                width: side,
+                height: side,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+    (texture.create_view(&Default::default()), levels)
 }
 
 /// The first `size` bytes of `buffer`, copied back from the GPU.
@@ -795,7 +872,9 @@ pub fn read_back(gpu: &egui_wgpu::RenderState, buffer: &wgpu::Buffer, size: u64)
     staging.slice(..).get_mapped_range().expect("mapped").to_vec()
 }
 
-/// What the layer draws seen from `eye` towards `look`, 32 × 32 pixels of RGBA cleared to black.
+/// What the layer draws seen from `eye` towards `look`, 32 × 32 pixels of RGBA cleared to black, as
+/// the view draws it: the opaque phase in a first pass; the layer's computing against a pyramid of
+/// the depth of `bench.wall`; the other phases in a second pass.
 pub fn render(bench: &mut Bench, eye: Vec3, look: Vec3) -> Vec<u8> {
     let gpu = bench.gpu.clone();
     let size = 32u32;
@@ -861,23 +940,45 @@ pub fn render(bench: &mut Bench, eye: Vec3, look: Vec3) -> Vec<u8> {
         usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    {
+    let (wall, levels) = pyramid_of(&gpu, size, bench.wall);
+    let (colour_view, depth_view) = (
+        colour.create_view(&Default::default()),
+        depth.create_view(&Default::default()),
+    );
+    for first in [true, false] {
+        if !first && bench.layer.occludes() {
+            let pyramid = Pyramid {
+                view: &wall,
+                size: [size, size],
+                levels,
+                generation: PYRAMIDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            };
+            bench.layer.occlude(&gpu, &view, &pyramid, &mut encoder);
+        }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: None,
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &colour.create_view(&Default::default()),
+                view: &colour_view,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    load: if first {
+                        wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
                     store: wgpu::StoreOp::Store,
                 },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &depth.create_view(&Default::default()),
+                view: &depth_view,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(0.0),
-                    store: wgpu::StoreOp::Discard,
+                    load: if first {
+                        wgpu::LoadOp::Clear(0.0)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
+                    store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
             }),
@@ -886,6 +987,9 @@ pub fn render(bench: &mut Bench, eye: Vec3, look: Vec3) -> Vec<u8> {
             multiview_mask: None,
         });
         for (phase, bundle) in Phase::ALL.into_iter().zip(&bundles) {
+            if phase.first_pass() != first {
+                continue;
+            }
             pass.execute_bundles([bundle]);
             if in_pass {
                 bench.layer.draw_pass(&gpu, &TARGET, &view, phase, &mut pass);
@@ -975,6 +1079,57 @@ fn a_model_is_drawn_where_its_instance_stands_lit_and_one_sided() {
     assert_eq!(middle(&settled(&mut bench, FRONT, AIM)), BLACK);
     let stats = bench.layer.stats();
     assert_eq!((stats.draws, stats.triangles), (0, 0), "out of sight");
+}
+
+#[test]
+fn an_instance_the_depth_hides_is_drawn_while_seen_at_the_frame_before_then_no_longer() {
+    let Some(mut bench) = bench(square(0, 0), [255, 0, 0, 255]) else {
+        return;
+    };
+    bench.service.place("test", &[instance(1, 0, Vec3::ZERO, 1.0)]);
+    // Its box 3.5 yards from the eye at the nearest: behind a wall at 3 yards, never seen.
+    bench.wall = flat(depth_at(3.0));
+    assert_eq!(middle(&render(&mut bench, FRONT, AIM)), BLACK, "hidden");
+    // The wall at 4 yards, its box reaching nearer: drawn in the second pass.
+    bench.wall = flat(depth_at(4.0));
+    assert!(red(middle(&render(&mut bench, FRONT, AIM))), "found in sight");
+    // The wall nearer again: drawn first as seen at the frame before, then hidden.
+    bench.wall = flat(depth_at(3.0));
+    assert!(
+        red(middle(&render(&mut bench, FRONT, AIM))),
+        "drawn as seen at the frame before"
+    );
+    assert_eq!(middle(&render(&mut bench, FRONT, AIM)), BLACK, "hidden since");
+    let hidden = steady_items(&mut bench);
+    assert!(hidden.contains(", 1 hidden by the depth;"), "{hidden}");
+    bench.wall = flat(0.0);
+    let seen = steady_items(&mut bench);
+    assert!(seen.contains(", 0 hidden by the depth;"), "{seen}");
+}
+
+/// What the layer says it drew, once the frames before have been read back.
+fn steady_items(bench: &mut Bench) -> String {
+    for _ in 0..4 {
+        render(bench, FRONT, AIM);
+    }
+    bench.layer.stats().items
+}
+
+#[test]
+fn a_blended_instance_the_depth_hides_is_not_drawn() {
+    let Some(mut bench) = bench(square(0, 2), [255, 0, 0, 255]) else {
+        return;
+    };
+    let mut half = instance(1, 0, Vec3::ZERO, 1.0);
+    half.alpha = 0.5;
+    bench.service.place("test", &[half]);
+    bench.wall = flat(depth_at(3.0));
+    assert_eq!(middle(&render(&mut bench, FRONT, AIM)), BLACK, "hidden");
+    bench.wall = flat(depth_at(4.0));
+    assert!(middle(&render(&mut bench, FRONT, AIM))[0] > 40, "found in sight");
+    // Kept by the second phase only, counted once.
+    let items = steady_items(&mut bench);
+    assert!(items.contains("chosen by the GPU: 1 pairs"), "{items}");
 }
 
 #[test]

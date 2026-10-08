@@ -1,12 +1,16 @@
-// The instances drawn from the pool, chosen by the GPU at each frame. `choose`: each instance of the
-// groups the CPU found in sight, in sight itself and within the reach of its size, at the level of
-// skin its distance chooses, kept from the frame before until past its limit by the margin; the
-// instances of each record (a batch of a look at a level) counted. Then a prefix sum over the
-// records, a workgroup a block of 256 (`blocks`, `tops`, `place`): the places of the records'
+// The instances drawn from the pool, chosen by the GPU twice a frame. `choose_first`, before the
+// first pass of the view: each instance of the groups the CPU found in sight that was drawn at the
+// frame before, in sight itself and within the reach of its size, at the level of skin its
+// distance chooses, kept from the frame before until past its limit by the margin. `choose_second`,
+// between the passes: each instance chosen so and not hidden by the pyramid of the depth the first
+// pass left, those the first drew not drawn again; what it keeps is what the next frame draws first.
+// The instances of each record (a batch of a look at a level) counted. Then a prefix sum over the
+// records, a workgroup a block of 256 (`blocks`, `tops_*`, `place`): the places of the records'
 // instances, and of their draws among those of their state; `pack`: the arguments of the records
-// drawn, packed in the order of their state's records. `tops` also keeps, in their order, the
-// templates of the blended batches the CPU sorted the farthest first where the level chosen is
-// theirs. `scatter`: each instance's entries written at its records' places.
+// drawn, packed in the order of their state's records. `tops_second` also keeps, in their order,
+// the templates of the blended batches the CPU sorted the farthest first where the level chosen is
+// theirs: the blended are drawn in the second pass only. `scatter_*`: each instance's entries
+// written at its records' places.
 
 struct Params {
     // The sides of the view (x >= -w, x <= w, y >= -w, y <= w) and the eye's (w > 0).
@@ -30,6 +34,8 @@ struct Params {
     // Where the sums of the blocks begin in the work buffer, how many blocks, and where their
     // totals are.
     blocks: vec4<u32>,
+    // The view, to find where a box falls on the pyramid.
+    view_proj: mat4x4<f32>,
 };
 
 struct Instance {
@@ -51,6 +57,8 @@ struct Instance {
 @group(0) @binding(6) var<storage, read_write> work: array<atomic<u32>>;
 @group(0) @binding(7) var<storage, read_write> entries: array<vec2<u32>>;
 @group(0) @binding(8) var<storage, read_write> args: array<u32>;
+// The depth the first pass left, the farthest of each texel (`viewport::Pyramid`).
+@group(1) @binding(0) var pyramid: texture_2d<f32>;
 
 const LOOK: u32 = 10u;
 const RECORD: u32 = 5u;
@@ -93,11 +101,10 @@ fn in_sight(origin: vec3<f32>, half: f32) -> bool {
     return true;
 }
 
-// The level plus one of the instance `index`, of a look of `radius` and `count` levels; 0 out of
-// sight or beyond the reach of its size.
-fn chosen(index: u32, radius: f32, count: u32) -> u32 {
+// The box of the instance `index` of a look of `radius`: its origin, and its half side, the radius
+// at its largest scale.
+fn box_of(index: u32, radius: f32) -> vec4<f32> {
     let instance = instances[index];
-    let origin = vec3<f32>(instance.row0.w, instance.row1.w, instance.row2.w);
     let scale = max(
         length(vec3<f32>(instance.row0.x, instance.row1.x, instance.row2.x)),
         max(
@@ -105,12 +112,58 @@ fn chosen(index: u32, radius: f32, count: u32) -> u32 {
             length(vec3<f32>(instance.row0.z, instance.row1.z, instance.row2.z)),
         ),
     );
-    let size = radius * scale;
+    return vec4<f32>(instance.row0.w, instance.row1.w, instance.row2.w, radius * scale);
+}
+
+// The level plus one of the instance `index`, of a look of `radius` and `count` levels; 0 out of
+// sight or beyond the reach of its size.
+fn chosen(index: u32, radius: f32, count: u32) -> u32 {
+    let shape = box_of(index, radius);
+    let origin = shape.xyz;
+    let size = shape.w;
     let away = length(max(abs(params.eye.xyz - origin) - vec3<f32>(size), vec3<f32>(0.0)));
     if away > params.eye.w * max(size, 1.0) || !in_sight(origin, size) {
         return 0u;
     }
     return level_of(away / max(size, 0.5), before[index], count) + 1u;
+}
+
+// Whether the box of the instance `index`, of a look of `radius`, may be seen past the depth the
+// first pass left: its nearest depth (reverse Z: the greatest) not less than the least of the
+// pyramid over the rectangle it covers, read at the level where that rectangle spans two texels at
+// most. A box reaching behind the eye is seen.
+fn seen(index: u32, radius: f32) -> bool {
+    let shape = box_of(index, radius);
+    var low = vec2<f32>(1.0);
+    var high = vec2<f32>(-1.0);
+    var nearest = 0.0;
+    for (var corner = 0u; corner < 8u; corner++) {
+        let side = vec3<f32>((vec3<u32>(corner) >> vec3<u32>(0u, 1u, 2u)) & vec3<u32>(1u)) * 2.0 - 1.0;
+        let clip = params.view_proj * vec4<f32>(shape.xyz + side * shape.w, 1.0);
+        if clip.w <= 0.0 {
+            return true;
+        }
+        let ndc = clip.xyz / clip.w;
+        low = min(low, ndc.xy);
+        high = max(high, ndc.xy);
+        nearest = max(nearest, ndc.z);
+    }
+    // From the view's -1 to 1, y up, to its pixels, y down.
+    let size = vec2<f32>(textureDimensions(pyramid, 0u));
+    let first = clamp(vec2<f32>(low.x, -high.y) * 0.5 + 0.5, vec2<f32>(0.0), vec2<f32>(1.0)) * size;
+    let last = min(clamp(vec2<f32>(high.x, -low.y) * 0.5 + 0.5, vec2<f32>(0.0), vec2<f32>(1.0)) * size, size - 1.0);
+    let extent = max(last.x - first.x, last.y - first.y);
+    let level = min(u32(ceil(log2(max(extent, 1.0)))), textureNumLevels(pyramid) - 1u);
+    let texels = textureDimensions(pyramid, level) - vec2<u32>(1u);
+    let start = min(vec2<u32>(first) >> vec2<u32>(level), texels);
+    let end = min(vec2<u32>(last) >> vec2<u32>(level), texels);
+    var farthest = 1.0;
+    for (var y = start.y; y <= end.y; y++) {
+        for (var x = start.x; x <= end.x; x++) {
+            farthest = min(farthest, textureLoad(pyramid, vec2<u32>(x, y), level).r);
+        }
+    }
+    return nearest >= farthest;
 }
 
 // The group `group` of the frame: its first instance, its count, where its look is in the tables.
@@ -119,45 +172,87 @@ fn group_of(group: u32) -> vec3<u32> {
     return vec3<u32>(frames[at], frames[at + 1u], params.statics.y + frames[at + 2u] * LOOK);
 }
 
-// The instances chosen at each level, in a workgroup.
-var<workgroup> chosen_levels: array<atomic<u32>, 4>;
+// The instances chosen at each level, then those the pyramid hid, in a workgroup.
+var<workgroup> chosen_levels: array<atomic<u32>, 5>;
 
-@compute @workgroup_size(64)
-fn choose(@builtin(workgroup_id) workgroup: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>) {
-    if local.x < 4u {
-        atomicStore(&chosen_levels[local.x], 0u);
+fn begin_choosing(thread: u32) {
+    if thread < 5u {
+        atomicStore(&chosen_levels[thread], 0u);
     }
     workgroupBarrier();
+}
+
+// The instances chosen at each level, and those hidden, added to the statistics.
+fn end_choosing(thread: u32) {
+    workgroupBarrier();
+    if thread < 4u {
+        atomicAdd(&work[params.regions.w + 4u + thread], atomicLoad(&chosen_levels[thread]));
+    } else if thread == 4u {
+        atomicAdd(&work[params.regions.w + 3u], atomicLoad(&chosen_levels[4u]));
+    }
+}
+
+// An instance of the group `group` drawn at `level` plus one: counted among the records of its
+// look at that level.
+fn count_chosen(group: vec3<u32>, level: u32) {
+    atomicAdd(&chosen_levels[level - 1u], 1u);
+    let first = statics[group.z + 2u * level];
+    let references = statics[group.z + 2u * level + 1u];
+    for (var j = 0u; j < references; j++) {
+        atomicAdd(&work[statics[params.statics.z + first + j]], 1u);
+    }
+}
+
+@compute @workgroup_size(64)
+fn choose_first(@builtin(workgroup_id) workgroup: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>) {
+    begin_choosing(local.x);
     let group = group_of(workgroup.x);
     let radius = bitcast<f32>(statics[group.z]);
     let count = statics[group.z + 1u];
     for (var k = local.x; k < group.y; k += 64u) {
         let index = group.x + k;
-        let level = chosen(index, radius, count);
+        var level = 0u;
+        if before[index] != 0u {
+            level = chosen(index, radius, count);
+        }
         levels[index] = level;
-        if level == 0u {
-            continue;
-        }
-        atomicAdd(&chosen_levels[level - 1u], 1u);
-        let first = statics[group.z + 2u * level];
-        let references = statics[group.z + 2u * level + 1u];
-        for (var j = 0u; j < references; j++) {
-            atomicAdd(&work[statics[params.statics.z + first + j]], 1u);
+        if level != 0u {
+            count_chosen(group, level);
         }
     }
-    workgroupBarrier();
-    if local.x < 4u {
-        atomicAdd(&work[params.regions.w + 4u + local.x], atomicLoad(&chosen_levels[local.x]));
-    }
+    end_choosing(local.x);
 }
 
 @compute @workgroup_size(64)
-fn scatter(@builtin(workgroup_id) workgroup: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>) {
+fn choose_second(@builtin(workgroup_id) workgroup: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>) {
+    begin_choosing(local.x);
+    let group = group_of(workgroup.x);
+    let radius = bitcast<f32>(statics[group.z]);
+    let count = statics[group.z + 1u];
+    for (var k = local.x; k < group.y; k += 64u) {
+        let index = group.x + k;
+        var level = chosen(index, radius, count);
+        if level != 0u && !seen(index, radius) {
+            atomicAdd(&chosen_levels[4u], 1u);
+            level = 0u;
+        }
+        levels[index] = level;
+        // What the first phase drew is not drawn again.
+        if level != 0u && before[index] == 0u {
+            count_chosen(group, level);
+        }
+    }
+    end_choosing(local.x);
+}
+
+// Each instance drawn in the phase: its entries written at its records' places; in the second,
+// not those the first drew.
+fn scatter_in(workgroup: vec3<u32>, local: vec3<u32>, second: bool) {
     let group = group_of(workgroup.x);
     for (var k = local.x; k < group.y; k += 64u) {
         let index = group.x + k;
         let level = levels[index];
-        if level == 0u {
+        if level == 0u || (second && before[index] != 0u) {
             continue;
         }
         let first = statics[group.z + 2u * level];
@@ -168,6 +263,16 @@ fn scatter(@builtin(workgroup_id) workgroup: vec3<u32>, @builtin(local_invocatio
             entries[place] = vec2<u32>(index, statics[params.statics.w + record * RECORD + 3u]);
         }
     }
+}
+
+@compute @workgroup_size(64)
+fn scatter_first(@builtin(workgroup_id) workgroup: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>) {
+    scatter_in(workgroup, local, false);
+}
+
+@compute @workgroup_size(64)
+fn scatter_second(@builtin(workgroup_id) workgroup: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>) {
+    scatter_in(workgroup, local, true);
 }
 
 var<workgroup> sums: array<u32, 256>;
@@ -242,9 +347,8 @@ fn blocks(@builtin(workgroup_id) workgroup: vec3<u32>, @builtin(local_invocation
 }
 
 // The places of the blocks, from their totals; then the templates, kept where the level chosen
-// for their instance is theirs, packed in their order.
-@compute @workgroup_size(256)
-fn tops(@builtin(local_invocation_id) local: vec3<u32>) {
+// for their instance is theirs, in the second phase only, packed in their order.
+fn tops_in(local: vec3<u32>, second: bool) {
     let thread = local.x;
     let count = params.blocks.y;
     let span = (count + THREADS - 1u) / THREADS;
@@ -287,7 +391,7 @@ fn tops(@builtin(local_invocation_id) local: vec3<u32>) {
     var item_triangles = 0u;
     for (var item = item_begin; item < item_end; item++) {
         let at = params.frames.z + item * TEMPLATE;
-        if levels[frames[at + 4u]] == frames[at + 5u] {
+        if second && levels[frames[at + 4u]] == frames[at + 5u] {
             kept += 1u;
             item_triangles += frames[at] / 3u;
         }
@@ -300,13 +404,13 @@ fn tops(@builtin(local_invocation_id) local: vec3<u32>) {
     for (var item = item_begin; item < item_end; item++) {
         let at = params.frames.z + item * TEMPLATE;
         atomicStore(&work[params.work.z + item], before_kept);
-        before_kept += select(0u, 1u, levels[frames[at + 4u]] == frames[at + 5u]);
+        before_kept += select(0u, 1u, second && levels[frames[at + 4u]] == frames[at + 5u]);
     }
     storageBarrier();
     workgroupBarrier();
     for (var item = item_begin; item < item_end; item++) {
         let at = params.frames.z + item * TEMPLATE;
-        let keep = levels[frames[at + 4u]] == frames[at + 5u];
+        let keep = second && levels[frames[at + 4u]] == frames[at + 5u];
         let region = frames[at + 6u];
         let start = frames[params.frames.x + region * 2u];
         var slot = item;
@@ -338,6 +442,16 @@ fn tops(@builtin(local_invocation_id) local: vec3<u32>) {
         }
         atomicStore(&work[params.work.w + params.regions.x + region], after - at_start);
     }
+}
+
+@compute @workgroup_size(256)
+fn tops_first(@builtin(local_invocation_id) local: vec3<u32>) {
+    tops_in(local, false);
+}
+
+@compute @workgroup_size(256)
+fn tops_second(@builtin(local_invocation_id) local: vec3<u32>) {
+    tops_in(local, true);
 }
 
 // Each record: the place of its instances among the entries, and of its draw among the draws

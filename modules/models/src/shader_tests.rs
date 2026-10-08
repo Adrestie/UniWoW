@@ -262,6 +262,7 @@ fn drawn_on(
         service,
         layer,
         scene,
+        wall: crate::tests::flat(0.0),
     };
     let placed = Instance {
         id: 1,
