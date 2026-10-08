@@ -92,9 +92,6 @@ pub struct Discovery {
     pub slots: Vec<Slot>,
 }
 
-/// Folders of `modules\` that hold modules of one family, such as those of the interface.
-const GROUPS: [&str; 1] = ["UI"];
-
 fn subfolders(folder: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(folder)
         .map(|entries| {
@@ -107,6 +104,23 @@ fn subfolders(folder: &Path) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+/// The folders of the modules in `root`, sorted: each subfolder, but for a group folder, one
+/// without a manifest whose subfolders hold manifests (such as `UI`), the subfolders of the group.
+fn module_folders(root: &Path) -> Vec<PathBuf> {
+    let has_manifest = |folder: &Path| folder.join(manifest::FILE_NAME).exists();
+    let mut folders = Vec::new();
+    for folder in subfolders(root) {
+        let inner = subfolders(&folder);
+        if !has_manifest(&folder) && inner.iter().any(|f| has_manifest(f)) {
+            folders.extend(inner);
+        } else {
+            folders.push(folder);
+        }
+    }
+    folders.sort();
+    folders
+}
+
 /// Scans `<exe dir>\modules`, and its group folders, checks every module against the runtime and
 /// loads the valid ones.
 pub fn discover(exe_dir: &Path, disabled: &BTreeSet<String>) -> Discovery {
@@ -114,18 +128,7 @@ pub fn discover(exe_dir: &Path, disabled: &BTreeSet<String>) -> Discovery {
     let shadow_dir = prepare_shadow_dir();
     let mut slots: Vec<Slot> = Vec::new();
 
-    let mut folders = Vec::new();
-    for folder in subfolders(&exe_dir.join("modules")) {
-        let name = folder.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        if GROUPS.iter().any(|group| group.eq_ignore_ascii_case(&name)) && !folder.join(manifest::FILE_NAME).exists() {
-            folders.extend(subfolders(&folder));
-        } else {
-            folders.push(folder);
-        }
-    }
-    folders.sort();
-
-    for folder in folders {
+    for folder in module_folders(&exe_dir.join("modules")) {
         let folder_name = folder.file_name().unwrap_or_default().to_string_lossy().into_owned();
         let manifest = match Manifest::read(&folder.join(manifest::FILE_NAME)) {
             Ok(m) => m,
@@ -143,7 +146,10 @@ pub fn discover(exe_dir: &Path, disabled: &BTreeSet<String>) -> Discovery {
         let dll = folder.join(&manifest.dll);
         let state = if !dll.exists() {
             State::Ignored(format!("missing {}", manifest.dll))
-        } else if slots.iter().any(|s| s.id == id && s.manifest.is_some()) {
+        } else if slots
+            .iter()
+            .any(|s| s.id == id && !matches!(s.state, State::Ignored(_)))
+        {
             State::Ignored(format!("another folder already provides the id '{id}'"))
         } else if disabled.contains(&id) {
             State::Disabled
@@ -237,4 +243,179 @@ fn prepare_shadow_dir() -> PathBuf {
     }
     let _ = std::fs::create_dir_all(&own);
     own
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+
+    use uniwow_api::RUNTIME_DLL;
+
+    use super::{Slot, State, discover};
+    use crate::manifest::{self, FILE_NAME};
+
+    /// A folder standing for the executable's, with a runtime DLL of made-up bytes and an empty
+    /// `modules`; removed when dropped.
+    struct ExeDir(PathBuf);
+
+    impl ExeDir {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("uniwow-loader-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(path.join("modules")).expect("modules folder");
+            std::fs::write(path.join(RUNTIME_DLL), b"runtime").expect("runtime");
+            Self(path)
+        }
+
+        fn runtime(&self) -> String {
+            manifest::hash_file(&self.0.join(RUNTIME_DLL)).expect("runtime hash")
+        }
+
+        /// The folder `modules\<folder>` of a Rust module `id` built against `runtime`, its
+        /// manifest giving `dll_hash`, or the hash of its DLL; its DLL holding `dll`, or absent.
+        fn module(&self, folder: &str, id: &str, runtime: &str, dll: Option<&[u8]>, dll_hash: Option<&str>) {
+            let folder = self.0.join("modules").join(folder);
+            std::fs::create_dir_all(&folder).expect("module folder");
+            let file = folder.join(format!("{id}.dll"));
+            if let Some(bytes) = dll {
+                std::fs::write(&file, bytes).expect("dll");
+            }
+            let hash = match dll_hash {
+                Some(hash) => hash.to_owned(),
+                None => manifest::hash_file(&file).unwrap_or_default(),
+            };
+            let text = format!(
+                "id = \"{id}\"\nkind = \"rust\"\npackage = \"uniwow-module-{id}\"\nname = \"{id}\"\nversion = \"1\"\n\
+                 dll = \"{id}.dll\"\ndll_hash = \"{hash}\"\nruntime = \"{runtime}\"\n"
+            );
+            std::fs::write(folder.join(FILE_NAME), text).expect("manifest");
+        }
+
+        fn folder(&self, path: &str) -> PathBuf {
+            let folder = self.0.join("modules").join(path);
+            std::fs::create_dir_all(&folder).expect("folder");
+            folder
+        }
+
+        fn discover(&self, disabled: &[&str]) -> Vec<(String, String)> {
+            let disabled: BTreeSet<String> = disabled.iter().map(|id| (*id).to_owned()).collect();
+            discover(&self.0, &disabled).slots.iter().map(described).collect()
+        }
+    }
+
+    impl Drop for ExeDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The id of a slot and its state, with the reason.
+    fn described(slot: &Slot) -> (String, String) {
+        let state = match &slot.state {
+            State::Running => "running".to_owned(),
+            State::Disabled => "disabled".to_owned(),
+            State::Ignored(reason) => format!("ignored: {reason}"),
+            State::Refused(reason) => format!("refused: {reason}"),
+            State::Blocked(reason) => format!("blocked: {reason}"),
+            State::Failed(reason) => format!("failed: {reason}"),
+        };
+        (slot.id.clone(), state)
+    }
+
+    fn state_of<'a>(slots: &'a [(String, String)], id: &str) -> Vec<&'a str> {
+        slots
+            .iter()
+            .filter(|(slot, _)| slot == id)
+            .map(|(_, state)| state.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_folder_without_a_usable_manifest_or_dll_is_ignored_with_the_reason() {
+        let exe = ExeDir::new("ignored");
+        exe.folder("bare");
+        std::fs::write(
+            exe.folder("lua").join(FILE_NAME),
+            "id = \"lua\"\nkind = \"lua\"\nname = \"L\"\nversion = \"1\"\ndll = \"lua.dll\"\n",
+        )
+        .expect("manifest");
+        exe.module("missing", "missing", &exe.runtime(), None, Some("0"));
+        let slots = exe.discover(&[]);
+        assert_eq!(state_of(&slots, "bare"), ["ignored: no module.toml"]);
+        let lua = state_of(&slots, "lua");
+        assert!(
+            lua.len() == 1 && lua[0].starts_with("ignored: invalid module.toml"),
+            "{lua:?}"
+        );
+        assert_eq!(state_of(&slots, "missing"), ["ignored: missing missing.dll"]);
+    }
+
+    #[test]
+    fn a_module_built_for_another_runtime_or_whose_dll_changed_is_refused() {
+        let exe = ExeDir::new("refused");
+        exe.module("other", "other", "0000", Some(b"dll"), None);
+        exe.module("changed", "changed", &exe.runtime(), Some(b"dll"), Some("0000"));
+        exe.module("unreadable", "unreadable", &exe.runtime(), Some(b"not a dll"), None);
+        let slots = exe.discover(&[]);
+        assert_eq!(
+            state_of(&slots, "other"),
+            ["refused: built for another runtime: rebuild it"]
+        );
+        assert_eq!(
+            state_of(&slots, "changed"),
+            ["refused: changed.dll does not match its module.toml: rebuild it"]
+        );
+        let unreadable = state_of(&slots, "unreadable");
+        assert!(
+            unreadable.len() == 1 && unreadable[0].starts_with("refused: could not be loaded"),
+            "{unreadable:?}"
+        );
+    }
+
+    #[test]
+    fn a_disabled_module_is_not_loaded() {
+        let exe = ExeDir::new("disabled");
+        exe.module("off", "off", &exe.runtime(), Some(b"dll"), None);
+        assert_eq!(state_of(&exe.discover(&["off"]), "off"), ["disabled"]);
+    }
+
+    #[test]
+    fn an_id_is_kept_by_the_first_folder_that_is_not_ignored() {
+        let exe = ExeDir::new("twice");
+        // Sorted by folder: `a` is ignored for want of its DLL, `b` then provides the id, not `c`.
+        exe.module("a", "m", &exe.runtime(), None, Some("0"));
+        exe.module("b", "m", "0000", Some(b"dll"), None);
+        exe.module("c", "m", &exe.runtime(), Some(b"dll"), None);
+        assert_eq!(
+            state_of(&exe.discover(&[]), "m"),
+            [
+                "ignored: missing m.dll",
+                "refused: built for another runtime: rebuild it",
+                "ignored: another folder already provides the id 'm'",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_modules_of_a_group_folder_are_found_whatever_its_name() {
+        let exe = ExeDir::new("groups");
+        exe.module(
+            &Path::new("UI").join("ui-one").to_string_lossy(),
+            "ui-one",
+            "0000",
+            Some(b"dll"),
+            None,
+        );
+        exe.module(
+            &Path::new("Tools").join("tool").to_string_lossy(),
+            "tool",
+            "0000",
+            Some(b"dll"),
+            None,
+        );
+        let slots = exe.discover(&[]);
+        let ids: Vec<&str> = slots.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["tool", "ui-one"], "Tools before UI, by path");
+    }
 }

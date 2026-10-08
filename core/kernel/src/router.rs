@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use uniwow_api::serde_json::Value;
 use uniwow_api::{
     AppliedChange, CallId, CommandHandler, CommandInfo, CommandSpec, EditorBackend, Event, PropertyInfo, PropertyValue,
-    ReadProperty, WriteProperty, egui, log,
+    ReadProperty, WriteProperty, egui,
 };
 
 use crate::guard::guarded_as;
@@ -80,12 +80,14 @@ pub enum Request {
     },
 }
 
-/// Chooses, once every module has registered, which declaration of each command name the
-/// catalogue keeps: a command a module declares itself wins over a delegated one; between two of
-/// the same kind, the first registered wins. Each declaration set aside is logged with the one
-/// that wins. Only the kind of declaration counts, never which module it comes from (R1).
-pub fn choose_commands(declared: Vec<(String, CommandSpec)>) -> Vec<(String, CommandSpec)> {
+/// Chooses which declaration of each command name the catalogue keeps, among those `declared`
+/// by `(owner, command)`: a command a module declares itself wins over a delegated one; between
+/// two of the same kind, the first registered wins. Returns those kept, and a sentence for each
+/// declaration set aside naming the one that wins. Only the kind of declaration counts, never
+/// which module it comes from (R1).
+pub fn choose_commands(declared: Vec<(String, CommandSpec)>) -> (Vec<(String, CommandSpec)>, Vec<String>) {
     let mut kept: Vec<(String, CommandSpec)> = Vec::new();
+    let mut set_aside = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
     for (owner, spec) in declared {
         let Some(&at) = index.get(&spec.name) else {
@@ -95,16 +97,19 @@ pub fn choose_commands(declared: Vec<(String, CommandSpec)>) -> Vec<(String, Com
         };
         let (winner, kept_spec) = &kept[at];
         if kept_spec.delegated && !spec.delegated {
-            log::warn!(
+            set_aside.push(format!(
                 "command '{}' offered by '{winner}' on behalf of a module or a script set aside: '{owner}' declares it",
                 spec.name
-            );
+            ));
             kept[at] = (owner, spec);
         } else {
-            log::warn!("command '{}' of '{owner}' set aside: '{winner}' offers it", spec.name);
+            set_aside.push(format!(
+                "command '{}' of '{owner}' set aside: '{winner}' offers it",
+                spec.name
+            ));
         }
     }
-    kept
+    (kept, set_aside)
 }
 
 /// The module part of a caller: `scripting-lua#paint.lua #3` → `scripting-lua`.
@@ -552,16 +557,16 @@ mod tests {
                 declared("modules", "cube.paint", true),
             ],
         ] {
-            assert_eq!(owners(&choose_commands(declared)), vec![("cube.paint", "cube")]);
+            assert_eq!(owners(&choose_commands(declared).0), vec![("cube.paint", "cube")]);
         }
     }
 
     #[test]
     fn between_two_of_the_same_kind_the_first_registered_wins() {
         let delegated = vec![declared("modules", "x.do", true), declared("lua", "x.do", true)];
-        assert_eq!(owners(&choose_commands(delegated)), vec![("x.do", "modules")]);
+        assert_eq!(owners(&choose_commands(delegated).0), vec![("x.do", "modules")]);
         let direct = vec![declared("cube", "x.do", false), declared("terrain", "x.do", false)];
-        assert_eq!(owners(&choose_commands(direct)), vec![("x.do", "cube")]);
+        assert_eq!(owners(&choose_commands(direct).0), vec![("x.do", "cube")]);
     }
 
     fn info(name: &str, owner: &str, on_caller: bool) -> CommandInfo {

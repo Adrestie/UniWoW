@@ -1,5 +1,5 @@
 //! The property grids: their rows made and read before the objects are locked, those around the
-//! rows in sight only; drawn by the service of the module `properties`; the values changed written
+//! rows in sight only; drawn by the service of the property grid; the values changed written
 //! once the objects are unlocked, and each change done recorded as one undo entry of the property's
 //! module.
 

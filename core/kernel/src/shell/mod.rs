@@ -19,8 +19,9 @@ use std::time::{Duration, Instant};
 use uniwow_api::egui_dock::tab_viewer::OnCloseResponse;
 use uniwow_api::egui_dock::{DockArea, DockState, Style, TabViewer};
 use uniwow_api::{
-    CallId, CommandHandler, CommandInfo, Context, DIALOG_ANSWERED_TOPIC, DIALOG_COMMAND, DockArea as Area, Event, Host,
-    MODULE_FAILED_TOPIC, Module, PropertyInfo, Registrar, RunsOn, eframe, egui, log, range_error, serde_json,
+    CallId, CommandHandler, CommandInfo, CommandSpec, Context, DIALOG_ANSWERED_TOPIC, DIALOG_COMMAND, DockArea as Area,
+    Event, Host, MODULE_FAILED_TOPIC, Module, PropertyInfo, Registrar, RunsOn, eframe, egui, log, range_error,
+    serde_json,
 };
 
 use crate::capi;
@@ -88,6 +89,9 @@ pub struct Shell {
     hotkeys: Hotkeys,
     hotkey_window: HotkeyWindow,
     frames: Frames,
+    /// The commands each module declared, by owner, in the order registered: the catalogue is made
+    /// of those of the modules running.
+    declared: Vec<(String, CommandSpec)>,
 }
 
 /// Where the closing of the editor stands while modules have unsaved changes.
@@ -171,6 +175,7 @@ impl Shell {
             players: Players::default(),
             hotkeys,
             hotkey_window: HotkeyWindow::default(),
+            declared: Vec::new(),
         };
         shell.register_all();
         shell.resolve_requirements();
@@ -188,7 +193,6 @@ impl Shell {
     }
 
     fn register_all(&mut self) {
-        // Name conflicts are settled once every module has declared its commands.
         let mut declared = Vec::new();
         for slot in &mut self.slots {
             let Some(module) = slot.module.as_deref_mut().filter(|_| slot.state.is_running()) else {
@@ -245,32 +249,60 @@ impl Shell {
                 self.host.services.insert(id, Service { provider, value });
             }
         }
-        let names: Vec<(String, String)> = declared
+        // Name conflicts are settled once every module has declared its commands.
+        self.declared = declared;
+        self.make_catalogue();
+    }
+
+    /// Makes the catalogue of the commands again, of those the running modules declared (F6), so
+    /// that a command set aside comes back once the one that won stops; each module keeps the list
+    /// of its commands, those set aside with the module that won. The first time, the declarations
+    /// set aside are logged; then, the commands that change hands.
+    fn make_catalogue(&mut self) {
+        let running = self.running_ids();
+        let offered: Vec<(String, CommandSpec)> = self
+            .declared
             .iter()
-            .map(|(owner, spec)| (owner.clone(), spec.name.clone()))
+            .filter(|(owner, _)| running.contains(owner))
+            .cloned()
             .collect();
-        let kept = router::choose_commands(declared);
-        // Each module keeps the list of its commands, those set aside with the module that won.
+        let (kept, set_aside) = router::choose_commands(offered);
         let winners: HashMap<&str, &str> = kept
             .iter()
             .map(|(owner, spec)| (spec.name.as_str(), owner.as_str()))
             .collect();
         for slot in &mut self.slots {
-            slot.commands = names
+            slot.commands = self
+                .declared
                 .iter()
                 .filter(|(owner, _)| *owner == slot.id)
-                .map(|(_, name)| {
+                .map(|(_, spec)| {
                     let refused = winners
-                        .get(name.as_str())
+                        .get(spec.name.as_str())
                         .filter(|winner| **winner != slot.id)
                         .map(|winner| format!("offered by '{winner}'"));
-                    (name.clone(), refused)
+                    (spec.name.clone(), refused)
                 })
                 .collect();
         }
         drop(winners);
         let mut catalogue = self.host.bridge.catalogue.write().unwrap_or_else(|e| e.into_inner());
+        let before: HashMap<String, String> = std::mem::take(&mut *catalogue)
+            .into_iter()
+            .map(|(name, entry)| (name, entry.info.owner))
+            .collect();
+        if before.is_empty() {
+            for sentence in set_aside {
+                log::warn!("{sentence}");
+            }
+        }
         for (owner, spec) in kept {
+            if let Some(was) = before.get(&spec.name).filter(|was| **was != owner) {
+                log::warn!(
+                    "command '{}' now offered by '{owner}': '{was}' is not running",
+                    spec.name
+                );
+            }
             let handler = match spec.runs_on {
                 RunsOn::Interface => None,
                 RunsOn::Caller(handler) => Some(handler),
@@ -328,12 +360,19 @@ impl Shell {
     }
 
     fn block(&mut self, index: usize, reason: String) {
+        self.stop(index, State::Blocked(reason));
+    }
+
+    /// Stops a module, left in `state`: its services withdrawn, what the interface kept of its
+    /// objects let go, their textures with it, the bridge told, and the catalogue made again
+    /// without its commands.
+    fn stop(&mut self, index: usize, state: State) {
         let id = self.slots[index].id.clone();
-        self.slots[index].state = State::Blocked(reason);
+        self.slots[index].state = state;
         self.host.services.retain(|_, s| s.provider != id);
-        // What the interface kept of its objects goes, their textures with it.
         self.host.views.retain(|(owner, _), _| *owner != id);
         self.sync_running();
+        self.make_catalogue();
     }
 
     /// Tells the bridge which modules are running: only their commands can be called.
@@ -477,10 +516,8 @@ impl Shell {
                 lost.join(", ")
             );
         }
-        slot.state = State::Failed(message);
         let id = slot.id.clone();
-        self.host.services.retain(|_, s| s.provider != id);
-        self.sync_running();
+        self.stop(index, State::Failed(message));
         // Its jobs and script runs stop; from now on the bridge refuses whatever they still ask.
         self.host.pool.cancel_owner(&id);
         self.host.bridge.close_subscriptions(&id);

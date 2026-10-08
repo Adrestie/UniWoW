@@ -27,11 +27,11 @@ pub struct PanelView {
     painted: HashMap<Handle, [f64; 2]>,
     /// The height, or width, each child of a box layout that does not expand took last frame.
     sizes: HashMap<Handle, f32>,
-    /// The curve editor of the module `curves`, which draws the curve views, when it runs.
+    /// The curve editor, which draws the curve views, when a running module provides it.
     curve_editor: Option<Arc<dyn CurveEditor>>,
-    /// The dopesheet of the module `dopesheet`, which draws the dopesheet views, when it runs.
+    /// The dopesheet, which draws the dopesheet views, when a running module provides it.
     dopesheet: Option<Arc<dyn Dopesheet>>,
-    /// The property grid of the module `properties`, which draws the property grids, when it runs.
+    /// The property grid, which draws the property grids, when a running module provides it.
     property_grid: Option<Arc<dyn PropertyGrid>>,
     /// The module's editor: the labels and values of the properties its sequences animate and its
     /// grids show.
@@ -246,9 +246,9 @@ fn expands(store: &Ui, handle: Handle) -> bool {
 }
 
 impl PanelView {
-    /// The services the views are drawn with, from the modules `curves`, `dopesheet` and
-    /// `properties`; the editor of the module whose objects are drawn, and the kernel's side of the
-    /// editors.
+    /// The services the views are drawn with, the curve editor, the dopesheet and the property
+    /// grid, from the modules providing them; the editor of the module whose objects are drawn,
+    /// and the kernel's side of the editors.
     pub fn set_services(
         &mut self,
         curve_editor: Option<Arc<dyn CurveEditor>>,

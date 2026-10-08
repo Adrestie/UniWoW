@@ -62,7 +62,7 @@ fn view_key(owner: &str, objects: &SharedUi) -> (String, usize) {
 }
 
 impl KernelHost {
-    /// The curve editor of the module `curves`, which draws the curve views, when it runs.
+    /// The curve editor, which draws the curve views, when a running module provides it.
     fn curve_editor(&self) -> Option<Arc<dyn CurveEditor>> {
         self.services
             .get(curve::SERVICE.id())?
@@ -71,7 +71,7 @@ impl KernelHost {
             .cloned()
     }
 
-    /// The dopesheet of the module `dopesheet`, which draws the dopesheet views, when it runs.
+    /// The dopesheet, which draws the dopesheet views, when a running module provides it.
     fn dopesheet(&self) -> Option<Arc<dyn Dopesheet>> {
         self.services
             .get(dopesheet::SERVICE.id())?
@@ -80,7 +80,7 @@ impl KernelHost {
             .cloned()
     }
 
-    /// The property grid of the module `properties`, which draws the property grids, when it runs.
+    /// The property grid, which draws the property grids, when a running module provides it.
     fn property_grid(&self) -> Option<Arc<dyn PropertyGrid>> {
         self.services
             .get(property_grid::SERVICE.id())?

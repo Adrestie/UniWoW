@@ -1402,3 +1402,144 @@ fn undo_and_redo_follow_the_keys_they_are_bound_to() {
     harness.frame(key(Key::R, true));
     assert_eq!(*lock(&value), 2);
 }
+
+const OFFERED: uniwow_api::ServiceKey<()> = uniwow_api::ServiceKey::new("offered");
+
+/// A module that declares the command `x.do`, may provide the service `offered`, and may panic
+/// in `init`.
+struct Offering {
+    provides: bool,
+    panics: bool,
+}
+
+impl Module for Offering {
+    fn register(&mut self, reg: &mut Registrar) {
+        reg.command("x.do", "Does x", json!({}), json!({}));
+        if self.provides {
+            reg.provide(OFFERED, ());
+        }
+    }
+
+    fn init(&mut self, _ctx: &mut Context) {
+        assert!(!self.panics, "init failed on purpose");
+    }
+}
+
+fn offering(id: &str, provides: bool, panics: bool) -> Slot {
+    Slot::loaded(id, Box::new(Offering { provides, panics }))
+}
+
+/// A running module whose manifest requires and uses the services given, as `discover` leaves it.
+fn needing(id: &str, requires: &[&str], uses: &[&str]) -> Slot {
+    let mut slot = offering(id, false, false);
+    slot.manifest = Some(crate::manifest::Manifest {
+        id: id.to_owned(),
+        kind: crate::manifest::Kind::Rust,
+        package: String::new(),
+        name: id.to_owned(),
+        version: "1".to_owned(),
+        category: String::new(),
+        description: String::new(),
+        requires: requires.iter().map(|s| (*s).to_owned()).collect(),
+        uses: uses.iter().map(|s| (*s).to_owned()).collect(),
+        dll: String::new(),
+        dll_hash: String::new(),
+        runtime: String::new(),
+    });
+    slot
+}
+
+fn slot<'a>(shell: &'a Shell, id: &str) -> &'a Slot {
+    shell
+        .slots
+        .iter()
+        .find(|slot| slot.id == id)
+        .expect("a slot of that id")
+}
+
+#[test]
+fn a_command_set_aside_comes_back_when_the_module_that_won_does_not_start() {
+    let harness = Harness::with_slots(vec![offering("a", false, true), offering("b", false, false)]);
+    let shell = &harness.shell;
+    assert!(matches!(slot(shell, "a").state, State::Failed(_)));
+    assert_eq!(
+        shell.host.bridge.lookup("x.do").map(|(owner, _)| owner),
+        Ok("b".to_owned())
+    );
+    assert_eq!(slot(shell, "b").commands, [("x.do".to_owned(), None)]);
+    assert_eq!(
+        slot(shell, "a").commands,
+        [("x.do".to_owned(), Some("offered by 'b'".to_owned()))]
+    );
+}
+
+#[test]
+fn a_command_set_aside_comes_back_when_the_module_that_won_fails_later() {
+    let mut harness = Harness::with_slots(vec![offering("a", false, false), offering("b", false, false)]);
+    assert_eq!(
+        harness.shell.host.bridge.lookup("x.do").map(|(owner, _)| owner),
+        Ok("a".to_owned())
+    );
+    harness.shell.fail(0, "on purpose".to_owned());
+    assert_eq!(
+        harness.shell.host.bridge.lookup("x.do").map(|(owner, _)| owner),
+        Ok("b".to_owned())
+    );
+    assert_eq!(slot(&harness.shell, "b").commands, [("x.do".to_owned(), None)]);
+}
+
+#[test]
+fn a_module_whose_required_service_nobody_provides_is_blocked() {
+    let harness = Harness::with_slots(vec![needing("consumer", &["offered"], &[])]);
+    assert!(
+        matches!(
+            &slot(&harness.shell, "consumer").state,
+            State::Blocked(reason) if reason == "requires the service 'offered', which no running module provides"
+        ),
+        "{}",
+        state_text(&slot(&harness.shell, "consumer").state)
+    );
+}
+
+#[test]
+fn a_module_whose_provider_failed_in_its_init_is_blocked_and_one_using_it_starts_without_it() {
+    // Registered first, so that only the order of the providers puts the provider before them.
+    let harness = Harness::with_slots(vec![
+        needing("consumer", &["offered"], &[]),
+        needing("user", &[], &["offered"]),
+        offering("provider", true, true),
+    ]);
+    let shell = &harness.shell;
+    assert!(matches!(slot(shell, "provider").state, State::Failed(_)));
+    assert!(
+        matches!(
+            &slot(shell, "consumer").state,
+            State::Blocked(reason) if reason == "requires the service 'offered', whose provider failed"
+        ),
+        "{}",
+        state_text(&slot(shell, "consumer").state)
+    );
+    assert!(slot(shell, "user").state.is_running());
+    assert!(!shell.host.services.contains_key("offered"), "withdrawn");
+}
+
+#[test]
+fn what_the_interface_kept_of_the_objects_of_a_failed_module_goes() {
+    let mut harness = Harness::with_slots(vec![offering("a", false, false), offering("b", false, false)]);
+    for owner in ["a", "b"] {
+        harness
+            .shell
+            .host
+            .views
+            .insert((owner.to_owned(), 1), crate::draw::PanelView::default());
+    }
+    harness.shell.fail(0, "on purpose".to_owned());
+    let kept: Vec<&str> = harness
+        .shell
+        .host
+        .views
+        .keys()
+        .map(|(owner, _)| owner.as_str())
+        .collect();
+    assert_eq!(kept, ["b"]);
+}

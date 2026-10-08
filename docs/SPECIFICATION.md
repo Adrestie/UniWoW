@@ -63,6 +63,7 @@ Allowed dependencies (enforced by `xtask check`):
 
 | Layer | May depend on |
 |---|---|
+| app | core/api, core/kernel |
 | modules/* | core/api, libs/* |
 | core/kernel | core/api, libs/* |
 | core/api | libs/* (types only) |
@@ -92,7 +93,10 @@ free. Tried in step 9.1 with mimalloc in the runtime: every program crashed as i
 
 Every module has a folder `modules\<id>\` beside the executable, with a manifest `module.toml`:
 id, name, version, category, description, kind, the services it requires or uses, and what its
-kind needs (its DLL and the DLL's hash, the runtime fingerprint, its entry file).
+kind needs (its DLL and the DLL's hash, the runtime fingerprint, its entry file). The manifest of a
+Rust module also names its Cargo package, which the loader checks against the DLL, and the one
+`cargo xtask build` writes says `origin = "workspace"`: the next build removes such a folder once
+its source is gone, and leaves the folders of other origins alone.
 
 | Kind | Written as | Loaded by | Panels |
 |---|---|---|---|
@@ -150,7 +154,7 @@ Rules:
 | F3 | A module owns its project data section and its settings; no other module reads them directly. |
 | F4 | A missing required service: the module is not loaded and the reason is shown. A missing used service: the module loads without the parts that need it. A module that fails withdraws its services; requirements are checked again just before each `init`, so a module whose provider failed meanwhile is not initialised. |
 | F5 | A module that runs code on behalf of another, such as the viewport drawing a layer, catches its failures and reports the culprit with `Context::report_failure`. The kernel disables the culprit as if it had panicked, naming the reporter. |
-| F6 | Every action a module offers to others is a named command. The kernel keeps their catalogue and routes the calls; the same catalogue serves every module and script (S1). A Rust module declares its commands itself; those of compiled, Lua and Python modules are declared on their behalf, by the kernel or by the module of their language: they are delegated. Once every module has registered, a name declared twice keeps the command declared directly over a delegated one, and the first registered between two of the same kind; each one set aside is logged with the one that wins. |
+| F6 | Every action a module offers to others is a named command. The kernel keeps their catalogue and routes the calls; the same catalogue serves every module and script (S1). A Rust module declares its commands itself; those of compiled, Lua and Python modules are declared on their behalf, by the kernel or by the module of their language: they are delegated. Once every module has registered, a name declared twice keeps the command declared directly over a delegated one, and the first registered between two of the same kind; each one set aside is logged with the one that wins. The choice is made among the modules running: the catalogue is made again whenever a module is blocked or fails, so that a command set aside comes back once the one that won stops, which the log tells. |
 
 ### Interface objects
 
@@ -304,13 +308,18 @@ interpreters\python-3.xx\
 
 At start, the kernel:
 
-1. Scans `modules\*\module.toml`. A folder without a manifest, or without what its kind needs, is
-   ignored and listed.
+1. Scans `modules\*\module.toml`. A folder without a manifest whose subfolders hold manifests is a
+   **group folder**, such as `modules\UI\`: its subfolders are scanned instead, whatever its name.
+   A folder without a manifest, or without what its kind needs, is ignored and listed. An id is
+   kept by the first folder, in the order of their paths, that is not ignored; a later folder
+   giving the same id is ignored and listed.
 2. Compares the **runtime fingerprint** of each Rust module with its own. The fingerprint
    identifies the compiler version and the runtime build. A mismatch refuses the module with the
    reason ("built for another runtime, rebuild it") instead of loading it. A compiled module is
-   checked against the version of `uniwow.h` (S10). A Lua or Python module is handed to the module
-   of its language; without it, it is refused with the reason.
+   checked against the version of `uniwow.h` (S10). A Lua or Python module is to be handed to the
+   module of its language, and refused with the reason without it: the target of milestones 10 and
+   11. Until then, a manifest of kind `lua` or `python` is not valid, and its folder is ignored and
+   listed.
 3. Copies each accepted DLL to a temporary folder and loads the copy, so that a module can be
    rebuilt while the editor is open.
 4. Calls the entry point, checks required services, orders initialization so that service
@@ -615,7 +624,7 @@ E:\WoW-editor
   xtask/
   docs/
   .github/workflows/    CI on Windows with .NET 10: fmt, bindings --check, clippy -D warnings, cargo test,
-                        xtask build, test-sdk and check
+                        xtask build, the C# sample module built, test-sdk and check
 ```
 
 ---

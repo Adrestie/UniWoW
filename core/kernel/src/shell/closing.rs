@@ -1,4 +1,5 @@
-//! Closing the editor: the question about the unsaved changes, asked through the module dialogs.
+//! Closing the editor: the question about the unsaved changes, asked through the command opening
+//! a modal window.
 
 use super::*;
 
