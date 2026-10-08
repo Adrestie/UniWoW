@@ -297,10 +297,17 @@ pub trait Layer: Send {
 
     /// Records what the layer computes on the GPU for this frame, such as the compute passes choosing
     /// what it draws, into an encoder of its own, submitted before the pass of the view. It runs at
-    /// each frame after `prepare`, inside a validation error scope, which the encoder is finished
-    /// in: a layer that panics or fails here is removed and its module reported. Nothing by default.
+    /// each frame after `prepare` when `computes` says so, inside a validation error scope, which
+    /// the encoder is finished in: a layer that panics or fails here is removed and its module
+    /// reported. Nothing by default.
     fn compute(&mut self, gpu: &egui_wgpu::RenderState, view: &View, encoder: &mut wgpu::CommandEncoder) {
         let _ = (gpu, view, encoder);
+    }
+
+    /// Whether the layer computes at this frame: an encoder is made for `compute` only then. Read at
+    /// each frame, after `prepare`; none by default.
+    fn computes(&self) -> bool {
+        false
     }
 
     /// How the layer draws: by `draw` into its bundle, by default, or by `draw_pass`. Read at each

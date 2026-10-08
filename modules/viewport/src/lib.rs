@@ -1172,7 +1172,7 @@ fn prepare_layer(
         entry.kept = None;
         return Ok(Prepared {
             bundles: None,
-            computed: Some(computed),
+            computed,
             timed,
             prepare,
             record: None,
@@ -1193,7 +1193,7 @@ fn prepare_layer(
     };
     Ok(Prepared {
         bundles: Some(bundles),
-        computed: Some(computed),
+        computed,
         timed,
         prepare,
         record,
@@ -1201,18 +1201,29 @@ fn prepare_layer(
 }
 
 /// The computing of a layer, recorded into an encoder of its own between its timestamps when the
-/// frame times it apart, and finished inside a validation error scope; with its number among the
-/// layers timed.
+/// frame times it apart, and finished inside a validation error scope; none for a layer that does
+/// not compute at this frame, its timestamps of computing left unwritten, read as nothing. With its
+/// number among the layers timed.
 fn compute(
     entry: &mut Entry,
     gpu: &egui_wgpu::RenderState,
     view: &View,
     timer: Option<&mut GpuTimer>,
-) -> Result<(wgpu::CommandBuffer, Option<u32>), String> {
+) -> Result<(Option<wgpu::CommandBuffer>, Option<u32>), String> {
+    let timed = timer.and_then(|timer| timer.layer(&entry.owner).map(|number| (timer, number)));
+    let layer = entry.layer.as_ref();
+    let computes = catch_unwind(AssertUnwindSafe(|| layer.computes())).map_err(|payload| {
+        format!(
+            "its viewport layer panicked telling whether it computes: {}",
+            panic_text(payload)
+        )
+    })?;
+    if !computes {
+        return Ok((None, timed.map(|(_, number)| number)));
+    }
     let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some(&entry.owner),
     });
-    let timed = timer.and_then(|timer| timer.layer(&entry.owner).map(|number| (timer, number)));
     if let Some((timer, number)) = &timed {
         timer.computing(&mut encoder, *number, false);
     }
@@ -1237,7 +1248,7 @@ fn compute(
         (Ok(()), Ok(_), Some(error)) => Err(format!(
             "its viewport layer caused a GPU error while computing: {error}"
         )),
-        (Ok(()), Ok(buffer), None) => Ok((buffer, number)),
+        (Ok(()), Ok(buffer), None) => Ok((Some(buffer), number)),
     }
 }
 
@@ -2132,6 +2143,10 @@ fn cs_main() {
             }
         }
 
+        fn computes(&self) -> bool {
+            self.computes || matches!(self.fault, Fault::PanicComputing | Fault::ErrorComputing)
+        }
+
         fn drawing(&self) -> Drawing {
             self.drawing
         }
@@ -2542,6 +2557,25 @@ fn cs_main() {
         let drawn = targets.draw(&layers, &gpu, &view, false, None);
         assert!(drawn.failures.is_empty(), "{:?}", drawn.failures);
         assert_eq!(targets.middle(&gpu), [0, 0, 255, 255], "the blue its computing wrote");
+    }
+
+    #[test]
+    fn a_layer_that_computes_nothing_gets_no_encoder() {
+        let Some(gpu) = gpu() else {
+            eprintln!("skipped: no software adapter for a device");
+            return;
+        };
+        let view = view(&Camera::default(), [8, 8], 0.0, viewport::Fog::default());
+        let entry = |painter: Painter| Entry {
+            owner: "painter".to_owned(),
+            layer: Box::new(painter),
+            kept: None,
+        };
+        let (idle, _) = super::compute(&mut entry(Painter::new(Drawing::Pass, RED)), &gpu, &view, None).unwrap();
+        assert!(idle.is_none(), "no command buffer for nothing");
+        let computing = Painter::new(Drawing::Pass, RED).computing();
+        let (computed, _) = super::compute(&mut entry(computing), &gpu, &view, None).unwrap();
+        assert!(computed.is_some());
     }
 
     #[test]

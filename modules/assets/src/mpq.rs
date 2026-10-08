@@ -127,7 +127,6 @@ pub enum Entry {
     Deleted,
 }
 
-/// An archive open, its tables read.
 /// The largest sector the archives of 3.3.5a could have: 512 << 23, 4 GB; theirs are of 4 KB.
 const MAX_SECTOR_SHIFT: u16 = 23;
 /// The largest file an archive may give, far beyond any of the client's.
@@ -150,6 +149,7 @@ impl NameHashes {
     }
 }
 
+/// An archive open, its tables read.
 pub struct Archive {
     path: PathBuf,
     file: File,

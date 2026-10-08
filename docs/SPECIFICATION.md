@@ -2328,7 +2328,9 @@ First part (9.2b), the readers of the terrain and of the textures:
   doodads of `Azeroth_32_48`. The components of the normals are those of the world: checked against
   the slopes of the heights on every tile read.
 - BLP (`modules/assets/src/blp.rs`), translated from wow.export: version 2, its palette (alphas of
-  0, 1, 4 or 8 bits), DXT1, DXT3 and DXT5, kept as BC or decoded, BGRA. A level cut short ends the
+  0, 1, 4 or 8 bits, an alpha of 4 bits widened times 17 as DXT3 and the alpha maps are, where
+  wow.export shifts it and leaves 0xF short of opaque), DXT1, DXT3 and DXT5, kept as BC or
+  decoded, BGRA. A level cut short ends the
   levels kept. Versions 0 and 1 are refused by name: Wow.exe 12340 holds the mark `BLP2` seven
   times and never `BLP1`, so the client reads no other. One texture of the terrain of the user's
   client of 2,379 is a BLP1 (`Tileset\Aerie Peaks\AeriePeaksWebs.blp`).
@@ -3945,7 +3947,9 @@ submit.
   view, pass)`, nothing by default; `draw` now nothing by default too, for a layer drawn in the
   pass. Their documentation says what the state of the pass is when `draw_pass` begins.
 - **A frame of the view** (`draw_frame`), in three times: each layer prepared, then its computing
-  recorded into an encoder of its own, finished inside its scope of validation (a panic, invalid
+  recorded into an encoder of its own, for a layer whose `computes` says so (none by default: no
+  encoder for a layer computing nothing, its timestamps of computing read as nothing),
+  finished inside its scope of validation (a panic, invalid
   commands or a GPU error there remove that layer alone), then its bundle kept or recorded, or none
   for a layer drawn in the pass; then the pass: the grid, then the layers in their order, a bundle
   run or `draw_pass` called; then each layer's statistics and labels. Everything is submitted in
@@ -3967,9 +3971,15 @@ submit.
   whether the textures are read as sRGB are given to `TextureArrays::new`; the counts give the
   layers holding a texture and all the layers of the arrays (their capacity), counted where a layer
   is taken and given back. The terrain keeps its 12 slots, read as sRGB, and its tests.
-  - Against the proposal, the class stays (format, size, levels): by format and size alone,
-    Dalaran has 34 classes instead of 36 and Orgrimmar 25 as before, which does not pay for a
-    level of detail held by the gradients in every shader reading the arrays.
+  - Against the proposal, the class stayed (format, size, levels): by format and size alone,
+    Dalaran has 34 classes instead of 36 and Orgrimmar 25 as before, which did not pay for a
+    level of detail held by the gradients in every shader reading the arrays. Changed by the full
+    verification of the milestones, at the user's choice: a texture whose levels are cut short (3
+    of the client) or exported with fewer took a class, and a slot, of its own, which a map holding
+    several such could run out of. The class is (format, size); an array has every level of its
+    size, down to 1 texel (BC: down to 4), and those a texture lacks are made from its last one
+    when it is placed, its texels averaged 2 × 2, or for BC one block of each 2 × 2 taken, which
+    needs no encoder and no change of the shaders.
 - **Tests**: in `viewport`, on the software adapter: layers drawn in the pass and in bundles in
   their order, each with its own state, in three orders (the pass then a bundle, a bundle then the
   pass, the pass, a bundle and the pass again), the pixel read back; what a layer computes drawn

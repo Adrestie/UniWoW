@@ -632,6 +632,10 @@ impl Layer for ModelsLayer {
         }
     }
 
+    fn computes(&self) -> bool {
+        self.choice.is_some()
+    }
+
     fn drawing(&self) -> Drawing {
         if self.pool().is_some() {
             Drawing::Pass

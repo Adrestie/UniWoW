@@ -1,4 +1,4 @@
-//! Textures in arrays, one for each class of texture (format, size and levels), so that what draws
+//! Textures in arrays, one for each class of texture (format and size), so that what draws
 //! many textures binds a few arrays and draws them in one draw: a texture is a layer of an array of
 //! its class, read once and shared between those holding it. An array grows as textures come, a
 //! layer nobody holds is given to the next texture, and an array that holds none is dropped. The
@@ -17,6 +17,67 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use crate::formats::{FileRef, Formats, Texture, TextureFormat};
 use crate::wgpu::util::DeviceExt;
 use crate::{journal, log, wgpu};
+
+/// The levels of `class` for `texture`: its own, then those it lacks, as the client's textures cut
+/// short at their end, each made from the one before: texels averaged 2 × 2, or for BC one block of
+/// each 2 × 2, which no encoder is needed for.
+fn full_levels<'a>(texture: &'a Texture, class: &Class) -> Vec<std::borrow::Cow<'a, [u8]>> {
+    use std::borrow::Cow;
+    let mut levels: Vec<Cow<'a, [u8]>> = texture
+        .levels
+        .iter()
+        .take(class.levels as usize)
+        .map(|level| Cow::Borrowed(level.as_slice()))
+        .collect();
+    while levels.len() < class.levels as usize {
+        let level = levels.len() as u32;
+        let last = levels.last().expect("a texture has a level");
+        let (width, height) = (
+            (class.width >> (level - 1)).max(1) as usize,
+            (class.height >> (level - 1)).max(1) as usize,
+        );
+        let (half_width, half_height) = ((width / 2).max(1), (height / 2).max(1));
+        let next = match class.format.block_copy_size(None) {
+            Some(block) if class.format.is_compressed() => {
+                let block = block as usize;
+                let (across, down) = (width.div_ceil(4), height.div_ceil(4));
+                let (half_across, half_down) = (half_width.div_ceil(4), half_height.div_ceil(4));
+                let mut blocks = Vec::with_capacity(half_across * half_down * block);
+                for y in 0..half_down {
+                    for x in 0..half_across {
+                        let at = ((y * 2).min(down - 1) * across + (x * 2).min(across - 1)) * block;
+                        match last.get(at..at + block) {
+                            Some(taken) => blocks.extend_from_slice(taken),
+                            None => blocks.resize(blocks.len() + block, 0),
+                        }
+                    }
+                }
+                blocks
+            }
+            _ => {
+                let texel = |x: usize, y: usize, channel: usize| {
+                    let (x, y) = (x.min(width - 1), y.min(height - 1));
+                    u32::from(last.get((y * width + x) * 4 + channel).copied().unwrap_or(0))
+                };
+                let mut texels = Vec::with_capacity(half_width * half_height * 4);
+                for y in 0..half_height {
+                    for x in 0..half_width {
+                        for channel in 0..4 {
+                            let sum = texel(x * 2, y * 2, channel)
+                                + texel(x * 2 + 1, y * 2, channel)
+                                + texel(x * 2, y * 2 + 1, channel)
+                                + texel(x * 2 + 1, y * 2 + 1, channel);
+                            texels.push(((sum + 2) / 4) as u8);
+                        }
+                    }
+                }
+                texels
+            }
+        };
+        levels.push(Cow::Owned(next));
+    }
+    levels
+}
 
 /// What a texture without a layer has in its place, as a code: drawn white by its shader.
 pub const NONE: u32 = u32::MAX;
@@ -39,7 +100,8 @@ impl Placed {
     }
 }
 
-/// What the textures of an array have in common.
+/// What the textures of an array have in common: their format and size, and the levels of that
+/// size, those a texture lacks made from its last one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Class {
     format: wgpu::TextureFormat,
@@ -303,12 +365,17 @@ impl TextureArrays {
             (TextureFormat::Bc2, false) => wgpu::TextureFormat::Bc2RgbaUnorm,
             (TextureFormat::Bc3, false) => wgpu::TextureFormat::Bc3RgbaUnorm,
         };
-        // The levels of BC at least 4 texels wide and high.
+        if texture.levels.is_empty() || texture.width == 0 || texture.height == 0 {
+            return Err("a texture without texels".to_owned());
+        }
+        // Every level of its size, down to 1 texel; of BC, those at least 4 texels wide and high.
+        let side = texture.width.max(texture.height);
         let levels = match texture.format {
-            TextureFormat::Rgba8 => texture.levels.len(),
-            _ => (0..texture.levels.len())
+            TextureFormat::Rgba8 => (u32::BITS - side.leading_zeros()) as usize,
+            _ => (0..u32::BITS)
                 .take_while(|level| (texture.width >> level) >= 4 && (texture.height >> level) >= 4)
-                .count(),
+                .count()
+                .max(1),
         };
         let class = Class {
             format,
@@ -319,7 +386,7 @@ impl TextureArrays {
         // The rows of each level apart by a multiple of what a copy from a buffer needs.
         let mut bytes = Vec::new();
         let mut copies = Vec::with_capacity(levels);
-        for (level, data) in texture.levels.iter().take(levels).enumerate() {
+        for (level, data) in full_levels(texture, &class).iter().enumerate() {
             let (row, rows) = class.level_layout(level as u32);
             let stride = row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
             copies.push((bytes.len() as u64, stride, rows));

@@ -1005,6 +1005,47 @@ fn an_array_grows_keeping_its_layers_and_the_arrays_end_with_their_slots() {
     assert!(refused.contains("full"), "{refused}");
 }
 
+#[test]
+fn textures_of_one_size_and_format_share_an_array_whatever_their_levels() {
+    let Some(gpu) = device() else {
+        eprintln!("skipped: no software adapter for a device");
+        return;
+    };
+    let shared = Shared::new(&gpu, &TARGET).unwrap();
+    // A texture with all its levels, then the same cut short after its first, as some of the client.
+    let full = Texture {
+        levels: vec![
+            [10u8, 20, 30, 255].repeat(64),
+            [10u8, 20, 30, 255].repeat(16),
+            [10u8, 20, 30, 255].repeat(4),
+            [10u8, 20, 30, 255].to_vec(),
+        ],
+        ..plain(8, [10, 20, 30, 255])
+    };
+    let short = plain(8, [200, 100, 50, 255]);
+    let (a, b) = (
+        shared.textures.place(&full).unwrap(),
+        shared.textures.place(&short).unwrap(),
+    );
+    assert_eq!(a.slot, b.slot, "one array");
+    assert_ne!(a.layer, b.layer);
+    if shared.textures.block_compression() {
+        let block = |levels: usize| Texture {
+            width: 16,
+            height: 16,
+            format: TextureFormat::Bc1,
+            levels: (0..levels)
+                .map(|level| vec![0u8; 8 * (4 >> level) * (4 >> level)])
+                .collect(),
+        };
+        let (c, d) = (
+            shared.textures.place(&block(3)).unwrap(),
+            shared.textures.place(&block(1)).unwrap(),
+        );
+        assert_eq!(c.slot, d.slot, "one array of BC too");
+    }
+}
+
 /// A tile of chunks with one texture each, `red.blp` (4 texels a side) for the columns of chunks
 /// below 8, `green.blp` (8 a side, another class) for the others; flat at the height 7, unshadowed.
 fn two_textures() -> Tile {

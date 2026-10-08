@@ -120,11 +120,12 @@ fn from_palette(data: &[u8], palette: &[u8], texels: usize, depth: u8) -> Vec<u8
                 }
             }
             4 => {
+                // Widened as the client's other 4-bit alphas are: 0xF is opaque.
                 let byte = alphas[index / 2];
                 if index.is_multiple_of(2) {
-                    (byte & 0x0F) << 4
+                    (byte & 0x0F) * 17
                 } else {
-                    byte & 0xF0
+                    (byte >> 4) * 17
                 }
             }
             8 => alphas[index],
