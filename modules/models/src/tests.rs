@@ -1519,6 +1519,96 @@ fn the_animations_ended_leave_the_models_at_rest_and_say_why_when_they_panicked(
 }
 
 #[test]
+fn the_distances_are_walked_whole_by_one_job_at_a_time_those_before_kept_meanwhile() {
+    let group = |look: u32, x: f32| Group {
+        look: LookId(look),
+        tile: [0, 0],
+        first: 0,
+        count: 1,
+        low: Vec3::new(x, 0.0, 0.0),
+        high: Vec3::new(x, 0.0, 0.0),
+        scale: 1.0,
+    };
+    let published = |groups: Vec<Group>| {
+        Arc::new(groups::Published {
+            groups,
+            ..groups::Published::default()
+        })
+    };
+    let building = published(vec![group(0, 30.0)]);
+    let creature = |x| published(vec![group(1, x)]);
+    let radius = |_: LookId| 0.0;
+    // The job of a whole walk, made as the module's would, by hand.
+    let walk =
+        |before, owners: &[(u32, Arc<groups::Published>)], eye| crate::Walked::update(before, owners, 1, eye, radius).0;
+    let mut walking = crate::Walking::default();
+    let mut started = Vec::new();
+    let owners = [(1, building.clone()), (2, creature(50.0))];
+    let frame = |walking: &mut crate::Walking,
+                 started: &mut Vec<Option<crate::Walked>>,
+                 owners: &[(u32, Arc<groups::Published>)],
+                 eye: Vec3| {
+        walking.frame(owners, 1, eye, radius, |before| {
+            started.push(before);
+            uniwow_api::JobId(started.len() as u64)
+        })
+    };
+    assert!(
+        frame(&mut walking, &mut started, &owners, Vec3::ZERO).is_none(),
+        "nothing walked yet"
+    );
+    assert!(frame(&mut walking, &mut started, &owners, Vec3::ZERO).is_none());
+    assert_eq!(started.len(), 1, "one job, not one a frame");
+    // Another job's outcome is given back; the walk's taken.
+    let other = walking.ended(uniwow_api::JobId(9), uniwow_api::JobOutcome::Cancelled);
+    assert!(matches!(other, Some(uniwow_api::JobOutcome::Cancelled)));
+    let done = walk(started[0].take(), &owners, Vec3::ZERO);
+    assert!(
+        walking
+            .ended(uniwow_api::JobId(1), uniwow_api::JobOutcome::Done(Box::new(done)))
+            .is_none()
+    );
+    let (walked, told) = frame(&mut walking, &mut started, &owners, Vec3::ZERO).expect("walked");
+    assert!(told, "to be told to the budget once");
+    assert_eq!(walked.nearest[&LookId(0)], 30.0);
+    walking.keep(walked);
+    let (walked, told) = frame(&mut walking, &mut started, &owners, Vec3::ZERO).expect("walked");
+    assert!(!told);
+    walking.keep(walked);
+    // The creature moves: once walked whole, then here at each frame, no job started.
+    let moved = [(1, building.clone()), (2, creature(40.0))];
+    let (walked, _) = frame(&mut walking, &mut started, &moved, Vec3::ZERO).expect("those before");
+    walking.keep(walked);
+    assert_eq!(started.len(), 2, "a job for an owner published");
+    let done = walk(started[1].take(), &moved, Vec3::ZERO);
+    walking.ended(uniwow_api::JobId(2), uniwow_api::JobOutcome::Done(Box::new(done)));
+    let nearer = [(1, building.clone()), (2, creature(20.0))];
+    let (walked, told) = frame(&mut walking, &mut started, &nearer, Vec3::ZERO).expect("walked");
+    assert!(told);
+    assert_eq!(walked.nearest[&LookId(1)], 20.0, "walked here");
+    walking.keep(walked);
+    assert_eq!(started.len(), 2);
+    // The camera moves past the margin: those before kept while the job runs, one job only.
+    let far = Vec3::new(crate::WALK + 1.0, 0.0, 0.0);
+    for _ in 0..3 {
+        let (walked, told) = frame(&mut walking, &mut started, &nearer, far).expect("those before");
+        assert!(!told);
+        assert_eq!(walked.nearest[&LookId(0)], 30.0, "not walked from there yet");
+        walking.keep(walked);
+    }
+    assert_eq!(started.len(), 3);
+    // A walk that panicked: those before kept, another started at the next frame.
+    walking.ended(
+        uniwow_api::JobId(3),
+        uniwow_api::JobOutcome::Panicked("no memory".to_owned()),
+    );
+    let (walked, told) = frame(&mut walking, &mut started, &nearer, far).expect("those before");
+    assert!(!told);
+    walking.keep(walked);
+    assert_eq!(started.len(), 4);
+}
+
+#[test]
 fn one_job_makes_the_tables_at_a_time_and_one_more_after_it_for_the_looks_published_meanwhile() {
     let mut tables = crate::TablesJob::default();
     assert!(tables.asked(), "none running: one starts");

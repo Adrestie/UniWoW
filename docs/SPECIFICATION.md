@@ -5897,6 +5897,42 @@ The pyramid of the depth takes 0.10 to 0.15 ms of the GPU a frame on the user's 
 - **To measure by the user**: the frames a second over the whole maps and in the cities, and the
   count of the hidden in the statistics of the layer.
 
+#### The frames measured while the camera moves, after 9.6f2
+
+The user saw no gain from 9.6f2, and the frames falling while the camera moves, back up once it
+stops, as before 9.6f. The journal of the frames, the whole map of the branch without the distance
+of the view loaded, 112 seconds and 6,225 frames, flown and still at several places:
+
+| Part, on the interface thread | Still | Moving, a crowded view |
+|---|---|---|
+| `view: models prepare` | 1.4 ms, up to 10 in a crowded view | 9 to 10 ms |
+| `windows of models`: the distances of every look placed walked whole for the budget | 1 ms | 3.5 to 4.5 ms |
+| `view: buildings prepare` | 0.2 ms, up to 2.4 | 2.2 to 2.4 ms |
+| `view: submit` | 0.4 ms, up to 2.4 | 2 ms |
+| The GPU, the frame timed last | 3.2 ms | 4 to 6 ms |
+
+The GPU is not what the frames wait for, so that the occlusion could not show. The distances of
+the looks were walked whole again once the camera moved by 8 yards, at each frame of a flight;
+their milliseconds take the interface thread past 16.7 and the frames miss the vertical blank.
+Decided by the user: the walk first, then `models prepare` measured and lightened, then the
+buildings and the submission; 9.6f3 after them.
+
+#### The walk of the distances off the interface thread, as built
+
+- `Walking` in `models`: a whole walk of the distances is made by a job of the pool from what is
+  placed then (the owners' publications, the radii of the looks held, the eye), one at a time;
+  the frames meanwhile keep the distances walked before. Its outcome is kept once it comes back,
+  and the next frame tells the budget, the loads and the releases following it. The owners that
+  move, whose groups alone are walked again when nothing else changed, are still walked on the
+  interface thread, which is quick.
+- `Walked::whole` says, apart from `Walked::update`, whether a walk would be whole.
+- **Tested**: a job a whole walk, not a frame; nothing until the first comes back; another job's
+  outcome given back; the distances come back told to the budget once; the owners that move walked
+  on the interface thread without a job; the camera past the margin keeping those before while one
+  job runs; a walk that panicked followed by another. 9 changes made on purpose: 8 made a test
+  fail; the ninth, the budget never told, is the line of the module's steering, which no test
+  drives, the module having no harness of its own.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around
