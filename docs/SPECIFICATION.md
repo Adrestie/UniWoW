@@ -5762,8 +5762,14 @@ waits for the next, 33 ms).
   textures, the tiles of the terrain, the models of their own, the per-frame tables of `models` and
   `buildings`), the arenas grown and what they copied, the waits of the interface thread for the
   locks of the arenas and of `models`, `liquids` and `terrain`, what the GPU spent by layer on the
-  frame timed last, and the jobs not yet handed back. Kept cheap whether written or not; written a
-  line a frame where `UNIWOW_SLOW_FRAMES` names a file, the frames past 17.5 ms marked slow.
+  frame timed last, and the jobs started and not yet handed back, waiting, running or ended. Kept
+  cheap whether written or not; written a line a frame where `UNIWOW_SLOW_FRAMES` names a file, the
+  frames past 17.5 ms marked slow. The parts nest: the kernel's, named `kernel: …`, follow one
+  another, and those of the modules (each in all its calls, then its windows and its jobs apart)
+  and of the views lie within them; eframe's runs from the window drawn to the next frame, its
+  waiting for the vertical blank and any idleness included. The work of the interface thread is the
+  kernel's parts summed, each once, which the line gives last since the full verification of the
+  milestones; the frames of a window minimised are written too.
 - **Flown by the user**, the terrain at 64 tiles, the buildings at 8, the doodads at 4, the models
   at a reach of 1,000, 300 then 600 yards a second:
 
@@ -5773,15 +5779,15 @@ waits for the next, 33 ms).
   | Statistics hidden | 43.8 | 34 % | 133 ms | 28.9 / 6.5 ms | 31.6 MB | 4, 89 MB |
   | Terrain 16, buildings 3 | 28.0 | 53 % | 138 ms | 38.9 / 4.5 ms | 42.1 MB | none |
 
-  Of the slow frames, 421 of 464, 381 of 433 and 296 of 325 took more than 16.7 ms of work on the
-  interface thread; the GPU spent 3 to 4.4 ms on a frame. By part, a slow frame of the second
+  The work of the interface thread, above and below, is the kernel's parts summed (eframe's aside):
+  of the slow frames, 421 of 464, 381 of 433 and 296 of 325 took more than 16.7 ms of it; the GPU spent 3 to 4.4 ms on a frame. By part, a slow frame of the second
   flight: the jobs handed back to `models` 7.3 ms (46 at most), its windows 2.7, those of
   `buildings` 1.9, `liquids` 1.5 and `terrain` 1.5; recording the bundle of the terrain 3.9 ms,
   preparing `models` 3.1, `buildings` 1.1, submitting 1.1. The waits for a lock 0.1 ms a slow frame
   on average, 3 ms at the longest (10 in the third flight); the report of the allocator, made once a
   second while the statistics are shown, 2.9 ms at the longest, and the second flight, without it,
-  as slow. Up to 298 jobs waited to be handed back at once: 94 on average in the slow frames of the
-  second flight, 11 in the others.
+  as slow. Up to 298 jobs were started and not yet handed back at once, waiting, running or ended:
+  94 on average in the slow frames of the second flight, 11 in the others.
 - **The same flight scripted** (`viewport.look_at` 60 times a second along the same way): 60 frames
   a second, 4 to 5 % slow, 34 ms at the longest; the flights of the user loaded many more models at
   once.

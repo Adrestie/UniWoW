@@ -3,7 +3,8 @@
 //! and what they copied, and the locks the interface thread waited for; with what the GPU last spent
 //! on each layer. The kernel takes it at the start of each frame and writes the frames that missed
 //! their deadline where `UNIWOW_SLOW_FRAMES` names a file. Kept cheap whether written or not: sums
-//! by part, and counters.
+//! by part, and counters. The waits for locks are timed on the interface thread only, the thread
+//! whose frames the journal is about; the workers' waits are not seen.
 
 use std::cell::Cell;
 use std::collections::HashMap;
