@@ -182,6 +182,7 @@ impl Shell {
         }
         uniwow_api::journal::spent("kernel: windows of the modules", windows.elapsed());
         self.hotkey_window(&ctx);
+        self.settings_window(&ctx);
         // A modal window takes the keyboard from the editor: one the kernel draws, from the frame it
         // is drawn in to the last one; one a Rust module draws with egui, as egui knows it, from
         // the frame after.
@@ -212,6 +213,7 @@ impl Shell {
                 }
                 MenuAction::SetPanelOpen(tab, open) => self.set_panel_open(&tab, open),
                 MenuAction::Hotkeys => self.hotkey_window.open = true,
+                MenuAction::Settings => self.settings_window.open = true,
                 MenuAction::Module(index, action) => {
                     if self.slots[index].state.is_running()
                         && let Err(message) =

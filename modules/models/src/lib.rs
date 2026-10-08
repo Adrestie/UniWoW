@@ -44,8 +44,8 @@ use uniwow_api::glam::{Mat4, Quat, Vec3};
 use uniwow_api::models::{self, Geosets, Instance, Look, LookId, LookState, Models, Motion};
 use uniwow_api::viewport::Demand;
 use uniwow_api::{
-    Context, DockArea, Event, JobId, JobOutcome, MODULE_FAILED_TOPIC, Module, PropertyValue, Registrar, egui, liquids,
-    log, serde_json, viewport,
+    Context, DockArea, Event, JobId, JobOutcome, MODULE_FAILED_TOPIC, Module, PropertyValue, Registrar, SettingSpec,
+    egui, liquids, log, serde_json, viewport,
 };
 
 use choice::Tables;
@@ -268,10 +268,21 @@ pub(crate) fn nearest_looks<'a>(
     nearest
 }
 
-/// The setting of how far an instance is drawn, in radii of it, and its least and most.
+/// The setting of how far an instance is drawn, in radii of it, in the window *Settings*: at most
+/// the diagonal of a map, 64 tiles of 533 1/3 yards times the square root of 2, rounded up to the
+/// hundred, so that an instance of a radius of 1 or less is drawn from any point of a map to its
+/// farthest; half of it by default.
 const REACH: &str = "reach";
-const DEFAULT_REACH: f32 = 100.0;
-const REACHES: [f32; 2] = [10.0, 1_000.0];
+const MOST_REACH: i64 = 48_300;
+
+fn reach_setting() -> SettingSpec {
+    SettingSpec::integer(
+        REACH,
+        "Instances drawn up to (times their radius)",
+        [10, MOST_REACH],
+        MOST_REACH / 2,
+    )
+}
 /// The owner of the instances previewed.
 const PREVIEW: &str = "models";
 /// What a look not yet loaded is expected to take on the GPU, before any is held.
@@ -517,7 +528,7 @@ impl Default for ModelsModule {
             told: None,
             walking: Walking::default(),
             frame: 0,
-            reach: DEFAULT_REACH,
+            reach: (MOST_REACH / 2) as f32,
             preview: Preview::default(),
             refusals: Vec::new(),
             said: HashSet::new(),
@@ -581,6 +592,7 @@ impl ModelsModule {
     /// models' demand made again and told to the budget when a whole walk came back.
     fn steer(&mut self, ctx: &mut Context) {
         let start = Instant::now();
+        self.reach = reach_setting().value(ctx.setting(REACH).as_ref()) as f32;
         if lock(&self.service.formats).is_none()
             && let Some(formats) = ctx.service(formats::SERVICE)
         {
@@ -873,6 +885,7 @@ impl Module for ModelsModule {
         let service: models::Handle = self.service.clone();
         reg.provide(models::SERVICE, service)
             .panel("models", "Models", DockArea::Right)
+            .settings("Models", vec![reach_setting()])
             .subscribe(MODULE_FAILED_TOPIC)
             .command(
                 "models.preview",
@@ -890,9 +903,7 @@ impl Module for ModelsModule {
     }
 
     fn init(&mut self, ctx: &mut Context) {
-        if let Some(reach) = ctx.setting(REACH).and_then(|value| value.as_f64()) {
-            self.reach = (reach as f32).clamp(REACHES[0], REACHES[1]);
-        }
+        self.reach = reach_setting().value(ctx.setting(REACH).as_ref()) as f32;
         self.service.set_reach(self.reach);
         // The tables, for the modules asking for looks before the first frame.
         if let Some(formats) = ctx.service(formats::SERVICE) {
@@ -932,20 +943,6 @@ impl Module for ModelsModule {
                 }
             });
         }
-        ui.horizontal(|ui| {
-            ui.label("Instances drawn up to");
-            let changed = ui
-                .add(
-                    egui::DragValue::new(&mut self.reach)
-                        .range(REACHES[0]..=REACHES[1])
-                        .speed(1.0),
-                )
-                .changed();
-            ui.label("times their radius");
-            if changed {
-                ctx.set_setting(REACH, serde_json::json!(self.reach));
-            }
-        });
         ui.separator();
         ui.horizontal(|ui| {
             ui.label("Preview the display");

@@ -249,7 +249,20 @@ fn the_tiles_wanted_are_those_around_the_camera_the_nearest_first() {
 fn at_the_largest_distance_every_tile_of_a_map_is_wanted_from_its_middle() {
     let all = vec![true; 4096];
     let middle = id(32, 32).centre();
-    assert_eq!(loading::wanted(&all, middle, crate::DISTANCES[1]).len(), 4096);
+    assert_eq!(
+        loading::wanted(&all, middle, uniwow_api::formats::WHOLE_MAP).len(),
+        4096
+    );
+    for corner in [id(0, 0), id(63, 0), id(0, 63), id(63, 63)] {
+        let [x, y] = corner.centre();
+        // The corner of the map beyond the centre of its corner tile.
+        let eye = [x + TILE * 0.5 * x.signum(), y + TILE * 0.5 * y.signum()];
+        assert_eq!(
+            loading::wanted(&all, eye, uniwow_api::formats::WHOLE_MAP).len(),
+            4096,
+            "{eye:?}"
+        );
+    }
     assert!(
         loading::wanted(&all, middle, 8).len() < 300,
         "at 8, the tiles around only"

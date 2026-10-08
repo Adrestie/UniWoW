@@ -48,6 +48,9 @@ impl Shell {
                 if ui.button("Hotkey").clicked() {
                     actions.push(MenuAction::Hotkeys);
                 }
+                if ui.button("Settings").clicked() {
+                    actions.push(MenuAction::Settings);
+                }
                 self.module_items(ui, "Edit", &mut actions);
             });
             ui.menu_button("Window", |ui| {
@@ -123,6 +126,7 @@ pub(super) enum MenuAction {
     CloseGroup(u64),
     SetPanelOpen(Tab, bool),
     Hotkeys,
+    Settings,
     Module(usize, String),
 }
 

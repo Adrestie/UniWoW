@@ -83,7 +83,7 @@ pub use parallel::parallel_for;
 pub use property::{
     PropertyInfo, PropertyKind, PropertySpec, PropertyValue, ReadProperty, WriteProperty, name_error, range_error,
 };
-pub use registrar::{DockArea, HotkeySpec, MenuItemSpec, PanelSpec, Registrar};
+pub use registrar::{DockArea, HotkeySpec, MenuItemSpec, PanelSpec, Registrar, SettingSpec, SettingsCategory};
 pub use service::ServiceKey;
 
 /// Topic published by the kernel when a module fails while running. Payload: `{ "id": <module id> }`.

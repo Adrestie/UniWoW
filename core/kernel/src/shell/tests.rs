@@ -64,6 +64,50 @@ impl Harness {
             .unwrap_or_default()
     }
 
+    /// A frame with the window shown on a screen of 1280 × 800, as `frame`, at `input`'s events;
+    /// the texts drawn, with their rectangles.
+    fn frame_texts(&mut self, events: Vec<egui::Event>) -> Vec<(String, egui::Rect)> {
+        let shell = &mut self.shell;
+        let input = RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))),
+            events,
+            ..RawInput::default()
+        };
+        let mut output = self.ctx.run_ui(input, |ui| {
+            shell.logic_pass(ui.ctx());
+            shell.ui_pass(ui);
+        });
+        output.textures_delta.clear();
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some((
+                    text.galley.text().to_owned(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Clicks the text `text` drawn at the frame before: pressed in a frame, released in the next.
+    fn click_text(&mut self, texts: &[(String, egui::Rect)], text: &str) {
+        let at = texts
+            .iter()
+            .find(|(drawn, _)| drawn == text)
+            .map(|(_, rect)| rect.center())
+            .unwrap_or_else(|| panic!("'{text}' not drawn"));
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        self.frame_texts(vec![egui::Event::PointerMoved(at), button(true)]);
+        self.frame_texts(vec![button(false)]);
+    }
+
     /// The window minimised: eframe runs `logic` alone.
     fn minimised(&mut self, input: RawInput) -> Vec<ViewportCommand> {
         let shell = &mut self.shell;
@@ -1637,4 +1681,84 @@ fn a_panic_in_a_command_run_on_the_caller_makes_its_module_fail_and_the_next_cal
     let refused = editor.call("breaking.now", json!({})).expect_err("refused");
     assert!(refused.contains("which is not running"), "{refused}");
     assert!(slot(&harness.shell, "other").state.is_running());
+}
+
+/// A module declaring its category of the window *Settings*, titled `.0`.
+struct Configured(&'static str);
+
+impl Module for Configured {
+    fn register(&mut self, reg: &mut Registrar) {
+        reg.settings(
+            self.0,
+            vec![uniwow_api::SettingSpec::integer("far", "Far (tiles)", [1, 90], 45)],
+        );
+    }
+}
+
+#[test]
+fn the_window_settings_shows_the_category_of_each_running_module_and_keeps_its_values() {
+    let mut harness = Harness::new(vec![
+        ("zeta", Box::new(Configured("Zeta"))),
+        ("alpha", Box::new(Configured("Alpha"))),
+        ("plain", counter("plain").0),
+    ]);
+    let titles = |shell: &Shell| -> Vec<(String, String)> {
+        shell
+            .settings_categories()
+            .into_iter()
+            .map(|(id, category)| (id, category.title))
+            .collect()
+    };
+    assert_eq!(
+        titles(&harness.shell),
+        [
+            ("alpha".to_owned(), "Alpha".to_owned()),
+            ("zeta".to_owned(), "Zeta".to_owned())
+        ],
+        "by their titles, none for a module declaring none"
+    );
+    // The first category shown, its value as stored; back to its default by its button.
+    harness.shell.host.set_setting("alpha", "far", json!(8));
+    harness.shell.settings_window.open = true;
+    let texts = harness.frame_texts(Vec::new());
+    for shown in ["Settings", "Alpha", "Zeta", "Far (tiles)", "8"] {
+        assert!(texts.iter().any(|(text, _)| text == shown), "'{shown}' in {texts:?}");
+    }
+    harness.click_text(&texts, "Default");
+    assert_eq!(harness.shell.host.setting("alpha", "far"), Some(json!(45)));
+    // A value typed in the field of the slider.
+    let texts = harness.frame_texts(Vec::new());
+    harness.click_text(&texts, "45");
+    let key = |key, pressed| egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let select_all = egui::Event::Key {
+        key: egui::Key::A,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::COMMAND,
+    };
+    harness.frame_texts(vec![select_all, egui::Event::Text("30".to_owned())]);
+    harness.frame_texts(vec![key(egui::Key::Enter, true), key(egui::Key::Enter, false)]);
+    assert_eq!(harness.shell.host.setting("alpha", "far"), Some(json!(30)), "typed");
+    assert_eq!(
+        harness.shell.host.setting("zeta", "far"),
+        None,
+        "another module's untouched"
+    );
+    // Another category chosen.
+    let texts = harness.frame_texts(Vec::new());
+    harness.click_text(&texts, "Zeta");
+    assert_eq!(harness.shell.settings_window.shown.as_deref(), Some("zeta"));
+    // A module failed: its category gone.
+    let index = harness.index("zeta");
+    harness.shell.fail(index, "on purpose".to_owned());
+    assert_eq!(titles(&harness.shell), [("alpha".to_owned(), "Alpha".to_owned())]);
+    let texts = harness.frame_texts(Vec::new());
+    assert!(!texts.iter().any(|(text, _)| text == "Zeta"), "{texts:?}");
 }

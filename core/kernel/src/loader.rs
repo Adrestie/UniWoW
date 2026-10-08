@@ -3,7 +3,9 @@ use std::ffi::CStr;
 use std::path::{Path, PathBuf};
 
 use crate::capi;
-use uniwow_api::{CREATE_SYMBOL, CreateFn, MenuItemSpec, Module, PACKAGE_SYMBOL, PackageFn, PanelSpec, RUNTIME_DLL};
+use uniwow_api::{
+    CREATE_SYMBOL, CreateFn, MenuItemSpec, Module, PACKAGE_SYMBOL, PackageFn, PanelSpec, RUNTIME_DLL, SettingsCategory,
+};
 
 use crate::compiled;
 use crate::guard::guarded_as;
@@ -38,6 +40,8 @@ pub struct Slot {
     pub module: Option<Box<dyn Module>>,
     pub panels: Vec<PanelSpec>,
     pub menu_items: Vec<MenuItemSpec>,
+    /// Its category of the window *Settings*.
+    pub settings: Option<SettingsCategory>,
     pub subscriptions: Vec<String>,
     /// The commands it declared, with the reason of those the catalogue set aside (F6).
     pub commands: Vec<(String, Option<String>)>,
@@ -72,6 +76,7 @@ impl Slot {
             module: None,
             panels: Vec::new(),
             menu_items: Vec::new(),
+            settings: None,
             subscriptions: Vec::new(),
             commands: Vec::new(),
             compiled: None,

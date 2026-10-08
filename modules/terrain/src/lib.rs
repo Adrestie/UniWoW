@@ -33,15 +33,12 @@ use layer::{Scene, TerrainLayer, lock};
 use loading::{Held, Inputs, Kind};
 use model::{TILE, TileId, TileModel};
 
-/// The settings: the map shown and how far around the camera tiles load. The GPU budget is the
-/// view's, shared with its other layers; the terrain's own, before, is given to the view once.
+/// The settings: the map shown and how far around the camera tiles load (`formats::distance_setting`,
+/// in the window *Settings*). The GPU budget is the view's, shared with its other layers; the
+/// terrain's own, before, is given to the view once.
 const MAP: &str = "map";
 const DISTANCE: &str = "view_distance";
 const OLD_BUDGET: &str = "gpu_budget_mb";
-const DEFAULT_DISTANCE: u32 = 3;
-/// The least and most `view_distance`, in tiles: the most is the side of a map, all of which it
-/// reaches from its middle.
-const DISTANCES: [u32; 2] = [1, 64];
 /// The least and most budget of the view the panel sets, in MB.
 const BUDGETS: [u64; 2] = [64, 65_536];
 const MB: u64 = 1024 * 1024;
@@ -411,6 +408,8 @@ impl TerrainModule {
     /// layer how long it took, how far the tiles load and what the terrain takes on the GPU.
     fn steer(&mut self, ctx: &mut Context) {
         let start = Instant::now();
+        self.distance = formats::distance_setting(DISTANCE).value(ctx.setting(DISTANCE).as_ref()) as u32;
+        self.shared_distance.store(self.distance, Ordering::Relaxed);
         self.steer_loads(ctx);
         if !self.dropped.is_empty() {
             let dropped = std::mem::take(&mut self.dropped);
@@ -565,7 +564,8 @@ impl TerrainModule {
 
 impl Module for TerrainModule {
     fn register(&mut self, reg: &mut Registrar) {
-        reg.panel("terrain", "Terrain", DockArea::Right);
+        reg.panel("terrain", "Terrain", DockArea::Right)
+            .settings("Terrain", vec![formats::distance_setting(DISTANCE)]);
         let (shown, distance) = (self.shown_map.clone(), self.shared_distance.clone());
         reg.command_on_caller(
             "terrain.map",
@@ -592,13 +592,6 @@ impl Module for TerrainModule {
     }
 
     fn init(&mut self, ctx: &mut Context) {
-        self.distance = ctx
-            .setting(DISTANCE)
-            .and_then(|value| value.as_u64())
-            .map_or(DEFAULT_DISTANCE, |value| {
-                value.clamp(u64::from(DISTANCES[0]), u64::from(DISTANCES[1])) as u32
-            });
-        self.shared_distance.store(self.distance, Ordering::Relaxed);
         self.remembered = ctx.setting(MAP).and_then(|value| value.as_str().map(str::to_owned));
         let Some(view) = ctx.service(viewport::SERVICE) else {
             log::info!("no viewport service: the terrain is not drawn");
@@ -706,14 +699,6 @@ impl Module for TerrainModule {
             ));
         }
         ui.horizontal(|ui| {
-            ui.label("Distance (tiles)");
-            if ui
-                .add(egui::DragValue::new(&mut self.distance).range(DISTANCES[0]..=DISTANCES[1]))
-                .changed()
-            {
-                ctx.set_setting(DISTANCE, serde_json::json!(self.distance));
-                self.shared_distance.store(self.distance, Ordering::Relaxed);
-            }
             ui.label("GPU budget of the view (MB)");
             let mut mb = allowance.budget / MB;
             if ui

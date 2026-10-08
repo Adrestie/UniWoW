@@ -8,6 +8,7 @@ mod history_ops;
 mod hotkey_window;
 mod menus;
 mod modules_panel;
+mod settings_window;
 mod tabs;
 
 use std::collections::{HashMap, HashSet};
@@ -46,6 +47,7 @@ use history_ops::Recorded;
 use hotkey_window::HotkeyWindow;
 use menus::MenuAction;
 use modules_panel::{short, state_text};
+use settings_window::SettingsWindow;
 use tabs::{Viewer, log_panel};
 
 #[cfg(test)]
@@ -88,6 +90,7 @@ pub struct Shell {
     players: Players,
     hotkeys: Hotkeys,
     hotkey_window: HotkeyWindow,
+    settings_window: SettingsWindow,
     frames: Frames,
     /// The commands each module declared, by owner, in the order registered: the catalogue is made
     /// of those of the modules running.
@@ -175,6 +178,7 @@ impl Shell {
             players: Players::default(),
             hotkeys,
             hotkey_window: HotkeyWindow::default(),
+            settings_window: SettingsWindow::default(),
             declared: Vec::new(),
         };
         shell.register_all();
@@ -206,6 +210,7 @@ impl Shell {
             }
             slot.panels = reg.panels;
             slot.menu_items = reg.menu_items;
+            slot.settings = reg.settings;
             slot.subscriptions = reg.subscriptions;
             for spec in reg.hotkeys {
                 self.hotkeys.declare(&slot.id, spec, &self.host.settings.hotkeys);

@@ -139,7 +139,7 @@ Extension points a module may contribute to:
 | Named commands: called by name with JSON arguments and a JSON result, each declared with a description and the schema of its arguments and result. Not to be confused with the undoable `Command` of the history | "open creature <id>", "paint texture" |
 | Inspectors, per selection type | creature inspector, doodad inspector |
 | Asset handlers, per file type | open or preview `.blp`, `.m2` |
-| Settings page | brush defaults |
+| A category of the window *Settings*, declared by the module | the distances of the view |
 | Services implementing an interface defined in core/api, under a typed `ServiceKey<T>` declared beside the interface, used both to provide and to ask, so that a type mismatch does not compile | "viewport", "creature lookup" |
 | Viewport layers, through the viewport service | terrain, cube; each layer records into its own render bundle, with pipelines matching the view's `Target`: its colour and depth formats, its sample count and its depth comparison (reverse Z: nearer is greater) |
 | Event subscriptions | "project saved", "tile changed" |
@@ -262,6 +262,7 @@ fills it, or *not planned* when no milestone does yet.
 | Named commands: offer, list, call | `Registrar::command`, `command_on_caller`; `Context::call`, `Editor::call` | `uniwow_module_info.commands`; `commands`, `call` | `uniwow::call`; `Editor.Call`, `Command` | Scripts: `uniwow.commands`, `uniwow.call`; modules: milestones 10 and 11 |
 | Events | `Registrar::subscribe`, `Module::on_event`, `Context::publish_as`; `Editor::subscribe`, `next_event` | `publish`, `subscribe`, `next_event`, `unsubscribe` | The table (`uniwow::api()`, `Editor.Table`) | Scripts: `uniwow.publish`, `subscribe`, `next_event`, `unsubscribe` |
 | Settings | `Context::setting`, `set_setting` | `setting`, `set_setting` | The table | Scripts: `uniwow.setting`, `set_setting` |
+| A category of the window *Settings* | `Registrar::settings`, `SettingSpec` | — not planned yet | — not planned yet | — milestones 10 and 11 |
 | Log | The `log` crate | `log` | `uniwow::log`; `Editor.Log` | Scripts: `uniwow.log`, `print` |
 | Undo of the module's own data | `Command`, `Context::execute` | `record_change`, with `uniwow_module_info.apply_change` | `uniwow::recordChange`; `Editor.RecordChange` | Milestones 10 and 11 |
 | Undo groups | The commands of one call | `begin_group`, `end_group` | The table; `Editor.BeginGroup`, `EndGroup` | Scripts: `uniwow.begin_group`, `end_group` |
@@ -5932,6 +5933,38 @@ buildings and the submission; 9.6f3 after them.
   job runs; a walk that panicked followed by another. 9 changes made on purpose: 8 made a test
   fail; the ninth, the budget never told, is the line of the module's steering, which no test
   drives, the module having no harness of its own.
+
+#### The window *Settings* and the distances of the view, as built
+
+Asked by the user after the walk: the distances back, the branch drawing the whole map left, in a
+window *Settings* with a category for each module, which the modules declare, since they may be
+disabled; by default at half the most that shows everything at all times, from any point of a map.
+
+- **The core**: `Registrar::settings(title, settings)` declares the module's category, the last
+  declared kept; `SettingSpec::integer(key, label, [least, most], default)`, a setting of whole
+  values, its key among the module's settings; `SettingSpec::value` reads the value stored, kept
+  within its range, or the default where none is stored or it is not a whole number.
+- **The kernel**: *Edit > Settings* opens the window: the categories of the running modules, by
+  their titles, on the left, the one chosen on the right, its settings each a slider with its field
+  and a button *Default*; a value chosen is written to the module's settings, which the module
+  reads. A module stopped or failed shows no category.
+- **The distances**: `formats::WHOLE_MAP`, 90 tiles, at which every tile of a map is taken from
+  any point of it (from a corner, 63.5 tiles along the diagonal times the square root of 2, less the
+  half tile of `tiles_around`, rounded up); `formats::distance_setting`, from 1 to 90, 45 by default,
+  for the terrain (`view_distance`), the doodads and the buildings (`distance`). The models
+  (`reach`, in radii): from 10 to 48,300, the diagonal of a map in yards rounded up to the hundred,
+  an instance of a radius of 1 or less drawn from any point of a map to its farthest; 24,150 by
+  default. Each module reads its setting at each frame; their panels no longer hold them, the GPU
+  budget of the view staying in the terrain's. A value stored before is kept, *Default* bringing
+  back the new one.
+- **Tested**: the value of a setting within its range, its default; every tile of a map around any
+  point of it at 90 and not at 89; the window: the categories of the running modules by their
+  titles, none for a module declaring none, a value stored shown, *Default* and a value typed in
+  the field written to the module's settings, another category chosen, a module failed showing
+  none. Not tested: each module reading its setting at each frame, which no test drives, the
+  modules having no harness of their own.
+- **Not offered yet**: the categories of the compiled modules, of C++ and C#, and of Lua and
+  Python.
 
 #### Tests
 

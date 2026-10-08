@@ -41,6 +41,44 @@ pub struct HotkeySpec {
     pub hotkey: Hotkey,
 }
 
+/// A setting of a module's category of the window *Settings*: its key among the module's settings
+/// (`Context::setting`), its label, and its whole values, the least and the most, and the one by
+/// default. The kernel draws it and keeps the value chosen; the module reads it with `value`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SettingSpec {
+    pub key: String,
+    pub label: String,
+    pub range: [i64; 2],
+    pub default: i64,
+}
+
+impl SettingSpec {
+    pub fn integer(key: &str, label: &str, range: [i64; 2], default: i64) -> Self {
+        Self {
+            key: key.to_owned(),
+            label: label.to_owned(),
+            range,
+            default: default.clamp(range[0], range[1]),
+        }
+    }
+
+    /// The value of the module's setting `stored`, kept within the range; the default where none is
+    /// stored or it is not a whole number.
+    pub fn value(&self, stored: Option<&serde_json::Value>) -> i64 {
+        stored
+            .and_then(serde_json::Value::as_i64)
+            .map_or(self.default, |value| value.clamp(self.range[0], self.range[1]))
+    }
+}
+
+/// The category of the window *Settings* a module declares: its title and its settings, shown while
+/// the module runs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SettingsCategory {
+    pub title: String,
+    pub settings: Vec<SettingSpec>,
+}
+
 /// Collects what a module contributes during `Module::register`.
 #[derive(Default)]
 pub struct Registrar {
@@ -54,9 +92,21 @@ pub struct Registrar {
     /// Animatable properties.
     pub properties: Vec<PropertySpec>,
     pub hotkeys: Vec<HotkeySpec>,
+    /// Its category of the window *Settings*.
+    pub settings: Option<SettingsCategory>,
 }
 
 impl Registrar {
+    /// Declares the module's category of the window *Settings*, titled `title`; declared again, the
+    /// last one is kept.
+    pub fn settings(&mut self, title: &str, settings: Vec<SettingSpec>) -> &mut Self {
+        self.settings = Some(SettingsCategory {
+            title: title.to_owned(),
+            settings,
+        });
+        self
+    }
+
     pub fn panel(&mut self, id: &str, title: &str, area: DockArea) -> &mut Self {
         self.panels.push(PanelSpec {
             id: id.to_owned(),
@@ -180,5 +230,26 @@ impl Registrar {
     pub fn subscribe(&mut self, topic: &str) -> &mut Self {
         self.subscriptions.push(topic.to_owned());
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SettingSpec;
+
+    #[test]
+    fn a_setting_reads_the_value_stored_within_its_range_or_its_default() {
+        let spec = SettingSpec::integer("distance", "Distance (tiles)", [1, 90], 45);
+        assert_eq!(spec.value(None), 45, "none stored");
+        assert_eq!(spec.value(Some(&serde_json::json!(8))), 8);
+        assert_eq!(spec.value(Some(&serde_json::json!(200))), 90, "kept within");
+        assert_eq!(spec.value(Some(&serde_json::json!(0))), 1);
+        assert_eq!(spec.value(Some(&serde_json::json!(8.5))), 45, "not a whole number");
+        assert_eq!(spec.value(Some(&serde_json::json!("8"))), 45);
+        assert_eq!(
+            SettingSpec::integer("a", "A", [1, 90], 120).default,
+            90,
+            "a default beyond"
+        );
     }
 }

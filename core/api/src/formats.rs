@@ -42,6 +42,18 @@ impl TileId {
     }
 }
 
+/// The distance, in tiles, at which `tiles_around` takes every tile of a map from any point of it:
+/// from a corner, the centres of the tiles reach 63.5 tiles along the diagonal, times the square
+/// root of 2, less the half tile it adds, rounded up.
+pub const WHOLE_MAP: u32 = 90;
+
+/// The setting of how far around the camera a module of the tiles of a map reads them, in tiles, for
+/// the window *Settings*: from 1 to `WHOLE_MAP`, half of it by default.
+pub fn distance_setting(key: &str) -> crate::SettingSpec {
+    let most = i64::from(WHOLE_MAP);
+    crate::SettingSpec::integer(key, "View distance (tiles)", [1, most], most / 2)
+}
+
 /// The tiles of a map, `tiles` at `y * 64 + x`, around `eye` within `distance` tiles, the nearest
 /// first: those whose centre lies within half a tile more, as the terrain chooses its own, and
 /// those `held` within a whole tile more, so that a camera going to and fro over a border does not
@@ -923,6 +935,27 @@ mod tests {
         let mut holed = all.clone();
         holed[40 * 64 + 30] = false;
         assert!(!tiles_around(&holed, eye, 1, &HashSet::new()).contains(&TileId { x: 30, y: 40 }));
+    }
+
+    #[test]
+    fn at_the_whole_map_every_tile_is_around_any_point_of_the_map_and_not_one_less() {
+        let all = vec![true; 4096];
+        for eye in [
+            [ORIGIN, ORIGIN],
+            [-ORIGIN, ORIGIN],
+            [ORIGIN, -ORIGIN],
+            [-ORIGIN, -ORIGIN],
+            [0.0, 0.0],
+        ] {
+            assert_eq!(
+                tiles_around(&all, eye, WHOLE_MAP, &HashSet::new()).len(),
+                4096,
+                "{eye:?}"
+            );
+        }
+        assert!(tiles_around(&all, [ORIGIN, ORIGIN], WHOLE_MAP - 1, &HashSet::new()).len() < 4096);
+        let setting = distance_setting("view_distance");
+        assert_eq!((setting.range, setting.default), ([1, 90], 45));
     }
 
     /// The transform of a placement as Noggit builds it, in its axes of the file, Y up, the model's

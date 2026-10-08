@@ -36,10 +36,8 @@ use gpu::{Shared, WmoGpu};
 use keeping::Kept;
 use layer::{BuildingsLayer, Placed, Poured, Scene};
 
-/// The setting of how far around the camera tiles are read, in tiles.
+/// The setting of how far around the camera tiles are read, in tiles (`formats::distance_setting`).
 const DISTANCE: &str = "distance";
-const DEFAULT_DISTANCE: u32 = 3;
-const DISTANCES: [u32; 2] = [1, 8];
 /// The refusals the panel keeps.
 const REFUSALS: usize = 8;
 
@@ -307,6 +305,12 @@ impl BuildingsModule {
     /// buildings whose files are ready, and has their doodads placed.
     fn steer(&mut self, ctx: &mut Context) {
         let start = Instant::now();
+        let distance = formats::distance_setting(DISTANCE).value(ctx.setting(DISTANCE).as_ref()) as u32;
+        if distance != self.distance {
+            self.distance = distance;
+            self.since = Some(Instant::now());
+            self.took = None;
+        }
         self.steer_tiles(ctx);
         let mut scene = lock(&self.scene);
         if scene.liquids.is_none() {
@@ -575,16 +579,11 @@ impl BuildingsModule {
 
 impl Module for BuildingsModule {
     fn register(&mut self, reg: &mut Registrar) {
-        reg.panel("buildings", "Buildings", DockArea::Right);
+        reg.panel("buildings", "Buildings", DockArea::Right)
+            .settings("Buildings", vec![formats::distance_setting(DISTANCE)]);
     }
 
     fn init(&mut self, ctx: &mut Context) {
-        self.distance = ctx
-            .setting(DISTANCE)
-            .and_then(|value| value.as_u64())
-            .map_or(DEFAULT_DISTANCE, |value| {
-                value.clamp(u64::from(DISTANCES[0]), u64::from(DISTANCES[1])) as u32
-            });
         let (Some(view), Some(gpu)) = (ctx.service(viewport::SERVICE), ctx.gpu().cloned()) else {
             log::info!("no 3D view: the buildings are not drawn");
             return;
@@ -605,7 +604,7 @@ impl Module for BuildingsModule {
         }
     }
 
-    fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
+    fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, _ctx: &mut Context) {
         if let Some(reason) = &self.refused_device {
             ui.colored_label(ui.visuals().warn_fg_color, reason);
             return;
@@ -648,17 +647,6 @@ impl Module for BuildingsModule {
                 took.as_secs_f32()
             ));
         }
-        ui.horizontal(|ui| {
-            ui.label("Distance (tiles)");
-            if ui
-                .add(egui::DragValue::new(&mut self.distance).range(DISTANCES[0]..=DISTANCES[1]))
-                .changed()
-            {
-                ctx.set_setting(DISTANCE, json!(self.distance));
-                self.since = Some(Instant::now());
-                self.took = None;
-            }
-        });
         for refusal in &self.refusals {
             ui.colored_label(ui.visuals().warn_fg_color, refusal);
         }

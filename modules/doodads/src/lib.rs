@@ -17,10 +17,8 @@ use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, PropertyValue, Re
 
 use placing::Placing;
 
-/// The setting of how far around the camera tiles are placed, in tiles.
+/// The setting of how far around the camera tiles are placed, in tiles (`formats::distance_setting`).
 const DISTANCE: &str = "distance";
-const DEFAULT_DISTANCE: u32 = 2;
-const DISTANCES: [u32; 2] = [1, 4];
 /// The refusals of tiles the panel keeps.
 const REFUSALS: usize = 8;
 
@@ -96,6 +94,12 @@ impl DoodadsModule {
     /// taken away, and starts the reads of the nearest it wants, as many at once as the workers but
     /// one.
     fn steer(&mut self, ctx: &mut Context) {
+        let distance = formats::distance_setting(DISTANCE).value(ctx.setting(DISTANCE).as_ref()) as u32;
+        if distance != self.distance {
+            self.distance = distance;
+            self.since = Some(Instant::now());
+            self.took = None;
+        }
         let (Some(view), Some(models), Some(formats)) = (
             ctx.service(viewport::SERVICE),
             ctx.service(models::SERVICE),
@@ -214,16 +218,8 @@ impl DoodadsModule {
 
 impl Module for DoodadsModule {
     fn register(&mut self, reg: &mut Registrar) {
-        reg.panel("doodads", "Doodads", DockArea::Right);
-    }
-
-    fn init(&mut self, ctx: &mut Context) {
-        self.distance = ctx
-            .setting(DISTANCE)
-            .and_then(|value| value.as_u64())
-            .map_or(DEFAULT_DISTANCE, |value| {
-                value.clamp(u64::from(DISTANCES[0]), u64::from(DISTANCES[1])) as u32
-            });
+        reg.panel("doodads", "Doodads", DockArea::Right)
+            .settings("Doodads", vec![formats::distance_setting(DISTANCE)]);
     }
 
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
@@ -254,17 +250,6 @@ impl Module for DoodadsModule {
                 took.as_secs_f32()
             ));
         }
-        ui.horizontal(|ui| {
-            ui.label("Distance (tiles)");
-            if ui
-                .add(egui::DragValue::new(&mut self.distance).range(DISTANCES[0]..=DISTANCES[1]))
-                .changed()
-            {
-                ctx.set_setting(DISTANCE, json!(self.distance));
-                self.since = Some(Instant::now());
-                self.took = None;
-            }
-        });
         for refusal in &self.refusals {
             ui.colored_label(ui.visuals().warn_fg_color, refusal);
         }
