@@ -320,8 +320,10 @@ At start, the kernel:
    module of its language, and refused with the reason without it: the target of milestones 10 and
    11. Until then, a manifest of kind `lua` or `python` is not valid, and its folder is ignored and
    listed.
-3. Copies each accepted DLL to a temporary folder and loads the copy, so that a module can be
-   rebuilt while the editor is open.
+3. Copies the DLL of each accepted Rust module to a temporary folder and loads the copy, so that
+   the module can be rebuilt while the editor is open. A compiled module's DLL is loaded where it
+   is, so that the DLLs it needs are found in its folder: the editor holds it, and it is rebuilt
+   with the editor closed.
 4. Calls the entry point, checks required services, orders initialization so that service
    providers start before their consumers, collects contributions, then calls `init`.
 5. Catches any failure (error or panic) in `register`, `init` or while drawing a panel: that
@@ -864,7 +866,8 @@ As built:
   name, and its commands declared on its behalf as delegated (F6).
 - **Manifest**: `module.toml` has a `kind` (`rust` or `compiled`); `package`, `dll_hash` and
   `runtime` concern Rust modules only. Settings and layouts saved with the former names
-  (`disabled_features`, `features`, a tab's `feature`) are still read.
+  (`disabled_features`, `features`, a tab's `feature`) were read until the full verification of
+  the milestones, which removed them: none was left in use.
 - **Modules panel**: kind, state and commands of every module; a command set aside shows the module
   that offers it.
 - **Scripts**: the panel lists the scripts placed directly in `scripts\lua-5.1\`, then each tool

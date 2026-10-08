@@ -9,7 +9,7 @@ use uniwow_api::{log, serde_json};
 #[serde(crate = "uniwow_api::serde")]
 pub struct Settings {
     /// Modules not loaded at start.
-    #[serde(default, alias = "disabled_features")]
+    #[serde(default)]
     pub disabled_modules: BTreeSet<String>,
     /// Panels the user closed, as `module/panel`; not reopened automatically.
     #[serde(default)]
@@ -18,7 +18,7 @@ pub struct Settings {
     #[serde(default)]
     pub layout: Option<serde_json::Value>,
     /// Settings of each module, by module id then key.
-    #[serde(default, alias = "features")]
+    #[serde(default)]
     pub modules: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// The keys the user bound hotkeys to, by `<owner>/<name>`, those other than their own.
     #[serde(default)]

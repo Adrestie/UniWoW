@@ -11,7 +11,6 @@ use uniwow_api::{DockArea as Area, serde_json};
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(crate = "uniwow_api::serde")]
 pub struct Tab {
-    #[serde(alias = "feature")]
     pub module: String,
     pub panel: String,
 }

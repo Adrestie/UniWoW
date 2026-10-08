@@ -47,11 +47,11 @@
        "tab_bar_hidden": false,
        "tabs": [
         {
-         "feature": "kernel",
+         "module": "kernel",
          "panel": "features"
         },
         {
-         "feature": "kernel",
+         "module": "kernel",
          "panel": "log"
         }
        ],

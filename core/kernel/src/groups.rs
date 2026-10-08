@@ -405,7 +405,7 @@ mod tests {
         let here = std::thread::current().id();
         let mut groups = Groups::default();
         groups.begin("scripting-lua#paint.lua #1", here, "Lua: paint.lua");
-        groups.begin("native-modules#cpp", here, "module");
+        groups.begin("sample-cpp", here, "module");
         let parts = groups.parts_of("scripting-lua#paint.lua #1", here).expect("open");
         parts.push(part("painted"));
         parts.push(Part {
