@@ -9,7 +9,7 @@ use std::time::Instant;
 use uniwow_api::parallel::{Helper, Workers};
 use uniwow_api::{Editor, JobContext, JobFn, JobId, JobOutcome, egui};
 
-use crate::guard::guarded_as;
+use crate::guard::{acting_as, current_module, guarded_as};
 use crate::router::{Bridge, Request};
 
 type Task = Box<dyn FnOnce() + Send>;
@@ -41,11 +41,14 @@ pub struct Finished {
     pub outcome: JobOutcome,
 }
 
+/// A helper of slices, with the module that called `parallel_for`, on whose behalf it runs.
+type Helping = (Option<String>, Helper);
+
 /// What the workers take: the jobs and the kernel's own work first, then the helpers of the slices.
 #[derive(Default)]
 struct Waiting {
     jobs: VecDeque<Task>,
-    helpers: VecDeque<Helper>,
+    helpers: VecDeque<Helping>,
     /// Set when the pool is dropped: the workers end once nothing waits.
     closed: bool,
 }
@@ -76,16 +79,22 @@ impl Queue {
     }
 
     /// Queues a helper of slices; dropped once the pool is gone, the caller doing the slices.
-    fn push_helper(&self, helper: Helper) {
+    fn push_helper(&self, helping: Helping) {
         let mut waiting = self.lock();
         if !waiting.closed {
-            waiting.helpers.push_back(helper);
+            waiting.helpers.push_back(helping);
             self.ready.notify_one();
         }
     }
 
+    /// Closes the queue: the workers end once nothing waits, and nothing more is queued.
+    fn close(&self) {
+        self.lock().closed = true;
+        self.ready.notify_all();
+    }
+
     /// What a worker runs: a job, else a helper; none once the pool is gone and nothing waits.
-    fn take(&self) -> Option<Result<Task, Helper>> {
+    fn take(&self) -> Option<Result<Task, Helping>> {
         let mut waiting = self.lock();
         loop {
             if let Some(task) = waiting.jobs.pop_front() {
@@ -145,8 +154,15 @@ impl Pool {
                     while let Some(work) = queue.take() {
                         match work {
                             Ok(task) => task(),
-                            // Between two slices, a job waiting takes the worker back.
-                            Err(helper) => helper(&|| queue.jobs.load(Ordering::Acquire) > 0),
+                            // Between two slices, a job waiting takes the worker back; the helper
+                            // is queued again for the slices left, taken after that job.
+                            Err((owner, helper)) => {
+                                let left =
+                                    acting_as(owner.as_deref(), || helper(&|| queue.jobs.load(Ordering::Acquire) > 0));
+                                if left {
+                                    queue.push_helper((owner, helper));
+                                }
+                            }
                         }
                     }
                 });
@@ -180,12 +196,12 @@ impl Pool {
         })
     }
 
-    /// The workers, for the slices of `parallel_for`.
+    /// The workers, for the slices of `parallel_for`, which run on behalf of the module calling it.
     pub fn workers(&self) -> Workers {
         let queue = self.queue.clone();
         Workers {
             threads: self.threads,
-            queue: Arc::new(move |helper| queue.push_helper(helper)),
+            queue: Arc::new(move |helper| queue.push_helper((current_module(), helper))),
         }
     }
 
@@ -248,17 +264,23 @@ impl Pool {
                 wake.request_repaint();
             }
         });
-        if own_thread {
-            if let Err(error) = std::thread::Builder::new().name(thread_name).spawn(task) {
-                self.finished.lock().unwrap_or_else(|e| e.into_inner()).push(Finished {
-                    id,
-                    owner: job_owner,
-                    label: job_label,
-                    outcome: JobOutcome::Panicked(format!("its thread could not start: {error}")),
-                });
-            }
-        } else if !self.queue.push_job(task) {
-            uniwow_api::log::error!("job '{job_label}' of '{job_owner}' could not be queued: no worker thread");
+        let not_started = if own_thread {
+            std::thread::Builder::new()
+                .name(thread_name)
+                .spawn(task)
+                .err()
+                .map(|error| format!("its thread could not start: {error}"))
+        } else {
+            (!self.queue.push_job(task)).then(|| "it could not be queued: no worker thread".to_owned())
+        };
+        // A job that never runs ends at once, as failed, so that it leaves the Jobs panel.
+        if let Some(why) = not_started {
+            self.finished.lock().unwrap_or_else(|e| e.into_inner()).push(Finished {
+                id,
+                owner: job_owner,
+                label: job_label,
+                outcome: JobOutcome::Panicked(why),
+            });
         }
         id
     }
@@ -290,15 +312,14 @@ impl Pool {
 
 impl Drop for Pool {
     fn drop(&mut self) {
-        self.queue.lock().closed = true;
-        self.queue.ready.notify_all();
+        self.queue.close();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier, Mutex};
     use std::time::{Duration, Instant};
 
@@ -585,6 +606,77 @@ mod tests {
         let waited = ended(job) - started;
         assert!(waited < Duration::from_millis(100), "waited {waited:?}");
         assert!(ended(job) < ended(slices), "the job ended before the slices");
+    }
+
+    #[test]
+    fn a_worker_called_away_by_a_job_comes_back_to_the_slices_left() {
+        let pool = Pool::new(1, None, None);
+        let workers = pool.workers();
+        let background = pool.background();
+        let caller = std::thread::current().id();
+        let called = AtomicBool::new(false);
+        let done = Arc::new(AtomicBool::new(false));
+        let after = AtomicUsize::new(0);
+        workers.parallel_for(60, 1, |_| {
+            if std::thread::current().id() == caller {
+                // The caller waits for the job, so that slices are left for the worker after it.
+                let started = Instant::now();
+                while !done.load(Ordering::Acquire) && started.elapsed() < Duration::from_secs(5) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            } else if !called.swap(true, Ordering::AcqRel) {
+                let done = done.clone();
+                background(Box::new(move || done.store(true, Ordering::Release)));
+            } else if done.load(Ordering::Acquire) {
+                after.fetch_add(1, Ordering::Relaxed);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        });
+        assert!(done.load(Ordering::Acquire), "the job ran");
+        assert!(
+            after.load(Ordering::Relaxed) > 0,
+            "the worker took slices again after the job"
+        );
+    }
+
+    #[test]
+    fn the_slices_run_on_behalf_of_the_module_calling_parallel_for() {
+        let mut pool = Pool::new(2, None, None);
+        let workers = pool.workers();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let inside = seen.clone();
+        pool.spawn(
+            "terrain",
+            "slices",
+            Box::new(move |_| {
+                workers.parallel_for(40, 1, |_| {
+                    inside
+                        .lock()
+                        .unwrap()
+                        .push((std::thread::current().id(), crate::guard::current_module()));
+                    std::thread::sleep(Duration::from_millis(1));
+                });
+                Box::new(())
+            }),
+            editor(),
+        );
+        assert_eq!(wait_for(&mut pool, 1).len(), 1);
+        let seen = seen.lock().unwrap();
+        let threads: std::collections::HashSet<_> = seen.iter().map(|(thread, _)| *thread).collect();
+        assert!(threads.len() > 1, "a worker helped");
+        assert!(seen.iter().all(|(_, module)| module.as_deref() == Some("terrain")));
+    }
+
+    #[test]
+    fn a_job_that_cannot_be_queued_ends_at_once_as_failed() {
+        let mut pool = Pool::new(1, None, None);
+        pool.queue.close();
+        let id = pool.spawn("test", "late", Box::new(|_| Box::new(())), editor());
+        let finished = pool.take_finished();
+        assert!(
+            matches!(&finished[..], [Finished { id: ended, outcome: JobOutcome::Panicked(_), .. }] if *ended == id)
+        );
+        assert!(pool.running().is_empty(), "it left the Jobs panel");
     }
 
     #[test]

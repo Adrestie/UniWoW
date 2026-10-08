@@ -96,15 +96,6 @@ impl Editor {
         }
     }
 
-    /// Like `derive`, with settings of its own, e.g. for a compiled module.
-    pub fn derive_with_settings(&self, name: &str) -> Editor {
-        let caller = format!("{}#{name}", self.module());
-        Editor {
-            settings: caller.clone(),
-            ..Editor::new(self.backend.clone(), &caller)
-        }
-    }
-
     /// Every command of running modules, with its description and schemas.
     pub fn commands(&self) -> Vec<CommandInfo> {
         self.backend.commands()

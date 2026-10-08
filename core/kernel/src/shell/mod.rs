@@ -266,11 +266,19 @@ impl Shell {
             .filter(|(owner, _)| running.contains(owner))
             .cloned()
             .collect();
-        let (kept, set_aside) = router::choose_commands(offered);
-        let winners: HashMap<&str, &str> = kept
+        let (mut kept, set_aside) = router::choose_commands(offered);
+        let winners: HashMap<String, String> = kept
             .iter()
-            .map(|(owner, spec)| (spec.name.as_str(), owner.as_str()))
+            .map(|(owner, spec)| (spec.name.clone(), owner.clone()))
             .collect();
+        // A command no running module offers stays under the module that declared it first, so
+        // that a call to it is refused with the reason, its module not running, not as unknown.
+        let mut stopped = HashSet::new();
+        for (owner, spec) in &self.declared {
+            if !winners.contains_key(&spec.name) && stopped.insert(spec.name.as_str()) {
+                kept.push((owner.clone(), spec.clone()));
+            }
+        }
         for slot in &mut self.slots {
             slot.commands = self
                 .declared
@@ -278,14 +286,13 @@ impl Shell {
                 .filter(|(owner, _)| *owner == slot.id)
                 .map(|(_, spec)| {
                     let refused = winners
-                        .get(spec.name.as_str())
+                        .get(&spec.name)
                         .filter(|winner| **winner != slot.id)
                         .map(|winner| format!("offered by '{winner}'"));
                     (spec.name.clone(), refused)
                 })
                 .collect();
         }
-        drop(winners);
         let mut catalogue = self.host.bridge.catalogue.write().unwrap_or_else(|e| e.into_inner());
         let before: HashMap<String, String> = std::mem::take(&mut *catalogue)
             .into_iter()

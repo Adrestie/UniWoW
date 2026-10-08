@@ -154,7 +154,7 @@ Rules:
 | F3 | A module owns its project data section and its settings; no other module reads them directly. |
 | F4 | A missing required service: the module is not loaded and the reason is shown. A missing used service: the module loads without the parts that need it. A module that fails withdraws its services; requirements are checked again just before each `init`, so a module whose provider failed meanwhile is not initialised. |
 | F5 | A module that runs code on behalf of another, such as the viewport drawing a layer, catches its failures and reports the culprit with `Context::report_failure`. The kernel disables the culprit as if it had panicked, naming the reporter. |
-| F6 | Every action a module offers to others is a named command. The kernel keeps their catalogue and routes the calls; the same catalogue serves every module and script (S1). A Rust module declares its commands itself; those of compiled, Lua and Python modules are declared on their behalf, by the kernel or by the module of their language: they are delegated. Once every module has registered, a name declared twice keeps the command declared directly over a delegated one, and the first registered between two of the same kind; each one set aside is logged with the one that wins. The choice is made among the modules running: the catalogue is made again whenever a module is blocked or fails, so that a command set aside comes back once the one that won stops, which the log tells. |
+| F6 | Every action a module offers to others is a named command. The kernel keeps their catalogue and routes the calls; the same catalogue serves every module and script (S1). A Rust module declares its commands itself; those of compiled, Lua and Python modules are declared on their behalf, by the kernel or by the module of their language: they are delegated. Once every module has registered, a name declared twice keeps the command declared directly over a delegated one, and the first registered between two of the same kind; each one set aside is logged with the one that wins. The choice is made among the modules running: the catalogue is made again whenever a module is blocked or fails, so that a command set aside comes back once the one that won stops, which the log tells; a command no running module offers is refused with the reason, its module not running. |
 
 ### Interface objects
 
@@ -474,6 +474,8 @@ Not guaranteed:
 - The order, relative to an open group, of a change made by hand meanwhile (S4).
 - `disconnect` from another thread does not wait for a call already under way.
 - An event published during a frame is delivered at the next one.
+- Every event reaching a subscription: one whose reader leaves 4,096 events unread is closed, with
+  a warning in the log, and its reader then gets the error of a closed subscription.
 
 Stress tests with random interleavings, seeded so that a failure can be replayed: threads calling and grouping at once through the router, each getting its answers in its order; the undo groups against a model of rule S4; Undo at random moments while a compiled module's thread records changes, never before the module's last change reaches the history.
 
@@ -588,7 +590,7 @@ Rules:
 | S1 | One generic interface, the same for every language: list the named commands with their descriptions and schemas, call one by name, publish and receive events, read and write settings, log, and, for modules, offer commands, build panels of interface objects and record undoable changes. Commands, events and settings carry their values as JSON; the interface objects are reached through typed functions (handles, texts, numbers). It is defined once, independently of any language, and also offered as a C interface (`extern "C"` functions taking and returning UTF-8 JSON, header `uniwow.h`), so that compiled code reaches the same commands without depending on the Rust ABI. The Lua and Python `uniwow` modules only translate their values to and from JSON on top of this interface: they add no command of their own, so every language always has the same access. Each language has classes over the interface objects, named as in Qt. |
 | S2 | Named commands (F6) must exist in the kernel first: they are what scripts and compiled modules mostly call. |
 | S3 | Scripts never run on the interface thread (T6). A call that changes a module's state is applied on the interface thread at the next frame; a call to a command running on the calling thread answers at once (T4). A running script can be stopped. |
-| S4 | Every change one run of a script makes forms a single undo entry. The kernel learns to group commands. A group belongs to one caller on one thread and can be nested; a command delegated to another module runs inside its caller's group, as a change made on a thread where its caller has no group open enters the group opened last on that thread. A group closes at its outermost end, when the job that opened it ends, when its module fails, or from the Edit menu. While an open group already holds a change, Undo and Redo are refused, greyed with the reason; a group that changed nothing yet, such as a script waiting for events, blocks nothing. Changes made by hand meanwhile enter the history on their own: when they touch what the script changes, their order relative to the group can be imprecise, and so is the undo order of two runs in parallel that change the same thing. Indirect changes are not grouped: a command triggered by an event a script publishes is applied when the event is delivered, outside the group. |
+| S4 | Every change one run of a script makes forms a single undo entry. The kernel learns to group commands. A group belongs to one caller on one thread and can be nested; a command delegated to another module runs inside its caller's group, as a change made on a thread where its caller has no group open enters the group opened last on that thread. A group closes at its outermost end, when the job that opened it ends, when its module fails, or from the Edit menu. While an open group already holds a change, Undo and Redo are refused, greyed with the reason; a group that changed nothing yet, such as a script waiting for events, blocks nothing. Changes made by hand meanwhile enter the history on their own: when they touch what the script changes, their order relative to the group can be imprecise, and so is the undo order of two runs in parallel that change the same thing. Indirect changes are not grouped: a command triggered by an event a script publishes is applied when the event is delivered, outside the group. A change a slice of `parallel_for` records is made on its worker's thread, outside the group of the job that called it: slices compute, and the job records. |
 | S5 | A Lua or Python error is shown in the console with its line; it does not make the module fail. |
 | S6 | Compiled code runs inside the editor and can end its process: a crash there is not an error that can be caught. Lua scripts cannot load C modules, nor precompiled Lua chunks, which the bytecode checks of Lua 5.1 cannot keep from corrupting the memory: `string.dump` is removed, and every way of loading Lua code (scripts, console, `load`, `loadstring`, `loadfile`, `dofile`, `require`) accepts source text only. The compiled packages a Python script imports and the compiled modules carry this risk, which is accepted. |
 | S7 | Scripts and compiled modules have full access to the machine, like editor scripts in Unity: one received from someone else is checked before it is used. |
@@ -690,7 +692,9 @@ Content:
   thread, a call blocks until its answer: at once for a calling-thread command; for an
   interface-thread command, the interface thread serves the pending calls during a time budget of
   a few milliseconds each frame, so that successive calls are not limited to one per frame. From
-  the interface thread, a call to an interface-thread command is answered at the end of the frame.
+  the interface thread, `Context::call` queues the call, whatever command it names: it is served in
+  the kernel's next logic pass, and its answer handed to the module's `on_reply` right after, at
+  the next frame for a call made while drawing or while taking jobs and events back.
   The C interface over this handle comes with scripting (milestone 3).
 - **Events from any thread (T3)**, delivered on the interface thread.
 - **Commands panel**: the catalogue with descriptions and schemas, and a field to call a command
@@ -2218,7 +2222,9 @@ Step 9.2a, the additions to the core:
   ended. A slice may call it in turn.
 - The pool has two queues under one lock: the jobs and the kernel's work, then the helpers of the
   slices. A worker takes a job before any helper; a helper leaves between two slices when a job
-  waits, a count read without the lock. In the test, a job of another module started while every
+  waits, a count read without the lock, and is queued again when it left slices to take, so that
+  a worker comes back to them once the job is done. A helper runs on behalf of the module that
+  called `parallel_for`: a panic in a slice is logged under its name. In the test, a job of another module started while every
   thread ran slices of 10 ms ended within 100 ms.
 - The layers of the viewport: `Layer::prepare(gpu, view)`, run at each frame before any bundle is
   drawn, and `Layer::version()`, none by default. A layer with a version keeps its bundle while the

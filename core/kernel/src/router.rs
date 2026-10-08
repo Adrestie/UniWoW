@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use uniwow_api::serde_json::Value;
 use uniwow_api::{
     AppliedChange, CallId, CommandHandler, CommandInfo, CommandSpec, EditorBackend, Event, PropertyInfo, PropertyValue,
-    ReadProperty, WriteProperty, egui,
+    ReadProperty, WriteProperty, egui, log,
 };
 
 use crate::guard::guarded_as;
@@ -117,11 +117,14 @@ pub fn module_of(caller: &str) -> &str {
     caller.split('#').next().unwrap_or(caller)
 }
 
+/// The events a subscription keeps unread: one more closes it, its reader having stopped reading.
+pub const UNREAD_EVENTS: usize = 4096;
+
 struct Subscription {
     /// Who subscribed: its subscriptions close when its module fails.
     caller: String,
     topic: String,
-    sender: mpsc::Sender<Event>,
+    sender: mpsc::SyncSender<Event>,
     receiver: Arc<Mutex<mpsc::Receiver<Event>>>,
 }
 
@@ -169,14 +172,29 @@ impl Bridge {
         (Arc::new(bridge), receiver)
     }
 
-    /// Hands a published event to the subscriptions of other threads.
+    /// Hands a published event to the subscriptions of other threads. A subscription already
+    /// holding `UNREAD_EVENTS` is closed instead, with a warning: its reader gets the error of a
+    /// closed subscription, and nothing more piles up there.
     pub fn deliver(&self, event: &Event) {
-        for subscription in self.subscriptions.lock().unwrap_or_else(|e| e.into_inner()).values() {
-            if subscription.topic == "*" || subscription.topic == event.topic {
-                // A subscriber that stopped reading is no reason to fail.
-                let _ = subscription.sender.send(event.clone());
-            }
-        }
+        self.subscriptions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|id, subscription| {
+                if subscription.topic != "*" && subscription.topic != event.topic {
+                    return true;
+                }
+                match subscription.sender.try_send(event.clone()) {
+                    Err(mpsc::TrySendError::Full(_)) => {
+                        log::warn!(
+                            "subscription {id} of '{}' to '{}' closed: {UNREAD_EVENTS} events left unread",
+                            subscription.caller,
+                            subscription.topic
+                        );
+                        false
+                    }
+                    _ => true,
+                }
+            });
     }
 
     /// Closes the subscriptions of a module that failed. Their channels close with them: a thread
@@ -378,7 +396,7 @@ impl EditorBackend for Bridge {
     fn subscribe(&self, caller: &str, topic: &str) -> Result<u64, String> {
         self.active(caller)?;
         let id = self.next_subscription.fetch_add(1, Ordering::Relaxed);
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(UNREAD_EVENTS);
         let subscription = Subscription {
             caller: caller.to_owned(),
             topic: topic.to_owned(),
@@ -524,7 +542,7 @@ mod tests {
 
     use uniwow_api::{CommandSpec, RunsOn};
 
-    use super::{Bridge, Entry, PropertyEntry, ReplyTo, Request, choose_commands, serve};
+    use super::{Bridge, Entry, PropertyEntry, ReplyTo, Request, UNREAD_EVENTS, choose_commands, serve};
     use crate::random::Random;
 
     fn declared(owner: &str, name: &str, delegated: bool) -> (String, CommandSpec) {
@@ -837,6 +855,31 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn a_subscription_left_unread_is_closed_once_full() {
+        let (bridge, _receiver) = bridge();
+        bridge.running.write().unwrap().insert("cube".to_owned());
+        let unread = bridge.subscribe("cube", "*").unwrap();
+        let read = bridge.subscribe("cube", "*").unwrap();
+        let event = uniwow_api::Event {
+            topic: "any".to_owned(),
+            source: "cube".to_owned(),
+            payload: json!({}),
+        };
+        let next = |subscription| bridge.next_event("cube", subscription, Duration::ZERO);
+        for _ in 0..UNREAD_EVENTS {
+            bridge.deliver(&event);
+            assert!(next(read).unwrap().is_some());
+        }
+        assert!(
+            bridge.subscriptions.lock().unwrap().contains_key(&unread),
+            "full, still open"
+        );
+        bridge.deliver(&event);
+        assert!(next(unread).is_err(), "one more closes it");
+        assert!(next(read).unwrap().is_some(), "a subscription read goes on");
     }
 
     #[test]

@@ -21,10 +21,22 @@ pub fn guarded<R>(f: impl FnOnce() -> R) -> Result<R, String> {
 
 /// Runs `f` on behalf of `module`: a panic becomes an error message and is logged under its name.
 pub fn guarded_as<R>(module: &str, f: impl FnOnce() -> R) -> Result<R, String> {
-    let previous = CURRENT.with(|current| current.replace(Some(module.to_owned())));
-    let result = guarded(f);
-    CURRENT.with(|current| *current.borrow_mut() = previous);
-    result
+    acting_as(Some(module), || guarded(f))
+}
+
+/// Runs `f` on behalf of `module`, or of none: a panic in it is logged under that name, and goes
+/// on unwinding.
+pub fn acting_as<R>(module: Option<&str>, f: impl FnOnce() -> R) -> R {
+    /// Puts back the module called before, even when `f` unwinds.
+    struct Restore(Option<String>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            CURRENT.with(|current| *current.borrow_mut() = previous);
+        }
+    }
+    let _restore = Restore(CURRENT.with(|current| current.replace(module.map(str::to_owned))));
+    f()
 }
 
 /// The module being called on this thread, if any.

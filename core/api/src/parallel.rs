@@ -2,7 +2,7 @@
 //! workers of the pool share with the calling thread, which works on its own slices while it
 //! waits, never on other jobs. The pool runs a job before any slice, and a worker helping with
 //! slices goes back to the jobs between two slices, so that a job of another module waits for at
-//! most one slice.
+//! most one slice; once the job is done, it comes back to the slices left.
 
 use std::any::Any;
 use std::ops::Range;
@@ -11,8 +11,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 /// A helper of a `parallel_for`, run by a worker of the pool: it takes slices until none is left,
-/// or until its argument says that a job waits for the worker.
-pub type Helper = Box<dyn FnOnce(&dyn Fn() -> bool) + Send>;
+/// or until its argument says that a job waits for the worker. Returns whether it left slices to
+/// take: the pool then queues it again, to come back once the job is done.
+pub type Helper = Arc<dyn Fn(&dyn Fn() -> bool) -> bool + Send + Sync>;
 
 /// The workers of the pool that help with the slices: how many, and how to queue a helper.
 #[derive(Clone)]
@@ -70,12 +71,15 @@ struct Slices {
 
 impl Slices {
     /// Takes and runs slices until none is left, or until `leave` says that the thread is wanted
-    /// elsewhere.
-    fn help(&self, leave: &dyn Fn() -> bool) {
-        while !leave() {
+    /// elsewhere; returns whether it left slices to take.
+    fn help(&self, leave: &dyn Fn() -> bool) -> bool {
+        loop {
+            if leave() {
+                return self.next.load(Ordering::Acquire) < self.total;
+            }
             let index = self.next.fetch_add(1, Ordering::AcqRel);
             if index >= self.total {
-                return;
+                return false;
             }
             if !self.failed.load(Ordering::Acquire) {
                 let range = index * self.slice..((index + 1) * self.slice).min(self.count);
@@ -124,10 +128,10 @@ fn split(workers: Option<&Workers>, count: usize, slice: usize, work: &(dyn Fn(R
     });
     for _ in 0..(total - 1).min(workers.threads) {
         let slices = slices.clone();
-        (workers.queue)(Box::new(move |leave| slices.help(leave)));
+        (workers.queue)(Arc::new(move |leave| slices.help(leave)));
     }
     // The caller never leaves its own slices.
-    slices.help(&|| false);
+    let _ = slices.help(&|| false);
     let mut unfinished = slices.unfinished.lock().unwrap_or_else(|e| e.into_inner());
     while *unfinished > 0 {
         unfinished = slices.ended.wait(unfinished).unwrap_or_else(|e| e.into_inner());

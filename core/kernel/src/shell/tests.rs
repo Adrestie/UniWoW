@@ -1543,3 +1543,35 @@ fn what_the_interface_kept_of_the_objects_of_a_failed_module_goes() {
         .collect();
     assert_eq!(kept, ["b"]);
 }
+
+/// A module whose command `breaking.now`, run on the calling thread, panics.
+struct Breaking;
+
+impl Module for Breaking {
+    fn register(&mut self, reg: &mut Registrar) {
+        reg.command_on_caller(
+            "breaking.now",
+            "Panics",
+            json!({}),
+            json!({}),
+            Arc::new(|_| panic!("broken on purpose")),
+        );
+    }
+}
+
+#[test]
+fn a_panic_in_a_command_run_on_the_caller_makes_its_module_fail_and_the_next_call_is_refused() {
+    let mut harness = Harness::new(vec![("breaking", Box::new(Breaking)), ("other", counter("other").0)]);
+    let editor = uniwow_api::Editor::new(harness.shell.host.bridge.clone(), "other");
+    let failed = editor.call("breaking.now", json!({})).expect_err("it panicked");
+    assert!(failed.contains("broken on purpose"), "{failed}");
+    harness.frame(RawInput::default());
+    assert!(
+        matches!(&slot(&harness.shell, "breaking").state, State::Failed(reason) if reason.contains("command 'breaking.now' panicked")),
+        "{}",
+        state_text(&slot(&harness.shell, "breaking").state)
+    );
+    let refused = editor.call("breaking.now", json!({})).expect_err("refused");
+    assert!(refused.contains("which is not running"), "{refused}");
+    assert!(slot(&harness.shell, "other").state.is_running());
+}
