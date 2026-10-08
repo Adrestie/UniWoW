@@ -319,6 +319,45 @@ fn forget_failed(service: &Service, event: &Event) {
     }
 }
 
+/// The job making the tables of the GPU: one at a time; looks published while it runs make it start
+/// once more when it ends, from the looks it then finds, those of every publication between.
+#[derive(Default)]
+struct TablesJob {
+    running: Option<JobId>,
+    wanted: bool,
+}
+
+impl TablesJob {
+    /// Looks were published: whether a job starts now; else one starts once the one running ends.
+    fn asked(&mut self) -> bool {
+        self.wanted |= self.running.is_some();
+        self.running.is_none()
+    }
+
+    fn started(&mut self, job: JobId) {
+        self.running = Some(job);
+    }
+
+    /// Whether `job` is the one running, and then whether another starts, looks published meanwhile.
+    fn ended(&mut self, job: JobId) -> Option<bool> {
+        (self.running == Some(job)).then(|| {
+            self.running = None;
+            std::mem::take(&mut self.wanted)
+        })
+    }
+}
+
+/// The pipelines of the models as their job gave them, or why it gave none.
+fn setup_ended(outcome: JobOutcome) -> Result<Arc<Shared>, String> {
+    match outcome {
+        JobOutcome::Panicked(message) => Err(format!("their pipelines failed: {message}")),
+        JobOutcome::Cancelled => Err("their pipelines were cancelled".to_owned()),
+        done => done
+            .take::<Arc<Shared>>()
+            .ok_or_else(|| "their pipelines gave nothing".to_owned()),
+    }
+}
+
 /// The thread of the animations ended, as `outcome` says: the bones it published last forgotten,
 /// so that each owner is drawn from its last publication, at rest. Returns why, when it panicked.
 fn animations_ended(scene: &Mutex<Scene>, outcome: JobOutcome) -> Option<String> {
@@ -362,6 +401,9 @@ struct ModelsModule {
     animating: Option<JobId>,
     /// Why the thread of the animations stopped, until the user starts it again.
     animations_stopped: Option<String>,
+    /// Why the pipelines of the models could not be built: none is drawn then.
+    setup_failed: Option<String>,
+    tables: TablesJob,
     view: Option<viewport::Handle>,
     caches: Arc<Caches>,
     /// The looks on the GPU, those loading by their job, and the jobs by look.
@@ -391,6 +433,8 @@ impl Default for ModelsModule {
             setup: None,
             animating: None,
             animations_stopped: None,
+            setup_failed: None,
+            tables: TablesJob::default(),
             view: None,
             caches: Arc::default(),
             held: HashMap::new(),
@@ -425,25 +469,37 @@ impl ModelsModule {
     }
 
     /// Hands the looks held to the layer; with the pool, a job makes the tables the GPU chooses
-    /// from, handed when made, unless newer ones were.
+    /// from, one at a time (`TablesJob`).
     fn publish(&mut self, ctx: &mut Context) {
         self.generation += 1;
-        let looks = Arc::new(self.held.clone());
         {
             let mut scene = lock(&self.scene);
-            scene.looks = looks.clone();
+            scene.looks = Arc::new(self.held.clone());
             scene.generation = self.generation;
         }
-        if let Some(shared) = self.shared.clone().filter(|shared| shared.pool.is_some()) {
-            let (scene, generation) = (self.scene.clone(), self.generation);
-            ctx.spawn("Make the tables of the models", move |_| {
-                let tables = Arc::new(Tables::new(&shared.device, generation, &looks));
-                let mut scene = lock(&scene);
-                if scene.tables.as_ref().is_none_or(|kept| kept.generation < generation) {
-                    scene.tables = Some(tables);
-                }
-            });
+        if self.tables.asked() {
+            self.make_tables(ctx);
         }
+    }
+
+    /// Starts the job making the tables of the looks handed last, as it finds them when it starts.
+    fn make_tables(&mut self, ctx: &mut Context) {
+        let Some(shared) = self.shared.clone().filter(|shared| shared.pool.is_some()) else {
+            return;
+        };
+        let scene = self.scene.clone();
+        let job = ctx.spawn("Make the tables of the models", move |_| {
+            let (looks, generation) = {
+                let scene = lock(&scene);
+                (scene.looks.clone(), scene.generation)
+            };
+            let tables = Arc::new(Tables::new(&shared.device, generation, &looks));
+            let mut scene = lock(&scene);
+            if scene.tables.as_ref().is_none_or(|kept| kept.generation < generation) {
+                scene.tables = Some(tables);
+            }
+        });
+        self.tables.started(job);
     }
 
     /// At each frame, while the view is drawn: the nearest group of each look placed, walked again
@@ -772,6 +828,9 @@ impl Module for ModelsModule {
     }
 
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
+        if let Some(why) = &self.setup_failed {
+            ui.colored_label(ui.visuals().warn_fg_color, format!("The models cannot be drawn: {why}"));
+        }
         if let Some(why) = self.animations_stopped.clone() {
             ui.horizontal(|ui| {
                 ui.colored_label(
@@ -860,21 +919,39 @@ impl Module for ModelsModule {
     }
 
     fn on_job(&mut self, job: JobId, outcome: JobOutcome, ctx: &mut Context) {
-        if self.setup == Some(job) {
+        if let Some(again) = self.tables.ended(job) {
+            if let JobOutcome::Panicked(message) = outcome {
+                log::error!("the tables of the models could not be made: {message}");
+            }
+            if again {
+                self.make_tables(ctx);
+            }
+        } else if self.setup == Some(job) {
             self.setup = None;
-            if let Some(shared) = outcome.take::<Arc<Shared>>() {
-                *lock(&self.incoming) = Some(shared.clone());
-                self.shared = Some(shared);
-                self.start_animations(ctx);
+            match setup_ended(outcome) {
+                Ok(shared) => {
+                    *lock(&self.incoming) = Some(shared.clone());
+                    self.shared = Some(shared);
+                    self.start_animations(ctx);
+                }
+                Err(why) => {
+                    log::error!("the models cannot be drawn: {why}");
+                    self.setup_failed = Some(why);
+                }
             }
         } else if self.animating == Some(job) {
             self.animating = None;
             self.animations_stopped = animations_ended(&self.scene, outcome);
         } else if self.preview.job == Some(job) {
             self.preview.job = None;
-            if let Some(said) = outcome.take::<Result<String, String>>() {
-                self.preview.said = said.unwrap_or_else(|why| why);
-            }
+            self.preview.said = match outcome {
+                JobOutcome::Panicked(message) => format!("the preview failed: {message}"),
+                JobOutcome::Cancelled => "the preview was cancelled".to_owned(),
+                done => done.take::<Result<String, String>>().map_or_else(
+                    || "the preview gave nothing".to_owned(),
+                    |said| said.unwrap_or_else(|why| why),
+                ),
+            };
         } else if let Some(id) = self.jobs.remove(&job) {
             self.loading.remove(&id);
             match outcome.take::<Loaded>() {

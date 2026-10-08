@@ -1362,3 +1362,34 @@ fn the_animations_ended_leave_the_models_at_rest_and_say_why_when_they_panicked(
     assert!(scene.lock().unwrap().animated.is_none(), "drawn at rest");
     assert_eq!(crate::animations_ended(&scene, uniwow_api::JobOutcome::Cancelled), None);
 }
+
+#[test]
+fn one_job_makes_the_tables_at_a_time_and_one_more_after_it_for_the_looks_published_meanwhile() {
+    let mut tables = crate::TablesJob::default();
+    assert!(tables.asked(), "none running: one starts");
+    tables.started(uniwow_api::JobId(1));
+    assert!(
+        (0..29).all(|_| !tables.asked()),
+        "29 publications while it runs start none"
+    );
+    assert_eq!(tables.ended(uniwow_api::JobId(2)), None, "another job");
+    assert_eq!(tables.ended(uniwow_api::JobId(1)), Some(true), "one more, for them");
+    assert!(tables.asked());
+    tables.started(uniwow_api::JobId(3));
+    assert_eq!(
+        tables.ended(uniwow_api::JobId(3)),
+        Some(false),
+        "nothing published meanwhile"
+    );
+}
+
+#[test]
+fn pipelines_that_failed_say_why() {
+    let failed = crate::setup_ended(uniwow_api::JobOutcome::Panicked("no device".to_owned())).err();
+    assert_eq!(failed.as_deref(), Some("their pipelines failed: no device"));
+    assert!(crate::setup_ended(uniwow_api::JobOutcome::Cancelled).is_err());
+    assert!(
+        crate::setup_ended(uniwow_api::JobOutcome::Done(Box::new(0_u8))).is_err(),
+        "not pipelines"
+    );
+}

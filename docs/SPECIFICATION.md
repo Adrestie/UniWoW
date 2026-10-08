@@ -4158,7 +4158,13 @@ submit.
   the blended draws.
 - **The choice by the GPU** (`models/src/choice.rs`, `choice.wgsl`), with the pool:
   - the tables the GPU chooses from, made by a job of the module when its looks change and handed
-    with them (a look loaded is drawn a frame or two later, when its tables come): the pooled looks
+    with them (a look loaded is drawn a frame or two later, when its tables come), one job at a
+    time: looks published while it runs make it start once more when it ends, from the looks it then
+    finds, rather than one job each, of which only the newest was kept (the full verification of
+    the milestones). A job of the pipelines that fails is said in the panel, no model drawn; one of
+    the preview, in its line. The counts of the choice are read back without waiting, by
+    `device.poll` without blocking on the interface thread at each frame, which the callbacks of
+    `map_async` need. The pooled looks
     by slot, their radius and levels; their opaque records, gathered by state in the order drawn
     (then by look, level and batch), and the regions of those states;
   - at each frame, the CPU finds the groups in sight as in 9.4c and writes them for the GPU; it
