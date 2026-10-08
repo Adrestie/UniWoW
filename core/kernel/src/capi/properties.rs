@@ -168,7 +168,7 @@ fn value_of(kind: PropertyKind, values: *const f64, count: u32) -> Result<Proper
 }
 
 pub extern "C" fn api_properties(context: *mut c_void, reply: Option<Reply>, reply_context: *mut c_void) {
-    guarded((), || {
+    guarded(context, (), || {
         let listed = editor(context).map(|editor| {
             editor
                 .properties()
@@ -192,7 +192,7 @@ pub extern "C" fn api_properties(context: *mut c_void, reply: Option<Reply>, rep
 }
 
 pub extern "C" fn api_read_property(context: *mut c_void, path: *const c_char, values: *mut f64, capacity: u32) -> u32 {
-    guarded(0, || {
+    guarded(context, 0, || {
         let numbers = read(path).and_then(|path| editor(context)?.read_property(&path));
         match numbers {
             Ok(value) => {
@@ -214,7 +214,7 @@ pub extern "C" fn api_read_property(context: *mut c_void, path: *const c_char, v
 }
 
 pub extern "C" fn api_write_property(context: *mut c_void, path: *const c_char, values: *const f64, count: u32) -> i32 {
-    guarded(1, || {
+    guarded(context, 1, || {
         let written = (|| {
             let path = read(path)?;
             let editor = editor(context)?;
@@ -237,7 +237,7 @@ pub extern "C" fn api_write_property(context: *mut c_void, path: *const c_char, 
 }
 
 pub extern "C" fn api_set_property(context: *mut c_void, name: *const c_char, values: *const f64, count: u32) -> i32 {
-    guarded(1, || {
+    guarded(context, 1, || {
         let module = module(context);
         let told = (|| {
             let name = read(name)?;

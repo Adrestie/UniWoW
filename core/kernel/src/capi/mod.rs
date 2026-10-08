@@ -8,7 +8,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,8 @@ use uniwow_api::serde_json::{self, Value, json};
 
 use uniwow_api::ui::{self, Post, SharedUi, Ui};
 use uniwow_api::{DockArea, Editor, PanelSpec, log};
+
+use crate::guard::acting_as;
 
 const API_VERSION: u32 = 5;
 /// The name under which a compiled module exports its entry point.
@@ -143,6 +145,15 @@ impl ModuleContext {
 pub struct CompiledHandler {
     handler: Handler,
     user: *mut c_void,
+    /// The module and the command, named by the warning of an answer that is not JSON.
+    context: &'static ModuleContext,
+    command: &'static Answering,
+}
+
+/// A command of a compiled module, and whether its answer was told once not to be JSON.
+struct Answering {
+    name: String,
+    warned: AtomicBool,
 }
 
 // SAFETY: uniwow.h requires every command handler to be callable from any thread, several at once.
@@ -150,14 +161,28 @@ unsafe impl Send for CompiledHandler {}
 unsafe impl Sync for CompiledHandler {}
 
 impl CompiledHandler {
+    /// Runs the command with `arguments`: its JSON answer, or its error, a message of the editor's
+    /// when it gave none. An answer that is not JSON, against uniwow.h, is handed on as a JSON
+    /// string, with a warning under the module's name the first time.
     pub fn invoke(&self, arguments: &Value) -> Result<Value, String> {
         let arguments = c_text(&arguments.to_string());
         let mut answer = String::new();
         let status = (self.handler)(self.user, arguments.as_ptr(), collect, text_target(&mut answer));
         if status != 0 {
+            if answer.is_empty() {
+                return Err("the command failed without a message".to_owned());
+            }
             return Err(answer);
         }
-        Ok(serde_json::from_str(&answer).unwrap_or(Value::String(answer)))
+        Ok(serde_json::from_str(&answer).unwrap_or_else(|error| {
+            if !self.command.warned.swap(true, Ordering::Relaxed) {
+                self.context.refuse(
+                    &format!("command '{}'", self.command.name),
+                    &format!("its answer is not JSON ({error}): handed on as a JSON string"),
+                );
+            }
+            Value::String(answer)
+        }))
     }
 }
 
@@ -253,7 +278,7 @@ fn module_thread(id: &str) -> (Post, Post, Arc<Activity>) {
             for (job, counted) in receiver {
                 *worker.running.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), counted));
                 let unrecorded = (!counted).then(Unrecorded::start);
-                if catch_unwind(AssertUnwindSafe(job)).is_err() {
+                if catch_unwind(AssertUnwindSafe(|| acting_as(Some(&name), job))).is_err() {
                     log::error!("module '{name}': a call on its thread panicked in the editor");
                 }
                 drop(unrecorded);
@@ -369,14 +394,21 @@ pub fn start(init: InitFn, id: &str) -> Result<Started, String> {
                 .and_then(|t| serde_json::from_str(&t).ok())
                 .unwrap_or(json!({}))
         };
+        let name = read(entry.name).map_err(|e| format!("command {index}: {e}"))?;
+        let command: &'static Answering = Box::leak(Box::new(Answering {
+            name: name.clone(),
+            warned: AtomicBool::new(false),
+        }));
         commands.push(OfferedCommand {
-            name: read(entry.name).map_err(|e| format!("command {index}: {e}"))?,
+            name,
             description: read(entry.description).unwrap_or_default(),
             arguments: schema(entry.arguments_schema),
             result: schema(entry.result_schema),
             handler: CompiledHandler {
                 handler,
                 user: entry.user,
+                context,
+                command,
             },
         });
     }
@@ -451,7 +483,7 @@ extern "C" fn api_record_change(
     undo: *const c_char,
     redo: *const c_char,
 ) -> i32 {
-    guarded(1, || {
+    guarded(context, 1, || {
         let module = module(context);
         let result = (|| {
             if let Some(reason) = unrecorded() {
@@ -525,16 +557,17 @@ fn editor(context: *mut c_void) -> Result<&'static Editor, String> {
         .ok_or_else(|| "the editor is not ready yet: call it from the module's commands or threads".to_owned())
 }
 
-/// Runs the body of a C function: a panic must not cross into the module's code.
-fn guarded<R>(fallback: R, body: impl FnOnce() -> R) -> R {
+/// Runs the body of a C function the module of `context` called: a panic must not cross into the
+/// module's code, and is logged with the module's name.
+fn guarded<R>(context: *mut c_void, fallback: R, body: impl FnOnce() -> R) -> R {
     catch_unwind(AssertUnwindSafe(body)).unwrap_or_else(|_| {
-        log::error!("a call of a compiled module panicked in the editor");
+        log::error!("a call of the module '{}' panicked in the editor", module(context).id);
         fallback
     })
 }
 
 extern "C" fn api_commands(context: *mut c_void, reply: Option<Reply>, reply_context: *mut c_void) {
-    guarded((), || {
+    guarded(context, (), || {
         let commands: Vec<Value> = editor(context)
             .map(|editor| editor.commands())
             .unwrap_or_default()
@@ -555,7 +588,7 @@ extern "C" fn api_call(
     reply: Option<Reply>,
     reply_context: *mut c_void,
 ) -> i32 {
-    guarded(1, || {
+    guarded(context, 1, || {
         let result = (|| {
             let editor = editor(context)?;
             let arguments: Value =
@@ -576,7 +609,7 @@ extern "C" fn api_call(
 }
 
 extern "C" fn api_publish(context: *mut c_void, topic: *const c_char, payload: *const c_char) {
-    guarded((), || {
+    guarded(context, (), || {
         let result = (|| {
             let payload: Value =
                 serde_json::from_str(&read(payload)?).map_err(|e| format!("invalid JSON payload: {e}"))?;
@@ -589,7 +622,7 @@ extern "C" fn api_publish(context: *mut c_void, topic: *const c_char, payload: *
 }
 
 extern "C" fn api_subscribe(context: *mut c_void, topic: *const c_char) -> u64 {
-    guarded(0, || {
+    guarded(context, 0, || {
         let subscribed = read(topic).and_then(|topic| editor(context)?.subscribe(&topic));
         subscribed.unwrap_or_else(|error| {
             log::warn!("a compiled module could not subscribe: {error}");
@@ -605,7 +638,7 @@ extern "C" fn api_next_event(
     reply: Option<Reply>,
     reply_context: *mut c_void,
 ) -> i32 {
-    guarded(-1, || {
+    guarded(context, -1, || {
         let next = editor(context)
             .and_then(|editor| editor.next_event(subscription, Duration::from_millis(u64::from(timeout_ms))));
         match next {
@@ -624,7 +657,7 @@ extern "C" fn api_next_event(
 }
 
 extern "C" fn api_unsubscribe(context: *mut c_void, subscription: u64) {
-    guarded((), || {
+    guarded(context, (), || {
         if let Ok(editor) = editor(context) {
             editor.unsubscribe(subscription);
         }
@@ -632,7 +665,7 @@ extern "C" fn api_unsubscribe(context: *mut c_void, subscription: u64) {
 }
 
 extern "C" fn api_setting(context: *mut c_void, key: *const c_char, reply: Option<Reply>, reply_context: *mut c_void) {
-    guarded((), || {
+    guarded(context, (), || {
         let value = editor(context)
             .and_then(|editor| editor.setting(&read(key)?))
             .unwrap_or_else(|error| {
@@ -644,7 +677,7 @@ extern "C" fn api_setting(context: *mut c_void, key: *const c_char, reply: Optio
 }
 
 extern "C" fn api_set_setting(context: *mut c_void, key: *const c_char, value: *const c_char) {
-    guarded((), || {
+    guarded(context, (), || {
         let result = (|| {
             let value: Value = serde_json::from_str(&read(value)?).map_err(|e| format!("invalid JSON value: {e}"))?;
             editor(context)?.set_setting(&read(key)?, value)
@@ -655,22 +688,27 @@ extern "C" fn api_set_setting(context: *mut c_void, key: *const c_char, value: *
     })
 }
 
+/// The level of a log line, as uniwow.h numbers it: 1 error, 2 warning, 4 debug, any other
+/// information.
+fn log_level(level: i32) -> log::Level {
+    match level {
+        1 => log::Level::Error,
+        2 => log::Level::Warn,
+        4 => log::Level::Debug,
+        _ => log::Level::Info,
+    }
+}
+
 extern "C" fn api_log(context: *mut c_void, level: i32, message: *const c_char) {
-    guarded((), || {
-        let level = match level {
-            1 => log::Level::Error,
-            2 => log::Level::Warn,
-            4 => log::Level::Debug,
-            _ => log::Level::Info,
-        };
+    guarded(context, (), || {
         if let (Ok(editor), Ok(message)) = (editor(context), read(message)) {
-            editor.log(level, &message);
+            editor.log(log_level(level), &message);
         }
     })
 }
 
 extern "C" fn api_begin_group(context: *mut c_void, label: *const c_char) {
-    guarded((), || {
+    guarded(context, (), || {
         if let Some(reason) = unrecorded() {
             module(context).refuse("begin_group", reason);
             return;
@@ -682,7 +720,7 @@ extern "C" fn api_begin_group(context: *mut c_void, label: *const c_char) {
 }
 
 extern "C" fn api_end_group(context: *mut c_void) {
-    guarded((), || {
+    guarded(context, (), || {
         if let Some(reason) = unrecorded() {
             module(context).refuse("end_group", reason);
             return;
@@ -1000,7 +1038,15 @@ mod tests {
 
     use uniwow_api::serde_json::{Value, json};
 
-    use super::{API_VERSION, Api, CommandEntry, ModuleInfo, PanelEntry, Reply, start};
+    use std::ffi::CString;
+    use std::sync::mpsc;
+
+    use super::{
+        API_VERSION, Api, CommandEntry, ModuleInfo, PanelEntry, Reply, Started, api_begin_group, api_call,
+        api_commands, api_end_group, api_log, api_next_event, api_publish, api_set_setting, api_setting, api_subscribe,
+        api_unsubscribe, collect, log_level, serde_json, start, text_target,
+    };
+    use crate::router::{Bridge, Entry, Request};
     use uniwow_api::{AppliedChange, CommandInfo, DockArea, Editor, EditorBackend, Event};
 
     extern "C-unwind" fn echo(_user: *mut c_void, arguments: *const c_char, reply: Reply, context: *mut c_void) -> i32 {
@@ -1094,6 +1140,227 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(activity.running_for().is_none());
+    }
+
+    /// The context the table gives to the module of `started`.
+    fn context_of(started: &Started) -> *mut c_void {
+        std::ptr::from_ref(started.context).cast_mut().cast()
+    }
+
+    /// The module of `started` given its `Editor`, as when it starts, on a bridge of its own
+    /// offering `echo`, run on the caller; the queue of that bridge.
+    fn ready(started: &Started) -> (Arc<Bridge>, mpsc::Receiver<Request>) {
+        let (bridge, requests) = Bridge::new(None);
+        bridge.running.write().unwrap().insert("test".to_owned());
+        bridge.catalogue.write().unwrap().insert(
+            "echo".to_owned(),
+            Entry {
+                info: CommandInfo {
+                    name: "echo".to_owned(),
+                    owner: "test".to_owned(),
+                    description: String::new(),
+                    arguments: json!({}),
+                    result: json!({}),
+                    on_caller: true,
+                },
+                handler: Some(Arc::new(Ok)),
+            },
+        );
+        assert!(started.context.editor.set(Editor::new(bridge.clone(), "test")).is_ok());
+        (bridge, requests)
+    }
+
+    /// Calls `function` with a reply function collecting its text: what it returned, and the text.
+    fn replied<R>(function: impl FnOnce(Option<Reply>, *mut c_void) -> R) -> (R, String) {
+        let mut text = String::new();
+        let returned = function(Some(collect), text_target(&mut text));
+        (returned, text)
+    }
+
+    #[test]
+    fn before_the_module_started_the_c_functions_say_the_editor_is_not_ready() {
+        let started = start(good, "test").expect("starts");
+        let context = context_of(&started);
+        let (status, reply) =
+            replied(|reply, target| api_call(context, c"echo".as_ptr(), c"{}".as_ptr(), reply, target));
+        assert_eq!(status, 1);
+        assert!(reply.contains("the editor is not ready yet"), "{reply}");
+        let none = std::ptr::null_mut();
+        assert_eq!(
+            api_call(context, c"echo".as_ptr(), c"{}".as_ptr(), None, none),
+            1,
+            "no reply function"
+        );
+        assert_eq!(api_subscribe(context, c"demo".as_ptr()), 0);
+        let (status, reply) = replied(|reply, target| api_next_event(context, 1, 0, reply, target));
+        assert_eq!(status, -1);
+        assert!(reply.contains("the editor is not ready yet"), "{reply}");
+        assert_eq!(replied(|reply, target| api_commands(context, reply, target)).1, "[]");
+        api_log(context, 2, c"nowhere to go yet".as_ptr());
+    }
+
+    #[test]
+    fn a_call_through_the_table_answers_json_or_refuses_with_a_message() {
+        let started = start(good, "test").expect("starts");
+        let _bridge = ready(&started);
+        let context = context_of(&started);
+        let call = |name: &CStr, arguments: &CStr| {
+            replied(|reply, target| api_call(context, name.as_ptr(), arguments.as_ptr(), reply, target))
+        };
+        assert_eq!(call(c"echo", cr#"{"a":1}"#), (0, r#"{"a":1}"#.to_owned()));
+        let (status, reply) = call(c"nope", c"{}");
+        assert_eq!(status, 1);
+        assert!(reply.contains("unknown command 'nope'"), "{reply}");
+        let (status, reply) = call(c"echo", c"{a:1}");
+        assert_eq!(status, 1);
+        assert!(reply.starts_with("invalid JSON arguments"), "{reply}");
+        let not_utf8 = CString::new(vec![0xff_u8]).expect("no NUL");
+        assert_eq!(call(&not_utf8, c"{}"), (1, "text is not UTF-8".to_owned()));
+        let none = std::ptr::null_mut();
+        assert_eq!(
+            api_call(context, c"echo".as_ptr(), c"{}".as_ptr(), None, none),
+            0,
+            "no reply function"
+        );
+        let (_, commands) = replied(|reply, target| api_commands(context, reply, target));
+        let commands: Value = serde_json::from_str(&commands).expect("JSON");
+        assert_eq!(commands[0]["name"], "echo");
+        assert_eq!(commands[0]["on_caller"], true);
+    }
+
+    #[test]
+    fn events_through_the_table_reach_a_subscription_until_it_is_closed() {
+        let started = start(good, "test").expect("starts");
+        let (bridge, _requests) = ready(&started);
+        let context = context_of(&started);
+        api_publish(context, c"demo".as_ptr(), cr#"{"n":1}"#.as_ptr());
+        api_publish(context, c"demo".as_ptr(), c"{n:1}".as_ptr());
+        let published = std::mem::take(&mut *bridge.events.lock().unwrap());
+        assert_eq!(published.len(), 1, "the invalid payload is refused");
+        let subscription = api_subscribe(context, c"demo".as_ptr());
+        assert!(subscription > 0);
+        bridge.deliver(&published[0]);
+        let next = || replied(|reply, target| api_next_event(context, subscription, 0, reply, target));
+        let (status, event) = next();
+        assert_eq!(status, 1);
+        let event: Value = serde_json::from_str(&event).expect("JSON");
+        assert_eq!(
+            event,
+            json!({ "topic": "demo", "source": "test", "payload": { "n": 1 } })
+        );
+        assert_eq!(next().0, 0, "none waiting");
+        api_unsubscribe(context, subscription);
+        let (status, error) = next();
+        assert_eq!(status, -1);
+        assert!(error.contains("does not exist"), "{error}");
+    }
+
+    #[test]
+    fn settings_and_undo_groups_through_the_table() {
+        let started = start(good, "test").expect("starts");
+        let (_bridge, requests) = ready(&started);
+        let context = context_of(&started);
+        api_set_setting(context, c"size".as_ptr(), c"42".as_ptr());
+        api_set_setting(context, c"size".as_ptr(), c"forty".as_ptr());
+        let setting = |key: &CStr| replied(|reply, target| api_setting(context, key.as_ptr(), reply, target)).1;
+        assert_eq!(setting(c"size"), "42", "the invalid value is refused");
+        assert_eq!(setting(c"other"), "null");
+        api_begin_group(context, c"paint".as_ptr());
+        api_end_group(context);
+        let queued: Vec<Request> = requests.try_iter().collect();
+        assert!(
+            matches!(&queued[..], [
+                Request::BeginGroup { caller, label, .. },
+                Request::EndGroup { caller: ended, .. },
+            ] if caller == "test" && label == "paint" && ended == "test"),
+            "{} requests",
+            queued.len()
+        );
+    }
+
+    #[test]
+    fn the_levels_of_the_log_are_those_of_uniwow_h() {
+        use uniwow_api::log::Level;
+        let levels: Vec<Level> = [1, 2, 3, 4, 0, 9].into_iter().map(log_level).collect();
+        assert_eq!(
+            levels,
+            [
+                Level::Error,
+                Level::Warn,
+                Level::Info,
+                Level::Debug,
+                Level::Info,
+                Level::Info
+            ]
+        );
+    }
+
+    extern "C-unwind" fn plain_text(
+        _user: *mut c_void,
+        _arguments: *const c_char,
+        reply: Reply,
+        context: *mut c_void,
+    ) -> i32 {
+        reply(context, c"plain words".as_ptr());
+        0
+    }
+
+    extern "C-unwind" fn silent(
+        _user: *mut c_void,
+        _arguments: *const c_char,
+        _reply: Reply,
+        _context: *mut c_void,
+    ) -> i32 {
+        1
+    }
+
+    unsafe extern "C-unwind" fn answering_badly(
+        _api: *const Api,
+        info: *mut ModuleInfo,
+        _error: Reply,
+        _context: *mut c_void,
+    ) -> i32 {
+        let command = |name: &'static CStr, handler| CommandEntry {
+            name: name.as_ptr(),
+            description: c"".as_ptr(),
+            arguments_schema: c"{}".as_ptr(),
+            result_schema: c"{}".as_ptr(),
+            handler: Some(handler),
+            user: std::ptr::null_mut(),
+        };
+        let commands: &'static [CommandEntry] = Box::leak(Box::new([
+            command(c"test.text", plain_text),
+            command(c"test.silent", silent),
+        ]));
+        fill(info, |info| {
+            info.commands = commands.as_ptr();
+            info.command_count = 2;
+        })
+    }
+
+    #[test]
+    fn an_answer_that_is_not_json_is_a_string_told_once_and_a_silent_failure_gets_a_message() {
+        let started = start(answering_badly, "test").expect("starts");
+        let text = &started.commands[0].handler;
+        assert!(!text.command.warned.load(Ordering::Relaxed));
+        assert_eq!(text.invoke(&json!({})), Ok(json!("plain words")));
+        assert!(text.command.warned.load(Ordering::Relaxed), "told");
+        assert_eq!(text.invoke(&json!({})), Ok(json!("plain words")));
+        assert_eq!(
+            started.commands[1].handler.invoke(&json!({})),
+            Err("the command failed without a message".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_work_of_a_module_thread_runs_on_behalf_of_the_module() {
+        let started = start(good, "sample").expect("starts");
+        let (sender, received) = mpsc::channel();
+        uniwow_api::ui::lock(&started.context.ui).post_job(Box::new(move || {
+            let _ = sender.send(crate::guard::current_module());
+        }));
+        let module = received.recv_timeout(Duration::from_secs(5)).expect("ran");
+        assert_eq!(module.as_deref(), Some("sample"));
     }
 
     #[test]

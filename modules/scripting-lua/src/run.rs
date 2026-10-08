@@ -1,8 +1,9 @@
 //! One run of Lua code on a thread of its own, in a Lua state of its own (rule T6), with the `uniwow`
 //! module translating Lua values to and from the JSON of the generic interface (rule S1).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
+use std::ffi::c_void;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -22,6 +23,9 @@ const HOOK_INTERVAL: u32 = 1_000;
 /// Longest wait between two checks of the cancellation while waiting for an event.
 const EVENT_SLICE: Duration = Duration::from_millis(50);
 const STOPPED: &str = "stopped";
+/// The memory a run may take: beyond it, the script gets the error "not enough memory" instead of
+/// the editor running out of it.
+const MEMORY_LIMIT: usize = 1 << 30;
 
 /// Run before the script: once the run is stopped, `pcall`, `xpcall` and `coroutine.resume` raise
 /// the stop again instead of catching it, so that no script can go on by catching it.
@@ -73,7 +77,7 @@ pub enum Source {
 /// Runs the code and prints its output, then how it ended, prefixed with `run_name`.
 pub fn run(source: Source, editor: Editor, cancelled: Arc<AtomicBool>, output: Arc<Output>, run_name: &str) {
     let started = Instant::now();
-    match execute(&source, &editor, &cancelled, &output) {
+    match execute(&source, &editor, &cancelled, &output, MEMORY_LIMIT) {
         Ok(()) => {
             if let Source::Script { .. } = source {
                 output.push(
@@ -87,10 +91,18 @@ pub fn run(source: Source, editor: Editor, cancelled: Arc<AtomicBool>, output: A
     }
 }
 
-fn execute(source: &Source, editor: &Editor, cancelled: &Arc<AtomicBool>, output: &Arc<Output>) -> mlua::Result<()> {
-    // The safe subset of the standard libraries: C modules cannot be loaded, and Lua code is
-    // loaded from source text only (rule S6).
+/// Runs `source` in a Lua state of its own, which may take `memory_limit` bytes.
+fn execute(
+    source: &Source,
+    editor: &Editor,
+    cancelled: &Arc<AtomicBool>,
+    output: &Arc<Output>,
+    memory_limit: usize,
+) -> mlua::Result<()> {
+    // The standard libraries mlua deems safe, without `debug`: C modules cannot be loaded, and Lua
+    // code is loaded from source text only (rule S6).
     let lua = Lua::new();
+    lua.set_memory_limit(memory_limit)?;
     loading::install(&lua)?;
     let stop = Stop(cancelled.clone());
     // A global hook also runs in the coroutines, which a hook of the main thread does not reach.
@@ -336,21 +348,32 @@ fn module(lua: &Lua, editor: &Editor, stop: &Stop, subscriptions: &Rc<RefCell<Ha
         })?,
     )?;
 
-    let (e, s) = (editor.clone(), stop.clone());
+    // The groups the script opened itself: `end_group` never ends the group of the run.
+    let opened = Rc::new(Cell::new(0_u32));
+    let (e, s, o) = (editor.clone(), stop.clone(), opened.clone());
     module.set(
         "begin_group",
         lua.create_function(move |_, label: String| {
             s.check()?;
-            e.begin_group(&label).map_err(mlua::Error::runtime)
+            e.begin_group(&label).map_err(mlua::Error::runtime)?;
+            o.set(o.get() + 1);
+            Ok(())
         })?,
     )?;
 
-    let (e, s) = (editor.clone(), stop.clone());
+    let (e, s, o) = (editor.clone(), stop.clone(), opened);
     module.set(
         "end_group",
         lua.create_function(move |_, ()| {
             s.check()?;
-            e.end_group().map_err(mlua::Error::runtime)
+            if o.get() == 0 {
+                return Err(mlua::Error::runtime(
+                    "end_group without begin_group: the script has no undo group of its own open",
+                ));
+            }
+            e.end_group().map_err(mlua::Error::runtime)?;
+            o.set(o.get() - 1);
+            Ok(())
         })?,
     )?;
 
@@ -365,8 +388,43 @@ fn to_lua(lua: &Lua, value: &Value) -> mlua::Result<mlua::Value> {
     lua.to_value_with(value, options)
 }
 
+/// The JSON of a Lua value; NaN becomes null. A table JSON cannot hold whole is refused rather than
+/// losing keys without a word.
 fn from_lua(lua: &Lua, value: mlua::Value) -> mlua::Result<Value> {
+    whole_in_json(&value, &mut HashSet::new())?;
     lua.from_value(value)
+}
+
+/// Refuses a table, or one inside it, that holds a list, keys 1 to its length, and other keys
+/// besides: a JSON value is one or the other. `seen` holds the tables already checked; a table
+/// inside itself is refused by `from_value`.
+fn whole_in_json(value: &mlua::Value, seen: &mut HashSet<*const c_void>) -> mlua::Result<()> {
+    let mlua::Value::Table(table) = value else {
+        return Ok(());
+    };
+    if !seen.insert(table.to_pointer()) {
+        return Ok(());
+    }
+    let length = table.raw_len();
+    table.for_each(|key: mlua::Value, item: mlua::Value| {
+        let listed = match &key {
+            mlua::Value::Integer(index) => (1..=length as i64).contains(index),
+            mlua::Value::Number(index) => index.fract() == 0.0 && (1.0..=length as f64).contains(index),
+            _ => false,
+        };
+        if length > 0 && !listed {
+            let key = match &key {
+                mlua::Value::String(text) => format!("\"{}\"", text.to_string_lossy()),
+                mlua::Value::Integer(index) => index.to_string(),
+                mlua::Value::Number(index) => index.to_string(),
+                other => other.type_name().to_owned(),
+            };
+            return Err(mlua::Error::runtime(format!(
+                "a table holds a list of {length} values and the key {key} besides: a JSON value is a list or a map, not both"
+            )));
+        }
+        whole_in_json(&item, seen)
+    })
 }
 
 /// The message of a Lua error, with its line, without the Rust wrapping.
@@ -501,6 +559,60 @@ mod tests {
         assert_eq!(sent, json!({ "color": [1, 0.5, 0], "name": "red" }));
         assert_eq!(calls[2], "end scripting-lua#test.lua #1");
         assert_eq!(printed[0], "red\t0.5");
+    }
+
+    #[test]
+    fn a_table_that_json_cannot_hold_whole_is_refused() {
+        let (calls, printed) = execute(
+            script(
+                r#"local function send(value)
+                    local sent, why = pcall(uniwow.call, "echo", value)
+                    print(sent and "sent" or why)
+                end
+                send({[1] = "a", [3] = "c"})
+                send({1, 2, key = "v"})
+                send({list = {1, x = 2}})
+                send({1, nil, 3})
+                send({})
+                send({n = 0/0})"#,
+            ),
+            Arc::default(),
+        );
+        let refused: Vec<&String> = printed.iter().filter(|line| line.contains("not both")).collect();
+        assert_eq!(refused.len(), 3, "{printed:?}");
+        assert!(refused[0].contains("a list of 1 values and the key 3"), "{refused:?}");
+        assert!(refused[1].contains("the key \"key\""), "{refused:?}");
+        let sent: Vec<&str> = calls
+            .iter()
+            .filter_map(|call| call.strip_prefix("call echo "))
+            .collect();
+        assert_eq!(sent, ["[1,null,3]", "{}", "{\"n\":null}"]);
+    }
+
+    #[test]
+    fn a_run_taking_too_much_memory_gets_an_error_and_the_editor_goes_on() {
+        let recorder = Arc::new(Recorder::default());
+        let editor = Editor::new(recorder, "scripting-lua#test.lua #1");
+        let source = script(r#"local t = {} while true do t[#t + 1] = string.rep("x", 100000) .. #t end"#);
+        let error =
+            super::execute(&source, &editor, &Arc::default(), &Arc::default(), 16 << 20).expect_err("out of memory");
+        assert!(super::describe(&error).contains("not enough memory"), "{error}");
+    }
+
+    #[test]
+    fn end_group_never_ends_the_group_of_the_run() {
+        let (calls, printed) = execute(
+            script(r#"uniwow.begin_group("mine") uniwow.end_group() print(pcall(uniwow.end_group))"#),
+            Arc::default(),
+        );
+        assert!(
+            printed[0].starts_with("false") && printed[0].contains("end_group without begin_group"),
+            "{printed:?}"
+        );
+        // Its own group, then the group of the run, at its end.
+        let ends: Vec<usize> = (0..calls.len()).filter(|&i| calls[i].starts_with("end ")).collect();
+        assert_eq!(ends, [2, 3], "{calls:?}");
+        assert_eq!(calls[1], "begin scripting-lua#test.lua #1 mine");
     }
 
     #[test]

@@ -97,7 +97,7 @@ fn with_ui<R: Copy>(
     fallback: R,
     body: impl FnOnce(&mut Ui) -> Result<R, String>,
 ) -> R {
-    guarded(fallback, || {
+    guarded(context, fallback, || {
         let module = module(context);
         let result = body(&mut ui::lock(&module.ui));
         result.unwrap_or_else(|error| {
@@ -216,7 +216,7 @@ extern "C" fn text(
     reply: Option<Reply>,
     reply_context: *mut c_void,
 ) -> i32 {
-    guarded(1, || {
+    guarded(context, 1, || {
         let module = module(context);
         let copied = property(which).and_then(|which| {
             let ui = ui::lock(&module.ui);

@@ -782,7 +782,11 @@ As built:
   crosses between the editor and a module, and a module that forgets to free leaks nothing. The
   table also has `begin_group` and `end_group`: a module's command often returns before the work
   it starts ends (the sample's thread), so a module groups its own changes into one undo entry.
-  A script run is grouped automatically.
+  A script run is grouped automatically. A command whose answer is not JSON, against `uniwow.h`,
+  has it handed on as a JSON string, with a warning under its module's name the first time; one
+  that fails without a message gets the editor's ("the command failed without a message"). A
+  panic in the editor's side of a C function, or on a module's thread, is logged with the
+  module's name.
 - **Lua in the runtime**: mlua's generic code is instantiated in the feature using it, which then
   calls the Lua C functions directly. The runtime exports the 122 functions of the Lua 5.1 C API
   (`core/api/build.rs`), so that every feature uses the one Lua compiled into it. Runtime: 18,261
@@ -791,8 +795,13 @@ As built:
   calls go through an `Editor` named `native-modules#<module>`. `cargo xtask build` compiles each
   folder of `modules-src\` (`cl /LD /MD /O2 /std:c++17 /W4 /WX`, linked with `/Brepro` so that an
   unchanged module gives the same file) and copies `scripts\` beside the executable.
-- **Lua**: the safe subset of the standard libraries; `require` finds Lua files in
-  `scripts\lua-5.1\`. `uniwow.next_event(subscription, timeout_ms)` waits without a time limit when
+- **Lua**: the standard libraries mlua deems safe: `debug` is left out and no C code can be loaded,
+  but `os` and `io` stay whole (S7: `os.exit` ends the editor without the question about unsaved
+  changes). A run may take 1 GB of memory; beyond it, the script gets "not enough memory" and the
+  editor goes on. A table crossing to JSON is a list or a map: one holding a list, keys 1 to its
+  length, and other keys besides is refused with an error rather than losing keys; NaN becomes
+  null. `uniwow.end_group` ends only a group the script opened with `begin_group`, never the group
+  of the run. `require` finds Lua files in `scripts\lua-5.1\`. `uniwow.next_event(subscription, timeout_ms)` waits without a time limit when
   `timeout_ms` is omitted, until an event arrives or the run is stopped; the subscriptions a run
   leaves open end with it. Stop is checked every 1,000 Lua instructions and before each call.
   Each console line is a run of its own, in a new Lua state: a global set on one line is gone on
