@@ -20,8 +20,8 @@ use uniwow_api::egui_dock::tab_viewer::OnCloseResponse;
 use uniwow_api::egui_dock::{DockArea, DockState, Style, TabViewer};
 use uniwow_api::{
     CallId, CommandHandler, CommandInfo, CommandSpec, Context, DIALOG_ANSWERED_TOPIC, DIALOG_COMMAND, DockArea as Area,
-    Event, Host, MODULE_FAILED_TOPIC, Module, PropertyInfo, Registrar, RunsOn, eframe, egui, log, range_error,
-    serde_json,
+    Event, Host, MODULE_FAILED_TOPIC, Module, PropertyInfo, Registrar, RunsOn, eframe, egui, log, name_error,
+    range_error, serde_json,
 };
 
 use crate::capi;
@@ -215,7 +215,7 @@ impl Shell {
             for spec in reg.properties {
                 let path = format!("{}/{}", slot.id, spec.name);
                 // Its module's mistake, refused here: clamping by it would fail in whoever writes.
-                if let Some(reason) = range_error(spec.range) {
+                if let Some(reason) = name_error(&spec.name).or_else(|| range_error(spec.range)) {
                     log::warn!("property '{path}' refused: {reason}");
                     continue;
                 }

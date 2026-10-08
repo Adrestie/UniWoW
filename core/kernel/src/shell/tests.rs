@@ -515,11 +515,21 @@ impl Module for Ranges {
             number,
             |_| {},
         );
+        for wrong in ["", "a/b", "with space"] {
+            reg.animatable(
+                wrong,
+                "Wrong",
+                uniwow_api::PropertyKind::Number,
+                [0.0, 1.0],
+                number,
+                |_| {},
+            );
+        }
     }
 }
 
 #[test]
-fn a_property_with_a_wrong_range_is_refused_and_its_module_goes_on() {
+fn a_property_with_a_wrong_name_or_range_is_refused_and_its_module_goes_on() {
     let harness = Harness::new(vec![("ranges", Box::new(Ranges))]);
     let properties = harness.shell.host.bridge.properties.read().unwrap();
     let paths: Vec<&String> = properties.keys().collect();

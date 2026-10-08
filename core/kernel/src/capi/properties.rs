@@ -219,9 +219,7 @@ pub extern "C" fn api_write_property(context: *mut c_void, path: *const c_char, 
             let path = read(path)?;
             let editor = editor(context)?;
             let kind = editor
-                .properties()
-                .into_iter()
-                .find(|p| p.path == path)
+                .property(&path)
                 .map(|p| p.kind)
                 .ok_or_else(|| format!("unknown property '{path}'"))?;
             editor.write_property(&path, value_of(kind, values, count)?)

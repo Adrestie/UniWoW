@@ -157,8 +157,10 @@ fn field(ui: &mut egui::Ui, kind: PropertyKind, value: PropertyValue, range: [f6
             let speed = ((range[1] - range[0]) / 2000.0).clamp(0.005, 1.0);
             let (mut changed, mut done) = (false, false);
             for number in &mut numbers {
+                let before = *number;
                 let response = number_field(ui, number, range, speed);
-                changed |= response.changed();
+                // A text being typed tells a change before it is a number: only a number changed counts.
+                changed |= response.changed() && *number != before;
                 done |= ended(&response);
             }
             (PropertyValue::from_components(kind, &numbers), changed, done)
@@ -333,6 +335,128 @@ mod tests {
         assert_eq!((path.as_str(), *done), ("cube/opacity", *changing.last().unwrap()));
         assert!(state.under_way.is_none());
         assert_eq!(outputs[0].shown, 0..1);
+    }
+
+    #[test]
+    fn a_number_typed_is_done_once_the_field_is_left_and_never_under_way() {
+        let rows = [row(Some(PropertyKind::Number), Some(PropertyValue::Number(0.5)))];
+        let at = field_at();
+        let enter = egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let (outputs, state) = frames(
+            State::default(),
+            &rows,
+            1,
+            vec![
+                Vec::new(),
+                vec![egui::Event::PointerMoved(at), button(at, true)],
+                vec![button(at, false)],
+                Vec::new(),
+                vec![egui::Event::Text("0.25".to_owned())],
+                vec![enter],
+                Vec::new(),
+            ],
+        );
+        assert!(
+            !outputs
+                .iter()
+                .any(|output| matches!(output.change, GridChange::Changing { .. })),
+            "typing is no change under way: {:?}",
+            outputs.iter().map(|output| &output.change).collect::<Vec<_>>()
+        );
+        let finished: Vec<&GridChange> = outputs
+            .iter()
+            .map(|output| &output.change)
+            .filter(|change| matches!(change, GridChange::Finished { .. }))
+            .collect();
+        assert_eq!(
+            finished,
+            vec![&GridChange::Finished {
+                path: "cube/opacity".to_owned(),
+                value: PropertyValue::Number(0.25),
+            }]
+        );
+        assert!(state.under_way.is_none());
+    }
+
+    /// The meshes drawn by a frame of `ctx` with `events` over a grid of `rows`, by their bounds.
+    fn meshes(output: &egui::FullOutput) -> Vec<egui::Rect> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Mesh(mesh) => Some(mesh.calc_bounds()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_colour_picked_by_dragging_in_its_window_is_under_way_then_done_when_let_go() {
+        let rows = [GridRow {
+            kind: Some(PropertyKind::Colour),
+            value: Some(PropertyValue::Colour([0.2, 0.4, 0.6])),
+            ..row(None, None)
+        }];
+        let grid = Grid::default();
+        let id = egui::Id::new("grid");
+        let ctx = egui::Context::default();
+        let mut outputs = Vec::new();
+        let mut frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                events,
+                ..egui::RawInput::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                let input = GridInput {
+                    count: 1,
+                    first: 0,
+                    rows: &rows,
+                };
+                outputs.push(grid.show(ui, id, &input).change);
+            });
+            output.textures_delta.clear();
+            output
+        };
+        let at = egui::pos2(LABEL_WIDTH[1] + 8.0 + 10.0, ROW / 2.0);
+        frame(Vec::new());
+        frame(vec![egui::Event::PointerMoved(at), button(at, true)]);
+        frame(vec![button(at, false)]);
+        // The window of the picker: its largest mesh is the square of saturation and value.
+        let square = meshes(&frame(Vec::new()))
+            .into_iter()
+            .max_by(|a, b| a.area().total_cmp(&b.area()))
+            .expect("the picker is open");
+        assert!(square.area() > 2000.0, "{square:?}");
+        let (from, to) = (square.center(), square.left_top() + square.size() * 0.2);
+        frame(vec![egui::Event::PointerMoved(from), button(from, true)]);
+        frame(vec![egui::Event::PointerMoved(from.lerp(to, 0.5))]);
+        frame(vec![egui::Event::PointerMoved(to)]);
+        frame(vec![button(to, false)]);
+        let changing: Vec<&PropertyValue> = outputs
+            .iter()
+            .filter_map(|change| match change {
+                GridChange::Changing { value, .. } => Some(value),
+                _ => None,
+            })
+            .collect();
+        let finished: Vec<&PropertyValue> = outputs
+            .iter()
+            .filter_map(|change| match change {
+                GridChange::Finished { value, .. } => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert!(!changing.is_empty(), "{outputs:?}");
+        assert_eq!(finished.len(), 1, "{outputs:?}");
+        assert!(matches!(finished[0], PropertyValue::Colour(_)));
+        assert_ne!(*finished[0], PropertyValue::Colour([0.2, 0.4, 0.6]), "a colour picked");
     }
 
     #[test]

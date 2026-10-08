@@ -327,6 +327,16 @@ impl EditorBackend for Bridge {
             .collect()
     }
 
+    fn property(&self, path: &str) -> Option<PropertyInfo> {
+        let running = self.running.read().unwrap_or_else(|e| e.into_inner());
+        self.properties
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(path)
+            .filter(|entry| running.contains(&entry.info.owner))
+            .map(|entry| entry.info.clone())
+    }
+
     fn read_property(&self, caller: &str, path: &str) -> Result<PropertyValue, String> {
         self.active(caller)?;
         let entry = self.property(path)?;
@@ -976,6 +986,17 @@ mod tests {
                 .is_err()
         );
         assert!(bridge.read_property(caller, "cube/size").is_err());
+    }
+
+    #[test]
+    fn a_property_is_found_by_its_path_while_its_module_runs() {
+        let (bridge, _scale) = bridge_with_scale();
+        let property = |path: &str| uniwow_api::EditorBackend::property(bridge.as_ref(), path);
+        let found = property("cube/scale").map(|info| (info.path, info.owner));
+        assert_eq!(found, Some(("cube/scale".to_owned(), "cube".to_owned())));
+        assert!(property("cube/size").is_none());
+        bridge.running.write().unwrap().remove("cube");
+        assert!(property("cube/scale").is_none(), "its module stopped");
     }
 
     #[test]

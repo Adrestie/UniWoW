@@ -44,6 +44,11 @@ pub trait EditorBackend: Send + Sync {
         Vec::new()
     }
 
+    /// The animatable property `path` of a running module.
+    fn property(&self, path: &str) -> Option<PropertyInfo> {
+        self.properties().into_iter().find(|info| info.path == path)
+    }
+
     fn read_property(&self, _caller: &str, path: &str) -> Result<PropertyValue, String> {
         Err(format!("no property '{path}' here"))
     }
@@ -178,6 +183,11 @@ impl Editor {
     /// Every animatable property of running modules.
     pub fn properties(&self) -> Vec<PropertyInfo> {
         self.backend.properties()
+    }
+
+    /// The animatable property `path` of a running module.
+    pub fn property(&self, path: &str) -> Option<PropertyInfo> {
+        self.backend.property(path)
     }
 
     /// The current value of an animatable property.

@@ -134,6 +134,18 @@ pub struct PropertySpec {
     pub write: WriteProperty,
 }
 
+/// Why `name` cannot be a property's: its path is `<module>/<name>`, which the views split at its
+/// last `/`, and shows as the name.
+pub fn name_error(name: &str) -> Option<String> {
+    if name.is_empty() {
+        Some("its name is empty".to_owned())
+    } else if name.contains('/') || name.chars().any(char::is_whitespace) {
+        Some(format!("its name '{name}' holds a '/' or a space"))
+    } else {
+        None
+    }
+}
+
 /// Why a range cannot be a property's: none for two numbers, the lowest first.
 pub fn range_error(range: [f64; 2]) -> Option<String> {
     if range[0].is_nan() || range[1].is_nan() {

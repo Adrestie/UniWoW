@@ -878,57 +878,92 @@ impl PanelView {
             .remove(&handle)
             .filter(|edit| table.row(edit.row).is_some());
         let mut actions = TableActions::default();
+        let mut edit_drawn = false;
         let inner = ui.allocate_ui(size, |ui| {
             let columns = table.columns().len().max(1);
             let width = ((ui.available_width() - 16.0) / columns as f32).max(60.0);
             let height = ui.spacing().interact_size.y;
-            ui.horizontal(|ui| {
-                let sorting = table
-                    .is_sorting()
-                    .then(|| table.sort().map(|(column, _)| column))
-                    .flatten();
-                for (column, header) in table.columns().iter().enumerate() {
-                    let state = if sorting == Some(column) {
-                        Header::Sorting
-                    } else {
-                        match table.shown_sort() {
-                            Some((sorted, descending)) if sorted == column => Header::Sorted { descending },
-                            _ => Header::Plain,
-                        }
-                    };
-                    if column_header(ui, header, state, [width, height]).clicked() {
-                        actions.sorted = Some(column);
-                    }
-                }
-            });
+            let spacing = ui.spacing().item_spacing;
+            let (column_step, row_step) = (width + spacing.x, height + spacing.y);
+            // The columns whose room crosses `from..to`, along the rows.
+            let in_sight = |from: f32, to: f32| {
+                let first = ((from / column_step).floor().max(0.0) as usize).min(columns);
+                let last = ((to / column_step).ceil().max(0.0) as usize).min(columns);
+                first..last.max(first)
+            };
+            // The header's room, filled once the rows tell how far they are scrolled sideways.
+            let (header, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::hover());
             ui.separator();
-            egui::ScrollArea::vertical()
+            let rows = egui::ScrollArea::both()
                 .id_salt(("uniwow-table", handle))
                 .auto_shrink([false, false])
-                .show_rows(ui, height, table.len(), |ui, positions| {
-                    for position in positions {
-                        let Some(row) = table.shown(position) else {
-                            continue;
-                        };
-                        ui.horizontal(|ui| {
-                            for column in 0..columns {
-                                let text = row.cells.get(column).map_or("", String::as_str);
-                                let current = row.id == object.current_item;
-                                table_cell(
-                                    ui,
-                                    row.id,
-                                    column,
-                                    text,
-                                    current,
-                                    [width, height],
-                                    &mut edit,
-                                    &mut actions,
-                                );
-                            }
-                        });
-                    }
+                .show_viewport(ui, |ui, viewport| {
+                    ui.set_width(columns as f32 * column_step);
+                    ui.set_height((row_step * table.len() as f32 - spacing.y).max(0.0));
+                    let first_row = (viewport.min.y / row_step).floor().max(0.0) as usize;
+                    let last_row = ((viewport.max.y / row_step).ceil().max(0.0) as usize + 1).min(table.len());
+                    let shown = in_sight(viewport.min.x, viewport.max.x);
+                    let area = egui::Rect::from_min_max(
+                        ui.max_rect().min + egui::vec2(shown.start as f32 * column_step, first_row as f32 * row_step),
+                        egui::pos2(ui.max_rect().max.x, ui.max_rect().top() + last_row as f32 * row_step),
+                    );
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
+                        for position in first_row..last_row.max(first_row) {
+                            let Some(row) = table.shown(position) else {
+                                continue;
+                            };
+                            ui.horizontal(|ui| {
+                                for column in shown.clone() {
+                                    let text = row.cells.get(column).map_or("", String::as_str);
+                                    let current = row.id == object.current_item;
+                                    edit_drawn |= edit.as_ref().is_some_and(|e| e.row == row.id && e.column == column);
+                                    table_cell(
+                                        ui,
+                                        row.id,
+                                        column,
+                                        text,
+                                        current,
+                                        [width, height],
+                                        &mut edit,
+                                        &mut actions,
+                                    );
+                                }
+                            });
+                        }
+                    });
                 });
+            let scrolled = rows.state.offset.x;
+            let mut ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(header.translate(egui::vec2(-scrolled, 0.0)).with_max_x(f32::INFINITY))
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            ui.set_clip_rect(header.intersect(ui.clip_rect()));
+            let sorting = table
+                .is_sorting()
+                .then(|| table.sort().map(|(column, _)| column))
+                .flatten();
+            let shown = in_sight(scrolled, scrolled + header.width());
+            ui.add_space(shown.start as f32 * column_step);
+            for column in shown {
+                let state = if sorting == Some(column) {
+                    Header::Sorting
+                } else {
+                    match table.shown_sort() {
+                        Some((sorted, descending)) if sorted == column => Header::Sorted { descending },
+                        _ => Header::Plain,
+                    }
+                };
+                let label = table.columns().get(column).map_or("", String::as_str);
+                if column_header(&mut ui, label, state, [width, height]).clicked() {
+                    actions.sorted = Some(column);
+                }
+            }
         });
+        // The cell edited scrolled out of sight: its text is kept, as in Qt, the field being gone.
+        if let Some(gone) = edit.take_if(|edit| edit.focused && !edit_drawn) {
+            actions.done = Some((gone.row, gone.column, gone.text));
+        }
         if let Some(edit) = edit {
             self.cell_edits.insert(handle, edit);
         }
@@ -1284,6 +1319,11 @@ fn apply_table(
     let object = store.object(handle)?;
     let table = object.table.as_ref()?;
     let (sort, current) = (table.sort(), (object.current_item, object.current_column));
+    // A cell given back with the text it had changes nothing, and tells nothing, as in Qt.
+    let unchanged = actions
+        .done
+        .as_ref()
+        .is_some_and(|(row, column, text)| table.row(*row).and_then(|found| found.cells.get(*column)) == Some(text));
     let edit = actions.edit.map(|(row, column)| CellEdit {
         row,
         column,
@@ -1317,7 +1357,7 @@ fn apply_table(
         target.current_column = column;
         events.push(signal(Signal::CurrentCellChanged, row, column));
     }
-    if let Some((row, column, text)) = actions.done
+    if let Some((row, column, text)) = actions.done.filter(|_| !unchanged)
         && store.set_cell(handle, row, column, &text).is_ok()
     {
         events.push(SignalData {
@@ -2375,6 +2415,174 @@ mod tests {
             std::ptr::eq(Arc::as_ptr(&sorted), address),
             "the table is changed in place, not copied"
         );
+    }
+
+    /// A frame of `shared`'s panel on a screen of 800 by 600 with `events`: each text drawn within
+    /// its clip, where, and how many texts were drawn, clipped or not.
+    fn texts_and_count(
+        ctx: &egui::Context,
+        panels: &mut PanelView,
+        shared: &SharedUi,
+        events: Vec<egui::Event>,
+    ) -> (Vec<(String, egui::Pos2)>, usize) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+            events,
+            ..egui::RawInput::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| panels.show(shared, "p", ui, None));
+        output.textures_delta.clear();
+        let count = output
+            .shapes
+            .iter()
+            .filter(|clipped| matches!(clipped.shape, egui::Shape::Text(_)))
+            .count();
+        let texts = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if clipped.clip_rect.contains(text.pos) => {
+                    Some((text.galley.text().to_owned(), text.pos))
+                }
+                _ => None,
+            })
+            .collect();
+        (texts, count)
+    }
+
+    /// The texts a frame draws within their clip, where (see `texts_and_count`).
+    fn texts_drawn(
+        ctx: &egui::Context,
+        panels: &mut PanelView,
+        shared: &SharedUi,
+        events: Vec<egui::Event>,
+    ) -> Vec<(String, egui::Pos2)> {
+        texts_and_count(ctx, panels, shared, events).0
+    }
+
+    #[test]
+    fn the_columns_beyond_the_width_of_a_table_are_reached_by_scrolling_and_only_those_in_sight_drawn() {
+        let (shared, table) = data_view(Kind::TableView);
+        {
+            let columns: Vec<String> = (0..30).map(|column| format!("\"C{column}\"")).collect();
+            let rows: Vec<String> = (1..=3)
+                .map(|row| {
+                    let cells: Vec<String> = (0..30).map(|column| format!("\"r{row}c{column}\"")).collect();
+                    format!(r#"{{"id":{row},"cells":[{}]}}"#, cells.join(","))
+                })
+                .collect();
+            let mut store = lock(&shared);
+            store
+                .set_text(table, Property::Columns, &format!("[{}]", columns.join(",")))
+                .unwrap();
+            store
+                .set_text(table, Property::Rows, &format!("[{}]", rows.join(",")))
+                .unwrap();
+        }
+        let ctx = egui::Context::default();
+        let mut panels = PanelView::default();
+        let has = |texts: &[(String, egui::Pos2)], text: &str| texts.iter().any(|(drawn, _)| drawn == text);
+        let (first, count) = texts_and_count(
+            &ctx,
+            &mut panels,
+            &shared,
+            vec![egui::Event::PointerMoved(egui::pos2(400.0, 100.0))],
+        );
+        assert!(has(&first, "C0") && has(&first, "r1c0"));
+        assert!(!has(&first, "C29") && !has(&first, "r1c29"), "out of sight");
+        assert!(count < 30 * 4 / 2, "only the columns in sight drawn: {count} texts");
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(-5000.0, 0.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut last = texts_drawn(&ctx, &mut panels, &shared, vec![wheel]);
+        for _ in 0..60 {
+            last = texts_drawn(&ctx, &mut panels, &shared, Vec::new());
+        }
+        assert!(has(&last, "C29") && has(&last, "r3c29"), "scrolled to the last column");
+        assert!(!has(&last, "C0"), "the first column out of sight now");
+        // Its header, scrolled with the rows, sorts its column.
+        let at = last.iter().find(|(text, _)| text == "C29").expect("drawn").1 + egui::vec2(4.0, 4.0);
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        texts_drawn(&ctx, &mut panels, &shared, vec![egui::Event::PointerMoved(at)]);
+        texts_drawn(&ctx, &mut panels, &shared, vec![button(true)]);
+        texts_drawn(&ctx, &mut panels, &shared, vec![button(false)]);
+        assert_eq!(lock(&shared).table(table).unwrap().sort(), Some((29, false)));
+    }
+
+    #[test]
+    fn a_cell_edited_then_scrolled_out_of_sight_keeps_its_text() {
+        let (shared, table) = data_view(Kind::TableView);
+        {
+            let rows: Vec<Row> = (1..=300)
+                .map(|id| Row {
+                    id,
+                    cells: vec![id.to_string()],
+                })
+                .collect();
+            let mut store = lock(&shared);
+            store.set_text(table, Property::Columns, r#"["Id"]"#).unwrap();
+            store.set_rows(table, Rows::new(rows).unwrap()).unwrap();
+        }
+        let ctx = egui::Context::default();
+        let mut panels = PanelView::default();
+        let shown = texts_drawn(&ctx, &mut panels, &shared, Vec::new());
+        let at = shown.iter().find(|(text, _)| text == "1").expect("row 1 drawn").1 + egui::vec2(4.0, 4.0);
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        texts_drawn(&ctx, &mut panels, &shared, vec![egui::Event::PointerMoved(at)]);
+        for pressed in [true, false, true, false] {
+            texts_drawn(&ctx, &mut panels, &shared, vec![button(pressed)]);
+        }
+        texts_drawn(&ctx, &mut panels, &shared, Vec::new());
+        texts_drawn(&ctx, &mut panels, &shared, vec![egui::Event::Text("zz".to_owned())]);
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -3000.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        };
+        texts_drawn(&ctx, &mut panels, &shared, vec![wheel]);
+        for _ in 0..40 {
+            texts_drawn(&ctx, &mut panels, &shared, Vec::new());
+        }
+        let store = lock(&shared);
+        assert_eq!(store.table(table).unwrap().row(1).unwrap().cells[0], "1zz");
+        assert!(panels.cell_edits.is_empty(), "the edit is done");
+    }
+
+    #[test]
+    fn a_cell_given_back_with_its_text_tells_nothing() {
+        let (shared, table) = data_view(Kind::TableView);
+        let mut store = lock(&shared);
+        store.set_text(table, Property::Columns, r#"["Id"]"#).unwrap();
+        store
+            .set_text(table, Property::Rows, r#"[{"id":1,"cells":["a"]}]"#)
+            .unwrap();
+        let mut events = Vec::new();
+        let same = TableActions {
+            done: Some((1, 0, "a".to_owned())),
+            ..TableActions::default()
+        };
+        apply_table(&mut store, table, same, &mut events);
+        assert!(events.is_empty());
+        let other = TableActions {
+            done: Some((1, 0, "b".to_owned())),
+            ..TableActions::default()
+        };
+        apply_table(&mut store, table, other, &mut events);
+        assert_eq!(told(&events), vec![(Signal::CellChanged, 1, 0, false, "b")]);
     }
 
     /// Draws `shared`'s panel with a screen of 800 by 600 and `events`; returns how long it took.

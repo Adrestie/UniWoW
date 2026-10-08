@@ -290,7 +290,8 @@ fills it, or *not planned* when no milestone does yet.
 | Reporting another module as the culprit of a failure (F5) | `Context::report_failure` | — not planned | — | — |
 | Services between modules | `Registrar::provide`, `Context::service` | Commands, events and the objects are their form for every language (S1) | | |
 
-The four gaps *not planned* are for the review to place in a milestone.
+The six gaps *not planned* and the five *not planned yet* are for the review to place in a
+milestone.
 
 ---
 
@@ -401,7 +402,7 @@ the same runtime.
 | Events | Publish and subscribe, typed by serialisation: the topic is a string and the payload JSON, written with `Context::publish_as` and read with `Event::decode` into a type each module declares on its own side. No Rust type is shared between modules. Events may be published from any thread; they are delivered on the interface thread |
 | Services | Registry of interface implementations provided by modules |
 | Selection | Current selection, any type |
-| Animatable properties | Registry of the properties modules let be animated: path, type, range, reading and writing; written without history during playback (milestone 6). A property whose range is not two numbers, the lowest first, is refused with the reason |
+| Animatable properties | Registry of the properties modules let be animated: path, type, range, reading and writing; written without history during playback (milestone 6). A property whose range is not two numbers, the lowest first, or whose name is empty or holds a `/` or a space (its path is `<module>/<name>`), is refused with the reason |
 | Project | Open, save; content defined in a later step |
 | Settings | Global, per project, per module. Written atomically (temporary file, then rename), at most once per second and at exit |
 | Hotkeys | Registry of the keys the kernel and the modules act on (`Registrar::hotkey`), with their keys by default; *Edit > Hotkey* binds them to others, kept in the settings (step 9.2d) |
@@ -1350,7 +1351,9 @@ table up to date, and its review checks it.
   - The camera is the orbit of the 3D view, shared by its panel, its properties and its commands,
     which may come from any thread. A position or a target given keeps the other one; the camera
     then stays within its orbit: at most 1.5 radians above or below the ground, from 0.5 to 100,000
-    units from its target. The angle of view goes from 1 to 170 degrees (45 at start). The target
+    units from its target. The angle of view goes from 1 to 170 degrees (45 at start), one given
+    beyond held at the nearest end, as an orbit is, where a position or a target out of reach is
+    refused. The target
     stays within 100,000 of the origin on each axis and the eye within 200,000, as far again as its
     distance to the target: a position read can always be written back.
   - The commands run on the calling thread and give the camera as `{ "position", "target", "fov" }`;
@@ -1539,8 +1542,13 @@ As built, second part (8.6b), the Timeline a client:
   unfolded, one selected; signals `itemClicked`, `currentItemChanged`, `itemExpanded`.
 - `TableView` (as `QTableWidget`), drawn by the kernel: columns with headers, rows of cells, cells
   edited in place, sorted by a column when the user clicks its header; signals `cellChanged`
-  (row, column, text), `currentCellChanged` and `sortChanged`. Only the rows in sight are drawn, so
-  that 100,000 rows scroll smoothly. Besides the rows given at once, functions change one cell,
+  (row, column, text), `currentCellChanged` and `sortChanged`. Only the rows and the columns in
+  sight are drawn, so that 100,000 rows scroll smoothly; columns beyond the width of the view are
+  reached by scrolling sideways, the headers with them. A cell being edited that scrolls out of
+  sight keeps its text, as leaving its field does; a cell given back with the text it had tells
+  nothing. A column to sort by beyond the columns sorts nothing, the rows staying in the module's
+  order; the classes of C++ and C# set the column, then the order, which sorts twice when the order
+  changes too. Besides the rows given at once, functions change one cell,
   insert rows and remove rows, without giving the whole table again. The kernel sorts, keeping the
   id of each row, which the signals and these functions use, whatever the order shown. The SQL
   tool of milestone 12 relies on it.
@@ -1599,7 +1607,7 @@ Where the work of trees and tables is done:
 |---|---|---|
 | `ITEMS` and `ROWS` read from JSON, rows made ready (places, ranks, index) | The module's, in `set_text` | No |
 | Items or rows set; those replaced freed | The module's, in `set_text` | Set: yes, by exchange; freed: no |
-| `set_cell`, `insert_rows`, `remove_rows` | The module's | Yes: a binary search and one move per row, one pass to remove |
+| `set_cell`, `insert_rows`, `remove_rows` | The module's | Yes: a binary search and one move per row, one pass to remove; the first change while a sort of the background runs copies the places it shares with it, once a sort |
 | `ROWS` read | The module's, in `text` | Only to take the rows, shared, not copied; the JSON is made after |
 | What the user did: a sort asked, a cell kept, an item folded | Interface | Yes, once the kernel let go of its copy of the object |
 | A sort of fewer than 50,000 rows | The thread asking for it | Yes |
@@ -1635,7 +1643,7 @@ Where the work of the property grid is done:
 | Work | Thread | Under the lock of the module's objects |
 |---|---|---|
 | `PATHS` read from JSON | The module's, in `set_text` | No |
-| The rows made and their values read: those in sight and 32 around, the first 64 of a grid not drawn yet | Interface, before drawing | No: reading a property runs its module's code, which may lock objects |
+| The rows made and their values read: those in sight and 32 around, the first 64 of a grid not drawn yet, for every grid of the module once any of its panels or dialogs is drawn, its own panel closed or not | Interface, before drawing | No: reading a property runs its module's code, which may lock objects |
 | Drawing, and what the user did turned into a change | Interface | Yes; only the rows in sight |
 | The values changed written, a change done recorded | Interface, once the drawing is done | No: writing runs the module's code, or hands the value to the module's thread |
 
