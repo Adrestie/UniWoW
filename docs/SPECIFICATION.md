@@ -311,8 +311,8 @@ At start, the kernel:
 1. Scans `modules\*\module.toml`. A folder without a manifest whose subfolders hold manifests is a
    **group folder**, such as `modules\UI\`: its subfolders are scanned instead, whatever its name.
    A folder without a manifest, or without what its kind needs, is ignored and listed. An id is
-   kept by the first folder, in the order of their paths, that is not ignored; a later folder
-   giving the same id is ignored and listed.
+   kept by the first folder, in the order of their paths, whose module is loaded; a later folder
+   giving the same id is ignored and listed. A folder ignored, refused or disabled keeps no id.
 2. Compares the **runtime fingerprint** of each Rust module with its own. The fingerprint
    identifies the compiler version and the runtime build. A mismatch refuses the module with the
    reason ("built for another runtime, rebuild it") instead of loading it. A compiled module is

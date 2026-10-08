@@ -146,10 +146,7 @@ pub fn discover(exe_dir: &Path, disabled: &BTreeSet<String>) -> Discovery {
         let dll = folder.join(&manifest.dll);
         let state = if !dll.exists() {
             State::Ignored(format!("missing {}", manifest.dll))
-        } else if slots
-            .iter()
-            .any(|s| s.id == id && !matches!(s.state, State::Ignored(_)))
-        {
+        } else if id_taken(&slots, &id) {
             State::Ignored(format!("another folder already provides the id '{id}'"))
         } else if disabled.contains(&id) {
             State::Disabled
@@ -182,6 +179,12 @@ pub fn discover(exe_dir: &Path, disabled: &BTreeSet<String>) -> Discovery {
         runtime_fingerprint,
         slots,
     }
+}
+
+/// Whether a folder found before, among `slots`, provides the id `id`: only a module loaded keeps
+/// its id, never a folder ignored, refused or disabled.
+fn id_taken(slots: &[Slot], id: &str) -> bool {
+    slots.iter().any(|slot| slot.id == id && slot.state.is_running())
 }
 
 /// Loads a copy of the DLL, so that the original can be rebuilt while the editor runs.
@@ -252,7 +255,7 @@ mod tests {
 
     use uniwow_api::RUNTIME_DLL;
 
-    use super::{Slot, State, discover};
+    use super::{Slot, State, discover, id_taken};
     use crate::manifest::{self, FILE_NAME};
 
     /// A folder standing for the executable's, with a runtime DLL of made-up bytes and an empty
@@ -381,20 +384,38 @@ mod tests {
     }
 
     #[test]
-    fn an_id_is_kept_by_the_first_folder_that_is_not_ignored() {
+    fn a_folder_ignored_refused_or_disabled_keeps_no_id() {
         let exe = ExeDir::new("twice");
-        // Sorted by folder: `a` is ignored for want of its DLL, `b` then provides the id, not `c`.
+        // Sorted by folder: `a` is ignored for want of its DLL, `b` refused, so `c` is tried; its
+        // DLL, made up, cannot be loaded.
         exe.module("a", "m", &exe.runtime(), None, Some("0"));
         exe.module("b", "m", "0000", Some(b"dll"), None);
         exe.module("c", "m", &exe.runtime(), Some(b"dll"), None);
+        let slots = exe.discover(&[]);
+        let states = state_of(&slots, "m");
         assert_eq!(
-            state_of(&exe.discover(&[]), "m"),
+            states[..2],
             [
                 "ignored: missing m.dll",
-                "refused: built for another runtime: rebuild it",
-                "ignored: another folder already provides the id 'm'",
+                "refused: built for another runtime: rebuild it"
             ]
         );
+        assert!(states[2].starts_with("refused: could not be loaded"), "{states:?}");
+    }
+
+    #[test]
+    fn only_a_module_loaded_keeps_its_id() {
+        let slot = |id: &str, state| Slot::new(id.to_owned(), PathBuf::new(), None, state);
+        let found = [
+            slot("ignored", State::Ignored(String::new())),
+            slot("refused", State::Refused(String::new())),
+            slot("disabled", State::Disabled),
+            slot("loaded", State::Running),
+        ];
+        for id in ["ignored", "refused", "disabled", "unknown"] {
+            assert!(!id_taken(&found, id), "{id}");
+        }
+        assert!(id_taken(&found, "loaded"));
     }
 
     #[test]
