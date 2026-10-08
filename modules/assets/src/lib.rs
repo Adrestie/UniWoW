@@ -414,6 +414,8 @@ impl Formats for Files {
 #[derive(Default)]
 struct Opening {
     jobs: HashMap<JobId, usize>,
+    /// The path of each archive, by its place, for what is said of it.
+    paths: Vec<PathBuf>,
     sources: Vec<Option<Source>>,
     index: Option<JobId>,
     folder: PathBuf,
@@ -430,6 +432,8 @@ struct AssetsModule {
     refused: Vec<String>,
     /// The job showing the folder picker, while it is open.
     picking: Option<JobId>,
+    /// Whether the folder typed last is no folder.
+    typed_wrong: bool,
 }
 
 impl AssetsModule {
@@ -459,6 +463,7 @@ impl AssetsModule {
         }
         self.files.set(FilesState::Opening);
         self.opening.sources = paths.iter().map(|_| None).collect();
+        self.opening.paths.clone_from(&paths);
         self.opening.folder = folder.to_owned();
         self.opening.locale = locale;
         for (place, path) in paths.into_iter().enumerate() {
@@ -494,7 +499,19 @@ impl Module for AssetsModule {
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
         ui.horizontal(|ui| {
             ui.label("Folder of the client");
-            ui.add(egui::TextEdit::singleline(&mut self.folder).desired_width(360.0));
+            let field = ui.add(egui::TextEdit::singleline(&mut self.folder).desired_width(360.0));
+            // The folder typed is opened once the field is left, Enter or not, unless it is open.
+            if field.lost_focus() {
+                let typed = self.folder.trim().to_owned();
+                self.typed_wrong = !Path::new(&typed).is_dir();
+                let open = ctx
+                    .setting(CLIENT_FOLDER)
+                    .and_then(|value| value.as_str().map(str::to_owned));
+                if !self.typed_wrong && open.as_deref() != Some(typed.as_str()) {
+                    ctx.set_setting(CLIENT_FOLDER, serde_json::json!(typed));
+                    self.open(Path::new(&typed), ctx);
+                }
+            }
             // The picker waits for the user on a thread of its own (T2), the interface going on.
             if ui
                 .add_enabled(self.picking.is_none(), egui::Button::new("Open"))
@@ -513,6 +530,9 @@ impl Module for AssetsModule {
                 }));
             }
         });
+        if self.typed_wrong {
+            ui.colored_label(ui.visuals().warn_fg_color, "The folder typed is no folder.");
+        }
         match self.files.state() {
             VfsState::NoClient(reason) => ui.weak(reason),
             VfsState::Opening => {
@@ -540,17 +560,30 @@ impl Module for AssetsModule {
                 self.open(&folder, ctx);
             }
         } else if let Some(place) = self.opening.jobs.remove(&job) {
-            match outcome.take::<Result<Source, String>>() {
-                Some(Ok(source)) => self.opening.sources[place] = Some(source),
-                Some(Err(reason)) => {
+            let archive = self
+                .opening
+                .paths
+                .get(place)
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
+            let opened = match outcome {
+                JobOutcome::Done(value) => value.downcast::<Result<Source, String>>().map_or_else(
+                    |_| Err(format!("{archive}: its opening gave nothing")),
+                    |opened| *opened,
+                ),
+                JobOutcome::Panicked(message) => Err(format!("{archive}: its opening failed: {message}")),
+                JobOutcome::Cancelled => Err(format!("{archive}: its opening was cancelled")),
+            };
+            match opened {
+                Ok(source) => self.opening.sources[place] = Some(source),
+                Err(reason) => {
                     log::warn!("an archive of the client is left out: {reason}");
                     self.refused.push(reason);
                 }
-                None => {}
             }
             if self.opening.jobs.is_empty() {
                 let sources: Vec<Source> = self.opening.sources.drain(..).flatten().collect();
-                let folder = std::mem::take(&mut self.opening.folder);
+                let folder = self.opening.folder.clone();
                 let locale = std::mem::take(&mut self.opening.locale);
                 self.opening.index = Some(ctx.spawn("Index the client's files", move |_| {
                     Client::open(sources, &folder, &locale)
@@ -558,13 +591,26 @@ impl Module for AssetsModule {
             }
         } else if self.opening.index == Some(job) {
             self.opening.index = None;
-            if let Some((client, refused)) = outcome.take::<(Client, Vec<String>)>() {
-                for reason in &refused {
-                    log::warn!("a table of paths of the client is left out: {reason}");
-                }
-                self.refused.extend(refused);
-                self.files.set(FilesState::Ready(Arc::new(client)));
-            }
+            // Whatever the index became, the files are no longer being opened.
+            let why = match outcome {
+                JobOutcome::Done(value) => match value.downcast::<(Client, Vec<String>)>() {
+                    Ok(indexed) => {
+                        let (client, refused) = *indexed;
+                        for reason in &refused {
+                            log::warn!("a table of paths of the client is left out: {reason}");
+                        }
+                        self.refused.extend(refused);
+                        self.files.set(FilesState::Ready(Arc::new(client)));
+                        return;
+                    }
+                    Err(_) => "gave nothing".to_owned(),
+                },
+                JobOutcome::Panicked(message) => format!("failed: {message}"),
+                JobOutcome::Cancelled => "was cancelled".to_owned(),
+            };
+            let reason = format!("{}: the index of the files {why}", self.opening.folder.display());
+            log::warn!("{reason}");
+            self.files.set(FilesState::NoClient(reason));
         }
     }
 }

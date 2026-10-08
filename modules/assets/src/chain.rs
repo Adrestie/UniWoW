@@ -13,7 +13,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::mpq::{Archive, Entry};
+use crate::mpq::{Archive, Entry, NameHashes};
 
 /// A path as a key: lower case, backslashes.
 pub fn key(path: &str) -> String {
@@ -112,7 +112,12 @@ impl Folder {
     pub fn open(path: &Path) -> Result<Self, String> {
         let mut files = HashMap::new();
         let mut folders = vec![path.to_owned()];
+        // Each folder read once, by its real path: a link or a junction back up ends no loop.
+        let mut seen = std::collections::HashSet::new();
         while let Some(folder) = folders.pop() {
+            if !seen.insert(std::fs::canonicalize(&folder).unwrap_or_else(|_| folder.clone())) {
+                continue;
+            }
             for entry in std::fs::read_dir(&folder)
                 .map_err(|e| e.to_string())?
                 .filter_map(Result::ok)
@@ -127,6 +132,12 @@ impl Folder {
             }
         }
         Ok(Self { files })
+    }
+
+    /// Whether it holds a file at `path`, for the tests.
+    #[cfg(test)]
+    pub fn holds(&self, path: &str) -> bool {
+        self.files.contains_key(&key(path))
     }
 }
 
@@ -201,15 +212,17 @@ impl Chain {
     }
 
     fn find(&self, path: &str) -> Option<Found<'_>> {
+        // Hashed and keyed once, for every archive of the chain.
+        let (hashes, folder_key) = (NameHashes::of(path), key(path));
         for source in &self.sources {
             match source {
-                Source::Archive(archive) => match archive.find(path) {
+                Source::Archive(archive) => match archive.find_hashed(&hashes) {
                     Some(Entry::File(index)) => return Some(Found::Archive(archive, index)),
                     Some(Entry::Deleted) => return Some(Found::Deleted),
                     None => {}
                 },
                 Source::Folder(folder) => {
-                    if let Some((_, file)) = folder.files.get(&key(path)) {
+                    if let Some((_, file)) = folder.files.get(&folder_key) {
                         return Some(Found::Loose(file));
                     }
                 }

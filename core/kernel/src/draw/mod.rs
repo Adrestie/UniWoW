@@ -1536,7 +1536,9 @@ fn table_cell(
         if !editing.focused {
             response.request_focus();
             editing.focused = true;
-        } else if response.lost_focus() {
+        } else if !response.has_focus() {
+            // The keyboard left the field, by a key, a click, or the field not drawn a while, as
+            // when its panel was hidden: its text is kept, unless Escape let it go.
             if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 actions.done = Some((row, column, editing.text.clone()));
             }
@@ -2559,6 +2561,48 @@ mod tests {
         }
         let store = lock(&shared);
         assert_eq!(store.table(table).unwrap().row(1).unwrap().cells[0], "1zz");
+        assert!(panels.cell_edits.is_empty(), "the edit is done");
+    }
+
+    #[test]
+    fn a_cell_edited_in_a_panel_hidden_then_shown_again_keeps_its_text() {
+        let (shared, table) = data_view(Kind::TableView);
+        {
+            let mut store = lock(&shared);
+            store.set_text(table, Property::Columns, r#"["Id"]"#).unwrap();
+            store
+                .set_text(
+                    table,
+                    Property::Rows,
+                    r#"[{"id":1,"cells":["1"]},{"id":2,"cells":["2"]}]"#,
+                )
+                .unwrap();
+        }
+        let ctx = egui::Context::default();
+        let mut panels = PanelView::default();
+        let shown = texts_drawn(&ctx, &mut panels, &shared, Vec::new());
+        let at = shown.iter().find(|(text, _)| text == "1").expect("row 1 drawn").1 + egui::vec2(4.0, 4.0);
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        texts_drawn(&ctx, &mut panels, &shared, vec![egui::Event::PointerMoved(at)]);
+        for pressed in [true, false, true, false] {
+            texts_drawn(&ctx, &mut panels, &shared, vec![button(pressed)]);
+        }
+        texts_drawn(&ctx, &mut panels, &shared, Vec::new());
+        texts_drawn(&ctx, &mut panels, &shared, vec![egui::Event::Text("zz".to_owned())]);
+        // Another tab of the dock shown: the panel is not drawn.
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+            output.textures_delta.clear();
+        }
+        for _ in 0..3 {
+            texts_drawn(&ctx, &mut panels, &shared, Vec::new());
+        }
+        assert_eq!(lock(&shared).table(table).unwrap().row(1).unwrap().cells[0], "1zz");
         assert!(panels.cell_edits.is_empty(), "the edit is done");
     }
 

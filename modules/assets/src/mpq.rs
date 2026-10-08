@@ -128,9 +128,33 @@ pub enum Entry {
 }
 
 /// An archive open, its tables read.
+/// The largest sector the archives of 3.3.5a could have: 512 << 23, 4 GB; theirs are of 4 KB.
+const MAX_SECTOR_SHIFT: u16 = 23;
+/// The largest file an archive may give, far beyond any of the client's.
+const MAX_FILE_SIZE: u64 = 1 << 30;
+
+/// The three hashes of a name an archive finds its file by.
+pub struct NameHashes {
+    name_a: u32,
+    name_b: u32,
+    table_offset: u32,
+}
+
+impl NameHashes {
+    pub fn of(name: &str) -> Self {
+        Self {
+            name_a: hash_string(name, hash_type::NAME_A),
+            name_b: hash_string(name, hash_type::NAME_B),
+            table_offset: hash_string(name, hash_type::TABLE_OFFSET),
+        }
+    }
+}
+
 pub struct Archive {
     path: PathBuf,
     file: File,
+    /// The length of the file, which no data of a block may pass.
+    length: u64,
     sector_size: u64,
     hash: Vec<HashEntry>,
     blocks: Vec<Block>,
@@ -220,7 +244,11 @@ impl Archive {
                 format + 1
             ));
         }
-        let sector_size = 512u64 << u16_at(&header, 0x0E);
+        let shift = u16_at(&header, 0x0E);
+        if shift > MAX_SECTOR_SHIFT {
+            return Err(format!("sectors of 512 << {shift} bytes, which no archive has"));
+        }
+        let sector_size = 512u64 << shift;
         let (hash_count, block_count) = (u32_at(&header, 0x18), u32_at(&header, 0x1C));
         // Positions are unsigned: those of a large archive of format 1 pass 2 GB.
         let (mut hash_at, mut block_at) = (u64::from(u32_at(&header, 0x10)), u64::from(u32_at(&header, 0x14)));
@@ -285,6 +313,7 @@ impl Archive {
         Ok(Self {
             path: path.to_owned(),
             file,
+            length,
             sector_size,
             hash,
             blocks,
@@ -298,12 +327,14 @@ impl Archive {
     /// What the archive holds under `name`: the entry of the neutral locale first, as the client
     /// reads it, then any other.
     pub fn find(&self, name: &str) -> Option<Entry> {
+        self.find_hashed(&NameHashes::of(name))
+    }
+
+    /// As `find`, for a name already hashed, as a chain of archives looks it up in each.
+    pub fn find_hashed(&self, hashes: &NameHashes) -> Option<Entry> {
         let mask = self.hash.len() - 1;
-        let (name_a, name_b) = (
-            hash_string(name, hash_type::NAME_A),
-            hash_string(name, hash_type::NAME_B),
-        );
-        let start = hash_string(name, hash_type::TABLE_OFFSET) as usize & mask;
+        let (name_a, name_b) = (hashes.name_a, hashes.name_b);
+        let start = hashes.table_offset as usize & mask;
         let mut found = None;
         for step in 0..self.hash.len() {
             let entry = self.hash[(start + step) & mask];
@@ -339,6 +370,14 @@ impl Archive {
         }
         if block.flags & FILE_PATCH != 0 {
             return Err("an incremental patch, which the archives of 3.3.5a do not hold".to_owned());
+        }
+        // A block damaged, or of an archive that is not the client's, must not ask for more than
+        // the archive holds, nor for gigabytes.
+        if block.offset.saturating_add(block.packed) > self.length {
+            return Err("its data goes past the end of the archive".to_owned());
+        }
+        if block.size > MAX_FILE_SIZE || (block.flags & FILE_COMPRESS == 0 && block.size > block.packed) {
+            return Err(format!("a file of {} bytes, more than its block holds", block.size));
         }
         let size = usize::try_from(block.size).map_err(|_| "a file too large".to_owned())?;
         let mut data = vec![0u8; size];

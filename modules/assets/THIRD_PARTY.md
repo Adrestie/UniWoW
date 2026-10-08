@@ -99,7 +99,8 @@ SOFTWARE.
 
 - Source: <https://github.com/wowdev/WoWDBDefs>, the definitions of `Map`, `AreaTable`,
   `CreatureDisplayInfo`, `CreatureModelData`, `CreatureDisplayInfoExtra`, `CharHairGeosets`,
-  `CharacterFacialHairStyles` and `GameObjectDisplayInfo` for the build 3.3.5.12340.
+  `CharacterFacialHairStyles`, `GameObjectDisplayInfo`, `CharSections`, `AnimationData`,
+  `LiquidType` and `LiquidMaterial` for the build 3.3.5.12340.
 - Licence of the definitions: CC BY-SA 4.0.
 - Taken into `src/dbc.rs`: the places of the columns read, and the count of the columns of each
   table; no file of the project is copied.

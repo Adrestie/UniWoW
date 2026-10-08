@@ -1579,7 +1579,8 @@ As built, first part (8.7a), trees and tables:
   cells keeping the module's order; a cell changed in the column sorted by sorts the rows again.
 - A click makes a cell current, a double click edits it in place: Enter or leaving the field keeps
   the text, which the table holds and `cellChanged` gives, Escape drops it; nothing is recorded, as
-  in Qt. The triangle before an item folds or unfolds it, which the tree keeps.
+  in Qt. The field left without a key, its row scrolled away or its panel hidden, keeps the text
+  too. The triangle before an item folds or unfolds it, which the tree keeps.
 - Trees and tables draw only the rows in sight. What the user did is applied once the kernel lets
   go of its copy of the object drawn, so that a table of 100,000 rows is changed in place rather
   than copied.
@@ -2131,7 +2132,12 @@ First part (9.1a), the archives:
   buffer each thread reuses (kept up to 64 MB, 8 MB since 9.1b), the file in one allocation of its
   size; stored, compressed with zlib in one unit or in sectors, with or without their checksums
   (not checked).
-  The entry of the neutral locale comes first. A delete marker hides the file of the archives read
+  The entry of the neutral locale comes first; without one, the first entry of the name is taken,
+  whatever its locale, where the client would prefer its own: the archives of 3.3.5a give every
+  file a neutral entry. A damaged archive is refused, or its file: sectors of more than 512 << 23
+  bytes, data past the end of the archive, a file of more than 1 GB or larger than its stored
+  block. A folder mounted is read once by its real path, a junction back up making no loop. A
+  delete marker hides the file of the archives read
   after it. The encryption of files, PKWare's implode, the other compressions and the incremental
   patches are refused by name: the archives of 3.3.5a hold none.
 - The lists of the archives are merged, a name deleted by the first archive listing it left out; a
@@ -2219,7 +2225,8 @@ Second part (9.1b), the FileDataIDs, the DB2 and the service `formats`:
   table of another layout, or damaged, is refused with its name.
 - `modules/assets/THIRD_PARTY.md` names wow.export, its commit, its authors and its licence,
   WoWDBDefs, and the sources of wxl-db2 read; nothing comes from DB2Gen or WarcraftXL (GPL-3).
-- Measured on the user's client (frFR since 5 October), release: the four tables read in 7 ms,
+- Measured on the user's client (frFR from 5 October; esES on 8 October, as Config.wtf says),
+  release: the four tables read in 7 ms,
   135 maps, 2,307 areas, 24,262 looks of creatures and 1,537 models, 1,527 of them found in the
   archives by their `.m2`. The client holds no table of paths: no FileDataID named.
 - Tests: DB2 the tests write, of each version (sections, strings, ids of every kind, the last
@@ -2231,7 +2238,9 @@ Second part (9.1b), the FileDataIDs, the DB2 and the service `formats`:
   `UNIWOW_CLIENT` names it. Each change made on purpose to the readers and the services made a
   test fail, but the thread of the picker, which no test opens: the recette checks it.
 - At the user's request, *Open* shows the folder picker of Windows, which starts in the folder
-  shown, and opens the client when a folder is chosen; cancelled, it changes nothing. The picker
+  shown, and opens the client when a folder is chosen; cancelled, it changes nothing. A folder
+  typed in the field is opened once the field is left, Enter or not, unless it is the one open; one
+  that is no folder is said under the field. The picker
   waits for the user on a thread of its own (T2), the interface going on meanwhile, *Open* greyed
   until it closes.
   The runtime re-exports `rfd` for it, which adds no other crate to the runtime.

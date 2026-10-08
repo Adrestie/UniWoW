@@ -64,6 +64,12 @@ fn pack(data: &[u8]) -> Vec<u8> {
 
 /// Writes an archive of format 1 with sectors of 512 << `shift` bytes, its list included.
 pub(crate) fn write_archive(path: &Path, shift: u16, files: &[TestFile]) {
+    write_archive_altered(path, shift, files, |_| {});
+}
+
+/// As `write_archive`, its block table (offset, packed, size, flags of each file) first given to
+/// `alter`, as a damaged archive would have it.
+fn write_archive_altered(path: &Path, shift: u16, files: &[TestFile], alter: impl Fn(&mut [[u32; 4]])) {
     let sector = 512usize << shift;
     let names: Vec<&str> = files.iter().map(|file| file.name).collect();
     let listfile = names.join("\r\n");
@@ -138,6 +144,7 @@ pub(crate) fn write_archive(path: &Path, shift: u16, files: &[TestFile]) {
         body.extend(numbers.iter().flat_map(|n| n.to_le_bytes()));
         at
     };
+    alter(&mut blocks);
     let hash_at = table(&hash, "(hash table)");
     let block_at = table(&blocks, "(block table)");
     let header: [u32; 8] = [
@@ -311,6 +318,259 @@ fn what_the_archives_of_3_3_5a_do_not_hold_is_refused_by_name() {
         panic!()
     };
     assert!(archive.read(index).unwrap_err().contains("0x08"));
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_damaged_archive_is_refused_or_its_file_refused_never_read_blindly() {
+    let folder = scratch("damaged");
+    let data = sample(3000);
+    let files = [file("a.bin", &data, Stored::Plain)];
+    // A shift of sectors no archive has: refused, where it would overflow.
+    let path = folder.join("shift.mpq");
+    write_archive(&path, 3, &files);
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[0x0E..0x10].copy_from_slice(&64u16.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(Archive::open(&path).err().unwrap().contains("sectors"));
+    let read_altered = |name: &str, alter: fn(&mut [[u32; 4]])| {
+        let path = folder.join(name);
+        write_archive_altered(&path, 3, &files, alter);
+        let archive = Archive::open(&path).unwrap();
+        let Some(Entry::File(index)) = archive.find("a.bin") else {
+            panic!("{name}")
+        };
+        archive.read(index)
+    };
+    // Gigabytes asked of a block holding 3,000 bytes, where the allocation would end the editor.
+    let huge = read_altered("huge.mpq", |blocks| blocks[0][2] = 0xF000_0000);
+    assert!(huge.unwrap_err().contains("more than its block holds"));
+    let larger = read_altered("larger.mpq", |blocks| blocks[0][2] += 1);
+    assert!(
+        larger.unwrap_err().contains("more than its block holds"),
+        "stored, larger than packed"
+    );
+    let beyond = read_altered("beyond.mpq", |blocks| blocks[0][0] = 0x0FFF_0000);
+    assert!(beyond.unwrap_err().contains("past the end"));
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_folder_mounted_with_a_junction_back_up_is_read_once() {
+    let folder = scratch("loop");
+    let mounted = folder.join("Patch-loop.MPQ");
+    std::fs::create_dir_all(mounted.join("World")).unwrap();
+    std::fs::write(mounted.join("World").join("a.txt"), b"a").unwrap();
+    // A junction inside it, back to itself, as a user could make one.
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(mounted.join("World").join("back"))
+        .arg(&mounted)
+        .output();
+    if !made.is_ok_and(|output| output.status.success()) {
+        eprintln!("skipped: no junction could be made");
+        return;
+    }
+    let opened = chain::Folder::open(&mounted).expect("read, without looping");
+    assert!(opened.holds("World\\a.txt"));
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+/// A host keeping the jobs the module starts, by number, and nothing else.
+#[derive(Default)]
+struct JobsHost {
+    spawned: Vec<String>,
+}
+
+impl uniwow_api::Host for JobsHost {
+    fn publish(&mut self, _source: &str, _topic: &str, _payload: uniwow_api::serde_json::Value) {}
+
+    fn execute(&mut self, _owner: &str, _command: Box<dyn uniwow_api::Command>) {}
+
+    fn forget_document(&mut self, _owner: &str, _document: &str) {}
+
+    fn service(&self, _id: &str) -> Option<&(dyn std::any::Any + Send + Sync)> {
+        None
+    }
+
+    fn service_provider(&self, _id: &str) -> Option<String> {
+        None
+    }
+
+    fn gpu(&self) -> Option<&uniwow_api::egui_wgpu::RenderState> {
+        None
+    }
+
+    fn gpu_memory(&self) -> Option<u64> {
+        None
+    }
+
+    fn draw_panel(
+        &mut self,
+        _owner: &str,
+        _objects: &uniwow_api::ui::SharedUi,
+        _panel: &str,
+        _ui: &mut uniwow_api::egui::Ui,
+    ) {
+    }
+
+    fn draw_dialogs(&mut self, _owner: &str, _objects: &uniwow_api::ui::SharedUi, _egui: &uniwow_api::egui::Context) {}
+
+    fn adopt_objects(&mut self, _owner: &str, _objects: &uniwow_api::ui::SharedUi) {}
+
+    fn setting(&self, _module: &str, _key: &str) -> Option<uniwow_api::serde_json::Value> {
+        None
+    }
+
+    fn set_setting(&mut self, _module: &str, _key: &str, _value: uniwow_api::serde_json::Value) {}
+
+    fn report_failure(&mut self, _reporter: &str, _culprit: &str, _message: &str) {}
+
+    fn spawn(&mut self, _owner: &str, label: &str, _job: uniwow_api::JobFn) -> uniwow_api::JobId {
+        self.spawned.push(label.to_owned());
+        uniwow_api::JobId(100 + self.spawned.len() as u64)
+    }
+
+    fn spawn_thread(&mut self, owner: &str, label: &str, job: uniwow_api::JobFn) -> uniwow_api::JobId {
+        self.spawn(owner, label, job)
+    }
+
+    fn cancel(&mut self, _owner: &str, _job: uniwow_api::JobId) {}
+
+    fn call(&mut self, _caller: &str, _name: &str, _arguments: uniwow_api::serde_json::Value) -> uniwow_api::CallId {
+        uniwow_api::CallId(1)
+    }
+
+    fn editor(&self, _caller: &str) -> uniwow_api::Editor {
+        unimplemented!("the module asks no editor here")
+    }
+}
+
+/// The module opening a client of two archives, their jobs numbered 1 and 2.
+fn opening() -> crate::AssetsModule {
+    let mut assets = crate::AssetsModule::default();
+    assets.files.set(crate::FilesState::Opening);
+    assets.opening.folder = PathBuf::from("E:\\client");
+    assets.opening.paths = vec![
+        PathBuf::from("E:\\client\\Data\\a.MPQ"),
+        PathBuf::from("E:\\client\\Data\\b.MPQ"),
+    ];
+    assets.opening.sources = vec![None, None];
+    assets.opening.jobs = [(uniwow_api::JobId(1), 0), (uniwow_api::JobId(2), 1)]
+        .into_iter()
+        .collect();
+    assets
+}
+
+#[test]
+fn an_archive_whose_opening_failed_or_was_cancelled_is_said_and_the_index_follows() {
+    use uniwow_api::{JobOutcome, Module};
+    let mut assets = opening();
+    let mut host = JobsHost::default();
+    let mut ctx = uniwow_api::Context::new(&mut host, "assets");
+    assets.on_job(uniwow_api::JobId(1), JobOutcome::Panicked("boom".to_owned()), &mut ctx);
+    assets.on_job(uniwow_api::JobId(2), JobOutcome::Cancelled, &mut ctx);
+    assert_eq!(
+        assets.refused,
+        vec![
+            "E:\\client\\Data\\a.MPQ: its opening failed: boom".to_owned(),
+            "E:\\client\\Data\\b.MPQ: its opening was cancelled".to_owned(),
+        ]
+    );
+    assert!(assets.opening.index.is_some(), "the index is made of what is left");
+    assert_eq!(host.spawned, vec!["Index the client's files".to_owned()]);
+}
+
+#[test]
+fn an_index_that_failed_or_was_cancelled_leaves_no_client_opening() {
+    use uniwow_api::{JobOutcome, Module};
+    for (outcome, why) in [
+        (JobOutcome::Panicked("boom".to_owned()), "failed: boom"),
+        (JobOutcome::Cancelled, "was cancelled"),
+    ] {
+        let mut assets = opening();
+        assets.opening.jobs.clear();
+        assets.opening.index = Some(uniwow_api::JobId(9));
+        let mut host = JobsHost::default();
+        assets.on_job(
+            uniwow_api::JobId(9),
+            outcome,
+            &mut uniwow_api::Context::new(&mut host, "assets"),
+        );
+        assert_eq!(
+            uniwow_api::vfs::Vfs::state(assets.files.as_ref()),
+            uniwow_api::vfs::VfsState::NoClient(format!("E:\\client: the index of the files {why}"))
+        );
+    }
+}
+
+/// The panel of `assets` typed into: its field of the folder clicked, `typed` written, then Enter.
+fn type_folder(assets: &mut crate::AssetsModule, typed: &str) {
+    use uniwow_api::Module;
+    let ctx = uniwow_api::egui::Context::default();
+    let mut host = JobsHost::default();
+    let mut frame = |assets: &mut crate::AssetsModule, events: Vec<uniwow_api::egui::Event>| {
+        let input = uniwow_api::egui::RawInput {
+            screen_rect: Some(uniwow_api::egui::Rect::from_min_size(
+                uniwow_api::egui::Pos2::ZERO,
+                uniwow_api::egui::vec2(1000.0, 400.0),
+            )),
+            events,
+            ..uniwow_api::egui::RawInput::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            assets.panel_ui("assets", ui, &mut uniwow_api::Context::new(&mut host, "assets"));
+        });
+        output.textures_delta.clear();
+        output
+    };
+    let label = frame(assets, Vec::new())
+        .shapes
+        .iter()
+        .find_map(|clipped| match &clipped.shape {
+            uniwow_api::egui::Shape::Text(text) if text.galley.text() == "Folder of the client" => {
+                Some(uniwow_api::egui::Rect::from_min_size(text.pos, text.galley.size()))
+            }
+            _ => None,
+        })
+        .expect("the label is drawn");
+    let at = uniwow_api::egui::pos2(label.right() + 40.0, label.center().y);
+    let button = |pressed| uniwow_api::egui::Event::PointerButton {
+        pos: at,
+        button: uniwow_api::egui::PointerButton::Primary,
+        pressed,
+        modifiers: uniwow_api::egui::Modifiers::NONE,
+    };
+    frame(assets, vec![uniwow_api::egui::Event::PointerMoved(at), button(true)]);
+    frame(assets, vec![button(false)]);
+    frame(assets, vec![uniwow_api::egui::Event::Text(typed.to_owned())]);
+    let enter = uniwow_api::egui::Event::Key {
+        key: uniwow_api::egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: uniwow_api::egui::Modifiers::NONE,
+    };
+    frame(assets, vec![enter]);
+    frame(assets, Vec::new());
+}
+
+#[test]
+fn a_folder_typed_is_opened_once_its_field_is_left_and_one_that_is_none_said() {
+    let folder = scratch("typed");
+    let mut assets = crate::AssetsModule::default();
+    type_folder(&mut assets, &folder.display().to_string());
+    assert!(!assets.typed_wrong);
+    let uniwow_api::vfs::VfsState::NoClient(reason) = uniwow_api::vfs::Vfs::state(assets.files.as_ref()) else {
+        panic!("not opened")
+    };
+    assert!(
+        reason.starts_with(&folder.display().to_string()),
+        "opened, without a client in it: {reason}"
+    );
+    let mut assets = crate::AssetsModule::default();
+    type_folder(&mut assets, &folder.join("nowhere").display().to_string());
+    assert!(assets.typed_wrong, "no such folder");
     let _ = std::fs::remove_dir_all(folder);
 }
 

@@ -272,7 +272,7 @@ impl Bridge {
     }
 
     /// The property, if it exists and its module is running.
-    fn property(&self, path: &str) -> Result<PropertyEntry, String> {
+    fn entry(&self, path: &str) -> Result<PropertyEntry, String> {
         let entry = self
             .properties
             .read()
@@ -339,13 +339,13 @@ impl EditorBackend for Bridge {
 
     fn read_property(&self, caller: &str, path: &str) -> Result<PropertyValue, String> {
         self.active(caller)?;
-        let entry = self.property(path)?;
+        let entry = self.entry(path)?;
         self.run_property(&entry, || (entry.read)())
     }
 
     fn write_property(&self, caller: &str, path: &str, value: PropertyValue) -> Result<(), String> {
         self.active(caller)?;
-        let entry = self.property(path)?;
+        let entry = self.entry(path)?;
         if value.kind() != entry.info.kind {
             return Err(format!(
                 "'{path}' takes a {}, not a {}",
@@ -991,7 +991,7 @@ mod tests {
     #[test]
     fn a_property_is_found_by_its_path_while_its_module_runs() {
         let (bridge, _scale) = bridge_with_scale();
-        let property = |path: &str| uniwow_api::EditorBackend::property(bridge.as_ref(), path);
+        let property = |path: &str| bridge.property(path);
         let found = property("cube/scale").map(|info| (info.path, info.owner));
         assert_eq!(found, Some(("cube/scale".to_owned(), "cube".to_owned())));
         assert!(property("cube/size").is_none());
