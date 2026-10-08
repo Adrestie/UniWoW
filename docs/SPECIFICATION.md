@@ -5797,6 +5797,62 @@ waits for the next, 33 ms).
   a second, 4 to 5 % slow, 34 ms at the longest; the flights of the user loaded many more models at
   once.
 
+#### Step 9.6f, proposed: the occlusion on the GPU
+
+Asked by the user once the terrain, the doodads and the buildings of a whole map were drawn (a
+branch without the distance of the view: 43 frames a second over Northrend, 49 over the Eastern
+Kingdoms, 58 over Kalimdor, the whole map in sight). In three parts, each measured and reviewed:
+
+1. **9.6f1, the two passes and the pyramid**: the pass of the view cut in two, the pyramid of the
+   depth built between them, and a point of computing for the layers there; nothing culled yet, so
+   that the cost of the cut alone is measured.
+2. **9.6f2, the instances of `models`**: the choice by the GPU (9.4e3) made twice. Before the first
+   pass, the instances in sight that were drawn at the frame before; between the passes, every
+   instance in sight tested against the pyramid by its box, those found in sight and not drawn yet
+   drawn in the second pass, and those found in sight kept as drawn for the next frame. The
+   blended are drawn only when found in sight.
+3. **9.6f3, the groups of `buildings`**: the groups the CPU lists by the portals and the view tested
+   on the GPU the same way, in two phases by what was seen at the frame before.
+
+Measured where the user flew, with and without, as 9.6f says: the four cities and the whole maps.
+
+#### Step 9.6f1, as built: the two passes and the pyramid
+
+- **The interface** (`core/api`): `Phase::Revealed`, between `Opaque` and the blended phases, for
+  the opaque a layer finds in sight against the pyramid; `Phase::first_pass`, true for `Opaque`
+  only. `viewport::Pyramid`: the view of every level, the size, the levels and a generation counting
+  the pyramids made, so that a layer keeps its bind group while the view keeps its size.
+  `Layer::occlude` and `Layer::occludes`, as `compute` and `computes`: an encoder of the layer's own,
+  submitted between the passes, inside a validation error scope; a layer that panics or fails there
+  is removed and its module reported.
+- **The frame** (`viewport`), one submission: the computing of the layers; the first pass, the grid
+  and the opaque phase, its colour and depth stored, not resolved, then the pyramid in the same
+  encoder; what the layers compute against it; the second pass, loading both, then `Revealed`, the
+  blended phases, and the resolve.
+- **The pyramid** (`viewport/src/pyramid.rs`): an `R32Float` texture of the size of the view, its
+  levels those of a texture, halved and rounded down to one texel; its first level the least of the
+  four samples of each pixel, read as a `texture_depth_multisampled_2d` (the depth target is now
+  `TEXTURE_BINDING` too); each next level the least of the 2 × 2 texels under each texel, the last
+  of a row or a column reading on to the end of the level under it, three texels where that side
+  is odd, so that every texel is covered. A compute pass, a dispatch a level, of 8 × 8 threads.
+  Made again with the targets, when the view changes size.
+- **Its time**: the GPU timer writes the beginning of the first pass and the end of the second, the
+  pyramid apart, and each layer's computing against the pyramid with its computing; the
+  statistics say *the pyramid of the depth N ms*.
+- **The layers**: none occludes yet, and every one draws nothing in `Revealed`.
+- **Tested**: the pyramid of a depth of 5 × 3, with four samples and with one, each sample of a
+  pixel at another depth, read back level by level against the rule; a layer reading the last level
+  between the passes reads the depth the first pass of the same frame left, and what the second
+  draws is not in it; what a layer reveals nearer than the ground is drawn over it, what lies behind
+  the ground hidden by the depth the first pass left; a layer panicking or failing on the GPU while
+  testing against the depth is removed and reported; the timer, the pyramid apart. 10 changes made
+  on purpose (the least of the samples, every sample, the least when reduced, the last texel of an
+  odd side, the pyramid built before the first pass, the colour and the depth of the first pass
+  kept, `Revealed` in the second pass, the layers asked to occlude, the pyramid timed) all made a
+  test fail, two once the samples of a pixel were set at depths in no order.
+- **To measure by the user**: the frames a second and the line *GPU* of the statistics, before and
+  after this step, on the whole maps and in the cities.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

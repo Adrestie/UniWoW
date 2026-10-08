@@ -261,15 +261,20 @@ pub enum Stage {
     Scene,
 }
 
-/// The phases a frame is drawn in: what every layer draws opaque, writing the depth; then what
-/// every layer blends over it, split at the surface of the water (`liquids::Surfaces::phase`) so
-/// that a blended batch under the water is seen through it: what lies beyond the surface from the
-/// eye, under it from over it and over it from under it; the water; then what lies on the eye's
-/// side. A blended batch of a layer is drawn over the opaque ones of every other, whatever their
-/// order. The sky of the ground begins the first blended phase, where nothing opaque is drawn.
+/// The phases a frame is drawn in, over two passes. The first draws what every layer draws opaque,
+/// writing the depth, such as what it saw at the frame before; the depth it leaves is reduced to a
+/// pyramid (`Pyramid`), which the layers test the rest of what they draw against between the two
+/// passes (`Layer::occlude`). The second draws the opaque they found in sight so (`Revealed`), then
+/// what every layer blends over it all, split at the surface of the water
+/// (`liquids::Surfaces::phase`) so that a blended batch under the water is seen through it: what
+/// lies beyond the surface from the eye, under it from over it and over it from under it; the
+/// water; then what lies on the eye's side. A blended batch of a layer is drawn over the opaque ones
+/// of every other, whatever their order. The sky of the ground begins the first blended phase, where
+/// nothing opaque is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Opaque,
+    Revealed,
     Beyond,
     Water,
     Near,
@@ -277,12 +282,33 @@ pub enum Phase {
 
 impl Phase {
     /// The phases, in the order they are drawn.
-    pub const ALL: [Phase; 4] = [Phase::Opaque, Phase::Beyond, Phase::Water, Phase::Near];
+    pub const ALL: [Phase; 5] = [Phase::Opaque, Phase::Revealed, Phase::Beyond, Phase::Water, Phase::Near];
 
     /// Whether what is drawn in it is blended over what is drawn before.
     pub fn blended(self) -> bool {
-        self != Phase::Opaque
+        !matches!(self, Phase::Opaque | Phase::Revealed)
     }
+
+    /// Whether it is drawn in the first pass, whose depth the pyramid is made of.
+    pub fn first_pass(self) -> bool {
+        self == Phase::Opaque
+    }
+}
+
+/// The depth the first pass of a frame left, reduced to a pyramid of its farthest values (Hi-Z):
+/// an `R32Float` texture of `levels` levels, the first of the size of the view, each next one half
+/// the one before rounded down, as the levels of a texture are; each texel holds the least depth
+/// (reverse Z: the farthest) of the 2 × 2 texels under it, and the last of a row or a column of
+/// those beyond them too, so that every texel is covered. A box whose nearest depth is less than
+/// the texels it covers at a level is hidden. Made again when the view changes size, which
+/// `generation` counts, so that a layer keeps its bind group while it stays.
+#[derive(Clone, Copy, Debug)]
+pub struct Pyramid<'a> {
+    /// Every level, read with `textureLoad` as a `texture_2d<f32>` that is not filterable.
+    pub view: &'a wgpu::TextureView,
+    pub size: [u32; 2],
+    pub levels: u32,
+    pub generation: u64,
 }
 
 /// Drawn on the interface thread, but may be created on any thread.
@@ -307,6 +333,27 @@ pub trait Layer: Send {
     /// Whether the layer computes at this frame: an encoder is made for `compute` only then. Read at
     /// each frame, after `prepare`; none by default.
     fn computes(&self) -> bool {
+        false
+    }
+
+    /// Records what the layer computes against the depth the first pass of this frame left, such as
+    /// testing what it did not draw in `Phase::Opaque` to draw in `Phase::Revealed` what is in
+    /// sight, into an encoder of its own, submitted between the two passes. It runs at each frame
+    /// when `occludes` says so, inside a validation error scope, which the encoder is finished in: a
+    /// layer that panics or fails here is removed and its module reported. Nothing by default.
+    fn occlude(
+        &mut self,
+        gpu: &egui_wgpu::RenderState,
+        view: &View,
+        pyramid: &Pyramid<'_>,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        let _ = (gpu, view, pyramid, encoder);
+    }
+
+    /// Whether the layer computes against the pyramid at this frame: an encoder is made for
+    /// `occlude` only then. Read at each frame, after `prepare`; none by default.
+    fn occludes(&self) -> bool {
         false
     }
 
@@ -405,7 +452,17 @@ pub struct LayerStats {
 
 #[cfg(test)]
 mod tests {
-    use super::{Allowance, BAND, BANDS, Demand, allow};
+    use super::{Allowance, BAND, BANDS, Demand, Phase, allow};
+
+    #[test]
+    fn the_opaque_is_drawn_in_the_first_pass_what_is_revealed_after_it_then_the_blended() {
+        assert_eq!(Phase::ALL[0], Phase::Opaque);
+        assert_eq!(Phase::ALL[1], Phase::Revealed);
+        let first: Vec<Phase> = Phase::ALL.into_iter().filter(|phase| phase.first_pass()).collect();
+        assert_eq!(first, [Phase::Opaque]);
+        let blended: Vec<Phase> = Phase::ALL.into_iter().filter(|phase| phase.blended()).collect();
+        assert_eq!(blended, [Phase::Beyond, Phase::Water, Phase::Near]);
+    }
 
     /// A demand of `fixed` bytes, wanting `bytes` in each of the bands `wanted` and holding `held`.
     fn demand(fixed: u64, wanted: std::ops::Range<usize>, bytes: u64, held: u64) -> Demand {

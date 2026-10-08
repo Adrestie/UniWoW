@@ -423,7 +423,7 @@ impl Layer for BuildingsLayer {
             Phase::Opaque => &self.opaque,
             Phase::Beyond => &self.beyond,
             Phase::Near => &self.near,
-            Phase::Water => return,
+            Phase::Revealed | Phase::Water => return,
         };
         let (Some((_, camera)), Some((group, _)), Some(commands), Some((vertices, _)), Some((indices, _))) = (
             &self.camera,

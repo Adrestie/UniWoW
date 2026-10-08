@@ -33,11 +33,12 @@ impl LayerTiming {
     }
 }
 
-/// What the GPU spent on a frame, in milliseconds: on it all, and on each layer timed, its
-/// computing and its drawing.
+/// What the GPU spent on a frame, in milliseconds: on it all, on the pyramid of the depth of its
+/// first pass, and on each layer timed, its computing, against the pyramid too, and its drawing.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GpuFrame {
     pub total: f64,
+    pub pyramid: f64,
     pub layers: Vec<(String, f64, f64)>,
 }
 
@@ -170,7 +171,10 @@ impl Stats {
         }
         lines.push(if timed {
             let (gpu, longest) = spread(self.gpu.iter().map(|(_, gpu)| gpu.total));
-            format!("GPU: {gpu:.2} ms a frame, the longest {longest:.2}")
+            let (pyramid, longest_pyramid) = spread(self.gpu.iter().map(|(_, gpu)| gpu.pyramid));
+            format!(
+                "GPU: {gpu:.2} ms a frame, the longest {longest:.2}; the pyramid of the depth {pyramid:.2} ({longest_pyramid:.2})"
+            )
         } else {
             "GPU: not timed, the device has no timestamps".to_owned()
         });
@@ -259,25 +263,28 @@ const MAPPED: u8 = 2;
 
 /// The layers whose computing and drawing a frame times apart, at most.
 pub const TIMED_LAYERS: usize = 16;
-/// The timestamps of a frame: its pass, then for each layer timed its computing begun and ended and
-/// its drawing of each phase begun and ended.
-const QUERIES: u32 = 2 + PER_LAYER * TIMED_LAYERS as u32;
-const PER_LAYER: u32 = 2 + 2 * Phase::ALL.len() as u32;
+/// The timestamps of a frame: the beginning of its first pass and the end of its second, the
+/// pyramid of the depth begun and ended, then for each layer timed its computing begun and ended,
+/// its computing against the pyramid begun and ended, and its drawing of each phase begun and ended.
+const QUERIES: u32 = FRAME + PER_LAYER * TIMED_LAYERS as u32;
+const FRAME: u32 = 4;
+const PER_LAYER: u32 = 4 + 2 * Phase::ALL.len() as u32;
 
-/// The milliseconds of the pass of a frame from its timestamps `ticks`, of `period` nanoseconds,
-/// and of each of its `layers` layers timed: its computing, and its drawing in every phase.
-pub(crate) fn spans(ticks: &[u64], layers: usize, period: f64) -> (f64, Vec<(f64, f64)>) {
+/// The milliseconds of the passes of a frame from its timestamps `ticks`, of `period` nanoseconds,
+/// of the pyramid of its depth, and of each of its `layers` layers timed: its computing, before the
+/// passes and between them, and its drawing in every phase.
+pub(crate) fn spans(ticks: &[u64], layers: usize, period: f64) -> (f64, f64, Vec<(f64, f64)>) {
     let span = |start: usize| ticks[start + 1].saturating_sub(ticks[start]) as f64 * period / 1e6;
     let timed = (0..layers)
         .map(|layer| {
-            let at = 2 + PER_LAYER as usize * layer;
+            let at = FRAME as usize + PER_LAYER as usize * layer;
             (
-                span(at),
-                (0..Phase::ALL.len()).map(|phase| span(at + 2 + 2 * phase)).sum(),
+                span(at) + span(at + 2),
+                (0..Phase::ALL.len()).map(|phase| span(at + 4 + 2 * phase)).sum(),
             )
         })
         .collect();
-    (span(0), timed)
+    (span(0), span(2), timed)
 }
 
 /// Times the frames of the view on the GPU: the pass by its timestamps at its start and its end,
@@ -346,14 +353,23 @@ impl GpuTimer {
             .position(|readback| readback.state.load(Ordering::Acquire) == FREE);
     }
 
-    /// Where the pass of this frame writes its timestamps, when the frame is timed.
-    pub fn writes(&self) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
+    /// Where the first pass of this frame writes its beginning, or the second its end, when the
+    /// frame is timed.
+    pub fn writes(&self, first: bool) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
         self.current?;
         Some(wgpu::RenderPassTimestampWrites {
             query_set: &self.set,
-            beginning_of_pass_write_index: Some(0),
-            end_of_pass_write_index: Some(1),
+            beginning_of_pass_write_index: first.then_some(0),
+            end_of_pass_write_index: (!first).then_some(1),
         })
+    }
+
+    /// Writes the beginning or the end of the pyramid of the depth into `encoder`, when the frame
+    /// is timed and the device writes timestamps inside encoders.
+    pub fn pyramid(&self, encoder: &mut wgpu::CommandEncoder, end: bool) {
+        if self.current.is_some() && self.inside {
+            encoder.write_timestamp(&self.set, 2 + u32::from(end));
+        }
     }
 
     /// The number of the layer `owner` among those of this frame timed apart; none when the frame
@@ -368,19 +384,25 @@ impl GpuTimer {
 
     /// Writes the beginning or the end of the computing of the layer `layer` into `encoder`.
     pub fn computing(&self, encoder: &mut wgpu::CommandEncoder, layer: u32, end: bool) {
-        encoder.write_timestamp(&self.set, 2 + PER_LAYER * layer + u32::from(end));
+        encoder.write_timestamp(&self.set, FRAME + PER_LAYER * layer + u32::from(end));
+    }
+
+    /// Writes the beginning or the end of the computing of the layer `layer` against the pyramid
+    /// into `encoder`.
+    pub fn occluding(&self, encoder: &mut wgpu::CommandEncoder, layer: u32, end: bool) {
+        encoder.write_timestamp(&self.set, FRAME + PER_LAYER * layer + 2 + u32::from(end));
     }
 
     /// Writes the beginning or the end of the drawing of the layer `layer` in `phase` into the pass.
     pub fn drawing(&self, pass: &mut wgpu::RenderPass<'_>, layer: u32, phase: Phase, end: bool) {
         let phase = Phase::ALL.iter().position(|each| *each == phase).unwrap_or(0) as u32;
-        pass.write_timestamp(&self.set, 2 + PER_LAYER * layer + 2 + 2 * phase + u32::from(end));
+        pass.write_timestamp(&self.set, FRAME + PER_LAYER * layer + 4 + 2 * phase + u32::from(end));
     }
 
-    /// After the pass: the timestamps written copied to the buffer of this frame.
+    /// After the second pass: the timestamps written copied to the buffer of this frame.
     pub fn resolve(&self, encoder: &mut wgpu::CommandEncoder) {
         if let Some(current) = self.current {
-            let written = 2 + PER_LAYER * self.owners.len() as u32;
+            let written = FRAME + PER_LAYER * self.owners.len() as u32;
             encoder.resolve_query_set(&self.set, 0..written, &self.resolve, 0);
             encoder.copy_buffer_to_buffer(
                 &self.resolve,
@@ -418,7 +440,7 @@ impl GpuTimer {
                 data.as_chunks::<8>()
                     .0
                     .iter()
-                    .take(2 + PER_LAYER as usize * readback.owners.len())
+                    .take(FRAME as usize + PER_LAYER as usize * readback.owners.len())
                     .map(|bytes| u64::from_le_bytes(*bytes))
                     .collect()
             });
@@ -427,9 +449,10 @@ impl GpuTimer {
             let Some(ticks) = ticks else {
                 continue;
             };
-            let (total, layers) = spans(&ticks, readback.owners.len(), self.period);
+            let (total, pyramid, layers) = spans(&ticks, readback.owners.len(), self.period);
             frames.push(GpuFrame {
                 total,
+                pyramid,
                 layers: readback
                     .owners
                     .iter()

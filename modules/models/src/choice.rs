@@ -865,7 +865,7 @@ impl Choice {
                 tables.records,
                 blended_counts + beyond as u32,
             ),
-            Phase::Water => return 0,
+            Phase::Revealed | Phase::Water => return 0,
         };
         for (region, (state, start, count)) in regions.iter().enumerate() {
             pass.set_pipeline(&pipeline(*state));

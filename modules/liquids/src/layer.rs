@@ -167,7 +167,7 @@ impl Layer for LiquidsLayer {
         let (pipeline, water) = match phase {
             Phase::Opaque => (&self.shared.opaque, false),
             Phase::Water => (&self.shared.water, true),
-            Phase::Beyond | Phase::Near => return,
+            Phase::Revealed | Phase::Beyond | Phase::Near => return,
         };
         let (Some((_, camera)), Some((group, _)), Some((vertices, _)), Some((indices, _))) = (
             &self.camera,

@@ -9,6 +9,7 @@
 
 mod camera;
 mod grid;
+mod pyramid;
 mod stats;
 
 use std::any::Any;
@@ -24,7 +25,7 @@ use uniwow_api::hotkey::{Hotkey, HotkeyKind, Keys};
 use uniwow_api::journal;
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::viewport::{
-    self, Allowance, Demand, Drawing, Fog, Frame, Label, Layer, MAX_FRAME_WAIT, Phase, Sun, Target, View,
+    self, Allowance, Demand, Drawing, Fog, Frame, Label, Layer, MAX_FRAME_WAIT, Phase, Pyramid, Sun, Target, View,
 };
 use uniwow_api::{
     Context, DockArea, Event, MODULE_FAILED_TOPIC, Module, PropertyKind, PropertyValue, Registrar, egui, egui_wgpu,
@@ -33,6 +34,7 @@ use uniwow_api::{
 
 use camera::{FOV, OrbitCamera, REACH};
 use grid::Grid;
+use pyramid::Builder;
 use stats::{GpuTimer, LayerTiming, Sample, Stats};
 
 /// The setting that shows the statistics over the view.
@@ -408,6 +410,7 @@ struct Targets {
     msaa: wgpu::TextureView,
     resolved: wgpu::TextureView,
     depth: wgpu::TextureView,
+    pyramid: pyramid::Pyramid,
     texture_id: egui::TextureId,
 }
 
@@ -416,6 +419,8 @@ struct ViewportModule {
     camera: Camera,
     targets: Option<Targets>,
     grid: Option<Grid>,
+    /// What builds the pyramids of the depth, made once.
+    pyramids: Option<Arc<Builder>>,
     start: Instant,
     frames: Arc<FrameSignal>,
     /// The frames submitted, the time of the last one, and the time between two, averaged.
@@ -451,6 +456,7 @@ impl Default for ViewportModule {
             camera: Arc::default(),
             targets: None,
             grid: None,
+            pyramids: None,
             start: Instant::now(),
             frames: Arc::default(),
             submitted: 0,
@@ -722,12 +728,18 @@ impl ViewportModule {
             extent,
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         );
+        // Read by the pyramid between the two passes.
         let depth = texture(
             "viewport depth",
             TARGET.depth_format,
             TARGET.sample_count,
-            wgpu::TextureUsages::RENDER_ATTACHMENT,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         );
+        let builder = self
+            .pyramids
+            .get_or_insert_with(|| Arc::new(Builder::new(device, TARGET.sample_count)))
+            .clone();
+        let pyramid = pyramid::Pyramid::new(device, builder, &depth, size);
 
         let mut renderer = gpu.renderer.write();
         let texture_id = match &self.targets {
@@ -747,6 +759,7 @@ impl ViewportModule {
             msaa,
             resolved,
             depth,
+            pyramid,
             texture_id,
         });
     }
@@ -770,6 +783,7 @@ impl ViewportModule {
             colour: &targets.msaa,
             resolve: Some(&targets.resolved),
             depth: &targets.depth,
+            pyramid: &targets.pyramid,
         };
         let drawn = draw_frame(
             &self.layers,
@@ -918,6 +932,8 @@ struct PassTargets<'a> {
     colour: &'a wgpu::TextureView,
     resolve: Option<&'a wgpu::TextureView>,
     depth: &'a wgpu::TextureView,
+    /// Of `depth`, built between the two passes.
+    pyramid: &'a pyramid::Pyramid,
 }
 
 /// What a layer gives its frame: its bundle, or none for its drawing in the pass; what it computes;
@@ -994,21 +1010,85 @@ fn draw_frame(
     });
 
     let submitting = Instant::now();
-    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("viewport"),
-    });
     let mut panicked: Vec<Option<String>> = vec![None; entries.len()];
     let mut drawing_in_pass = Duration::ZERO;
+    // The first pass: the opaque phase, its colour and depth kept for the second; then the pyramid
+    // of the depth it leaves.
+    let mut first = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("viewport first pass"),
+    });
     {
-        let timestamp_writes = timer.as_deref().and_then(GpuTimer::writes);
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("viewport"),
+        let mut pass = first.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("viewport first pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: targets.colour,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(BACKGROUND),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: targets.depth,
+                depth_ops: Some(wgpu::Operations {
+                    // Reverse Z: infinity is 0.
+                    load: wgpu::LoadOp::Clear(0.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: timer.as_deref().and_then(|timer| timer.writes(true)),
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        if let Some(grid) = grid {
+            grid.draw(&mut pass);
+        }
+        drawing_in_pass += draw_phases(
+            &mut pass,
+            true,
+            &mut entries,
+            &mut prepared,
+            &mut panicked,
+            gpu,
+            view,
+            timer.as_deref(),
+        );
+    }
+    if let Some(timer) = timer.as_deref() {
+        timer.pyramid(&mut first, false);
+    }
+    targets.pyramid.build(&mut first);
+    if let Some(timer) = timer.as_deref() {
+        timer.pyramid(&mut first, true);
+    }
+    // What the layers compute against it, each in an encoder of its own.
+    let pyramid = targets.pyramid.given();
+    let mut occluded = Vec::new();
+    for ((entry, layer), panic) in entries.iter_mut().zip(&prepared).zip(&mut panicked) {
+        if panic.is_some() {
+            continue;
+        }
+        match occlude(entry, gpu, view, &pyramid, timer.as_deref().zip(layer.timed)) {
+            Ok(Some(buffer)) => occluded.push(buffer),
+            Ok(None) => {}
+            Err(message) => *panic = Some(message),
+        }
+    }
+    // The second pass: what they found in sight, then the blended phases; resolved.
+    let mut second = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("viewport second pass"),
+    });
+    {
+        let mut pass = second.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("viewport second pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: targets.colour,
                 depth_slice: None,
                 resolve_target: targets.resolve,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(BACKGROUND),
+                    load: wgpu::LoadOp::Load,
                     store: if targets.resolve.is_some() {
                         wgpu::StoreOp::Discard
                     } else {
@@ -1019,76 +1099,43 @@ fn draw_frame(
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: targets.depth,
                 depth_ops: Some(wgpu::Operations {
-                    // Reverse Z: infinity is 0.
-                    load: wgpu::LoadOp::Clear(0.0),
+                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Discard,
                 }),
                 stencil_ops: None,
             }),
-            timestamp_writes,
+            timestamp_writes: timer.as_deref().and_then(|timer| timer.writes(false)),
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        if let Some(grid) = grid {
-            grid.draw(&mut pass);
-        }
-        for (index, phase) in Phase::ALL.into_iter().enumerate() {
-            for ((entry, layer), panic) in entries.iter_mut().zip(&mut prepared).zip(&mut panicked) {
-                // A layer that panicked in a phase is not drawn in the next.
-                if panic.is_some() {
-                    continue;
-                }
-                if let (Some(timer), Some(timed)) = (timer.as_deref(), layer.timed) {
-                    timer.drawing(&mut pass, timed, phase, false);
-                }
-                match &layer.bundles {
-                    Some(bundles) => pass.execute_bundles([&bundles[index]]),
-                    None => {
-                        let started = Instant::now();
-                        let drawn = catch_unwind(AssertUnwindSafe(|| {
-                            entry.layer.draw_pass(gpu, &TARGET, view, phase, &mut pass);
-                        }));
-                        let took = started.elapsed();
-                        drawing_in_pass += took;
-                        layer.record = Some(layer.record.unwrap_or_default() + took);
-                        if let Err(payload) = drawn {
-                            *panic = Some(format!(
-                                "its viewport layer panicked drawing in the pass: {}",
-                                panic_text(payload)
-                            ));
-                        }
-                    }
-                }
-                if let (Some(timer), Some(timed)) = (timer.as_deref(), layer.timed) {
-                    timer.drawing(&mut pass, timed, phase, true);
-                }
-            }
-        }
+        drawing_in_pass += draw_phases(
+            &mut pass,
+            false,
+            &mut entries,
+            &mut prepared,
+            &mut panicked,
+            gpu,
+            view,
+            timer.as_deref(),
+        );
     }
     if let Some(timer) = timer.as_deref() {
-        timer.resolve(&mut encoder);
+        timer.resolve(&mut second);
     }
-    // A GPU error in the pass is learnt here only: it is put on the layers drawn in it.
-    let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let finished = catch_unwind(AssertUnwindSafe(move || encoder.finish()));
-    let error = resolved(scope.pop()).flatten();
-    let failed_pass = match (&finished, error) {
-        (Err(payload), _) => Some(format!(
-            "the pass it drew in panicked once finished: {}",
-            panic_text_ref(payload)
-        )),
-        (Ok(_), Some(error)) => Some(format!("a GPU error in the pass it drew in: {error}")),
-        (Ok(_), None) => None,
-    };
+    // A GPU error in a pass is learnt here only: it is put on the layers drawn in the passes.
+    let (first, failed_first) = finish(gpu, first);
+    let (second, failed_second) = finish(gpu, second);
+    let failed_pass = failed_first.or(failed_second);
     let computed: Vec<wgpu::CommandBuffer> = prepared.iter_mut().filter_map(|layer| layer.computed.take()).collect();
-    match finished.ok().filter(|_| failed_pass.is_none()) {
-        Some(frame) => {
-            gpu.queue.submit(computed.into_iter().chain([frame]));
+    match (first, second) {
+        (Some(first), Some(second)) if failed_pass.is_none() => {
+            gpu.queue
+                .submit(computed.into_iter().chain([first]).chain(occluded).chain([second]));
             if let Some(timer) = timer {
                 timer.submitted();
             }
         }
-        None => {
+        _ => {
             gpu.queue.submit(computed);
             // Not timed: what its timestamps would read was not submitted.
             if let Some(timer) = timer {
@@ -1133,6 +1180,131 @@ fn draw_frame(
         labels,
         submit,
         pass_error: failed_pass,
+    }
+}
+
+/// Draws the phases of the first pass, or of the second, of every layer in its order, each phase
+/// of a layer between its timestamps when the frame times it; a layer that panicked is not drawn
+/// again. Returns the time the layers drawing in the pass took.
+#[allow(clippy::too_many_arguments)]
+fn draw_phases(
+    pass: &mut wgpu::RenderPass<'_>,
+    first: bool,
+    entries: &mut [Entry],
+    prepared: &mut [Prepared],
+    panicked: &mut [Option<String>],
+    gpu: &egui_wgpu::RenderState,
+    view: &View,
+    timer: Option<&GpuTimer>,
+) -> Duration {
+    let mut drawing_in_pass = Duration::ZERO;
+    for (index, phase) in Phase::ALL.into_iter().enumerate() {
+        if phase.first_pass() != first {
+            continue;
+        }
+        for ((entry, layer), panic) in entries.iter_mut().zip(prepared.iter_mut()).zip(panicked.iter_mut()) {
+            // A layer that panicked in a phase is not drawn in the next.
+            if panic.is_some() {
+                continue;
+            }
+            if let (Some(timer), Some(timed)) = (timer, layer.timed) {
+                timer.drawing(pass, timed, phase, false);
+            }
+            match &layer.bundles {
+                Some(bundles) => pass.execute_bundles([&bundles[index]]),
+                None => {
+                    let started = Instant::now();
+                    let drawn = catch_unwind(AssertUnwindSafe(|| {
+                        entry.layer.draw_pass(gpu, &TARGET, view, phase, pass);
+                    }));
+                    let took = started.elapsed();
+                    drawing_in_pass += took;
+                    layer.record = Some(layer.record.unwrap_or_default() + took);
+                    if let Err(payload) = drawn {
+                        *panic = Some(format!(
+                            "its viewport layer panicked drawing in the pass: {}",
+                            panic_text(payload)
+                        ));
+                    }
+                }
+            }
+            if let (Some(timer), Some(timed)) = (timer, layer.timed) {
+                timer.drawing(pass, timed, phase, true);
+            }
+        }
+    }
+    drawing_in_pass
+}
+
+/// The encoder of a pass finished inside a validation error scope; or why the pass failed.
+fn finish(
+    gpu: &egui_wgpu::RenderState,
+    encoder: wgpu::CommandEncoder,
+) -> (Option<wgpu::CommandBuffer>, Option<String>) {
+    let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let finished = catch_unwind(AssertUnwindSafe(move || encoder.finish()));
+    let error = resolved(scope.pop()).flatten();
+    match (finished, error) {
+        (Err(payload), _) => (
+            None,
+            Some(format!(
+                "the pass it drew in panicked once finished: {}",
+                panic_text(payload)
+            )),
+        ),
+        (Ok(_), Some(error)) => (None, Some(format!("a GPU error in the pass it drew in: {error}"))),
+        (Ok(buffer), None) => (Some(buffer), None),
+    }
+}
+
+/// What a layer computes against the pyramid of the first pass, recorded into an encoder of its
+/// own between its timestamps when the frame times it apart, its timer and number among the layers
+/// timed in `timed`, and finished inside a validation error scope; none for a layer that does not
+/// occlude at this frame.
+fn occlude(
+    entry: &mut Entry,
+    gpu: &egui_wgpu::RenderState,
+    view: &View,
+    pyramid: &Pyramid<'_>,
+    timed: Option<(&GpuTimer, u32)>,
+) -> Result<Option<wgpu::CommandBuffer>, String> {
+    let layer = entry.layer.as_ref();
+    let occludes = catch_unwind(AssertUnwindSafe(|| layer.occludes())).map_err(|payload| {
+        format!(
+            "its viewport layer panicked telling whether it occludes: {}",
+            panic_text(payload)
+        )
+    })?;
+    if !occludes {
+        return Ok(None);
+    }
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some(&entry.owner),
+    });
+    if let Some((timer, number)) = timed {
+        timer.occluding(&mut encoder, number, false);
+    }
+    let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let layer = entry.layer.as_mut();
+    let recorded = catch_unwind(AssertUnwindSafe(|| layer.occlude(gpu, view, pyramid, &mut encoder)));
+    if let Some((timer, number)) = timed {
+        timer.occluding(&mut encoder, number, true);
+    }
+    let finished = catch_unwind(AssertUnwindSafe(move || encoder.finish()));
+    let error = resolved(scope.pop()).flatten();
+    match (recorded, finished, error) {
+        (Err(payload), _, _) => Err(format!(
+            "its viewport layer panicked while testing against the depth: {}",
+            panic_text(payload)
+        )),
+        (Ok(()), Err(payload), _) => Err(format!(
+            "its viewport layer recorded invalid GPU commands while testing against the depth: {}",
+            panic_text(payload)
+        )),
+        (Ok(()), Ok(_), Some(error)) => Err(format!(
+            "its viewport layer caused a GPU error while testing against the depth: {error}"
+        )),
+        (Ok(()), Ok(buffer), None) => Ok(Some(buffer)),
     }
 }
 
@@ -1343,8 +1515,8 @@ uniwow_api::export_module!(ViewportModule::default());
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use uniwow_api::serde_json::json;
@@ -1355,6 +1527,7 @@ mod tests {
     use uniwow_api::glam::Vec3;
     use uniwow_api::hotkey::Keys;
 
+    use super::pyramid::{Builder, Pyramid, level_size, levels};
     use super::stats::{GpuFrame, GpuTimer, LayerTiming, Sample, Stats};
     use super::{
         Camera, CameraKeys, Drawn, Entry, FrameSignal, Layers, MISSED_FRAMES, PassTargets, PassWatch, TARGET,
@@ -1963,6 +2136,8 @@ fn cs_main() {
         ErrorComputing,
         PanicDrawing,
         ErrorDrawing,
+        PanicOccluding,
+        ErrorOccluding,
     }
 
     /// A layer painting the whole view with one colour, in a bundle or in the pass; or with the colour
@@ -2147,6 +2322,26 @@ fn cs_main() {
             self.computes || matches!(self.fault, Fault::PanicComputing | Fault::ErrorComputing)
         }
 
+        fn occlude(
+            &mut self,
+            gpu: &egui_wgpu::RenderState,
+            _view: &View,
+            _pyramid: &viewport::Pyramid<'_>,
+            encoder: &mut wgpu::CommandEncoder,
+        ) {
+            assert!(
+                self.fault != Fault::PanicOccluding,
+                "its test against the depth could not be made"
+            );
+            let (_, _, _, _, buffer) = self.made(gpu);
+            // Not a multiple of 4: refused.
+            encoder.clear_buffer(buffer, 1, None);
+        }
+
+        fn occludes(&self) -> bool {
+            matches!(self.fault, Fault::PanicOccluding | Fault::ErrorOccluding)
+        }
+
         fn drawing(&self) -> Drawing {
             self.drawing
         }
@@ -2212,6 +2407,7 @@ fn cs_main() {
         resolved: wgpu::Texture,
         resolve: wgpu::TextureView,
         depth: wgpu::TextureView,
+        pyramid: Pyramid,
         samples: u32,
     }
 
@@ -2244,13 +2440,20 @@ fn cs_main() {
                 1,
                 wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             );
+            let depth = texture(
+                TARGET.depth_format,
+                samples,
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            )
+            .create_view(&Default::default());
+            let builder = Arc::new(Builder::new(&gpu.device, samples));
             Self {
                 colour: texture(TARGET.color_format, samples, wgpu::TextureUsages::RENDER_ATTACHMENT)
                     .create_view(&Default::default()),
                 resolve: resolved.create_view(&Default::default()),
                 resolved,
-                depth: texture(TARGET.depth_format, samples, wgpu::TextureUsages::RENDER_ATTACHMENT)
-                    .create_view(&Default::default()),
+                pyramid: Pyramid::new(&gpu.device, builder, &depth, [8, 8]),
+                depth,
                 samples,
             }
         }
@@ -2267,6 +2470,7 @@ fn cs_main() {
                 colour: &self.colour,
                 resolve: (self.samples > 1).then_some(&self.resolve),
                 depth: &self.depth,
+                pyramid: &self.pyramid,
             };
             draw_frame(layers, gpu, view, new_device, &targets, None, timer)
         }
@@ -2591,6 +2795,11 @@ fn cs_main() {
             (Fault::ErrorComputing, "caused a GPU error while computing"),
             (Fault::PanicDrawing, "panicked drawing in the pass"),
             (Fault::ErrorDrawing, "a GPU error in the pass it drew in"),
+            (Fault::PanicOccluding, "panicked while testing against the depth"),
+            (
+                Fault::ErrorOccluding,
+                "caused a GPU error while testing against the depth",
+            ),
         ] {
             let layers = Layers::default();
             put(&layers, "kept", Painter::new(Drawing::Bundle, GREEN));
@@ -2612,13 +2821,414 @@ fn cs_main() {
         }
     }
 
+    /// Writes each pixel's depth from a storage buffer, its samples a little farther each, the
+    /// second the farthest, so that the least of them is neither the first nor the last.
+    const DEPTHS: &str = r#"
+@group(0) @binding(0) var<storage, read> depths: array<f32>;
+@group(0) @binding(1) var<uniform> width: vec4<u32>;
+
+@vertex
+fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    let corner = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));
+    return vec4<f32>(corner * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs_main(@builtin(position) at: vec4<f32>, @builtin(sample_index) sample: u32) -> @builtin(frag_depth) f32 {
+    let pixel = vec2<u32>(at.xy);
+    let farther = array<f32, 4>(0.0, 0.03, 0.01, 0.02);
+    return depths[pixel.y * width.x + pixel.x] - farther[sample];
+}
+"#;
+
+    /// The levels of the pyramid of a depth of `size` and `samples` samples a pixel, the depth of
+    /// each pixel `depth` at its place, its samples farther as `DEPTHS` says, read back.
+    fn pyramid_of(gpu: &egui_wgpu::RenderState, size: [u32; 2], samples: u32, depth: &[f32]) -> Vec<Vec<f32>> {
+        let device = &gpu.device;
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: size[0],
+                height: size[1],
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: samples,
+            dimension: wgpu::TextureDimension::D2,
+            format: TARGET.depth_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let depths = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: (depth.len() * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        gpu.queue
+            .write_buffer(&depths, 0, uniwow_api::bytemuck::cast_slice(depth));
+        let width = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        gpu.queue
+            .write_buffer(&width, 0, uniwow_api::bytemuck::cast_slice(&[size[0], 0, 0, 0]));
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(DEPTHS.into()),
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: TARGET.depth_format,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: samples,
+                ..Default::default()
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: depths.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: width.as_entire_binding(),
+                },
+            ],
+        });
+        let pyramid = Pyramid::new(device, Arc::new(Builder::new(device, samples)), &view, size);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        pyramid.build(&mut encoder);
+        let read: Vec<(wgpu::Buffer, [u32; 2])> = (0..levels(size))
+            .map(|level| {
+                let [width, height] = level_size(size, level);
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size: 256 * u64::from(height),
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                encoder.copy_texture_to_buffer(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: pyramid.texture(),
+                        mip_level: level,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &buffer,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(256),
+                            rows_per_image: Some(height),
+                        },
+                    },
+                    wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                (buffer, [width, height])
+            })
+            .collect();
+        gpu.queue.submit([encoder.finish()]);
+        for (buffer, _) in &read {
+            buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        }
+        gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        read.iter()
+            .map(|(buffer, [width, height])| {
+                let data = buffer.slice(..).get_mapped_range().expect("mapped").to_vec();
+                (0..*height as usize)
+                    .flat_map(|y| {
+                        let row = &data[y * 256..];
+                        (0..*width as usize)
+                            .map(|x| f32::from_le_bytes(row[x * 4..x * 4 + 4].try_into().expect("four bytes")))
+                            .collect::<Vec<f32>>()
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
     #[test]
-    fn a_layer_is_timed_drawing_in_every_phase() {
-        // The pass, then a layer: its computing 2 ticks, its drawing 3, 5, 7 and 11 in the four
-        // phases.
-        let ticks = [0, 100, 10, 12, 20, 23, 30, 35, 40, 47, 50, 61];
-        let (total, layers) = crate::stats::spans(&ticks, 1, 1e6);
-        assert_eq!((total, layers), (100.0, vec![(2.0, 26.0)]));
+    fn the_pyramid_holds_the_farthest_depth_under_each_texel_at_every_level() {
+        let Some(gpu) = gpu() else {
+            eprintln!("skipped: no software adapter for a device");
+            return;
+        };
+        // Odd sides, so that the last texel of a level covers three of the level under it.
+        let size = [5u32, 3];
+        let depth: Vec<f32> = (0..15u32).map(|at| 0.05 + ((at * 7) % 10) as f32 / 11.0).collect();
+        for samples in [TARGET.sample_count, 1] {
+            let read = pyramid_of(&gpu, size, samples, &depth);
+            assert_eq!(read.len(), 3, "5 × 3, 2 × 1, 1 × 1");
+            // The first level: the farthest sample of each pixel.
+            let farthest = if samples > 1 { 0.03 } else { 0.0 };
+            let mut expected: Vec<f32> = depth.iter().map(|at| at - farthest).collect();
+            for (level, read) in read.iter().enumerate() {
+                let [width, height] = level_size(size, level as u32);
+                if level > 0 {
+                    let [under_width, under_height] = level_size(size, level as u32 - 1);
+                    let under = expected.clone();
+                    // The texels under one: its 2 × 2, the last of a side to the end of the level.
+                    let span =
+                        |at: u32, side: u32, under: u32| 2 * at..=if at == side - 1 { under - 1 } else { 2 * at + 1 };
+                    expected = (0..height)
+                        .flat_map(|y| (0..width).map(move |x| (x, y)))
+                        .map(|(x, y)| {
+                            span(y, height, under_height)
+                                .flat_map(|row| span(x, width, under_width).map(move |column| (column, row)))
+                                .map(|(column, row)| under[(row * under_width + column) as usize])
+                                .fold(1.0, f32::min)
+                        })
+                        .collect();
+                }
+                assert_eq!(read.len(), (width * height) as usize);
+                for (got, wanted) in read.iter().zip(&expected) {
+                    assert!(
+                        (got - wanted).abs() < 1e-6,
+                        "{samples} samples, level {level}: {read:?}, not {expected:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The size and the levels of a pyramid given.
+    type Given = ([u32; 2], u32);
+
+    /// A layer reading, between the two passes, the farthest depth the first pass left over the whole
+    /// view, from the last level of the pyramid, into a buffer to read back; with the size and levels
+    /// of the pyramid it was given.
+    struct Sounding {
+        given: Arc<Mutex<Option<Given>>>,
+        read: Arc<Mutex<Option<wgpu::Buffer>>>,
+        made: Option<(wgpu::ComputePipeline, wgpu::BindGroupLayout, wgpu::Buffer)>,
+    }
+
+    const SOUNDING: &str = r#"
+@group(0) @binding(0) var pyramid: texture_2d<f32>;
+@group(0) @binding(1) var<storage, read_write> farthest: f32;
+
+@compute @workgroup_size(1)
+fn main() {
+    farthest = textureLoad(pyramid, vec2<u32>(0u), textureNumLevels(pyramid) - 1u).r;
+}
+"#;
+
+    impl Layer for Sounding {
+        fn occlude(
+            &mut self,
+            gpu: &egui_wgpu::RenderState,
+            _view: &View,
+            pyramid: &viewport::Pyramid<'_>,
+            encoder: &mut wgpu::CommandEncoder,
+        ) {
+            *self.given.lock().unwrap() = Some((pyramid.size, pyramid.levels));
+            let device = &gpu.device;
+            let (pipeline, layout, written) = self.made.get_or_insert_with(|| {
+                let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: None,
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+                let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: None,
+                    source: wgpu::ShaderSource::Wgsl(SOUNDING.into()),
+                });
+                let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: None,
+                    layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: None,
+                        bind_group_layouts: &[Some(&layout)],
+                        immediate_size: 0,
+                    })),
+                    module: &shader,
+                    entry_point: Some("main"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+                let written = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size: 4,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                });
+                (pipeline, layout, written)
+            });
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(pyramid.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: written.as_entire_binding(),
+                    },
+                ],
+            });
+            {
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, &group, &[]);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+            let read = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: 4,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_buffer_to_buffer(written, 0, &read, 0, 4);
+            *self.read.lock().unwrap() = Some(read);
+        }
+
+        fn occludes(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn the_layers_test_against_the_depth_their_first_pass_left_then_draw_what_they_reveal_over_it() {
+        let Some(gpu) = gpu() else {
+            eprintln!("skipped: no software adapter for a device");
+            return;
+        };
+        let view = view(&Camera::default(), [8, 8], 0.0, viewport::Fog::default());
+        let targets = Targets::new(&gpu);
+        let layers = Layers::default();
+        put(
+            &layers,
+            "ground",
+            Painter::new(Drawing::Bundle, RED).deep(0.5, true, wgpu::CompareFunction::Always),
+        );
+        let (given, read) = (Arc::default(), Arc::default());
+        lock(&layers).layers.push(Entry {
+            owner: "sounding".to_owned(),
+            layer: Box::new(Sounding {
+                given: Arc::clone(&given),
+                read: Arc::clone(&read),
+                made: None,
+            }),
+            kept: None,
+        });
+        // Revealed nearer than the ground, its depth written in the second pass only; then behind
+        // the ground, hidden by the depth the first pass left.
+        put(
+            &layers,
+            "revealed",
+            Painter::new(Drawing::Pass, GREEN).in_phase(Phase::Revealed).deep(
+                0.6,
+                true,
+                wgpu::CompareFunction::Greater,
+            ),
+        );
+        put(
+            &layers,
+            "hidden",
+            Painter::new(Drawing::Bundle, [0.0, 0.0, 1.0, 1.0])
+                .in_phase(Phase::Revealed)
+                .deep(0.4, false, wgpu::CompareFunction::Greater),
+        );
+        let drawn = targets.draw(&layers, &gpu, &view, false, None);
+        assert!(drawn.failures.is_empty(), "{:?}", drawn.failures);
+        assert_eq!(
+            targets.middle(&gpu),
+            [0, 255, 0, 255],
+            "revealed over the ground, what lies behind it hidden"
+        );
+        assert_eq!(*given.lock().unwrap(), Some(([8, 8], 4)));
+        let buffer = read.lock().unwrap().take().expect("read between the passes");
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let data = buffer.slice(..).get_mapped_range().expect("mapped").to_vec();
+        let farthest = f32::from_le_bytes(data[..4].try_into().expect("four bytes"));
+        assert_eq!(
+            farthest, 0.5,
+            "the depth of the first pass of the same frame, without what the second drew"
+        );
+    }
+
+    #[test]
+    fn a_layer_is_timed_computing_and_drawing_in_every_phase_and_the_pyramid_apart() {
+        // The passes, the pyramid 4 ticks, then a layer: its computing 2 ticks, against the pyramid
+        // 1, its drawing 3, 5, 7, 11 and 13 in the five phases.
+        let ticks = [0, 100, 60, 64, 10, 12, 13, 14, 20, 23, 30, 35, 40, 47, 50, 61, 70, 83];
+        let (total, pyramid, layers) = crate::stats::spans(&ticks, 1, 1e6);
+        assert_eq!((total, pyramid, layers), (100.0, 4.0, vec![(3.0, 39.0)]));
     }
 
     #[test]
@@ -2651,6 +3261,7 @@ fn cs_main() {
             start,
             GpuFrame {
                 total: 3.0,
+                pyramid: 0.5,
                 layers: vec![("terrain".to_owned(), 0.25, 1.5)],
             },
         );
@@ -2658,6 +3269,7 @@ fn cs_main() {
         assert!(text.starts_with("48 fps: a frame 20.7 ms, the longest 40.0"), "{text}");
         assert!(text.contains("view, interface thread: 2.00 ms"), "{text}");
         assert!(text.contains("GPU: 3.00 ms"), "{text}");
+        assert!(text.contains("the pyramid of the depth 0.50"), "{text}");
         assert!(
             text.contains("  GPU: computing 0.25 ms (0.25), drawing 1.50 (1.50)"),
             "{text}"

@@ -258,7 +258,7 @@ impl ModelsLayer {
             .collect();
         let groups: Vec<&Drawn> = match phase {
             Phase::Opaque => self.drawn.iter().collect(),
-            Phase::Water => Vec::new(),
+            Phase::Revealed | Phase::Water => Vec::new(),
             Phase::Beyond | Phase::Near => self
                 .order
                 .iter()
