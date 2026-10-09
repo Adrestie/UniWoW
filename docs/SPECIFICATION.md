@@ -6081,6 +6081,36 @@ batches, handled one by one on the interface thread at each frame, drawn as befo
   review, of those corrections: nothing serious or middling; the order of `total_cmp` tested on both
   signs.
 
+#### The preparation of the buildings, measured
+
+Asked by the user once the models were nearly at 60 frames a second: `buildings prepare`, about
+2 ms in the crowded views, and a frame of 190 to 350 ms in it now and then, while 90 to 200 MB
+were sent to the GPU from the jobs.
+
+- **Measured first**: `buildings prepare` in five parts of the journal of the frames: the scene
+  and the camera; the buildings let go, those of the frame before dropped once the module gave
+  others; the listing; the buffers written (with the lists of the frame and the bind group); the
+  statistics. A probe of the queue of the GPU: one small write of the interface thread waited 20
+  to 50 ms at most behind 384 MB written by three threads, cut in writes of 4 MB or not, not
+  enough for 190 to 350 ms; no arena grew in those frames. The waits inside wgpu (its allocator,
+  the growth of the arrays of textures, the submissions of the jobs), which the journal does not
+  see, are still to be measured.
+- **Lightened meanwhile**, by what they did at every frame for nothing: the buildings shared with
+  the layer as one list (`Scene::placed`, an `Arc<[Placed]>`) rather than copied, building by
+  building; their instances written to the GPU only once they change; the eye looked up in the
+  surfaces of the water once a frame.
+- **Tested**: a building moved, still in sight, drawn where the buildings last given place it,
+  those of the frame before held by the layer until it prepares the next; the instances outgrowing
+  their buffer, and the entries outgrowing theirs the frame five buildings are first seen, while
+  their instances are not written again. 7 changes made on purpose, all caught: one only once the
+  test checked that the layer holds the buildings drawn; two, the bind group not made again with a
+  new buffer of the instances or of the entries, added after the reviews. Reviewed by another
+  instance: nothing serious; two middling points taken, the
+  buffers outgrown untested and this section saying more than the probe showed; light points taken:
+  the building moved seen where it stands, the list made outside the lock of the scene. A second
+  review, of those corrections: nothing serious; one middling point taken, the first of the five
+  buildings set aside so that entries not bound again are seen.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

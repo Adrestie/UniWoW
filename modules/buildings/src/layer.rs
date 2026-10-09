@@ -8,7 +8,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use uniwow_api::glam::{Mat4, Vec3, Vec4};
 use uniwow_api::journal;
@@ -35,7 +35,8 @@ pub struct Placed {
 /// What the module shares with its layer.
 #[derive(Default)]
 pub struct Scene {
-    pub placed: Vec<Placed>,
+    /// The buildings drawn, made anew when they change.
+    pub placed: Arc<[Placed]>,
     /// The liquids, by which a blended group is told beyond the surface of the water or on the
     /// eye's side.
     pub liquids: Option<liquids::Handle>,
@@ -146,6 +147,9 @@ pub(crate) struct Listing {
 pub(crate) fn list(placed: &[Placed], view: &View, surfaces: Option<&Surfaces>) -> Listing {
     let planes = planes(&view.view_proj);
     let mut listing = Listing::default();
+    // Beyond the surface when one of the eye and the centre lies under the water and the other
+    // not, the eye told once.
+    let eye_under = surfaces.is_some_and(|surfaces| surfaces.under(view.eye));
     for (instance, building) in placed.iter().enumerate() {
         let bounds = world_bounds(&building.transform, &building.wmo.bounds);
         if !in_sight(&planes, &bounds) {
@@ -175,7 +179,7 @@ pub(crate) fn list(placed: &[Placed], view: &View, surfaces: Option<&Surfaces>) 
             listing.groups += 1;
             let centre = (bounds[0] + bounds[1]) * 0.5;
             let distance = centre.distance(view.eye);
-            let beyond = surfaces.is_some_and(|surfaces| surfaces.phase(view.eye, centre) == Phase::Beyond);
+            let beyond = surfaces.is_some_and(|surfaces| surfaces.under(centre) != eye_under);
             for batch in &group.batches {
                 let listed = Listed {
                     state: batch.state,
@@ -271,7 +275,7 @@ pub struct BuildingsLayer {
     commands: Grown,
     group: Option<(wgpu::BindGroup, (u64, u64))>,
     /// The buildings drawn this frame, held until the next, and the runs of each phase.
-    drawn: Vec<Placed>,
+    drawn: Arc<[Placed]>,
     opaque: Vec<Run>,
     beyond: Vec<Run>,
     near: Vec<Run>,
@@ -288,7 +292,7 @@ impl BuildingsLayer {
             entries: Grown::new("buildings entries", wgpu::BufferUsages::STORAGE),
             commands: Grown::new("buildings commands", wgpu::BufferUsages::INDIRECT),
             group: None,
-            drawn: Vec::new(),
+            drawn: Arc::default(),
             opaque: Vec::new(),
             beyond: Vec::new(),
             near: Vec::new(),
@@ -299,6 +303,12 @@ impl BuildingsLayer {
 
 impl Layer for BuildingsLayer {
     fn prepare(&mut self, gpu: &egui_wgpu::RenderState, view: &View) {
+        // Its parts in the journal of the frames, each from the end of the one before.
+        let mut part = Instant::now();
+        let mut spent = |name: &str| {
+            journal::spent(name, part.elapsed());
+            part = Instant::now();
+        };
         let shared = self.shared.clone();
         let (placed, steering, cpu, liquids) = {
             let scene = journal::lock(&self.scene, "buildings scene");
@@ -324,6 +334,13 @@ impl Layer for BuildingsLayer {
         });
         gpu.queue
             .write_buffer(camera, 0, bytemuck::cast_slice(&camera_values(view)));
+        spent("buildings prepare: the scene and the camera");
+        // The buildings of the frame before let go once they changed, the last of those held.
+        let changed = !Arc::ptr_eq(&placed, &self.drawn);
+        if changed {
+            self.drawn = placed.clone();
+        }
+        spent("buildings prepare: the buildings let go");
 
         let Listing {
             opaque,
@@ -334,19 +351,7 @@ impl Layer for BuildingsLayer {
             inside,
             through,
         } = list(&placed, view, surfaces.as_deref());
-        let instances: Vec<[f32; 16]> = placed
-            .iter()
-            .map(|building| {
-                let rows = [0, 1, 2].map(|row| building.transform.row(row).to_array());
-                let [r, g, b] = building.wmo.ambient;
-                let mut values = [0.0; 16];
-                for (at, row) in rows.iter().enumerate() {
-                    values[at * 4..at * 4 + 4].copy_from_slice(row);
-                }
-                values[12..15].copy_from_slice(&[r, g, b]);
-                values
-            })
-            .collect();
+        spent("buildings prepare: the listing");
         let listed: Vec<&Listed> = opaque.iter().chain(&beyond).chain(&near).collect();
         let commands: Vec<[u32; 5]> = listed
             .iter()
@@ -359,10 +364,28 @@ impl Layer for BuildingsLayer {
             .collect();
         let entries: Vec<[u32; 4]> = listed.iter().map(|listed| listed.entry).collect();
         let device = &shared.device;
-        let made = self
-            .instances
-            .write(device, &gpu.queue, bytemuck::cast_slice(&instances))
-            | self.entries.write(device, &gpu.queue, bytemuck::cast_slice(&entries));
+        // The instances, written again once the buildings change, and at the first frame, where
+        // the buildings may be the same empty list as those drawn.
+        let mut made = false;
+        if changed || self.instances.buffer.is_none() {
+            let instances: Vec<[f32; 16]> = placed
+                .iter()
+                .map(|building| {
+                    let rows = [0, 1, 2].map(|row| building.transform.row(row).to_array());
+                    let [r, g, b] = building.wmo.ambient;
+                    let mut values = [0.0; 16];
+                    for (at, row) in rows.iter().enumerate() {
+                        values[at * 4..at * 4 + 4].copy_from_slice(row);
+                    }
+                    values[12..15].copy_from_slice(&[r, g, b]);
+                    values
+                })
+                .collect();
+            made |= self
+                .instances
+                .write(device, &gpu.queue, bytemuck::cast_slice(&instances));
+        }
+        made |= self.entries.write(device, &gpu.queue, bytemuck::cast_slice(&entries));
         self.commands.write(device, &gpu.queue, bytemuck::cast_slice(&commands));
         let generation = shared.generation();
         if made || self.group.as_ref().is_none_or(|(_, at)| *at != generation) {
@@ -376,6 +399,7 @@ impl Layer for BuildingsLayer {
         self.opaque = runs(&opaque, 0);
         self.beyond = runs(&beyond, opaque.len() as u32);
         self.near = runs(&near, (opaque.len() + beyond.len()) as u32);
+        spent("buildings prepare: the buffers written");
         let triangles: u64 = listed.iter().map(|listed| u64::from(listed.command[0] / 3)).sum();
         let all_groups: usize = placed.iter().map(|building| building.wmo.groups.len()).sum();
         self.stats = LayerStats {
@@ -404,7 +428,7 @@ impl Layer for BuildingsLayer {
             ),
             steering,
         };
-        self.drawn = placed;
+        spent("buildings prepare: the statistics");
     }
 
     fn drawing(&self) -> Drawing {

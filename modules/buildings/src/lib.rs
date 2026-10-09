@@ -468,6 +468,7 @@ impl BuildingsModule {
                     _ => None,
                 })
                 .sum();
+            let placed: Arc<[Placed]> = placed.into();
             let mut scene = lock(&self.scene);
             scene.placed = placed;
             scene.cpu = cpu;

@@ -569,6 +569,16 @@ fn middle(gpu: &egui_wgpu::RenderState, layer: &mut BuildingsLayer, eye: Vec3) -
 
 /// The middle pixel of what `layer` draws in `phases` seen from `eye` towards the origin.
 fn middle_in(gpu: &egui_wgpu::RenderState, layer: &mut BuildingsLayer, eye: Vec3, phases: &[Phase]) -> [u8; 4] {
+    row_in(gpu, layer, eye, phases)[16]
+}
+
+/// The middle row of what `layer` draws seen from `eye` towards the origin, from the left.
+fn row(gpu: &egui_wgpu::RenderState, layer: &mut BuildingsLayer, eye: Vec3) -> Vec<[u8; 4]> {
+    row_in(gpu, layer, eye, &Phase::ALL)
+}
+
+/// The middle row of what `layer` draws in `phases` seen from `eye` towards the origin.
+fn row_in(gpu: &egui_wgpu::RenderState, layer: &mut BuildingsLayer, eye: Vec3, phases: &[Phase]) -> Vec<[u8; 4]> {
     let size = 32u32;
     let view = view(eye);
     layer.prepare(gpu, &view);
@@ -653,8 +663,12 @@ fn middle_in(gpu: &egui_wgpu::RenderState, layer: &mut BuildingsLayer, eye: Vec3
     pixels.slice(..).map_async(wgpu::MapMode::Read, |_| {});
     gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     let read = pixels.slice(..).get_mapped_range().expect("mapped").to_vec();
-    let at = (16 * 256 + 16 * 4) as usize;
-    [read[at], read[at + 1], read[at + 2], read[at + 3]]
+    (0..size as usize)
+        .map(|x| {
+            let at = 16 * 256 + x * 4;
+            [read[at], read[at + 1], read[at + 2], read[at + 3]]
+        })
+        .collect()
 }
 
 /// A layer drawing `wmo` at the origin on the device of `gpu`; none when the device cannot draw
@@ -668,7 +682,8 @@ fn bench(gpu: &egui_wgpu::RenderState, wmo: Wmo) -> Option<BuildingsLayer> {
         wmo: Arc::new(uploaded),
         parts: None,
         liquids: None,
-    }];
+    }]
+    .into();
     Some(BuildingsLayer::new(shared, scene))
 }
 
@@ -695,6 +710,67 @@ fn a_building_is_drawn_its_back_culled_but_where_two_sided() {
         2,
         "seen from behind: listed, its faces culled by the GPU"
     );
+}
+
+#[test]
+fn a_building_is_drawn_where_the_buildings_last_given_place_it() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    let Some(shared) = Shared::new(&gpu, &TARGET).ok().map(Arc::new) else {
+        eprintln!("skipped: the software adapter does not draw buildings");
+        return;
+    };
+    let wmo = Arc::new(gpu::upload(&shared, &NoFiles, square(material(0x1, 0), false, None)).unwrap());
+    let placed = |transforms: &[Mat4]| -> Arc<[Placed]> {
+        transforms
+            .iter()
+            .map(|transform| Placed {
+                transform: *transform,
+                wmo: wmo.clone(),
+                parts: None,
+                liquids: None,
+            })
+            .collect()
+    };
+    let (white, black) = ([255, 255, 255, 255], [0, 0, 0, 255]);
+    let scene = Arc::new(Mutex::new(Scene::default()));
+    let first = placed(&[Mat4::IDENTITY]);
+    scene.lock().unwrap().placed = first.clone();
+    let mut layer = BuildingsLayer::new(shared.clone(), scene.clone());
+    let front = Vec3::new(5.0, 0.0, 0.0);
+    // The middle, then on the right where a building moved by 2.5 yards stands.
+    let seen = |layer: &mut BuildingsLayer| {
+        let row = row(&gpu, layer, front);
+        [row[16], row[28]]
+    };
+    assert_eq!(seen(&mut layer), [white, black]);
+    assert_eq!(seen(&mut layer), [white, black], "the same again");
+    // Moved aside, still in sight. Those drawn before held by the layer until it prepares the
+    // next frame.
+    let aside = Mat4::from_translation(Vec3::new(0.0, 2.5, 0.0));
+    scene.lock().unwrap().placed = placed(&[aside]);
+    assert_eq!(Arc::strong_count(&first), 2, "held by the layer");
+    assert_eq!(seen(&mut layer), [black, white]);
+    assert_eq!(Arc::strong_count(&first), 1, "let go");
+    // Another in the middle: the instances outgrow their buffer.
+    scene.lock().unwrap().placed = placed(&[aside, Mat4::IDENTITY]);
+    assert_eq!(seen(&mut layer), [white, white]);
+    scene.lock().unwrap().placed = placed(&[Mat4::IDENTITY]);
+    assert_eq!(seen(&mut layer), [white, black], "back");
+    // Five at once, none listed at first, looking away: their entries outgrow their buffer the
+    // frame they are seen, their instances not written again; the first aside, so that an entry
+    // of a buffer not bound again would draw there.
+    let scene = Arc::new(Mutex::new(Scene::default()));
+    scene.lock().unwrap().placed = placed(&[aside, Mat4::IDENTITY, Mat4::IDENTITY, Mat4::IDENTITY, Mat4::IDENTITY]);
+    let mut layer = BuildingsLayer::new(shared, scene);
+    let mut away = view(front);
+    away.view = Mat4::look_at_rh(front, front * 2.0, Vec3::Z);
+    away.view_proj = Mat4::perspective_infinite_reverse_rh(60f32.to_radians(), 1.0, 0.1) * away.view;
+    layer.prepare(&gpu, &away);
+    assert_eq!(layer.stats().triangles, 0, "none in sight");
+    assert_eq!(seen(&mut layer), [white, white]);
+    assert_eq!(layer.stats().triangles, 10);
 }
 
 #[test]
@@ -1127,7 +1203,8 @@ fn a_blended_group_beyond_the_surface_of_the_water_from_the_eye_is_drawn_before_
             wmo: Arc::new(gpu::upload(&shared, &NoFiles, white).unwrap()),
             parts: None,
             liquids: None,
-        }];
+        }]
+        .into();
         scene.liquids = Some(Arc::new(Pond(Arc::new(surfaces))));
     }
     let mut layer = BuildingsLayer::new(shared, scene);
