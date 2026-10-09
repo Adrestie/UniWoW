@@ -19,7 +19,7 @@ use uniwow_api::{
     PropertyValue, Registrar, egui, egui_wgpu,
 };
 
-use crate::light::{Tables, colour_at, map_light, number_at, sun_direction};
+use crate::light::{Tables, colour_at, map_light, number_at, prepared_fog, sun_direction};
 
 /// A band of numbers of `keys`.
 fn numbers(id: u32, keys: &[(u32, f32)]) -> LightBand<f32> {
@@ -483,7 +483,7 @@ fn the_sun_turns_once_a_day_by_noggit_s_table_to_the_north_west() {
 fn the_light_given_to_the_view_is_the_fixed_one_where_the_tables_give_none() {
     let tables = tables();
     let values = tables.light_at(0, [920.0, -50.0], 0.0, 0, true).unwrap().values;
-    let given = map_light(&values, 0.0, true);
+    let given = map_light(&values, 0.0, Some([1.0, 2.0, 3.0]));
     assert_eq!(given.sun.colour, [200.0 / 255.0; 3], "the diffuse of the light 2");
     assert_eq!(given.sun.ambient, [40.0 / 255.0; 3], "the ambient of the global light");
     assert_eq!(
@@ -491,15 +491,14 @@ fn the_light_given_to_the_view_is_the_fixed_one_where_the_tables_give_none() {
         viewport::Fog::default().colour,
         "no fog band: the fixed colour"
     );
-    // The fog of the game from a quarter of 500 yards.
-    assert_eq!(given.fog, Some([125.0, 500.0]));
-    assert_eq!(map_light(&values, 0.0, false).fog, None, "the editor's");
-    // No band but the colour of the fog: the fixed sun, the fog of Noggit (6,500 36ths of a yard
-    // and 0.1).
+    // The fog of the game given, none for the editor's.
+    assert_eq!(given.fog, Some([1.0, 2.0, 3.0]));
+    assert_eq!(map_light(&values, 0.0, None).fog, None, "the editor's");
+    // No band but the colour of the fog: the fixed sun.
     let lights = [light(1, [0.0; 2], [0.0; 2], [1, 0])];
     let empty = Tables::new(&lights, &[params(1, 0.1)], &[greys(8, &[(0, 128)])], &[], &[]);
     let values = empty.light_at(0, [0.0; 2], 0.0, 0, true).unwrap().values;
-    let given = map_light(&values, 0.0, true);
+    let given = map_light(&values, 0.0, None);
     assert_eq!(
         (given.sun.colour, given.sun.ambient),
         (Sun::default().colour, Sun::default().ambient)
@@ -509,8 +508,89 @@ fn the_light_given_to_the_view_is_the_fixed_one_where_the_tables_give_none() {
         "a grey fog, made linear: {:?}",
         given.fog_colour
     );
-    let fog = given.fog.unwrap();
-    assert!((fog[1] - 6_500.0 / 36.0).abs() < 1e-3 && (fog[0] - 0.1 * fog[1]).abs() < 1e-3);
+}
+
+#[test]
+fn the_fog_of_a_light_is_prepared_straight_before_outland_and_curved_to_the_far_clip_from_it() {
+    let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-3);
+    // Before the map 530: straight, its end 10 yards at least, its share within -1 and 1.
+    assert_eq!(prepared_fog(500.0, 0.25, 0, 1_277.0), [500.0, 0.25, 1.0]);
+    assert_eq!(prepared_fog(2_000.0, -0.2, 529, 1_277.0), [2_000.0, -0.2, 1.0]);
+    assert_eq!(prepared_fog(5.0, 1.5, 1, 1_277.0), [10.0, 1.0, 1.0]);
+    assert_eq!(prepared_fog(0.0, -2.0, 0, 1_277.0), [10.0, -1.0, 1.0]);
+    // From it: ending at the far clip, its share no less than 0, its rate by its own fog against
+    // the far clip less 200 yards, 700 at most, 1.5 past it, up to 7.
+    let deadwind = prepared_fog(361.11, -0.2, 530, 1_277.0);
+    assert!(
+        close(deadwind, [1_277.0, 0.0, 1.5 + 5.5 * (1.0 - 433.332 / 500.0)]),
+        "{deadwind:?}"
+    );
+    let northrend = prepared_fog(888.89, 0.5, 571, 1_277.0);
+    assert!(
+        close(northrend, [1_277.0, 0.5, 1.5 + 5.5 * (1.0 - 444.445 / 500.0)]),
+        "{northrend:?}"
+    );
+    assert_eq!(prepared_fog(1_000.0, 0.5, 571, 600.0), [600.0, 0.5, 1.5]);
+    let near = prepared_fog(500.0, 0.25, 571, 600.0);
+    assert!(
+        close(near, [600.0, 0.25, 1.5 + 5.5 * (1.0 - 375.0 / 400.0)]),
+        "{near:?}"
+    );
+    assert!(close(prepared_fog(400.0, 1.0, 571, 1_277.0), [1_277.0, 1.0, 7.0]));
+    assert_eq!(prepared_fog(500.0, 0.0, 571, 1_277.0), [1_277.0, 0.0, 1.5]);
+    // Shorter than 1000/36 yards: straight, where it ends; its share no less than 0 still.
+    assert_eq!(prepared_fog(20.0, -0.5, 571, 1_277.0), [20.0, 0.0, 1.0]);
+    assert_eq!(prepared_fog(27.7, 0.5, 571, 1_277.0), [27.7, 0.5, 1.0]);
+    assert_eq!(prepared_fog(27.8, 0.5, 571, 1_277.0)[0], 1_277.0);
+}
+
+#[test]
+fn the_fog_of_the_game_is_that_of_the_lights_mixed_within_the_far_clip() {
+    let tables = tables();
+    let fog = |place: [f32; 2], map: u32, far: f32| {
+        let mixed = tables.light_at(map, place, 0.0, 0, true).unwrap();
+        tables.fog_of_the_game(&mixed, map, 0, 0.0, far).unwrap()
+    };
+    // The global light alone: from a quarter of 500 yards, straight; within the far clip.
+    assert_eq!(fog([-5_000.0, 0.0], 0, 1_277.0), [125.0, 500.0, 1.0]);
+    assert_eq!(fog([-5_000.0, 0.0], 0, 300.0), [75.0, 300.0, 1.0]);
+    // Within the light 2, whose fog ends at 0: 10 yards, as the client reads it; halfway, half of
+    // it mixed in.
+    assert_eq!(fog([920.0, -50.0], 0, 1_277.0), [0.0, 10.0, 1.0]);
+    // Within the light 3 too, which has no band of fog: its end read as 0 as well.
+    assert_eq!(fog([1_100.0, 0.0], 0, 1_277.0), [0.0, 10.0, 1.0]);
+    let halfway = fog([800.0, 0.0], 0, 1_277.0);
+    assert!(
+        halfway
+            .iter()
+            .zip([31.875, 255.0, 1.0])
+            .all(|(a, b)| (a - b).abs() < 1e-2),
+        "{halfway:?}"
+    );
+    // From Outland on, each light curved before they are mixed: a global light ending at 300
+    // yards from half of it, and a local one ending at 2,000 from a fifth, by half.
+    let mut local = light(2, [1_000.0, 0.0], [100.0, 300.0], [2, 0]);
+    local.map = 571;
+    let mut global = light(1, [0.0; 2], [0.0; 2], [1, 0]);
+    global.map = 571;
+    let numbers = [
+        numbers(1, &[(0, 300.0 * 36.0)]),
+        numbers(2, &[(0, 0.5)]),
+        numbers(7, &[(0, 2_000.0 * 36.0)]),
+        numbers(8, &[(0, 0.2)]),
+    ];
+    let curved = Tables::new(&[global, local], &[params(1, 0.1), params(2, 0.5)], &[], &numbers, &[]);
+    let mixed = curved.light_at(571, [800.0, 0.0], 0.0, 0, true).unwrap();
+    assert_eq!(ids(&mixed), [1, 2]);
+    assert!((mixed.used[1].1 - 0.5).abs() < 1e-4, "{:?}", mixed.used);
+    let fog = curved.fog_of_the_game(&mixed, 571, 0, 0.0, 1_277.0).unwrap();
+    let rate = (1.5 + 5.5 * (1.0 - 150.0 / 500.0) + 1.5) / 2.0;
+    assert!(
+        fog.iter()
+            .zip([0.35 * 1_277.0, 1_277.0, rate])
+            .all(|(a, b)| (a - b).abs() < 1e-2),
+        "{fog:?}"
+    );
 }
 
 #[test]
@@ -548,7 +628,8 @@ fn the_light_is_a_category_of_the_settings_noon_by_default_still() {
             ("hour", [0, 1439], 720),
             ("speed", [0, 1440], 0),
             ("local_lights", [0, 1], 1),
-            ("game_fog", [0, 1], 1)
+            ("game_fog", [0, 1], 1),
+            ("far_clip", [184, 2000], 1277)
         ]
     );
 }
@@ -929,7 +1010,8 @@ fn the_light_is_that_of_the_map_shown_at_the_camera_s_place_on_it() {
     // Given to the view, the fog of the game by default.
     let given = host.seen.0.lock().unwrap().expect("given");
     assert_eq!(Some(given), shown.given);
-    assert_eq!(given.fog, Some([125.0, 500.0]));
+    // Within the light 2, whose fog ends at 0: 10 yards, as the client reads it.
+    assert_eq!(given.fog, Some([0.0, 10.0, 1.0]));
     assert_eq!(given.sun.direction, sun_direction(1440.0));
     // At noon by default, in half-minutes, the hour read by the bands.
     assert_eq!(shown.time, 1440.0);
@@ -939,6 +1021,13 @@ fn the_light_is_that_of_the_map_shown_at_the_camera_s_place_on_it() {
     host.settings.insert("local_lights".to_owned(), json!(0));
     module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
     assert_eq!(module.shown.as_ref().unwrap().light.as_ref().unwrap().used, [(1, 1.0)]);
+    // On Northrend, of the light 1, the fog curved to the far clip set.
+    host.settings.insert("far_clip".to_owned(), json!(600));
+    *host.editor.map.lock().unwrap() = json!({ "id": 571, "name": "Northrend" });
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    let fog = host.seen.0.lock().unwrap().unwrap().fog.unwrap();
+    assert_eq!(fog, [150.0, 600.0, 1.5 + 5.5 * (1.0 - 375.0 / 400.0)]);
+    *host.editor.map.lock().unwrap() = json!({ "id": 0, "name": "Azeroth" });
     // The camera unread: the light before kept; no map shown: none.
     *host.editor.camera.lock().unwrap() = None;
     module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));

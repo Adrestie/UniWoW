@@ -169,6 +169,8 @@ pub struct Tables {
     /// The local lights by id: the least id of those sharing their centre, its own where none does,
     /// and that light's centre on the map.
     centres: HashMap<u32, (u32, [f32; 2])>,
+    /// Every light, by id.
+    by_id: HashMap<u32, LightRecord>,
 }
 
 /// Whether `light` is the global light of its map, at 0, 0, 0.
@@ -255,6 +257,7 @@ impl Tables {
         }
         Self {
             centres: centres(&by_map),
+            by_id: lights.iter().map(|light| (light.id, light.clone())).collect(),
             lights: by_map,
             fallback: lights.iter().find(|light| light.id == 1).cloned(),
             params: params.iter().map(|record| (record.id, record.clone())).collect(),
@@ -360,6 +363,29 @@ impl Tables {
         })
     }
 
+    /// The fog of the game where `mixed` was taken, on the map `map`, for the slot `slot` (the
+    /// client's for the slot 0, the eye out of the water) at `time`, as Wow.exe 12340 draws it with
+    /// the far clip `far`: the fog of each light mixed in, prepared (`prepared_fog`) from its
+    /// bands, one it lacks read as 0 as the client reads it, mixed by its weight in the order of
+    /// `mixed` (0x7ED4C0); then its end within the far clip, its start the share of it (0x7F16F0).
+    /// Where it starts and ends, in yards, and its rate; none without a light.
+    pub fn fog_of_the_game(&self, mixed: &Mixed, map: u32, slot: usize, time: f32, far: f32) -> Option<[f32; 3]> {
+        let mut lights = mixed.used.iter().filter_map(|(id, weight)| {
+            let values = self.values(params_of(self.by_id.get(id)?, slot), time)?;
+            let [end, share] = [
+                values.numbers[0].unwrap_or(0.0) / UNIT,
+                values.numbers[1].unwrap_or(0.0),
+            ];
+            Some((prepared_fog(end, share, map, far), *weight))
+        });
+        let (first, _) = lights.next()?;
+        let [end, share, rate] = lights.fold(first, |kept, (given, weight)| {
+            std::array::from_fn(|at| mix(kept[at], given[at], weight))
+        });
+        let end = end.min(far);
+        Some([share * end, end, rate])
+    }
+
     /// `values` with those of `light` for the slot `slot` at `time` mixed in by `weight`; false,
     /// unchanged, where its params are unknown.
     fn mix_in(&self, values: &mut Values, light: &LightRecord, slot: usize, time: f32, weight: f32) -> bool {
@@ -417,11 +443,10 @@ fn linear(gamma: f32) -> f32 {
 
 /// The light of `values` at `time` the view draws with: its sun, in the direction of the hour, its
 /// diffuse and ambient light (the fixed light's where it has none); the colour of its fog, made
-/// linear (the fixed one where it has none); and, with `game_fog`, where its fog starts and ends,
-/// in yards.
-pub fn map_light(values: &Values, time: f32, game_fog: bool) -> MapLight {
+/// linear (the fixed one where it has none); and the fog of the game `game_fog`, where it starts
+/// and ends and its rate, when it is drawn (`Tables::fog_of_the_game`).
+pub fn map_light(values: &Values, time: f32, game_fog: Option<[f32; 3]>) -> MapLight {
     let fixed = Sun::default();
-    let end = values.numbers[0].unwrap_or(FOG_END) / UNIT;
     MapLight {
         sun: Sun {
             direction: sun_direction(time),
@@ -429,7 +454,48 @@ pub fn map_light(values: &Values, time: f32, game_fog: bool) -> MapLight {
             ambient: values.colours[1].unwrap_or(fixed.ambient),
         },
         fog_colour: values.colours[7].map_or(Fog::default().colour, |colour| colour.map(linear)),
-        fog: game_fog.then(|| [values.numbers[1].unwrap_or(FOG_START) * end, end]),
+        fog: game_fog,
+    }
+}
+
+/// The first map whose fog is curved, Outland's, on hardware with shaders of the second version or
+/// later, as any card of today (0x781739).
+const CURVED_FROM: u32 = 530;
+/// The shortest end of the fog of a light, and the shortest it is curved from, in yards
+/// (0x7ECD80).
+const SHORTEST_FOG: f32 = 10.0;
+const SHORTEST_CURVED: f32 = 1_000.0 / 36.0;
+/// The far clip a curved fog is measured against, at most, and what is taken from it, in yards
+/// (0x7ECD00).
+const FAR_FOR_RATE: f32 = 700.0;
+const NEAR_FOR_RATE: f32 = 200.0;
+
+/// The fog of a light of the map `map`, from the end `end` of its fog, in yards, and the share
+/// `share` of it where it starts, as the client prepares it before the lights are mixed (0x7EBFF0,
+/// 0x7ECD80): its end 10 yards at least, its share within −1 and 1, its rate 1; from Outland on,
+/// of an end of 1000/36 yards or more, its rate by its own fog against the far clip `far`, then its
+/// end the far clip; its share no less than 0 there. Its end, its share and its rate.
+pub fn prepared_fog(end: f32, share: f32, map: u32, far: f32) -> [f32; 3] {
+    let end = end.max(SHORTEST_FOG);
+    let share = share.clamp(-1.0, 1.0);
+    if map < CURVED_FROM {
+        return [end, share, 1.0];
+    }
+    let [end, rate] = match end >= SHORTEST_CURVED {
+        true => [far, curve(share * end, end, far)],
+        false => [end, 1.0],
+    };
+    [end, share.max(0.0), rate]
+}
+
+/// How steep a fog from `start` to `end` is curved against the far clip `far` (0x7ECD00): 1.5 plus
+/// 5.5 times what its span leaves of the far clip less 200 yards, 700 at most; 1.5 past it.
+fn curve(start: f32, end: f32, far: f32) -> f32 {
+    let span = far.min(FAR_FOR_RATE) - NEAR_FOR_RATE;
+    if end - start <= span {
+        1.5 + 5.5 * (1.0 - (end - start) / span)
+    } else {
+        1.5
     }
 }
 

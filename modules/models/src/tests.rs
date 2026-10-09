@@ -1136,6 +1136,15 @@ fn an_unfogged_batch_is_not_drawn_beyond_the_end_of_the_fog_of_the_game() {
     // The fog of the editor ends nothing.
     bench.fog.rate = 0.0;
     assert_eq!(middle(&render(&mut bench, eye, AIM)), red);
+    // Facing the eye 5 yards ahead, its corners some 5.2 yards from it: cut by the depth along the
+    // view, not by the distance from the eye, so wholly drawn for an end at 5.1 yards.
+    let reds = |pixels: &[u8]| pixels.chunks(4).filter(|pixel| *pixel == red).count();
+    let whole = reds(&render(&mut bench, FRONT, AIM));
+    assert!(whole > 50, "{whole}");
+    bench.fog.end = 5.1;
+    bench.fog.rate = 2.0;
+    assert_eq!(reds(&render(&mut bench, FRONT, AIM)), whole);
+    bench.fog.rate = 0.0;
     // Beyond the end, lit and unfogged: not drawn; unlit and fogged: the colour of the fog.
     for (flags, beyond) in [(0x2, BLACK), (0x1, [0, 0, 255, 255])] {
         let mut other = crate::tests::bench(square(flags, 0), red).expect("as above");
@@ -1172,8 +1181,8 @@ fn a_model_is_drawn_where_its_instance_stands_lit_and_one_sided() {
         assert!(seen[0].abs_diff(lit) <= 2 && seen[1] == 0, "{seen:?}");
     }
     // In the fog of the game, blue, from 2 to 10 yards at the rate 2: at 5 yards from an eye 3 yards
-    // up, 1 − (5 / 8)² of it, by the distance from the eye; mixed in gamma as the client, over a red
-    // lit past 1, bounded first. The pixel read, half a pixel off the middle, is a little farther.
+    // up, 1 − (5 / 8)² of it, by the depth along the view; mixed in gamma as the client, over a red
+    // lit past 1, bounded first. The pixel read, half a pixel off the middle, lies a little deeper.
     bench.sun = Sun {
         direction: [1.0, 0.0, 0.0],
         colour: [1.0; 3],

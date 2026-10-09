@@ -51,13 +51,13 @@ pub trait Viewport: Send + Sync {
 }
 
 /// The light of the map at the place of the camera and the hour: its sun, the colour of its fog in
-/// linear, and where its fog starts and ends when the fog of the game is drawn, none for the
-/// editor's.
+/// linear, and where its fog starts and ends, in yards, and its rate when the fog of the game is
+/// drawn (`Fog`), none for the editor's.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapLight {
     pub sun: Sun,
     pub fog_colour: [f32; 3],
-    pub fog: Option<[f32; 2]>,
+    pub fog: Option<[f32; 3]>,
 }
 
 /// The WGSL of a colour in gamma made linear (`linear`) and back (`srgb`), which the shaders of the
@@ -78,17 +78,23 @@ fn srgb(value: vec3<f32>) -> vec3<f32> {
 ";
 
 /// The WGSL of the fog of the view (`fog_amount`, `fog_mix`, `beyond_fog`), which the shaders of the
-/// view share, for a uniform `camera` with an `eye` and a `fog` as `Fog` gives them: where it starts,
-/// its middle, where it ends and its rate; with `LINEAR_WGSL`.
+/// view share, for a uniform `camera` with a perspective `view_proj`, an `eye` and a `fog` as `Fog`
+/// gives them: where it starts, its middle, where it ends and its rate; with `LINEAR_WGSL`.
 pub const FOG_WGSL: &str = r"// The share of the editor's fog at its middle.
 const NEAR_FOG: f32 = 0.55;
 
-// The fog of the view: the game's when its rate is given, by the distance from the eye, as Noggit's
-// shaders draw it; the editor's otherwise, by the distance on the ground.
+// The depth of `position` along the view, by which the client fogs: the w of its place on the
+// screen, the view being a perspective.
+fn view_depth(position: vec3<f32>) -> f32 {
+    return (camera.view_proj * vec4<f32>(position, 1.0)).w;
+}
+
+// The fog of the view: the game's when its rate is given, by the depth along the view, as the
+// client draws it; the editor's otherwise, by the distance on the ground.
 fn fog_amount(position: vec3<f32>) -> f32 {
     if camera.fog.w > 0.0 {
-        let distance = length(position - camera.eye.xyz);
-        let left = clamp((camera.fog.z - distance) / max(camera.fog.z - camera.fog.x, 0.001), 0.0, 1.0);
+        let depth = view_depth(position);
+        let left = clamp((camera.fog.z - depth) / max(camera.fog.z - camera.fog.x, 0.001), 0.0, 1.0);
         return 1.0 - pow(left, camera.fog.w);
     }
     let distance = length(position.xy - camera.eye.xy);
@@ -109,7 +115,7 @@ fn fog_mix(colour: vec3<f32>, fog: vec3<f32>, amount: f32) -> vec3<f32> {
 // Whether `position` lies beyond the end of the fog of the game, past which Noggit leaves out the
 // models wholly beyond it.
 fn beyond_fog(position: vec3<f32>) -> bool {
-    return camera.fog.w > 0.0 && length(position - camera.eye.xyz) > camera.fog.z;
+    return camera.fog.w > 0.0 && view_depth(position) > camera.fog.z;
 }
 ";
 
@@ -123,21 +129,13 @@ fn light(normal: vec3<f32>) -> vec3<f32> {
 }
 ";
 
-/// The span of the fog of the game past which its curve is the gentlest, in yards (Noggit's).
-pub const FOG_SPAN: f32 = 1_583.333_4;
-
-/// How steep the fog of the game from `start` to `end` is drawn: 1.5, up to 7 for a short one.
-pub fn fog_rate(start: f32, end: f32) -> f32 {
-    1.5 + 5.5 * (1.0 - (end - start) / FOG_SPAN).clamp(0.0, 1.0)
-}
-
 /// The share of the editor's fog at its middle distance (`FOG_WGSL`).
 pub const NEAR_FOG: f32 = 0.55;
 
 /// The fog of the view and its colour, that of the sky, in linear. The editor's when `rate` is 0: by
 /// the distance on the ground from the eye, none up to `start`, `NEAR_FOG` of it at `middle`, all of
-/// it from `end`. The game's otherwise, as Noggit's shaders draw it: by the distance from the eye,
-/// 1 − ((end − distance) / (end − start))^rate, `middle` unused.
+/// it from `end`. The game's otherwise, as the client draws it: by the depth along the view,
+/// 1 − ((end − depth) / (end − start))^rate, `middle` unused.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Fog {
     pub colour: [f32; 3],

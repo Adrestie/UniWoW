@@ -6205,7 +6205,7 @@ comments say they come from the client's code):
   distance) / (end − start))^rate, the rate 1.5 plus 5.5 times what the span of the fog leaves of
   1,583⅓ yards (791⅔ for the maps of the first game, by its comment): for Azeroth at noon about 5.7,
   the fog at nine tenths 250 yards away. Noggit multiplies its start by its end twice, which fills
-  everything with fog, and draws none by default. The editor's fog is two smoothsteps by the
+  everything with fog, and draws none by default. The client draws it otherwise (9.7a4). The editor's fog is two smoothsteps by the
   distance on the ground, between three distances: taking the game's would change the type `Fog` and
   who sets it.
 - **The water and the liquids** (*client*): `LiquidType`'s field 3 is 1 for every water and ocean
@@ -6416,7 +6416,8 @@ Decided by the user before it: a band the global light lacks takes the fixed lig
 
 #### Step 9.7a3, as built: the zones of light of Northrend
 
-Decided by the user after the comparison of 72 zones with the game: the curve of Noggit's fog kept;
+Decided by the user after the comparison of 72 zones with the game: the curve of Noggit's fog kept
+(replaced in 9.7a4);
 the zones of light of Northrend read from the client's own Wow.exe and mixed as it mixes them, with
 two details of its mixing.
 
@@ -6474,6 +6475,57 @@ two details of its mixing.
   uncaught; it is now caught) and the measure against WotLK Classic, its 462 points within 0.004
   yard rather than 427 within 0.0005; light points taken: the order of lights sharing a centre
   through others said to be the editor's, two facts of 9.7 made true, a comment.
+
+#### Step 9.7a4, as built: the fog of the game as the client draws it
+
+Decided by the user once the fog was seen as dense as before: the fog of the game exactly as the
+client draws it, in place of the curve of Noggit; the far clip of the game a setting, 1277 yards by
+default.
+
+- **Where it comes from**: the client's shaders (`Shaders\Vertex\arbvp1`, programs in text) fog by
+  the depth along the view, handing `pow(clamp((end − depth) / (end − start)), rate)` to the linear
+  fog of OpenGL (`OPTION ARB_fog_linear` in 1,730 of its 1,818 fragment programs, no other kind in
+  the rest): 1 − ((end − depth) / (end − start))^rate, Noggit's form (its numbers built by 0x873210
+  and 0x7B19A2). Wow.exe 12340 reads the fog of each light, its end in yards and the share of it
+  where it starts, within −1 and 1, a band it lacks read as 0, its rate 1 (0x7EBFF0), and prepares
+  it (0x7ECD80): its end 10 yards at least; on the maps from 530 on (Outland, Northrend and the
+  instances of the two expansions), on hardware with shaders of the second version or later as any
+  card of today (0x781739), when it ends 1000/36 yards away or farther, its rate 1.5 plus 5.5 times
+  what the span of its own fog leaves of the far clip less 200 yards, 700 at most, 1.5 past it
+  (0x7ECD00; Noggit takes 1,583⅓ yards, its comment keeping 500), then its end the far clip; its
+  share no less than 0 there. The lights are mixed as their other values, end, share and rate by
+  their weights (0x7ED4C0); at each frame, the end is held within the far clip and the start is the
+  share of it (0x7F16F0). The far clip is the camera's far plane (0x607B22), the setting `farclip`
+  (*Far clip plane distance*, 350 by default), held within 183⅓ and 2,000 yards (0x780770). Left to
+  later parts: the fog of the insides of the buildings (`MFOG`, 0x7ED1B0, 9.7d), the rate doubled
+  under the water of the curved maps (0x7F1A09, 9.7c).
+- **Seen**: at the Elwynn Forest (its fog ending at 563.6 yards, from a quarter of it), 38 % of fog
+  300 yards away, 93 % before; at Deadwind Pass, 24 % 30 yards away, 77 % before.
+- **The view** (`core/api`): `MapLight::fog` gives the start, the end and the rate; `fog_rate` and
+  `FOG_SPAN`, Noggit's, are gone. `FOG_WGSL` fogs by the depth along the view (`view_depth`, the w
+  of the place on the screen, the view being a perspective), and `beyond_fog` cuts by it too; the
+  editor's fog is unchanged.
+- **The light** (`light.rs`): `prepared_fog` and `Tables::fog_of_the_game`, as above, over the
+  lights `light_at` mixed, in its order and by its weights; the numbers the panel shows unchanged
+  (Noggit's mixing: a fog of 0 left out, the global light's 0 replaced).
+- **The module `lighting`** has a setting *Far clip of the game, in yards (its farclip)*, from 184
+  to 2,000 (the client's bounds in whole yards), 1277 by default as in the user's game; the panel
+  says the rate.
+- **Tested**: the fog of a light prepared straight before the map 530 (its end 10 yards at least,
+  its share within −1 and 1), curved from it to the far clip (its share no less than 0, its rate by
+  its own fog against the far clip less 200 yards, 700 at most, 1.5 past it, 7 at most), straight
+  under 1000/36 yards; the fog of the game of the global light alone, within the far clip, within a
+  light whose fog ends at 0 (10 yards, as the client reads it), halfway into it, and of two lights
+  of a curved map mixed by half; the view taking the light's start, end and rate; the module giving
+  the fog of Northrend by the far clip set; the setting declared; a tile under the fog by the depth
+  along the view, as much at the edge of the view as in its middle; an unfogged batch facing the eye
+  cut by its depth, not by its distance. Reviewed by another instance: one serious point corrected,
+  the fog first read in the client's fog of the insides (0x7ED1B0) rather than in that of the
+  lights, now prepared for each light before they are mixed, its start the share of the far clip on
+  the curved maps; one middling, the functions cited; light points signalled (the client's far plane
+  is its far clip, a cut at the end of the fog not found there; `view_depth` holds for a perspective
+  only). 40 changes made on purpose, 17 before the review and 23 after it, all caught, one once a
+  light without a band of fog was tested.
 
 #### Tests
 

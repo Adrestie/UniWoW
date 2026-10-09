@@ -142,7 +142,7 @@ impl Lighting {
     }
 
     /// The fog and the sun of the view: the light's sun and colour of the fog over the terrain's
-    /// fog, and the light's distances with the curve of the game when it gives them; the fixed light
+    /// fog, and the light's distances and rate of the game when it gives them; the fixed light
     /// without it.
     fn resolved(&self) -> (Fog, Sun) {
         let Some((_, light)) = self.light else {
@@ -152,12 +152,12 @@ impl Lighting {
             colour: light.fog_colour,
             ..self.fog
         };
-        if let Some([start, end]) = light.fog {
+        if let Some([start, end, rate]) = light.fog {
             fog = Fog {
                 start,
                 middle: (start + end) / 2.0,
                 end,
-                rate: viewport::fog_rate(start, end),
+                rate,
                 ..fog
             };
         }
@@ -1824,18 +1824,16 @@ mod tests {
                 ..set
             }
         );
-        // The fog of the game: its distances and its curve, steeper as it is short.
+        // The fog of the game: its distances and its rate, as the light gives them.
         service.set_light(
             "lighting",
             Some(viewport::MapLight {
-                fog: Some([125.0, 500.0]),
+                fog: Some([125.0, 500.0, 2.5]),
                 ..light
             }),
         );
         let fog = super::view(&Camera::default(), [64, 64], 0.0, lighting.lock().unwrap().resolved()).fog;
-        assert_eq!([fog.start, fog.end], [125.0, 500.0]);
-        assert!((fog.rate - 5.697).abs() < 1e-3, "{}", fog.rate);
-        assert_eq!(viewport::fog_rate(0.0, 2_000.0), 1.5, "past its span, the gentlest");
+        assert_eq!([fog.start, fog.middle, fog.end, fog.rate], [125.0, 312.5, 500.0, 2.5]);
         // Taken back only by the module that gave it: the fixed light again.
         service.set_light("terrain", None);
         assert_eq!(

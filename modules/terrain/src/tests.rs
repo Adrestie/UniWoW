@@ -1332,8 +1332,9 @@ fn a_tile_is_one_draw_its_chunks_textured_from_two_arrays_and_the_horizon_beyond
         "red {red}, green {green}, blue {blue}"
     );
     // From 243 yards over the tile, at the height 7, in a fog of the game from 100 to 400 yards:
-    // 1 − (157 / 300)² of it at the middle, by the distance from the eye, none there by the
-    // distance on the ground; mixed in gamma as the client, its blue 185 of 255.
+    // 1 − (157 / 300)² of it, by the depth along the view, as much at the edge of the view, some
+    // 320 yards from the eye, as in its middle, none there by the distance on the ground; mixed in
+    // gamma as the client, its blue 185 of 255.
     let fog = viewport::Fog {
         start: 100.0,
         middle: 250.0,
@@ -1346,8 +1347,10 @@ fn a_tile_is_one_draw_its_chunks_textured_from_two_arrays_and_the_horizon_beyond
         red == 0 && green == 0 && blue > 4000,
         "red {red}, green {green}, blue {blue}"
     );
-    let centre = &fogged[(32 * 64 + 32) * 4..][..4];
-    assert!(centre[2].abs_diff(185) <= 2, "{centre:?}");
+    for (row, column) in [(32, 32), (4, 32), (32, 4)] {
+        let pixel = &fogged[(row * 64 + column) * 4..][..4];
+        assert!(pixel[2].abs_diff(185) <= 2, "{row}, {column}: {pixel:?}");
+    }
     let stats = layer.stats();
     assert_eq!(stats.draws, 2, "the tile in one draw, and the horizon");
     assert_eq!(

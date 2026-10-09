@@ -21,11 +21,13 @@ use light::{COLOURS, DAY, Mixed, NUMBERS, Tables};
 
 /// The settings: the hour, in minutes from midnight; how many minutes of the game pass in a second;
 /// whether the zones of light and the local lights are mixed in; whether the fog is the game's or
-/// the editor's.
+/// the editor's; the far clip of the game, in yards, which bounds its fog (its `farclip`, within
+/// the bounds Wow.exe gives it).
 const HOUR: &str = "hour";
 const SPEED: &str = "speed";
 const LOCAL: &str = "local_lights";
 const FOG: &str = "game_fog";
+const FAR: &str = "far_clip";
 
 /// The id of the module, as its manifest gives it: the owner of the light it gives the view.
 const OWNER: &str = "lighting";
@@ -72,6 +74,7 @@ fn settings() -> Vec<SettingSpec> {
             1,
         ),
         SettingSpec::integer(FOG, "Fog of the game (1) or of the editor (0)", [0, 1], 1),
+        SettingSpec::integer(FAR, "Far clip of the game, in yards (its farclip)", [184, 2000], 1277),
     ]
 }
 
@@ -182,7 +185,7 @@ impl LightingModule {
             }
         };
         let specs = settings();
-        let [hour, speed, local, fog] = [HOUR, SPEED, LOCAL, FOG].map(|key| {
+        let [hour, speed, local, fog, far] = [HOUR, SPEED, LOCAL, FOG, FAR].map(|key| {
             specs
                 .iter()
                 .find(|spec| spec.key == key)
@@ -205,9 +208,10 @@ impl LightingModule {
         };
         let place = [x as f32, y as f32];
         let light = tables.light_at(map, place, time, 0, local == 1);
-        let given = light
-            .as_ref()
-            .map(|light| light::map_light(&light.values, time, fog == 1));
+        let given = light.as_ref().map(|light| {
+            let game_fog = (fog == 1).then(|| tables.fog_of_the_game(light, map, 0, time, far as f32));
+            light::map_light(&light.values, time, game_fog.flatten())
+        });
         self.shown = Some(Shown {
             map,
             name,
@@ -271,7 +275,9 @@ impl Module for LightingModule {
         ));
         if let Some(given) = &shown.given {
             let fog = match given.fog {
-                Some([start, end]) => format!("the game's, from {start:.0} to {end:.0} yards"),
+                Some([start, end, rate]) => {
+                    format!("the game's, from {start:.0} to {end:.0} yards, of the rate {rate:.2}")
+                }
                 None => "the editor's".to_owned(),
             };
             ui.label(format!(

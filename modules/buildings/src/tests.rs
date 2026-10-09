@@ -806,9 +806,9 @@ fn outside_a_face_is_lit_in_gamma_by_the_ambient_light_turned_and_the_diffuse_th
     let dark = row_of(&gpu, &mut lit, &seen, &Phase::ALL)[16];
     assert!(dark[0] <= 1, "{dark:?}");
     // The fog of the game, red, from 2 to 10 yards at the rate 2: at 5 yards from an eye 3 yards up,
-    // 1 − (5 / 8)² of it, by the distance from the eye, not on the ground; mixed in gamma as the
+    // 1 − (5 / 8)² of it, by the depth along the view, not on the ground; mixed in gamma as the
     // client, over a face lit past white, bounded first. The pixel read, half a pixel off the
-    // middle, is a little farther: 97 of 255, not 100.
+    // middle, lies a little deeper: 97 of 255, not 100.
     let mut fogged = view(Vec3::new(4.0, 0.0, 3.0));
     fogged.sun = uniwow_api::viewport::Sun {
         colour: [1.0; 3],
