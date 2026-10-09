@@ -6371,11 +6371,11 @@ Decided by the user before it: a band the global light lacks takes the fixed lig
   target, the colour bounded to 1 first.
 - **The shaders**: what they share in WGSL is now `core/api`'s, put before each layer's own:
   `LINEAR_WGSL` (a colour in gamma made linear, `linear`, and back, `srgb`), `FOG_WGSL`
-  (`fog_amount`, and `fog_mix`, which mixes the fog as above) and `LIGHT_WGSL` (`light`: the ambient
-  light from 0.9 to 1.1 times as the face turns to the sun, plus the diffuse by the angle, in gamma,
-  made linear once, multiplying the colour in linear), used by the terrain and its horizon, the
-  models, the buildings outside and the water (its fog). Their copies in each module are gone. The
-  rate goes in the fourth number of the fog of each camera.
+  (`fog_amount`, `fog_mix`, which mixes the fog as above, and `beyond_fog`) and `LIGHT_WGSL`
+  (`light`: the ambient light from 0.9 to 1.1 times as the face turns to the sun, plus the diffuse
+  by the angle, in gamma, made linear once, multiplying the colour in linear), used by the terrain
+  and its horizon, the models, the buildings outside and the water (its fog). Their copies in each
+  module are gone. The rate goes in the fourth number of the fog of each camera.
 - **The module `lighting`** gives the view, at each frame, the light of the place and the hour (none
   without a map, the light before kept while the camera's place cannot be read), and takes it back
   when it stops. Its sun: Noggit's table read once a day, towards the north-west, 37° high at 0 h
@@ -6406,6 +6406,13 @@ Decided by the user before it: a band the global light lacks takes the fixed lig
   batch modulating it): the panel showed through, a light edge around the leaves of the trees, there
   since the models are drawn and revealed by the fog of the game covering them. Tested: the image
   drawn over a black rectangle of its size.
+- **Then, decided by the user**: a batch unfogged by its material (its flag 0x02, as the beams of
+  light of Feralas) is drawn unfogged within the fog of the game, as the client draws it, and cut
+  pixel by pixel at its end, which would not hide it, where Noggit leaves out the models wholly
+  beyond it; the models and the buildings alike. Tested: such a batch drawn within the fog, not
+  beyond its end by the distance from the eye, drawn under the editor's fog; beyond the end, a lit
+  unfogged batch not drawn, an unlit fogged one the colour of the fog. 10 changes made on purpose,
+  all caught.
 
 #### Tests
 

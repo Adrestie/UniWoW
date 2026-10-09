@@ -77,9 +77,9 @@ fn srgb(value: vec3<f32>) -> vec3<f32> {
 }
 ";
 
-/// The WGSL of the fog of the view (`fog_amount`, `fog_mix`), which the shaders of the view share,
-/// for a uniform `camera` with an `eye` and a `fog` as `Fog` gives them: where it starts, its middle,
-/// where it ends and its rate; with `LINEAR_WGSL`.
+/// The WGSL of the fog of the view (`fog_amount`, `fog_mix`, `beyond_fog`), which the shaders of the
+/// view share, for a uniform `camera` with an `eye` and a `fog` as `Fog` gives them: where it starts,
+/// its middle, where it ends and its rate; with `LINEAR_WGSL`.
 pub const FOG_WGSL: &str = r"// The share of the editor's fog at its middle.
 const NEAR_FOG: f32 = 0.55;
 
@@ -104,6 +104,12 @@ fn fog_mix(colour: vec3<f32>, fog: vec3<f32>, amount: f32) -> vec3<f32> {
         return linear(mix(srgb(bounded), srgb(fog), amount));
     }
     return mix(colour, fog, amount);
+}
+
+// Whether `position` lies beyond the end of the fog of the game, past which Noggit leaves out the
+// models wholly beyond it.
+fn beyond_fog(position: vec3<f32>) -> bool {
+    return camera.fog.w > 0.0 && length(position - camera.eye.xyz) > camera.fog.z;
 }
 ";
 

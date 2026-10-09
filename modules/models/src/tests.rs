@@ -1113,6 +1113,43 @@ const BEHIND: Vec3 = Vec3::new(-5.0, 0.0, 1.0);
 pub const AIM: Vec3 = Vec3::new(0.0, 0.0, 1.0);
 
 #[test]
+fn an_unfogged_batch_is_not_drawn_beyond_the_end_of_the_fog_of_the_game() {
+    // Unlit and unfogged, 5 yards from an eye 3 yards up and 4 away on the ground.
+    let Some(mut bench) = bench(square(0x3, 0), [255, 0, 0, 255]) else {
+        return;
+    };
+    bench.service.place("test", &[instance(1, 0, Vec3::ZERO, 1.0)]);
+    let eye = Vec3::new(4.0, 0.0, 4.0);
+    let red = [255, 0, 0, 255];
+    // Within the fog of the game: its colour.
+    bench.fog = Fog {
+        colour: [0.0, 0.0, 1.0],
+        start: 2.0,
+        middle: 6.0,
+        end: 10.0,
+        rate: 2.0,
+    };
+    assert_eq!(middle(&render(&mut bench, eye, AIM)), red);
+    // Beyond its end at 4.5 yards from the eye, not on the ground: not drawn.
+    bench.fog.end = 4.5;
+    assert_eq!(middle(&render(&mut bench, eye, AIM)), BLACK);
+    // The fog of the editor ends nothing.
+    bench.fog.rate = 0.0;
+    assert_eq!(middle(&render(&mut bench, eye, AIM)), red);
+    // Beyond the end, lit and unfogged: not drawn; unlit and fogged: the colour of the fog.
+    for (flags, beyond) in [(0x2, BLACK), (0x1, [0, 0, 255, 255])] {
+        let mut other = crate::tests::bench(square(flags, 0), red).expect("as above");
+        other.service.place("test", &[instance(1, 0, Vec3::ZERO, 1.0)]);
+        other.fog = Fog {
+            end: 4.5,
+            rate: 2.0,
+            ..bench.fog
+        };
+        assert_eq!(middle(&render(&mut other, eye, AIM)), beyond, "flags {flags:#x}");
+    }
+}
+
+#[test]
 fn a_model_is_drawn_where_its_instance_stands_lit_and_one_sided() {
     let Some(mut bench) = bench(square(0, 0), [255, 0, 0, 255]) else {
         return;

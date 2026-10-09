@@ -162,11 +162,12 @@ fn combine(shader: u32, colour: vec4<f32>, one: vec4<f32>, two: vec4<f32>) -> ve
 // The pixel of a batch whose textures are `combined` in gamma, `element` the alpha of the batch and
 // its instance; `flags` its alpha key (0 for none), whether unlit and unfogged, and the colour of its
 // fog (0 the view's, 1 black, 2 white, 3 grey for mod2x). Not drawn under its alpha as WotLK tests
-// it: the alpha key times `element`, or 1/255.
+// it: the alpha key times `element`, or 1/255; nor, unfogged, beyond the end of the fog of the game,
+// which would not hide it.
 fn shade(combined: vec4<f32>, element: f32, flags: vec4<f32>, normal: vec3<f32>, world: vec3<f32>) -> vec4<f32> {
     let alpha = clamp(combined.a, 0.0, 1.0);
     let reference = select(LEAST_ALPHA, flags.x * element, flags.x > 0.0);
-    if alpha < reference {
+    if alpha < reference || (flags.z > 0.5 && beyond_fog(world)) {
         discard;
     }
     let fog = select(fog_amount(world), 0.0, flags.z > 0.5);

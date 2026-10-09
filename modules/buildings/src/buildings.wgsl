@@ -197,6 +197,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if reference != LEAST_ALPHA {
         alpha = 1.0;
     }
+    // Unfogged, not drawn beyond the end of the fog of the game, which would not hide it.
+    if shading.z > 0.5 && beyond_fog(in.world) {
+        discard;
+    }
     let fog = select(fog_amount(in.world), 0.0, shading.z > 0.5);
     // A mod2x batch doubles what is drawn in gamma, as the models draw it.
     if shading.w > 2.5 {
