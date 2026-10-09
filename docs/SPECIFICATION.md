@@ -5977,6 +5977,53 @@ disabled; by default at half the most that shows everything at all times, from a
   taken from the setting at each frame, kept when set through the service. 8 changes made on
   purpose, all caught, one once the order of the titles differed from that of the ids.
 
+#### The preparation of the models, measured then lightened
+
+The journal of the frames, its parts of `models prepare` and of the steering of `models` apart, in
+the crowded views the user flew (961 frames; the interface thread at 15.8 ms a frame on average):
+
+| Part | ms |
+|---|---|
+| `models prepare` | 6.0 |
+| of which every group (a look on a tile) tested against the view | 2.7 |
+| of which the choice recorded (each owner's instances copied), the part left | about 1.5 |
+| of which the camera, the owners and the tables | 0.7 |
+| of which the frame of the choice written | 0.7 |
+| of which the order of the blended | 0.4 |
+| The steering of `models` | 2.2 |
+
+Decided by the user, after the walk: the groups and the steering first.
+
+- **The groups**: an owner in sight by its bounds gives the GPU every group of the pool it holds,
+  untested here, the GPU testing each instance against the view, its reach and the pyramid
+  already. What an owner's groups give is planned once (`layer::OwnerPlan`, `plan_of`) for its
+  publication, the generation of the looks held and that of the tables, and made again once one
+  of them changes: its pooled groups, among them those of looks with blended batches, still tested
+  here before giving their instances to the order of the blended, and those of looks of their own,
+  tested and drawn by group as before. The panel says the groups given.
+- **The dispatches of a workgroup a group** go over rows of 65,535 workgroups, the most a side of a
+  dispatch takes, the shader reading the width of a row from `num_workgroups`; a workgroup past the
+  groups of the frame takes the last with no instance, reaching the barriers with the others.
+- **The steering**: the loads, the releases and the loads cancelled are decided again only once
+  what they follow changes (`Decision`: a whole walk come back, the looks held and their
+  generation, the loads running, the reaches of the budget, the formats known), or, the owners
+  that move walked again alone, at most every 100 ms. The owners that move are walked again only
+  once one of them published again or the eye moved. The summary of the panel is made at most
+  twice a second.
+- **Reviewed** by another instance before being committed, as the user asked from then on: no
+  serious point; two of middling weight corrected (the steering decided at every frame while an
+  owner moved, the live world republishing at each frame; a change of the shader the test of the
+  rows let through), and some light ones (a plan let go with its publication, the formats in what
+  is decided from, the width of a row read by the shader). A second review, of those corrections:
+  nothing serious or middling; light ones taken: the owners that move walked again from where the
+  eye stands once a whole walk, made from where it stood, comes back; the owners published since
+  taken once a frame rather than four times; comments set right.
+- **Tested**: the plan of an owner, made again once the tables or the looks held change; more
+  groups than a side of a dispatch, the last in sight chosen once; the walks of the owners that
+  move counted only when walked, and walked again once a whole walk comes back; what the loads and
+  the releases are decided again on. 23 changes made on purpose: 22 made a test fail, the last, a
+  width of the rows other than the dispatch's, being the same as it in the test.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

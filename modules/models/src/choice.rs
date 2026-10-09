@@ -35,6 +35,8 @@ const GROUP: usize = 3;
 const TEMPLATE: usize = 7;
 /// The bytes of the arguments of a draw.
 const ARGS: u64 = 20;
+/// The most workgroups on a side of a dispatch, as wgpu takes by default.
+const SIDE: u32 = 65_535;
 /// The words of the statistics: the draws, the pairs of an instance and a batch, the triangles,
 /// the instances the pyramid hid, and the instances drawn at each level.
 const STATS: usize = 8;
@@ -874,18 +876,20 @@ impl Choice {
         if let Some(pyramid) = pyramid {
             pass.set_bind_group(1, pyramid, &[]);
         }
-        let mut dispatch = |pipeline: &wgpu::ComputePipeline, workgroups: u32| {
-            if workgroups > 0 {
+        let mut dispatch = |pipeline: &wgpu::ComputePipeline, [across, down]: [u32; 2]| {
+            if across > 0 && down > 0 {
                 pass.set_pipeline(pipeline);
-                pass.dispatch_workgroups(workgroups, 1, 1);
+                pass.dispatch_workgroups(across, down, 1);
             }
         };
-        dispatch(&phase.choose, groups);
-        dispatch(&self.blocks, blocks);
-        dispatch(&phase.tops, 1);
-        dispatch(&self.place, blocks);
-        dispatch(&self.pack, blocks);
-        dispatch(&phase.scatter, groups);
+        // A workgroup a group, over rows of the most a side of a dispatch takes (`choice.wgsl`).
+        let by_group = [groups.min(SIDE), groups.div_ceil(SIDE)];
+        dispatch(&phase.choose, by_group);
+        dispatch(&self.blocks, [blocks, 1]);
+        dispatch(&phase.tops, [1, 1]);
+        dispatch(&self.place, [blocks, 1]);
+        dispatch(&self.pack, [blocks, 1]);
+        dispatch(&phase.scatter, by_group);
     }
 
     /// The computing of the frame between its passes: the instances in sight tested against

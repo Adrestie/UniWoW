@@ -108,6 +108,63 @@ pub fn nearest(eye: Vec3, bounds: [Vec3; 2]) -> f32 {
 /// The box of an owner's groups drawn and their largest radius, `owner_bounds`.
 pub type OwnerBounds = Option<([Vec3; 2], f32)>;
 
+/// What an owner's groups give a frame, made once for its publication, the looks held and the
+/// tables of the GPU: the groups of looks of the pool, given to the GPU whole once the owner is in
+/// sight, the GPU choosing each instance; among them, those of looks with blended batches, tested
+/// here and sorted instance by instance; and those of looks of their own, tested and drawn here.
+#[derive(Debug, Default)]
+pub struct OwnerPlan {
+    /// The pooled groups, their first instance counted from the owner's.
+    pub pooled: Vec<GroupOfFrame>,
+    /// Of the pooled groups, those of looks with blended batches: their index and the slot of their
+    /// look.
+    pub blended: Vec<(usize, u32)>,
+    /// The groups of looks of their own, by their index.
+    pub own: Vec<usize>,
+    /// The instances of the pooled groups.
+    pub instances: u64,
+    /// The instances its groups take in the buffer of the frame: to the end of the last.
+    pub used: u32,
+}
+
+/// The plan of the groups of `published`, the looks held `looks`, the tables `tables`; a group of a
+/// look not held gives nothing.
+pub fn plan_of(published: &Published, looks: &HashMap<LookId, Arc<Ready>>, tables: Option<&Tables>) -> OwnerPlan {
+    let mut plan = OwnerPlan {
+        used: published
+            .groups
+            .iter()
+            .map(|group| group.first + group.count)
+            .max()
+            .unwrap_or(0),
+        ..OwnerPlan::default()
+    };
+    for (index, group) in published.groups.iter().enumerate() {
+        if !looks.contains_key(&group.look) {
+            continue;
+        }
+        match tables.and_then(|tables| Some((tables, *tables.slots.get(&group.look)?))) {
+            Some((tables, slot)) => {
+                plan.pooled.push(GroupOfFrame {
+                    first: group.first,
+                    count: group.count,
+                    slot,
+                });
+                plan.instances += u64::from(group.count);
+                if tables.looks[slot as usize]
+                    .blended
+                    .iter()
+                    .any(|records| !records.is_empty())
+                {
+                    plan.blended.push((index, slot));
+                }
+            }
+            None => plan.own.push(index),
+        }
+    }
+    plan
+}
+
 /// The box of the groups of `published` whose looks are drawn, grown by the largest of their radii
 /// at their scales, and that radius; none when none is drawn. None of those groups is in sight
 /// or within reach where this box is not.
@@ -211,6 +268,9 @@ pub struct ModelsLayer {
     /// generation of the looks they were made of, the publication held so that its place is not
     /// taken by another.
     owner_bounds: HashMap<u32, (Arc<Published>, u64, OwnerBounds)>,
+    /// The plan of each owner (`plan_of`), by its number, with the publication, the generation of the
+    /// looks and that of the tables it was made of.
+    plans: HashMap<u32, (Arc<Published>, u64, u64, Arc<OwnerPlan>)>,
     stats: LayerStats,
 }
 
@@ -233,6 +293,7 @@ impl ModelsLayer {
             skin_group: None,
             blended: Vec::new(),
             owner_bounds: HashMap::new(),
+            plans: HashMap::new(),
             stats: LayerStats::default(),
         }
     }
@@ -283,6 +344,12 @@ impl Layer for ModelsLayer {
         }
         let Some(shared) = self.shared.clone() else {
             return;
+        };
+        // Its parts in the journal of the frames, each from the end of the one before.
+        let mut part = Instant::now();
+        let mut spent = |name: &str| {
+            journal::spent(name, part.elapsed());
+            part = Instant::now();
         };
         let (looks, generation, tables, reach, summary, bytes, steering, animated, animation, liquids) = {
             let mut scene = journal::lock(&self.scene, "models scene");
@@ -368,6 +435,8 @@ impl Layer for ModelsLayer {
             .collect();
         let arena = self.service.instances().and_then(|arena| arena.buffer());
         let arena_generation = arena.as_ref().map_or(0, |(_, generation)| *generation);
+        let tables_generation = tables.map_or(0, |tables| tables.generation);
+        spent("models prepare: camera, owners and tables");
         for (slot, published, table) in published {
             let (Some(written), Some((buffer, _))) = (&published.written, &arena) else {
                 continue;
@@ -388,6 +457,8 @@ impl Layer for ModelsLayer {
                     let bounds = owner_bounds(&published, &looks);
                     self.owner_bounds
                         .insert(slot.number, (published.clone(), generation, bounds));
+                    // Its plan, of the publication before, let go: made again once in sight.
+                    self.plans.remove(&slot.number);
                     bounds
                 }
             };
@@ -398,19 +469,67 @@ impl Layer for ModelsLayer {
             if !owner_seen {
                 continue;
             }
-            let used = published
-                .groups
-                .iter()
-                .map(|group| group.first + group.count)
-                .max()
-                .unwrap_or(0);
+            let plan = match self.plans.get(&slot.number) {
+                Some((made_of, looks_at, tables_at, plan))
+                    if Arc::ptr_eq(made_of, &published)
+                        && *looks_at == generation
+                        && *tables_at == tables_generation =>
+                {
+                    plan.clone()
+                }
+                _ => {
+                    let plan = Arc::new(plan_of(&published, &looks, tables.map(|tables| &**tables)));
+                    self.plans.insert(
+                        slot.number,
+                        (published.clone(), generation, tables_generation, plan.clone()),
+                    );
+                    plan
+                }
+            };
+            let used = plan.used;
             owners.push((buffer.clone(), first, (slot.number, published.layout, base, used)));
             if let Some((at, count)) = table
                 && count.min(used) > 0
             {
                 bone_moves.push((u64::from(at) * 4, u64::from(base) * 4, u64::from(count.min(used)) * 4));
             }
-            for group in &published.groups {
+            // From the pool: every group given to the GPU, which chooses each instance in sight.
+            chosen.extend(plan.pooled.iter().map(|group| GroupOfFrame {
+                first: base + group.first,
+                ..*group
+            }));
+            seen += plan.pooled.len();
+            instances += plan.instances;
+            // The instances of looks with blended batches of the groups in sight, sorted here.
+            for &(index, look_slot) in &plan.blended {
+                let group = &published.groups[index];
+                let Some(look) = looks.get(&group.look) else {
+                    continue;
+                };
+                let radius = look.radius() * group.scale;
+                let bounds = [group.low - Vec3::splat(radius), group.high + Vec3::splat(radius)];
+                if nearest(view.eye, bounds) > reach * radius.max(1.0) || !in_sight(view.view_proj, bounds) {
+                    continue;
+                }
+                for at in group.first..group.first + group.count {
+                    let origin = published
+                        .instances
+                        .get(at as usize)
+                        .map_or(group.low, |instance| instance.transform.w_axis.truncate());
+                    candidates.push((
+                        view.eye.distance(origin),
+                        (slot.number, published.layout, at),
+                        Blended {
+                            index: base + at,
+                            slot: look_slot,
+                        },
+                        beyond(origin),
+                    ));
+                }
+            }
+            // The looks of their own, by group in sight.
+            for &index in &plan.own {
+                let group = &published.groups[index];
                 let Some(look) = looks.get(&group.look) else {
                     continue;
                 };
@@ -422,39 +541,6 @@ impl Layer for ModelsLayer {
                 }
                 seen += 1;
                 instances += u64::from(group.count);
-                // From the pool: chosen by the GPU, each instance of a look with blended batches
-                // sorted here.
-                if let Some(look_slot) = tables.and_then(|tables| tables.slots.get(&group.look)) {
-                    chosen.push(GroupOfFrame {
-                        first: base + group.first,
-                        count: group.count,
-                        slot: *look_slot,
-                    });
-                    let blends = tables.is_some_and(|tables| {
-                        tables.looks[*look_slot as usize]
-                            .blended
-                            .iter()
-                            .any(|records| !records.is_empty())
-                    });
-                    if blends {
-                        for at in group.first..group.first + group.count {
-                            let origin = published
-                                .instances
-                                .get(at as usize)
-                                .map_or(group.low, |instance| instance.transform.w_axis.truncate());
-                            candidates.push((
-                                view.eye.distance(origin),
-                                (slot.number, published.layout, at),
-                                Blended {
-                                    index: base + at,
-                                    slot: *look_slot,
-                                },
-                                beyond(origin),
-                            ));
-                        }
-                    }
-                    continue;
-                }
                 let key = (slot.number, group.look, group.tile);
                 let level = level(distance / radius.max(0.5), levels.get(&key).copied(), look.levels());
                 self.levels.insert(key, level);
@@ -475,6 +561,8 @@ impl Layer for ModelsLayer {
             base += used;
         }
         self.owner_bounds.retain(|number, _| present.contains(number));
+        self.plans.retain(|number, _| present.contains(number));
+        spent("models prepare: the groups in sight");
         // The blended groups, the farthest first: sorted again only when two cross by the margin.
         let distance_of: HashMap<GroupKey, f32> = drawn
             .iter()
@@ -521,6 +609,7 @@ impl Layer for ModelsLayer {
             }
         }
 
+        spent("models prepare: the order of the blended");
         // The groups of looks of their own, as in step 9.4c.
         let mut draws = 0;
         let mut triangles = 0;
@@ -600,6 +689,7 @@ impl Layer for ModelsLayer {
                 )
             }
         };
+        spent("models prepare: the frame of the choice");
         while self
             .recordings
             .front()
@@ -621,10 +711,11 @@ impl Layer for ModelsLayer {
             triangles,
             bytes,
             items: format!(
-                "{summary}\n  {instances} instances in {seen} groups in sight of {groups}; {drawing}\n  {animations}"
+                "{summary}\n  {instances} instances in {seen} groups given of {groups}; {drawing}\n  {animations}"
             ),
             steering,
         };
+        spent("models prepare: the statistics");
     }
 
     fn compute(&mut self, _gpu: &egui_wgpu::RenderState, _view: &View, encoder: &mut wgpu::CommandEncoder) {

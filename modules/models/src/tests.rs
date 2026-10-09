@@ -7,7 +7,7 @@ use std::pin::pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use uniwow_api::formats::{
     AnimationRecord, AreaRecord, Batch, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef,
@@ -1571,9 +1571,15 @@ fn the_distances_are_walked_whole_by_one_job_at_a_time_those_before_kept_meanwhi
     let (walked, told) = frame(&mut walking, &mut started, &owners, Vec3::ZERO).expect("walked");
     assert!(told, "to be told to the budget once");
     assert_eq!(walked.nearest[&LookId(0)], 30.0);
+    assert_eq!(walking.version(), 1, "a change: a whole walk come back");
     walking.keep(walked);
     let (walked, told) = frame(&mut walking, &mut started, &owners, Vec3::ZERO).expect("walked");
     assert!(!told);
+    assert_eq!(walking.version(), 1, "nothing changed");
+    walking.keep(walked);
+    // The eye moved within the margin, no owner moving: nothing walked.
+    let (walked, _) = frame(&mut walking, &mut started, &owners, Vec3::X).expect("walked");
+    assert_eq!(walking.moved(), 0);
     walking.keep(walked);
     // The creature moves: once walked whole, then here at each frame, no job started.
     let moved = [(1, building.clone()), (2, creature(40.0))];
@@ -1582,10 +1588,36 @@ fn the_distances_are_walked_whole_by_one_job_at_a_time_those_before_kept_meanwhi
     assert_eq!(started.len(), 2, "a job for an owner published");
     let done = walk(started[1].take(), &moved, Vec3::ZERO);
     walking.ended(uniwow_api::JobId(2), uniwow_api::JobOutcome::Done(Box::new(done)));
-    let nearer = [(1, building.clone()), (2, creature(20.0))];
-    let (walked, told) = frame(&mut walking, &mut started, &nearer, Vec3::ZERO).expect("walked");
+    // Walked from where the eye stood when it started: the owners that move walked again at once,
+    // though none published again.
+    let before = walking.moved();
+    let (walked, told) = frame(&mut walking, &mut started, &moved, Vec3::ZERO).expect("walked");
     assert!(told);
+    assert_eq!(walking.moved(), before + 1);
+    walking.keep(walked);
+    let nearer = [(1, building.clone()), (2, creature(20.0))];
+    let (version, moved) = (walking.version(), walking.moved());
+    let (walked, told) = frame(&mut walking, &mut started, &nearer, Vec3::ZERO).expect("walked");
+    assert!(!told, "told once");
     assert_eq!(walked.nearest[&LookId(1)], 20.0, "walked here");
+    assert_eq!(
+        (walking.version(), walking.moved()),
+        (version, moved + 1),
+        "the owner that moves walked, not walked whole"
+    );
+    walking.keep(walked);
+    let (walked, _) = frame(&mut walking, &mut started, &nearer, Vec3::ZERO).expect("walked");
+    assert_eq!(
+        walking.moved(),
+        moved + 1,
+        "nothing published again, the eye still: not walked"
+    );
+    walking.keep(walked);
+    // The eye moved: the owner that moves walked from there.
+    let up = Vec3::new(0.0, 0.0, 1.0);
+    let (walked, _) = frame(&mut walking, &mut started, &nearer, up).expect("walked");
+    assert_eq!(walking.moved(), moved + 2);
+    assert!(walked.nearest[&LookId(1)] > 20.0, "from the eye moved");
     walking.keep(walked);
     assert_eq!(started.len(), 2);
     // The camera moves past the margin: those before kept while the job runs, one job only.
@@ -1606,6 +1638,51 @@ fn the_distances_are_walked_whole_by_one_job_at_a_time_those_before_kept_meanwhi
     assert!(!told);
     walking.keep(walked);
     assert_eq!(started.len(), 4);
+}
+
+#[test]
+fn the_loads_and_the_releases_are_decided_again_once_what_they_follow_changes() {
+    let decision = crate::Decision {
+        walked: 1,
+        generation: 2,
+        held: 3,
+        loading: 1,
+        reaches: [10, 20],
+        formats: true,
+    };
+    let at = Instant::now();
+    let decided = (decision, 5, at);
+    assert!(crate::decide_again(None, decision, 5, at), "never decided");
+    assert!(
+        !crate::decide_again(Some(&decided), decision, 5, at + Duration::from_secs(1)),
+        "nothing changed"
+    );
+    for changed in [
+        crate::Decision { walked: 2, ..decision },
+        crate::Decision {
+            generation: 3,
+            ..decision
+        },
+        crate::Decision { held: 4, ..decision },
+        crate::Decision { loading: 0, ..decision },
+        crate::Decision {
+            reaches: [11, 20],
+            ..decision
+        },
+        crate::Decision {
+            reaches: [10, 21],
+            ..decision
+        },
+        crate::Decision {
+            formats: false,
+            ..decision
+        },
+    ] {
+        assert!(crate::decide_again(Some(&decided), changed, 5, at), "{changed:?}");
+    }
+    // The owners that move walked again: followed at most every `MOVED`.
+    assert!(!crate::decide_again(Some(&decided), decision, 6, at + crate::MOVED / 2));
+    assert!(crate::decide_again(Some(&decided), decision, 6, at + crate::MOVED));
 }
 
 #[test]

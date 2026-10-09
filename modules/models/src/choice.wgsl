@@ -166,6 +166,15 @@ fn seen(index: u32, radius: f32) -> bool {
     return nearest >= farthest;
 }
 
+// The group of the workgroup `workgroup`, a workgroup a group over rows of `across` workgroups;
+// past the groups of the frame, the last with no instance, so that its workgroup reaches the
+// barriers with the others yet does nothing.
+fn group_of_workgroup(workgroup: vec3<u32>, across: u32) -> vec3<u32> {
+    let at = workgroup.y * across + workgroup.x;
+    let group = group_of(min(at, params.sizes.z - 1u));
+    return vec3<u32>(group.x, select(0u, group.y, at < params.sizes.z), group.z);
+}
+
 // The group `group` of the frame: its first instance, its count, where its look is in the tables.
 fn group_of(group: u32) -> vec3<u32> {
     let at = params.frames.y + group * GROUP;
@@ -204,9 +213,13 @@ fn count_chosen(group: vec3<u32>, level: u32) {
 }
 
 @compute @workgroup_size(64)
-fn choose_first(@builtin(workgroup_id) workgroup: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>) {
+fn choose_first(
+    @builtin(workgroup_id) workgroup: vec3<u32>,
+    @builtin(num_workgroups) workgroups: vec3<u32>,
+    @builtin(local_invocation_id) local: vec3<u32>,
+) {
     begin_choosing(local.x);
-    let group = group_of(workgroup.x);
+    let group = group_of_workgroup(workgroup, workgroups.x);
     let radius = bitcast<f32>(statics[group.z]);
     let count = statics[group.z + 1u];
     for (var k = local.x; k < group.y; k += 64u) {
@@ -224,9 +237,13 @@ fn choose_first(@builtin(workgroup_id) workgroup: vec3<u32>, @builtin(local_invo
 }
 
 @compute @workgroup_size(64)
-fn choose_second(@builtin(workgroup_id) workgroup: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>) {
+fn choose_second(
+    @builtin(workgroup_id) workgroup: vec3<u32>,
+    @builtin(num_workgroups) workgroups: vec3<u32>,
+    @builtin(local_invocation_id) local: vec3<u32>,
+) {
     begin_choosing(local.x);
-    let group = group_of(workgroup.x);
+    let group = group_of_workgroup(workgroup, workgroups.x);
     let radius = bitcast<f32>(statics[group.z]);
     let count = statics[group.z + 1u];
     for (var k = local.x; k < group.y; k += 64u) {
@@ -247,8 +264,8 @@ fn choose_second(@builtin(workgroup_id) workgroup: vec3<u32>, @builtin(local_inv
 
 // Each instance drawn in the phase: its entries written at its records' places; in the second,
 // not those the first drew.
-fn scatter_in(workgroup: vec3<u32>, local: vec3<u32>, second: bool) {
-    let group = group_of(workgroup.x);
+fn scatter_in(workgroup: vec3<u32>, across: u32, local: vec3<u32>, second: bool) {
+    let group = group_of_workgroup(workgroup, across);
     for (var k = local.x; k < group.y; k += 64u) {
         let index = group.x + k;
         let level = levels[index];
@@ -266,13 +283,21 @@ fn scatter_in(workgroup: vec3<u32>, local: vec3<u32>, second: bool) {
 }
 
 @compute @workgroup_size(64)
-fn scatter_first(@builtin(workgroup_id) workgroup: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>) {
-    scatter_in(workgroup, local, false);
+fn scatter_first(
+    @builtin(workgroup_id) workgroup: vec3<u32>,
+    @builtin(num_workgroups) workgroups: vec3<u32>,
+    @builtin(local_invocation_id) local: vec3<u32>,
+) {
+    scatter_in(workgroup, workgroups.x, local, false);
 }
 
 @compute @workgroup_size(64)
-fn scatter_second(@builtin(workgroup_id) workgroup: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>) {
-    scatter_in(workgroup, local, true);
+fn scatter_second(
+    @builtin(workgroup_id) workgroup: vec3<u32>,
+    @builtin(num_workgroups) workgroups: vec3<u32>,
+    @builtin(local_invocation_id) local: vec3<u32>,
+) {
+    scatter_in(workgroup, workgroups.x, local, true);
 }
 
 var<workgroup> sums: array<u32, 256>;

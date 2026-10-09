@@ -12,6 +12,7 @@ use uniwow_api::models::{Geosets, Look, Models};
 use uniwow_api::viewport::Layer;
 use uniwow_api::wgpu;
 
+use crate::choice::Tables;
 use crate::lock;
 use crate::pool;
 use crate::pool_tests::{LEFT, Pooled, RIGHT, colours, only, pixel, skin};
@@ -107,12 +108,156 @@ fn each_instance_of_a_group_is_chosen_by_itself() {
     assert!(only(middle(&image), 0), "{:?}", middle(&image));
     let stats = pooled.bench.layer.stats();
     assert!(
-        stats.items.contains("3 instances in 1 groups in sight")
-            && stats.items.contains("1 pairs, levels [1, 0, 0, 0]"),
+        stats.items.contains("3 instances in 1 groups given") && stats.items.contains("1 pairs, levels [1, 0, 0, 0]"),
         "{}",
         stats.items
     );
     assert_eq!((stats.draws, stats.triangles), (1, 2));
+}
+
+#[test]
+fn an_owner_in_sight_gives_the_gpu_its_pooled_groups_whole_planned_once() {
+    let fake = Fake {
+        model: Some(square(0, 0)),
+        textures: colours(),
+        ..Fake::default()
+    };
+    let Some(mut pooled) = Pooled::new(pool::SLOTS) else {
+        return;
+    };
+    assert!(pooled.add(&fake, &look("square.m2")));
+    // Two groups of one look, in two tiles, the second out of sight.
+    pooled.bench.service.place(
+        "test",
+        &[
+            instance(1, 0, Vec3::new(-2.0, 0.0, 0.0), 1.0),
+            instance(2, 0, Vec3::new(-2.0, crate::groups::TILE * 3.0, 0.0), 1.0),
+        ],
+    );
+    render(&mut pooled.bench, FRONT, AIM);
+    let tables = pooled
+        .bench
+        .layer
+        .choice()
+        .expect("with the pool")
+        .tables
+        .clone()
+        .expect("made");
+    let looks = lock(&pooled.bench.scene).looks.clone();
+    let published = pooled.bench.service.owners()[0].published();
+    let plan = crate::layer::plan_of(&published, &looks, Some(&tables));
+    assert_eq!(plan.pooled.len(), 2, "both, the GPU choosing their instances");
+    assert_eq!(
+        (
+            plan.pooled[1].first,
+            plan.instances,
+            plan.used,
+            plan.blended.len(),
+            plan.own.len()
+        ),
+        (1, 2, 2, 0, 0)
+    );
+    let unpooled = crate::layer::plan_of(&published, &looks, None);
+    assert_eq!(
+        (unpooled.pooled.len(), unpooled.own),
+        (0, vec![0, 1]),
+        "of their own without tables"
+    );
+    let held_none = crate::layer::plan_of(&published, &std::collections::HashMap::new(), Some(&tables));
+    assert!(
+        held_none.pooled.is_empty() && held_none.own.is_empty(),
+        "a look not held gives nothing"
+    );
+    let items = settled(&mut pooled.bench, FRONT, AIM);
+    assert!(only(middle(&items), 0));
+    let stats = pooled.bench.layer.stats();
+    assert!(stats.items.contains("2 instances in 2 groups given"), "{}", stats.items);
+}
+
+#[test]
+fn an_owner_is_planned_again_once_the_tables_or_the_looks_held_change() {
+    let fake = Fake {
+        model: Some({
+            let mut model = square(0, 0);
+            model.textures[0].source = ModelTextureSource::Filled(11);
+            model
+        }),
+        textures: colours(),
+        ..Fake::default()
+    };
+    let Some(mut pooled) = Pooled::new(pool::SLOTS) else {
+        return;
+    };
+    for file in ["red.blp", "green.blp"] {
+        assert!(pooled.add(&fake, &skin(file)));
+    }
+    pooled.bench.service.place(
+        "test",
+        &[
+            instance(1, 0, Vec3::new(0.0, -1.5, 0.0), 0.5),
+            instance(2, 1, Vec3::new(0.0, 1.5, 0.0), 0.5),
+        ],
+    );
+    // The tables not made yet: the looks of the pool wait for them, not drawn.
+    let tables = lock(&pooled.bench.scene).tables.take();
+    let image = settled(&mut pooled.bench, FRONT, AIM);
+    assert_eq!(pixel(&image, LEFT.0, LEFT.1), [0, 0, 0, 255]);
+    // The tables made: given to the GPU.
+    let looks = lock(&pooled.bench.scene).looks.clone();
+    let made = Tables::new(&pooled.bench.gpu.device, 1_000, &looks);
+    assert!(tables.is_some_and(|tables| tables.generation != made.generation));
+    lock(&pooled.bench.scene).tables = Some(Arc::new(made));
+    let image = settled(&mut pooled.bench, FRONT, AIM);
+    assert!(only(pixel(&image, LEFT.0, LEFT.1), 0) && only(pixel(&image, RIGHT.0, RIGHT.1), 1));
+    // The green no longer held, the tables not made again yet: it is drawn no more.
+    {
+        let mut scene = lock(&pooled.bench.scene);
+        let mut held = (*scene.looks).clone();
+        held.remove(&uniwow_api::models::LookId(1));
+        scene.looks = Arc::new(held);
+        scene.generation += 1;
+    }
+    let image = settled(&mut pooled.bench, FRONT, AIM);
+    assert!(only(pixel(&image, LEFT.0, LEFT.1), 0));
+    assert_eq!(
+        pixel(&image, RIGHT.0, RIGHT.1),
+        [0, 0, 0, 255],
+        "planned again without it"
+    );
+}
+
+#[test]
+fn more_groups_than_a_side_of_a_dispatch_are_all_chosen() {
+    let fake = Fake {
+        model: Some(square(0, 0)),
+        textures: colours(),
+        ..Fake::default()
+    };
+    let Some(mut pooled) = Pooled::new(pool::SLOTS) else {
+        return;
+    };
+    assert!(pooled.add(&fake, &look("square.m2")));
+    // A group a tile, over rows of 300 tiles behind the camera; the one in sight the last group,
+    // past the first row of workgroups.
+    let far = 65_600u64;
+    let tile = crate::groups::TILE;
+    let mut placed: Vec<_> = (0..far)
+        .map(|at| {
+            let across = -((at % 300) as f32 + 1.5) * tile;
+            let along = ((at / 300) as f32 + 0.5) * tile;
+            instance(at + 2, 0, Vec3::new(across, along, 0.0), 1.0)
+        })
+        .collect();
+    placed.push(instance(1, 0, Vec3::new(-2.0, 0.0, 0.0), 1.0));
+    pooled.bench.service.place("test", &placed);
+    let image = settled(&mut pooled.bench, FRONT, AIM);
+    assert!(only(middle(&image), 0), "{:?}", middle(&image));
+    let stats = pooled.bench.layer.stats();
+    assert!(
+        stats.items.contains("65601 groups given") && stats.items.contains("chosen by the GPU: 1 pairs"),
+        "{}",
+        stats.items
+    );
 }
 
 #[test]

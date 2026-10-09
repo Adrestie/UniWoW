@@ -41,6 +41,7 @@ use std::time::{Duration, Instant};
 
 use uniwow_api::formats::{self, FileRef, Formats};
 use uniwow_api::glam::{Mat4, Quat, Vec3};
+use uniwow_api::journal;
 use uniwow_api::models::{self, Geosets, Instance, Look, LookId, LookState, Models, Motion};
 use uniwow_api::viewport::Demand;
 use uniwow_api::{
@@ -63,13 +64,41 @@ pub fn lock<T>(shared: &Mutex<T>) -> MutexGuard<'_, T> {
 /// sixteenth of a band of the budget of the view.
 const WALK: f32 = viewport::BAND / 16.0;
 
+/// How often the summary of the panel is made again.
+const SUMMARY: Duration = Duration::from_millis(500);
+
+/// How often the loads and the releases follow the owners that move, when nothing else changed.
+const MOVED: Duration = Duration::from_millis(100);
+
+/// What the loads and the releases are decided from: the version of the distances walked whole,
+/// the generation of the looks held, the looks held and loading, the reaches the budget allows, and
+/// whether the formats are known.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Decision {
+    walked: u64,
+    generation: u64,
+    held: usize,
+    loading: usize,
+    reaches: [u32; 2],
+    formats: bool,
+}
+
+/// Whether to decide the loads and the releases again: `now` differs from what they were last
+/// decided from, `before`, or the owners that move were walked again since (`moved` against the
+/// count then) and `MOVED` went by, at `at`.
+fn decide_again(before: Option<&(Decision, u64, Instant)>, now: Decision, moved: u64, at: Instant) -> bool {
+    before.is_none_or(|(decided, moved_then, when)| {
+        *decided != now || (moved != *moved_then && at.duration_since(*when) >= MOVED)
+    })
+}
+
 /// The owners of instances, by their number, with their publications.
 pub(crate) type Owners = [(u32, Arc<Published>)];
 
 /// The distance from the eye of the nearest group of each look placed, as walked: whole from where
 /// the camera stood, after which publication of the looks held, those over the owners that do not
-/// move kept; the owners that move, seen to publish again at the last whole walk, walked again at
-/// each frame.
+/// move kept; the owners that move, seen to publish again at the last whole walk, walked again
+/// once one of them publishes again or the eye moves.
 #[derive(Clone)]
 pub(crate) struct Walked {
     pub eye: Vec3,
@@ -95,14 +124,15 @@ fn changed(before: Option<&Walked>, owners: &Owners) -> HashSet<u32> {
 }
 
 impl Walked {
-    /// Whether `update` walks every owner again: when the camera moved past `WALK`, the looks held
-    /// were published, an owner came or went, or one that did not move published again.
-    pub fn whole(before: Option<&Walked>, owners: &Owners, generation: u64, eye: Vec3) -> bool {
+    /// Whether `update` walks every owner again, `changed` the owners that published since
+    /// `before`: when the camera moved past `WALK`, the looks held were published, an owner came or
+    /// went, or one that did not move published again.
+    fn whole(before: Option<&Walked>, owners: &Owners, changed: &HashSet<u32>, generation: u64, eye: Vec3) -> bool {
         before.is_none_or(|before| {
             before.generation != generation
                 || before.eye.distance(eye) > WALK
                 || before.owners.len() != owners.len()
-                || !changed(Some(before), owners).is_subset(&before.moving)
+                || !changed.is_subset(&before.moving)
         })
     }
 
@@ -115,9 +145,21 @@ impl Walked {
         eye: Vec3,
         radius: impl Fn(LookId) -> f32,
     ) -> (Walked, bool) {
-        let seen: HashMap<u32, Arc<Published>> = owners.iter().cloned().collect();
         let changed = changed(before.as_ref(), owners);
-        if !Self::whole(before.as_ref(), owners, generation, eye)
+        Self::update_given(before, owners, changed, generation, eye, radius)
+    }
+
+    /// As `update`, `changed` the owners that published since `before`.
+    fn update_given(
+        before: Option<Walked>,
+        owners: &Owners,
+        changed: HashSet<u32>,
+        generation: u64,
+        eye: Vec3,
+        radius: impl Fn(LookId) -> f32,
+    ) -> (Walked, bool) {
+        let seen: HashMap<u32, Arc<Published>> = owners.iter().cloned().collect();
+        if !Self::whole(before.as_ref(), owners, &changed, generation, eye)
             && let Some(before) = before
         {
             let mut nearest = before.fixed.clone();
@@ -185,13 +227,19 @@ struct Walking {
     running: Option<JobId>,
     /// A whole walk came back, not yet told to the budget.
     anew: bool,
+    /// Counts the whole walks come back.
+    version: u64,
+    /// Counts the walks of the owners that move, and where the eye stood at the last.
+    moved: u64,
+    eye: Option<Vec3>,
 }
 
 impl Walking {
     /// The distances for this frame, to give back with `keep`, and whether the budget is to be
-    /// told them, walked whole since it was last told. Walked here over the owners that move when
-    /// nothing else changed; otherwise those before kept, `start` given them to start the job of a
-    /// whole walk when none runs. None until a first whole walk comes back.
+    /// told them, walked whole since it was last told. Walked here over the owners that move, when
+    /// one of them published again or the eye moved, nothing else having changed; otherwise those
+    /// before kept, `start` given them to start the job of a whole walk when none runs. None until
+    /// a first whole walk comes back.
     fn frame(
         &mut self,
         owners: &Owners,
@@ -200,13 +248,22 @@ impl Walking {
         radius: impl Fn(LookId) -> f32,
         start: impl FnOnce(Option<Walked>) -> JobId,
     ) -> Option<(Walked, bool)> {
-        if Walked::whole(self.walked.as_ref(), owners, generation, eye) {
+        // The owners published since, taken once a frame.
+        let changed = changed(self.walked.as_ref(), owners);
+        if Walked::whole(self.walked.as_ref(), owners, &changed, generation, eye) {
             if self.running.is_none() {
                 self.running = Some(start(self.walked.clone()));
             }
         } else if let Some(before) = self.walked.take() {
-            self.walked = Some(Walked::update(Some(before), owners, generation, eye, radius).0);
+            // Walked again only when an owner that moves published again or the eye moved.
+            if !before.moving.is_empty() && (self.eye != Some(eye) || !changed.is_empty()) {
+                self.moved += 1;
+                self.walked = Some(Walked::update_given(Some(before), owners, changed, generation, eye, radius).0);
+            } else {
+                self.walked = Some(before);
+            }
         }
+        self.eye = Some(eye);
         let walked = self.walked.take()?;
         Some((walked, std::mem::take(&mut self.anew)))
     }
@@ -214,6 +271,16 @@ impl Walking {
     /// The distances `frame` gave, for the next frame.
     fn keep(&mut self, walked: Walked) {
         self.walked = Some(walked);
+    }
+
+    /// Counts the whole walks come back.
+    fn version(&self) -> u64 {
+        self.version
+    }
+
+    /// Counts the walks of the owners that move.
+    fn moved(&self) -> u64 {
+        self.moved
     }
 
     /// The outcome of `job` taken when it is the whole walk running, its distances then kept to be
@@ -231,6 +298,10 @@ impl Walking {
                 if let Some(walked) = outcome.take::<Walked>() {
                     self.walked = Some(walked);
                     self.anew = true;
+                    self.version += 1;
+                    // Walked from where the eye stood when it started: the owners that move walked
+                    // again from where it stands, at the next frame.
+                    self.eye = None;
                 }
             }
         }
@@ -499,6 +570,11 @@ struct ModelsModule {
     /// What the models told the budget of the view last, and the distances of the looks placed.
     told: Option<Demand>,
     walking: Walking,
+    /// What the loads and the releases were last decided from, the walks of the owners that move
+    /// then, and when.
+    decided: Option<(Decision, u64, Instant)>,
+    /// When the summary of the panel was made last.
+    summarised: Option<Instant>,
     frame: u64,
     reach: f32,
     preview: Preview,
@@ -527,6 +603,8 @@ impl Default for ModelsModule {
             generation: 0,
             told: None,
             walking: Walking::default(),
+            decided: None,
+            summarised: None,
             frame: 0,
             reach: (MOST_REACH / 2) as f32,
             preview: Preview::default(),
@@ -609,12 +687,19 @@ impl ModelsModule {
             Ok(PropertyValue::Vector([x, y, z])) => Vec3::new(x as f32, y as f32, z as f32),
             _ => return,
         };
+        // Its parts in the journal of the frames, each from the end of the one before.
+        let mut part = Instant::now();
+        let mut spent = |name: &str| {
+            journal::spent(name, part.elapsed());
+            part = Instant::now();
+        };
         let owners: Vec<(u32, Arc<Published>)> = self
             .service
             .owners()
             .iter()
             .map(|slot| (slot.number, slot.published()))
             .collect();
+        spent("models steer: the owners");
         let (held, generation) = (&self.held, self.generation);
         let walked = self.walking.frame(
             &owners,
@@ -635,8 +720,55 @@ impl ModelsModule {
         let Some((walked, whole)) = walked else {
             return;
         };
+        spent("models steer: the walk");
         let nearest = &walked.nearest;
         let allowance = view.allowance();
+        // The loads and the releases decided again only once something they follow changed.
+        let decision = |module: &Self| Decision {
+            walked: module.walking.version(),
+            generation: module.generation,
+            held: module.held.len(),
+            loading: module.loading.len(),
+            reaches: [allowance.load.to_bits(), allowance.keep.to_bits()],
+            formats: lock(&module.service.formats).is_some(),
+        };
+        let now = Instant::now();
+        if decide_again(self.decided.as_ref(), decision(self), self.walking.moved(), now) {
+            self.decide(ctx, &shared, nearest, &allowance);
+            self.decided = Some((decision(self), self.walking.moved(), now));
+        }
+        if whole {
+            self.tell_budget(&view, nearest);
+        }
+        spent("models steer: the loads and the releases");
+        let mut scene = lock(&self.scene);
+        if scene.liquids.is_none() {
+            scene.liquids = ctx.service(liquids::SERVICE);
+        }
+        scene.reach = self.reach;
+        self.service.set_reach(self.reach);
+        scene.bytes = self.told.as_ref().map_or(0, Demand::used);
+        if self.summarised.is_none_or(|at| at.elapsed() >= SUMMARY) {
+            scene.summary = self.summary(&shared, nearest);
+            self.summarised = Some(Instant::now());
+        }
+        scene.steering = start.elapsed();
+        drop(scene);
+        spent("models steer: the summary");
+        self.walking.keep(walked);
+    }
+
+    /// The loads and the releases the distances `nearest` and `allowance` ask for: the looks held
+    /// beyond what the budget keeps, or placed no more, released; the loads no longer wanted
+    /// cancelled; the nearest looks wanted within what it lets load started, as many at once as the
+    /// cores but one.
+    fn decide(
+        &mut self,
+        ctx: &mut Context,
+        shared: &Arc<Shared>,
+        nearest: &HashMap<LookId, f32>,
+        allowance: &viewport::Allowance,
+    ) {
         // Released beyond what the budget keeps, or placed no more, the farthest first.
         let released: Vec<LookId> = self
             .held
@@ -705,13 +837,11 @@ impl ModelsModule {
                 self.service.set_state(id, LookState::Loading);
             }
         }
-        if whole {
-            self.tell_budget(&view, nearest);
-        }
-        let mut scene = lock(&self.scene);
-        if scene.liquids.is_none() {
-            scene.liquids = ctx.service(liquids::SERVICE);
-        }
+    }
+
+    /// What the panel says of the looks, the caches and the pool, `nearest` the distances of the
+    /// looks placed.
+    fn summary(&self, shared: &Shared, nearest: &HashMap<LookId, f32>) -> String {
         let (models, textures) = (self.caches.models.counts(), self.caches.textures.counts());
         let own = self
             .held
@@ -723,9 +853,6 @@ impl ModelsModule {
             .filter(|id| !self.held.contains_key(id) && !self.loading.contains_key(id))
             .count();
         let bytes = self.told.as_ref().map_or(0, Demand::used);
-        scene.reach = self.reach;
-        self.service.set_reach(self.reach);
-        scene.bytes = bytes;
         let drawn = match &shared.pool {
             Some(pool) => {
                 let arrays = pool.arrays.counts();
@@ -763,7 +890,7 @@ impl ModelsModule {
                 cpu = [cpu[0] + kept[0], cpu[1] + kept[1]];
             }
         }
-        scene.summary = format!(
+        format!(
             "{} looks on the GPU ({:.0} MB), {} loading, {waiting} waiting; {} models and {} textures held, {} textures unreadable\n  on the CPU, the models held {:.0} MB, their animations {:.0} MB\n  {drawn}",
             self.held.len(),
             bytes as f64 / MB,
@@ -773,10 +900,7 @@ impl ModelsModule {
             textures.1,
             cpu[0] as f64 / MB,
             cpu[1] as f64 / MB
-        );
-        scene.steering = start.elapsed();
-        drop(scene);
-        self.walking.keep(walked);
+        )
     }
 
     /// Tells the budget of the view what the models hold and want, each model and texture once, in
