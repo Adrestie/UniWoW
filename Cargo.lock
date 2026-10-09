@@ -3524,6 +3524,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "uniwow-module-lighting"
+version = "0.1.0"
+dependencies = [
+ "uniwow-api",
+]
+
+[[package]]
 name = "uniwow-module-liquids"
 version = "0.1.0"
 dependencies = [

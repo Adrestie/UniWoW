@@ -36,8 +36,8 @@ use std::thread::ThreadId;
 
 use uniwow_api::formats::{
     self, AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef,
-    Formats, GameObjectDisplay, HairGeoset, LiquidLayer, LiquidTypeRecord, MapRecord, Model, Placements, Texture, Tile,
-    Wdl, Wdt, Wmo,
+    Formats, GameObjectDisplay, HairGeoset, LightBand, LightParamsRecord, LightRecord, LightSkyboxRecord, LiquidLayer,
+    LiquidTypeRecord, MapRecord, Model, Placements, Texture, Tile, Wdl, Wdt, Wmo,
 };
 use uniwow_api::vfs::{self, Vfs, VfsState};
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, Registrar, egui, log, rfd, serde_json};
@@ -361,6 +361,36 @@ impl Formats for Files {
         self.check_thread("LiquidType.dbc");
         let client = self.client()?;
         client.tables.liquid_types(&client.chain)
+    }
+
+    fn lights(&self) -> Result<Arc<Vec<LightRecord>>, String> {
+        self.check_thread("Light.dbc");
+        let client = self.client()?;
+        client.tables.lights(&client.chain)
+    }
+
+    fn light_params(&self) -> Result<Arc<Vec<LightParamsRecord>>, String> {
+        self.check_thread("LightParams.dbc");
+        let client = self.client()?;
+        client.tables.light_params(&client.chain)
+    }
+
+    fn light_colours(&self) -> Result<Arc<Vec<LightBand<[u8; 3]>>>, String> {
+        self.check_thread("LightIntBand.dbc");
+        let client = self.client()?;
+        client.tables.light_colours(&client.chain)
+    }
+
+    fn light_numbers(&self) -> Result<Arc<Vec<LightBand<f32>>>, String> {
+        self.check_thread("LightFloatBand.dbc");
+        let client = self.client()?;
+        client.tables.light_numbers(&client.chain)
+    }
+
+    fn light_skyboxes(&self) -> Result<Arc<Vec<LightSkyboxRecord>>, String> {
+        self.check_thread("LightSkybox.dbc");
+        let client = self.client()?;
+        client.tables.light_skyboxes(&client.chain)
     }
 
     fn model(&self, file: &FileRef) -> Result<Model, String> {

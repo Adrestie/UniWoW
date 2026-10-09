@@ -534,7 +534,8 @@ added through section 4 without touching the core.
 | terrain | Draws terrain in the viewport; height sculpting, texture painting (layers, alpha maps), holes, vertex shading, area painting, chunk flags |
 | liquids | Draws and edits water, lava, slime: create, heights, types |
 | placement | Draws M2 doodads and WMOs in tiles; place, move, rotate, scale, with gizmos and snapping |
-| environment | Lighting and sky (Light tables, skyboxes), zone music and ambience |
+| lighting | Light and sky of the maps (Light tables, skyboxes), from step 9.7 |
+| environment | Zone music and ambience |
 | spawns | Server creatures and game objects placed in the viewport, waypoints, formations |
 | server-map-data | Regenerate .map, vmaps and mmaps for changed tiles (AzerothCore extractors), in the background |
 | live-world | The world as it runs on the server, in the viewport: creatures, NPCs, game objects and players where they are, in real time, from the observer `mod-uniwow-observer` (milestone 9) |
@@ -6286,6 +6287,70 @@ death are left to the panel, if at all.
 **Not in 9.7**: the clouds, the sun, the moons and the stars drawn; the weather; the full-screen
 glow (`LightParams`); the highlights of the terrain; the lights of the models (M2); the flag
 "window" and the diffuse colour of the materials of the buildings.
+
+#### Step 9.7a1, as built: the light of a place and an hour, not yet drawn
+
+- **`formats`** (`core/api`): `LightRecord`, `LightParamsRecord`, `LightBand<T>` (its keys, a time
+  in half-minutes and a colour red, green, blue or a number) and `LightSkyboxRecord`, given by
+  `lights`, `light_params`, `light_colours`, `light_numbers` and `light_skyboxes`, none by default.
+  `assets` reads `Light.dbc`, `LightParams.dbc` (9 columns, as the client's file has),
+  `LightIntBand.dbc` (its colours stored `0x00RRGGBB`, given red first) and `LightFloatBand.dbc`
+  (for both, the keys past the count of a band, 16 at most, left out) and `LightSkybox.dbc`, each
+  once, as the other tables. The models of the sky and the sky's fields of the params are read for
+  9.7b and 9.7e, which use them.
+- **The module `lighting`** (World; in the catalogue of the modules, the light and the sky of
+  `environment`): the tables read by a job once the client's archives are open (`vfs`), read again
+  once they change, a read running cancelled when they change or close, a read cancelled from the
+  jobs or refused not tried again before they change; at each frame, the light of the map the
+  terrain shows (`terrain.map`, its id) at the place of the camera on it
+  (`viewport/camera_position`, its height left out, as decided) and at the hour of its settings
+  (category *Light*, the module's rather than the view's as proposed: the hour in minutes from
+  midnight, 720 by default; the minutes of the game in a second, 0 by default, the hour turning from
+  the one set, on from the hour reached when the speed alone changes, the same hour set again
+  leaving it turning; the local lights mixed in or not); the light kept while the camera's place
+  cannot be read. Its panel says the map, the place, the hour, the lights mixed with their weights,
+  the global first (or the light 1, said so, for a map without one), and the 18 colours (with a
+  swatch), the 6 numbers (the end of the fog in yards), the alphas and the glow. Nothing is given to
+  the view yet: nothing changes on screen.
+- **The light** (`light.rs`, pure): the values of a set of params at an hour, each band read by its
+  keys in the order of their times, between two keys, past the last towards the first of the next
+  day, before the first from the last of the day before, a single key kept, none without keys; the
+  global light of the map (the light 1 for a map without one), its fog where it gives none or 0
+  Noggit's (6,500 36ths of a yard, about 180 yards, and 0.1); then each local light whose disc on
+  the map holds the place, by its weight (1 within its inner radius, falling linearly to 0 at its
+  outer), the farthest first; for a slot, the params of that slot, or, a choice of the editor, of
+  the first where a light has none there (Noggit gives no light then); a band a light lacks left out
+  rather than mixed in as black, given whole by the first local light that has it where the global
+  one lacks it; the fog of a local light left out where it is 0; the alphas and the glow mixed by
+  the weight. The light a liquid names is left to 9.7c, which uses it.
+- **Tested**: the tables of the lights read on tables the tests write (by id, the keys past the
+  count left out, 16 at most, red first) and, when the folder of a client is given, its own: its
+  global light of the Eastern Kingdoms with the 18 colours and 6 numbers of its first params, read
+  at noon by the test itself (the function of `lighting` cannot be called from `assets`): the
+  diffuse 255, 136, 0, the ambient 104, 130, 154, the top of the sky 0, 31, 73, the fog from a
+  quarter of 500 yards, that of Northrend ending at 889; and nine tenths of its local lights at
+  least over tiles its WDT names, their centres read as `lighting` reads them. The light itself on
+  tables the tests write: a band between its keys, past midnight, before the first key, of one key
+  and of none, its keys out of order, an hour before the day or days after; the global light alone
+  far from the local ones, within an inner radius (a band the local light lacks kept from the global
+  one), halfway between the radii, within two (the nearest weighing last), within, on and past equal
+  radii, the local lights switched off; the params of a slot, those of the first where a light has
+  none, a local light's fog; the fog of Noggit for a global light giving none or 0; a map without a
+  global light, said so; params unknown; the category *Light* and its defaults; the hour turning,
+  past midnight, on from the hour reached when the speed alone changes. The module through a host,
+  an editor and files the tests make: the tables read once the client is open, not again after a
+  refusal, a cancel or a panic by the same archives, again by others, the read cancelled when the
+  client closes and its job then not taken; the light of the map shown at the place of the camera on
+  it (its axes, its height left out), its clear params, the local lights switched off, kept while
+  the camera is unread, none with no map shown. 30 changes made on purpose, all caught, one only
+  once a place exactly on a radius was tested. Reviewed by another instance: one serious point
+  corrected, the tables read before the client's archives were open and never again; two middling,
+  the values and the axes of the client checked, the light a liquid names left to 9.7c rather than
+  kept unused; then two middling of a second review, the light of each frame through the module
+  tested, and what the client's tables check said as it is; light points taken (the hour on from the
+  one reached, in `f64`; the keys sorted; the light 1 said; no list made for each band; a read
+  cancelled not tried again; the services used declared). To decide in 9.7a2: what is drawn for a
+  band the global light lacks (only the params 477 lack two).
 
 #### Tests
 

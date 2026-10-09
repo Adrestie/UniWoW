@@ -363,6 +363,52 @@ pub struct LiquidTypeRecord {
     pub animation: [f32; 2],
 }
 
+/// A light of `Light.dbc`, as the file stores it: its map, its centre and its two radii (where it
+/// weighs whole, where it ends) in the axes of the file and in 36ths of a yard (in the world:
+/// 17,066⅔ − z / 36, 17,066⅔ − x / 36, y / 36), the global light of its map at 0, 0, 0; and its eight
+/// sets of params (`LightParams`) by slot: clear weather, under the water, storm, storm under the
+/// water, death, then three unknown; 0 for none.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LightRecord {
+    pub id: u32,
+    pub map: u32,
+    pub position: [f32; 3],
+    pub radii: [f32; 2],
+    pub params: [u32; 8],
+}
+
+/// A set of params of a light (`LightParams.dbc`): whether its sky is highlighted, its model of the
+/// sky (`LightSkybox`, 0 for none), its type of cloud, its glow over the whole screen, the alphas of
+/// the river and of the ocean, shallow then deep. Its bands are those of the ids `18 id − 17` to
+/// `18 id` of the colours, `6 id − 5` to `6 id` of the numbers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LightParamsRecord {
+    pub id: u32,
+    pub highlight_sky: bool,
+    pub skybox: u32,
+    pub cloud: u32,
+    pub glow: f32,
+    pub river_alphas: [f32; 2],
+    pub ocean_alphas: [f32; 2],
+}
+
+/// A band of a light (`LightIntBand.dbc`, `LightFloatBand.dbc`): its keys, each a time in
+/// half-minutes from midnight (2,880 a day) and its value, a colour (red, green, blue) or a number.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LightBand<T> {
+    pub id: u32,
+    pub keys: Vec<(u32, T)>,
+}
+
+/// A model of the sky (`LightSkybox.dbc`): its path and its flags, 0x1 its animation following the
+/// hour, 0x2 the stars and the sky drawn under it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LightSkyboxRecord {
+    pub id: u32,
+    pub model: String,
+    pub flags: u32,
+}
+
 /// A building placed on a tile, in the axes of `Doodad`, with its bounds in them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Building {
@@ -880,6 +926,26 @@ pub trait Formats: Send + Sync {
     /// The types of liquid, by increasing id. None by default.
     fn liquid_types(&self) -> Result<Arc<Vec<LiquidTypeRecord>>, String> {
         Err("the types of liquid are not read".to_owned())
+    }
+    /// The lights of the maps, by increasing id. None by default.
+    fn lights(&self) -> Result<Arc<Vec<LightRecord>>, String> {
+        Err("the lights are not read".to_owned())
+    }
+    /// The params of the lights, by increasing id. None by default.
+    fn light_params(&self) -> Result<Arc<Vec<LightParamsRecord>>, String> {
+        Err("the params of the lights are not read".to_owned())
+    }
+    /// The bands of colours of the lights, by increasing id. None by default.
+    fn light_colours(&self) -> Result<Arc<Vec<LightBand<[u8; 3]>>>, String> {
+        Err("the colours of the lights are not read".to_owned())
+    }
+    /// The bands of numbers of the lights, by increasing id. None by default.
+    fn light_numbers(&self) -> Result<Arc<Vec<LightBand<f32>>>, String> {
+        Err("the numbers of the lights are not read".to_owned())
+    }
+    /// The models of the sky, by increasing id. None by default.
+    fn light_skyboxes(&self) -> Result<Arc<Vec<LightSkyboxRecord>>, String> {
+        Err("the models of the sky are not read".to_owned())
     }
     /// The M2 `file`, with its skins: of 3.3.5a, its path as a table names it (`.mdx` and `.mdl`
     /// read as `.m2`) and its skins beside it; modern, its skins named by its chunk `SFID`.

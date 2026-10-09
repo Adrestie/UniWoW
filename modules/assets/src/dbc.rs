@@ -6,7 +6,8 @@ use std::sync::{Arc, OnceLock};
 
 use uniwow_api::formats::{
     AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair,
-    GameObjectDisplay, HairGeoset, LiquidTypeRecord, MapRecord,
+    GameObjectDisplay, HairGeoset, LightBand, LightParamsRecord, LightRecord, LightSkyboxRecord, LiquidTypeRecord,
+    MapRecord,
 };
 
 use crate::chain::Chain;
@@ -101,6 +102,11 @@ pub struct Tables {
     sections: Rows<CharSection>,
     animations: Rows<AnimationRecord>,
     liquids: Rows<LiquidTypeRecord>,
+    lights: Rows<LightRecord>,
+    light_params: Rows<LightParamsRecord>,
+    light_colours: Rows<LightBand<[u8; 3]>>,
+    light_numbers: Rows<LightBand<f32>>,
+    light_skyboxes: Rows<LightSkyboxRecord>,
 }
 
 impl Tables {
@@ -121,7 +127,86 @@ impl Tables {
             sections: OnceLock::new(),
             animations: OnceLock::new(),
             liquids: OnceLock::new(),
+            lights: OnceLock::new(),
+            light_params: OnceLock::new(),
+            light_colours: OnceLock::new(),
+            light_numbers: OnceLock::new(),
+            light_skyboxes: OnceLock::new(),
         }
+    }
+
+    pub fn lights(&self, chain: &Chain) -> Result<Arc<Vec<LightRecord>>, String> {
+        self.lights
+            .get_or_init(|| {
+                let row = |dbc: &Dbc, row| {
+                    Ok(LightRecord {
+                        id: dbc.u32(row, 0),
+                        map: dbc.u32(row, 1),
+                        position: [dbc.f32(row, 2), dbc.f32(row, 3), dbc.f32(row, 4)],
+                        radii: [dbc.f32(row, 5), dbc.f32(row, 6)],
+                        params: std::array::from_fn(|slot| dbc.u32(row, 7 + slot)),
+                    })
+                };
+                read(chain, "Light.dbc", 15, row, |light| light.id)
+            })
+            .clone()
+    }
+
+    pub fn light_params(&self, chain: &Chain) -> Result<Arc<Vec<LightParamsRecord>>, String> {
+        self.light_params
+            .get_or_init(|| {
+                let row = |dbc: &Dbc, row| {
+                    Ok(LightParamsRecord {
+                        id: dbc.u32(row, 0),
+                        highlight_sky: dbc.u32(row, 1) != 0,
+                        skybox: dbc.u32(row, 2),
+                        cloud: dbc.u32(row, 3),
+                        glow: dbc.f32(row, 4),
+                        river_alphas: [dbc.f32(row, 5), dbc.f32(row, 6)],
+                        ocean_alphas: [dbc.f32(row, 7), dbc.f32(row, 8)],
+                    })
+                };
+                read(chain, "LightParams.dbc", 9, row, |params| params.id)
+            })
+            .clone()
+    }
+
+    /// The bands of colours, each stored `0x00RRGGBB`, given red first.
+    pub fn light_colours(&self, chain: &Chain) -> Result<Arc<Vec<LightBand<[u8; 3]>>>, String> {
+        self.light_colours
+            .get_or_init(|| {
+                let row = |dbc: &Dbc, row| {
+                    Ok(band(dbc, row, |value| {
+                        [(value >> 16) as u8, (value >> 8) as u8, value as u8]
+                    }))
+                };
+                read(chain, "LightIntBand.dbc", 34, row, |band| band.id)
+            })
+            .clone()
+    }
+
+    pub fn light_numbers(&self, chain: &Chain) -> Result<Arc<Vec<LightBand<f32>>>, String> {
+        self.light_numbers
+            .get_or_init(|| {
+                let row = |dbc: &Dbc, row| Ok(band(dbc, row, f32::from_bits));
+                read(chain, "LightFloatBand.dbc", 34, row, |band| band.id)
+            })
+            .clone()
+    }
+
+    pub fn light_skyboxes(&self, chain: &Chain) -> Result<Arc<Vec<LightSkyboxRecord>>, String> {
+        self.light_skyboxes
+            .get_or_init(|| {
+                let row = |dbc: &Dbc, row| {
+                    Ok(LightSkyboxRecord {
+                        id: dbc.u32(row, 0),
+                        model: dbc.string(row, 1)?,
+                        flags: dbc.u32(row, 2),
+                    })
+                };
+                read(chain, "LightSkybox.dbc", 3, row, |skybox| skybox.id)
+            })
+            .clone()
     }
 
     /// The types of liquid, each with the format of the vertices of its material.
@@ -330,6 +415,18 @@ impl Tables {
                 })
             })
             .clone()
+    }
+}
+
+/// The band of a light in the row `row`: its count of keys (16 at most), then 16 times, then 16
+/// values, each made by `value`; those past its count left out.
+fn band<T>(dbc: &Dbc, row: usize, value: impl Fn(u32) -> T) -> LightBand<T> {
+    let count = (dbc.u32(row, 1) as usize).min(16);
+    LightBand {
+        id: dbc.u32(row, 0),
+        keys: (0..count)
+            .map(|key| (dbc.u32(row, 2 + key), value(dbc.u32(row, 18 + key))))
+            .collect(),
     }
 }
 

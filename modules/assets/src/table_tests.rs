@@ -989,6 +989,113 @@ fn client() -> Option<(PathBuf, String, Chain)> {
 }
 
 #[test]
+fn the_tables_of_the_lights_read_their_lights_params_bands_and_skies() {
+    use Cell::*;
+    // A band: its id, its count of keys, then its 16 times and its 16 values.
+    let band = |id: u32, count: u32, keys: &[(u32, u32)]| -> Vec<(usize, Cell<'static>)> {
+        let mut cells = vec![(0, Int(id)), (1, Int(count))];
+        for (at, (time, value)) in keys.iter().enumerate() {
+            cells.push((2 + at, Int(*time)));
+            cells.push((18 + at, Int(*value)));
+        }
+        cells
+    };
+    let colours = [
+        band(199, 2, &[(0, 0x00FF_8800), (1440, 0x0010_2030), (2000, 0x00FF_FFFF)]),
+        band(200, 40, &[(5, 1)]),
+    ];
+    let numbers = [band(67, 1, &[(0, 18_000f32.to_bits()), (720, 1)])];
+    let tables = vec![
+        (
+            "Light.dbc",
+            dbc(
+                15,
+                &[
+                    &[
+                        (0, Int(2)),
+                        (2, Float(612_096.0)),
+                        (4, Float(998_400.0)),
+                        (5, Float(3_600.0)),
+                        (6, Float(7_200.0)),
+                        (7, Int(20)),
+                    ],
+                    &[
+                        (0, Int(1)),
+                        (7, Int(12)),
+                        (8, Int(13)),
+                        (9, Int(10)),
+                        (10, Int(13)),
+                        (11, Int(4)),
+                    ],
+                ],
+            ),
+        ),
+        (
+            "LightParams.dbc",
+            dbc(
+                9,
+                &[&[
+                    (0, Int(12)),
+                    (1, Int(1)),
+                    (2, Int(83)),
+                    (4, Float(0.65)),
+                    (5, Float(0.5)),
+                    (6, Float(1.0)),
+                    (7, Float(0.75)),
+                    (8, Float(1.0)),
+                ]],
+            ),
+        ),
+        (
+            "LightIntBand.dbc",
+            dbc(34, &colours.iter().map(Vec::as_slice).collect::<Vec<_>>()),
+        ),
+        (
+            "LightFloatBand.dbc",
+            dbc(34, &numbers.iter().map(Vec::as_slice).collect::<Vec<_>>()),
+        ),
+        (
+            "LightSkybox.dbc",
+            dbc(
+                3,
+                &[&[
+                    (0, Int(83)),
+                    (1, Text("Environments\\Stars\\DeathSkybox.mdx")),
+                    (2, Int(2)),
+                ]],
+            ),
+        ),
+    ];
+    let (_folder, chain) = tables_chain("lights", &tables);
+    let tables = Tables::new("enUS");
+    let lights = tables.lights(&chain).unwrap();
+    assert_eq!(lights.iter().map(|light| light.id).collect::<Vec<_>>(), [1, 2], "by id");
+    assert_eq!(
+        (lights[0].map, lights[0].position, lights[0].params),
+        (0, [0.0; 3], [12, 13, 10, 13, 4, 0, 0, 0])
+    );
+    assert_eq!(
+        (lights[1].position, lights[1].radii),
+        ([612_096.0, 0.0, 998_400.0], [3_600.0, 7_200.0])
+    );
+    let params = &tables.light_params(&chain).unwrap()[0];
+    assert!(params.highlight_sky);
+    assert_eq!((params.skybox, params.cloud, params.glow), (83, 0, 0.65));
+    assert_eq!((params.river_alphas, params.ocean_alphas), ([0.5, 1.0], [0.75, 1.0]));
+    // The keys past the count of a band left out, its count no more than 16; red first.
+    let colours = tables.light_colours(&chain).unwrap();
+    assert_eq!(colours[0].keys, [(0, [255, 136, 0]), (1440, [16, 32, 48])]);
+    assert_eq!(colours[1].keys.len(), 16);
+    let numbers = tables.light_numbers(&chain).unwrap();
+    assert_eq!(numbers[0].keys, [(0, 18_000.0)]);
+    let sky = &tables.light_skyboxes(&chain).unwrap()[0];
+    assert_eq!(
+        (sky.id, sky.model.as_str(), sky.flags),
+        (83, "Environments\\Stars\\DeathSkybox.mdx", 2)
+    );
+}
+
+#[test]
 fn the_client_s_tables_read_as_the_client_shows_them() {
     let Some((folder, locale, chain)) = client() else {
         return;
@@ -1004,7 +1111,82 @@ fn the_client_s_tables_read_as_the_client_shows_them() {
     let facials = tables.facial_hairs(&chain).unwrap();
     let objects = tables.game_object_displays(&chain).unwrap();
     let sections = tables.char_sections(&chain).unwrap();
+    let lights = tables.lights(&chain).unwrap();
+    let light_params = tables.light_params(&chain).unwrap();
+    let colours = tables.light_colours(&chain).unwrap();
+    let numbers = tables.light_numbers(&chain).unwrap();
+    let skies = tables.light_skyboxes(&chain).unwrap();
     let read = start.elapsed();
+    // The global light of the Eastern Kingdoms, its params with their 18 colours and 6 numbers.
+    let global = lights.iter().find(|light| light.id == 1).unwrap();
+    assert_eq!((global.map, global.position), (0, [0.0; 3]));
+    let clear = global.params[0];
+    assert!(light_params.iter().any(|params| params.id == clear));
+    assert!((0..18).all(|band| colours.iter().any(|found| found.id == clear * 18 - 17 + band)));
+    assert!((0..6).all(|band| numbers.iter().any(|found| found.id == clear * 6 - 5 + band)));
+    assert!(skies.iter().any(|sky| sky.model.to_ascii_lowercase().ends_with(".mdx")));
+    // At noon, as the probes of 9.7 read them: the band between its keys around 1,440 half-minutes.
+    let noon = |keys: &[(u32, f32)]| {
+        let after = keys.iter().position(|(time, _)| *time > 1440).unwrap_or(keys.len());
+        let (t1, v1) = keys[after.max(1) - 1];
+        let (t2, v2) = keys.get(after).copied().unwrap_or((keys[0].0 + 2880, keys[0].1));
+        v1 + (v2 - v1) * (1440.0 - t1 as f32) / (t2 as f32 - t1 as f32).max(1.0)
+    };
+    let colour = |params: u32, band: u32| -> [f32; 3] {
+        let found = colours
+            .iter()
+            .find(|found| found.id == params * 18 - 17 + band)
+            .unwrap();
+        std::array::from_fn(|channel| {
+            let keys: Vec<(u32, f32)> = found
+                .keys
+                .iter()
+                .map(|(time, rgb)| (*time, f32::from(rgb[channel])))
+                .collect();
+            noon(&keys).round()
+        })
+    };
+    let number = |params: u32, band: u32| {
+        noon(
+            &numbers
+                .iter()
+                .find(|found| found.id == params * 6 - 5 + band)
+                .unwrap()
+                .keys,
+        )
+    };
+    assert_eq!(colour(clear, 0), [255.0, 136.0, 0.0], "the diffuse light, red first");
+    assert_eq!(colour(clear, 1), [104.0, 130.0, 154.0], "the ambient light");
+    assert_eq!(colour(clear, 2), [0.0, 31.0, 73.0], "the top of the sky");
+    assert_eq!(
+        (number(clear, 0) / 36.0, number(clear, 1)),
+        (500.0, 0.25),
+        "the fog, in yards"
+    );
+    let northrend = lights
+        .iter()
+        .find(|light| light.map == 571 && light.position == [0.0; 3])
+        .unwrap();
+    assert!((number(northrend.params[0], 0) / 36.0 - 889.0).abs() < 1.0);
+    // The local lights of the Eastern Kingdoms over its tiles, their centres read as the module
+    // `lighting` reads them: 32 tiles − z / 36 to the north, 32 tiles − x / 36 to the west.
+    let azeroth = chain.read("World\\Maps\\Azeroth\\Azeroth.wdt").unwrap().unwrap();
+    let azeroth = crate::terrain::wdt(&azeroth).unwrap();
+    let middle = 32.0 * uniwow_api::formats::TILE;
+    let locals: Vec<_> = lights
+        .iter()
+        .filter(|light| light.map == 0 && light.position != [0.0; 3])
+        .collect();
+    let over = locals
+        .iter()
+        .filter(|light| {
+            let centre = [middle - light.position[2] / 36.0, middle - light.position[0] / 36.0];
+            // The tile of the file `<x>_<y>`: x from the west coordinate, y from the north one.
+            let [y, x] = centre.map(|axis| (32.0 - axis / uniwow_api::formats::TILE).floor() as i32);
+            (0..64).contains(&x) && (0..64).contains(&y) && azeroth.tiles[(y * 64 + x) as usize]
+        })
+        .count();
+    assert!(over * 10 >= locals.len() * 9, "{over} of {}", locals.len());
     // The looks of characters the displays name, but a few; hairs and facial hairs for the 20 bodies.
     let named: Vec<_> = displays.iter().filter(|display| display.extra != 0).collect();
     let missing = named
