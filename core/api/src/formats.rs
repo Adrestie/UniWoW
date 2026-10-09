@@ -409,6 +409,15 @@ pub struct LightSkyboxRecord {
     pub flags: u32,
 }
 
+/// A zone of light, as Wow.exe 12340 holds those of Northrend in place of a table: its map, the
+/// light of `Light.dbc` it gives, and its outline, in yards in the world (north, west).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ZoneLightRecord {
+    pub map: u32,
+    pub light: u32,
+    pub points: Vec<[f32; 2]>,
+}
+
 /// A building placed on a tile, in the axes of `Doodad`, with its bounds in them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Building {
@@ -946,6 +955,10 @@ pub trait Formats: Send + Sync {
     /// The models of the sky, by increasing id. None by default.
     fn light_skyboxes(&self) -> Result<Arc<Vec<LightSkyboxRecord>>, String> {
         Err("the models of the sky are not read".to_owned())
+    }
+    /// The zones of light, in the order of the client. None by default.
+    fn zone_lights(&self) -> Result<Arc<Vec<ZoneLightRecord>>, String> {
+        Err("the zones of light are not read".to_owned())
     }
     /// The M2 `file`, with its skins: of 3.3.5a, its path as a table names it (`.mdx` and `.mdl`
     /// read as `.m2`) and its skins beside it; modern, its skins named by its chunk `SFID`.

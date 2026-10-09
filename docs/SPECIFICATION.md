@@ -6177,13 +6177,13 @@ comments say they come from the client's code):
   from 18 to 2,650 yards; 339 inner and 506 outer at the median in Azeroth), weighing 1 within
   their inner radius and falling linearly to 0 at their outer one (*Noggit*). As *Noggit* mixes
   them, by the distance from the eye in three dimensions: the global light first, then each local
-  one the eye is within, the farthest first, mixed in by its weight; what the client does where two
-  overlap is not established. Of the eight params (*Noggit*): clear weather, then under the water,
+  one the eye is within, the farthest first, mixed in by its weight; the client does the same where
+  two overlap (9.7a3). Of the eight params (*Noggit*): clear weather, then under the water,
   storm, storm under the water, death; *Noggit* draws with the first, its editor of lights choosing
   another for one light. Northrend has, besides, eleven zones of light by polygons that 3.3.5a holds
-  in its code (*Noggit*; moved to a table in 4.0): their lights (825, 914, 959…) are spheres of 6 to
-  13 yards (*client*), reached only through those polygons, which are in none of its files; until
-  9.7e, Northrend differs from the game, those small spheres counted as local lights.
+  in its code (*Noggit*; moved to a table in 4.0): their lights (825, 914, 959…) are spheres of 3 to
+  23 yards (*client*), reached only through those polygons, which none of its tables holds: its
+  Wow.exe does, read since 9.7a3.
 - **The global light of Azeroth at noon** (*client*, as stored): diffuse 255, 136, 0, ambient 104,
   130, 154, sky top 0, 31, 73, fog 77, 120, 143, ocean 17, 75, 89 and 0, 29, 41; the fog from 125 to
   500 yards; that of Northrend ends at 889. The editor draws to the whole map: the game's distances
@@ -6256,7 +6256,7 @@ comments say they come from the client's code):
    highlight of the specular and metal shaders by the sun's colour.
 6. **9.7e, optional**: the models of the sky (`LightSkybox`, a building's `MOSB`), the fogs of the
    buildings (`MFOG`), the hour of the server through the observer. The zones of light of Northrend
-   only from the user's own data of a later client, never in this repository.
+   are read from the client's own Wow.exe since 9.7a3.
 
 **To decide by the user:** where the light is computed (a module of its own, the view falling back
 to the fixed light when it is stopped, or the terrain, as 9.4 said); the space and the formula of
@@ -6413,6 +6413,67 @@ Decided by the user before it: a band the global light lacks takes the fixed lig
   beyond its end by the distance from the eye, drawn under the editor's fog; beyond the end, a lit
   unfogged batch not drawn, an unlit fogged one the colour of the fog. 10 changes made on purpose,
   all caught.
+
+#### Step 9.7a3, as built: the zones of light of Northrend
+
+Decided by the user after the comparison of 72 zones with the game: the curve of Noggit's fog kept;
+the zones of light of Northrend read from the client's own Wow.exe and mixed as it mixes them, with
+two details of its mixing.
+
+- **Where they are**: `Light.dbc` gives each zone of Northrend only a light a few yards wide (862
+  for the Howling Fjord), which the game shows over the whole zone: at 20:31, the Howling Fjord
+  orange (its fog 117, 82, 62, ending at 2,268 yards), Wintergrasp and the Crystalsong Forest
+  purple, where the editor drew the global light 752 (its fog 86, 179, 212, ending at 889). Wow.exe
+  12340 holds them: a table of 11 entries at 0xADEF58, each the map 571, −1 and the light (914, 825,
+  959, 862, 1847, 1703, 1796, 1777, 1792, 1589, 1740), their outlines texts of SVG paths among its
+  constants, in the units of an image, which it reads as it starts (0x77ED40). They are those WotLK
+  Classic stores in `ZoneLightPoint`, which Noggit Red reads: its 462 points within 0.004 yard.
+- **`formats`** (`core/api`): `ZoneLightRecord`, its map, its light and its outline in yards in the
+  world, given by `zone_lights`, none by default. `assets` reads them once, from the Wow.exe of the
+  client's folder, its name in any case: the sections of the executable, the entries and the paths
+  they name, of which, as the client, only the commands `M` and `L` (a curve, straight, left out),
+  each point plus the two offsets of the client (−1.6623375 and −145.7316), 100/3 yards a unit;
+  refused, and said, when the executable is not that one: not one of Windows of 32 bits, an entry
+  without its mark, a path missing, unended within its section, open, or of fewer than three points.
+- **The light** (`light.rs`), as Wow.exe 12340 mixes it (0x7F1360): the global light; then the zones
+  of the map near the place, the first five in the client's order, each weighing the depth of the
+  place within it (its distance to the nearest edge, less than nothing outside) plus 50 yards, over
+  100, at most 1: half on its edge, whole 50 yards within, nothing 50 yards outside (0x77EED0,
+  0x7EE6B0); a zone whose light `Light.dbc` lacks left out; then the local lights, the farthest
+  first. The two details of the client: a local light whose outer radius is under 3 yards is left
+  out; of two lights whose centres are within a third of a yard, in three dimensions, the widest
+  inner radius is mixed first (0x7ED0A0). The client compares the lights two by two; for an order of
+  all of them, the editor gives lights so linked, through those near both, the centre of the least
+  id among them. The client's box around a zone, which changes nothing, is left out. The switch of
+  the local lights covers the zones too (*Zones of light and local lights mixed in (1) or not (0)*).
+- **The module `lighting`** reads the zones with the tables, keeps the light of the tables when they
+  cannot be read, and says why in the log and in the panel (*No zones of light: …*); the panel names
+  a zone among the lights mixed (*862 (zone) 1.00*).
+- **Tested**: the zones read from executables the tests write, of paths they make: their points in
+  the world as the client turns them, the commands `M` and `L` alone, a curve left out, negative
+  numbers;
+  refused: not an executable (without `MZ`, without `PE`), not of 32 bits, its sections cut short,
+  an entry without its mark, an entry or a path missing, a path unended within its section, open, of
+  two points, a point unread; from the folder of the client, its name in any case, read once, a
+  folder without it. From the client's own: the 11 lights, as many points as WotLK Classic stores
+  (27, 58, 54, 31, 35, 61, 31, 35, 37, 52, 41), the first of the Borean Tundra and of the Howling
+  Fjord. The light: a zone whole 50 yards within it, by the distance to its edge across it, also
+  from a corner, nothing 50 yards outside, switched off with the local lights, of its own map only;
+  an outline in L, its notch outside, its points in either order; the zone before the local light
+  holding the place, five zones of seven, those far from it not counted, a zone whose light is
+  lacking or without outline left out;
+  a local light of an outer radius of 2.99 yards left out, of 3 mixed; two lights sharing a centre,
+  in either order of their inner radii, within a third of a yard on the map or in height, not at
+  half a yard or ten yards up, three through the one near both, listed in either order. The module:
+  the zones read by its job, mixed and named in the panel; their refusal said, the light of the
+  tables kept; why forgotten once the client changes. 40 changes made on purpose: 35 caught at once;
+  the two on the box around a zone led to its removal; the three others caught once the tests held
+  an outline turned the other way, a zone without outline at the place, and a centre shared through
+  lights listed in another order. Reviewed by another instance: two middling points corrected, the
+  five zones proved counted among those near the place only (a change counting them all went
+  uncaught; it is now caught) and the measure against WotLK Classic, its 462 points within 0.004
+  yard rather than 427 within 0.0005; light points taken: the order of lights sharing a centre
+  through others said to be the editor's, two facts of 9.7 made true, a comment.
 
 #### Tests
 

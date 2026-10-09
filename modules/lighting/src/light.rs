@@ -1,11 +1,12 @@
 //! The light of a map at a place and an hour, from the tables of the client: the values of a set of
-//! params at the hour, their bands read between their keys; the global light of the map, then each
-//! local light whose sphere holds the place, the farthest first, mixed in by its weight, as Noggit
-//! mixes them, but by the place on the map whatever its height.
+//! params at the hour, their bands read between their keys; the global light of the map, then the
+//! zones of light near the place, then each local light whose sphere holds the place, the farthest
+//! first, mixed in by its weight, as Wow.exe 12340 mixes them (0x7F1360), but by the place on the
+//! map whatever its height.
 
 use std::collections::HashMap;
 
-use uniwow_api::formats::{LightBand, LightParamsRecord, LightRecord, TILE};
+use uniwow_api::formats::{LightBand, LightParamsRecord, LightRecord, TILE, ZoneLightRecord};
 use uniwow_api::viewport::{Fog, MapLight, Sun};
 
 /// A day, in half-minutes.
@@ -21,6 +22,17 @@ const UNIT: f32 = 36.0;
 /// when the global light gives neither (Noggit's defaults).
 const FOG_END: f32 = 6_500.0;
 const FOG_START: f32 = 0.1;
+/// A zone of light weighs from nothing to whole across its edge, from 50 yards outside it to 50
+/// inside, by the distance to its edge (0x77EED0, 0x7EE6B0); five at most are mixed in, the first in
+/// the order of the client (0x7ED150).
+const ZONE_MARGIN: f32 = 50.0;
+const ZONE_FADE: f32 = 100.0;
+const ZONES_MIXED: usize = 5;
+/// A local light whose outer radius is less, in yards, is left out (0x7F1360).
+const SMALLEST: f32 = 3.0;
+/// Two local lights whose centres are no farther apart, in yards, share them: the one of the wider
+/// inner radius is mixed in first (0x7ED0A0).
+const SAME_CENTRE: f32 = 1.0 / 3.0;
 
 /// The values of a light at an hour: its colours, red, green and blue from 0 to 1 as stored (in
 /// gamma), and its numbers, each none where its params have no such band or no keys in it; the
@@ -34,12 +46,14 @@ pub struct Values {
     pub glow: f32,
 }
 
-/// The light of a place: its values, each light mixed in with its weight, in their order, and
-/// whether the first is the light 1 for a map without a global light of its own.
+/// The light of a place: its values, each light mixed in with its weight, in their order, how many
+/// of them, after the first, are those of zones, and whether the first is the light 1 for a map
+/// without a global light of its own.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mixed {
     pub values: Values,
     pub used: Vec<(u32, f32)>,
+    pub zones: usize,
     pub fallback: bool,
 }
 
@@ -91,7 +105,58 @@ pub fn number_at(band: &LightBand<f32>, time: f32) -> Option<f32> {
     Some(mix(band.keys[from].1, band.keys[to].1, share))
 }
 
-/// The tables of the lights, by map and by id.
+/// A zone of light: the light it gives and its outline in the world, of one point at least.
+struct Zone {
+    light: LightRecord,
+    points: Vec<[f32; 2]>,
+}
+
+impl Zone {
+    /// Its weight at `place`, by how deep within it the place lies, less than nothing outside it;
+    /// none where it is 0.
+    fn weight(&self, place: [f32; 2]) -> Option<f32> {
+        let (inside, distance) = outline(&self.points, place);
+        let depth = if inside { distance } else { -distance };
+        let weight = ((ZONE_MARGIN + depth) / ZONE_FADE).min(1.0);
+        (weight > 0.0).then_some(weight)
+    }
+}
+
+/// Whether `place` lies within the outline `points`, by the edges west of it counted as the client
+/// counts them (0x7F9C90), and its distance to the nearest edge.
+fn outline(points: &[[f32; 2]], place: [f32; 2]) -> (bool, f32) {
+    let [x, y] = place;
+    let mut inside = false;
+    let mut nearest = f32::MAX;
+    let mut before = points[points.len() - 1];
+    for &point in points {
+        nearest = nearest.min(to_edge(place, point, before));
+        if (before[0] <= x && x < point[0]) || (point[0] <= x && x < before[0]) {
+            let crossed = point[1] + (x - point[0]) / (before[0] - point[0]) * (before[1] - point[1]);
+            if crossed > y {
+                inside = !inside;
+            }
+        }
+        before = point;
+    }
+    (inside, nearest.sqrt())
+}
+
+/// The square of the distance from `place` to the edge from `a` to `b`.
+fn to_edge(place: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    let along = [b[0] - a[0], b[1] - a[1]];
+    let from = [place[0] - a[0], place[1] - a[1]];
+    let length = along[0] * along[0] + along[1] * along[1];
+    let share = if length > 0.0 {
+        ((from[0] * along[0] + from[1] * along[1]) / length).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let off = [from[0] - share * along[0], from[1] - share * along[1]];
+    off[0] * off[0] + off[1] * off[1]
+}
+
+/// The tables of the lights, by map and by id, and the zones of light by map, in their order.
 #[derive(Default)]
 pub struct Tables {
     lights: HashMap<u32, Vec<LightRecord>>,
@@ -100,11 +165,63 @@ pub struct Tables {
     params: HashMap<u32, LightParamsRecord>,
     colours: HashMap<u32, LightBand<[u8; 3]>>,
     numbers: HashMap<u32, LightBand<f32>>,
+    zones: HashMap<u32, Vec<Zone>>,
+    /// The local lights by id: the least id of those sharing their centre, its own where none does,
+    /// and that light's centre on the map.
+    centres: HashMap<u32, (u32, [f32; 2])>,
 }
 
 /// Whether `light` is the global light of its map, at 0, 0, 0.
 fn global(light: &LightRecord) -> bool {
     light.position == [0.0; 3]
+}
+
+/// The centre of `light` in the world, in yards: north, west and up.
+fn centre(light: &LightRecord) -> [f32; 3] {
+    let [x, y, z] = light.position;
+    [MIDDLE - z / UNIT, MIDDLE - x / UNIT, y / UNIT]
+}
+
+/// The local lights of the maps by id: the least id of those sharing their centre, through those
+/// that share one with them, and that light's centre on the map.
+fn centres(lights: &HashMap<u32, Vec<LightRecord>>) -> HashMap<u32, (u32, [f32; 2])> {
+    let mut centres = HashMap::new();
+    for lights in lights.values() {
+        let local: Vec<(u32, [f32; 3])> = lights
+            .iter()
+            .filter(|light| !global(light))
+            .map(|light| (light.id, centre(light)))
+            .collect();
+        // Each light led to the least id it shares a centre with.
+        let mut lead: Vec<usize> = (0..local.len()).collect();
+        let find = |lead: &[usize], mut at: usize| {
+            while lead[at] != at {
+                at = lead[at];
+            }
+            at
+        };
+        for a in 0..local.len() {
+            for b in a + 1..local.len() {
+                let apart = (0..3)
+                    .map(|axis| (local[a].1[axis] - local[b].1[axis]).powi(2))
+                    .sum::<f32>();
+                if apart.sqrt() <= SAME_CENTRE {
+                    let (first, second) = (find(&lead, a), find(&lead, b));
+                    let (least, other) = if local[first].0 <= local[second].0 {
+                        (first, second)
+                    } else {
+                        (second, first)
+                    };
+                    lead[other] = least;
+                }
+            }
+        }
+        for (at, (id, _)) in local.iter().enumerate() {
+            let (least, [x, y, _]) = local[find(&lead, at)];
+            centres.insert(*id, (least, [x, y]));
+        }
+    }
+    centres
 }
 
 impl Tables {
@@ -113,6 +230,7 @@ impl Tables {
         params: &[LightParamsRecord],
         colours: &[LightBand<[u8; 3]>],
         numbers: &[LightBand<f32>],
+        zones: &[ZoneLightRecord],
     ) -> Self {
         let mut by_map: HashMap<u32, Vec<LightRecord>> = HashMap::new();
         for light in lights {
@@ -124,12 +242,25 @@ impl Tables {
             band.keys.sort_by_key(|(time, _)| *time);
             (band.id, band)
         }
+        // A zone whose light `Light.dbc` lacks left out, as the client leaves it, whatever its map.
+        let mut by_zone: HashMap<u32, Vec<Zone>> = HashMap::new();
+        for zone in zones.iter().filter(|zone| !zone.points.is_empty()) {
+            let Some(light) = lights.iter().find(|light| light.id == zone.light) else {
+                continue;
+            };
+            by_zone.entry(zone.map).or_default().push(Zone {
+                light: light.clone(),
+                points: zone.points.clone(),
+            });
+        }
         Self {
+            centres: centres(&by_map),
             lights: by_map,
             fallback: lights.iter().find(|light| light.id == 1).cloned(),
             params: params.iter().map(|record| (record.id, record.clone())).collect(),
             colours: colours.iter().map(sorted).collect(),
             numbers: numbers.iter().map(sorted).collect(),
+            zones: by_zone,
         }
     }
 
@@ -157,8 +288,8 @@ impl Tables {
 
     /// The light of the map `map` at the place `place` on it, in yards, at `time`, in half-minutes,
     /// for the params of the slot `slot` of each light (those of its first slot where it has none),
-    /// its local lights mixed in when `local`. None when the map has no global light and there is no
-    /// light 1, or when its params are unknown.
+    /// its zones and local lights mixed in when `local`. None when the map has no global light and
+    /// there is no light 1, or when its params are unknown.
     pub fn light_at(&self, map: u32, place: [f32; 2], time: f32, slot: usize, local: bool) -> Option<Mixed> {
         let lights = self.lights.get(&map).map(Vec::as_slice).unwrap_or_default();
         let own = lights.iter().find(|light| global(light));
@@ -170,12 +301,32 @@ impl Tables {
             }
         }
         let mut used = vec![(base.id, 1.0)];
-        let mut held: Vec<(f32, &LightRecord, f32)> = Vec::new();
+        let zones: Vec<(&LightRecord, f32)> = match local {
+            true => self
+                .zones
+                .get(&map)
+                .into_iter()
+                .flatten()
+                .filter_map(|zone| Some((&zone.light, zone.weight(place)?)))
+                .take(ZONES_MIXED)
+                .collect(),
+            false => Vec::new(),
+        };
+        for (light, weight) in zones {
+            if self.mix_in(&mut values, light, slot, time, weight) {
+                used.push((light.id, weight));
+            }
+        }
+        let zones = used.len() - 1;
+        // The distance to the centre each light shares, that centre's least id, its inner radius.
+        let mut held: Vec<(f32, u32, f32, &LightRecord, f32)> = Vec::new();
         for light in lights.iter().filter(|light| local && !global(light)) {
-            let [x, _, z] = light.position;
-            let centre = [MIDDLE - z / UNIT, MIDDLE - x / UNIT];
-            let distance = ((place[0] - centre[0]).powi(2) + (place[1] - centre[1]).powi(2)).sqrt();
+            let [x, y, _] = centre(light);
+            let distance = ((place[0] - x).powi(2) + (place[1] - y).powi(2)).sqrt();
             let [inner, outer] = light.radii.map(|radius| radius / UNIT);
+            if outer < SMALLEST {
+                continue;
+            }
             let weight = if distance <= inner {
                 1.0
             } else if distance < outer {
@@ -184,43 +335,59 @@ impl Tables {
                 0.0
             };
             if weight > 0.0 {
-                held.push((distance, light, weight));
+                let (shared, at) = self.centres[&light.id];
+                let apart = ((place[0] - at[0]).powi(2) + (place[1] - at[1]).powi(2)).sqrt();
+                held.push((apart, shared, inner, light, weight));
             }
         }
-        // The farthest first, so that the nearest weighs last.
-        held.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.id.cmp(&b.1.id)));
-        for (_, light, weight) in held {
-            let Some(other) = self.values(params_of(light, slot), time) else {
-                continue;
-            };
-            for (kept, given) in values.colours.iter_mut().zip(other.colours) {
-                if let Some(given) = given {
-                    *kept = Some(kept.map_or(given, |kept| mix_colour(kept, given, weight)));
-                }
+        // The farthest first, so that the nearest weighs last; of a centre, the widest inner radius.
+        held.sort_by(|a, b| {
+            (b.0.total_cmp(&a.0))
+                .then(a.1.cmp(&b.1))
+                .then(b.2.total_cmp(&a.2))
+                .then(a.3.id.cmp(&b.3.id))
+        });
+        for (_, _, _, light, weight) in held {
+            if self.mix_in(&mut values, light, slot, time, weight) {
+                used.push((light.id, weight));
             }
-            for (number, (kept, given)) in values.numbers.iter_mut().zip(other.numbers).enumerate() {
-                // A local light without fog gives none.
-                let given = given.filter(|value| number > 1 || *value != 0.0);
-                if let Some(given) = given {
-                    *kept = Some(kept.map_or(given, |kept| mix(kept, given, weight)));
-                }
-            }
-            for (kept, given) in values
-                .river_alphas
-                .iter_mut()
-                .chain(&mut values.ocean_alphas)
-                .zip(other.river_alphas.iter().chain(&other.ocean_alphas))
-            {
-                *kept = mix(*kept, *given, weight);
-            }
-            values.glow = mix(values.glow, other.glow, weight);
-            used.push((light.id, weight));
         }
         Some(Mixed {
             values,
             used,
+            zones,
             fallback: own.is_none(),
         })
+    }
+
+    /// `values` with those of `light` for the slot `slot` at `time` mixed in by `weight`; false,
+    /// unchanged, where its params are unknown.
+    fn mix_in(&self, values: &mut Values, light: &LightRecord, slot: usize, time: f32, weight: f32) -> bool {
+        let Some(other) = self.values(params_of(light, slot), time) else {
+            return false;
+        };
+        for (kept, given) in values.colours.iter_mut().zip(other.colours) {
+            if let Some(given) = given {
+                *kept = Some(kept.map_or(given, |kept| mix_colour(kept, given, weight)));
+            }
+        }
+        for (number, (kept, given)) in values.numbers.iter_mut().zip(other.numbers).enumerate() {
+            // A light without fog gives none.
+            let given = given.filter(|value| number > 1 || *value != 0.0);
+            if let Some(given) = given {
+                *kept = Some(kept.map_or(given, |kept| mix(kept, given, weight)));
+            }
+        }
+        for (kept, given) in values
+            .river_alphas
+            .iter_mut()
+            .chain(&mut values.ocean_alphas)
+            .zip(other.river_alphas.iter().chain(&other.ocean_alphas))
+        {
+            *kept = mix(*kept, *given, weight);
+        }
+        values.glow = mix(values.glow, other.glow, weight);
+        true
     }
 }
 

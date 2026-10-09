@@ -27,6 +27,9 @@ mod tests;
 mod wmo;
 #[cfg(test)]
 mod wmo_tests;
+mod zones;
+#[cfg(test)]
+mod zones_tests;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -37,7 +40,7 @@ use std::thread::ThreadId;
 use uniwow_api::formats::{
     self, AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef,
     Formats, GameObjectDisplay, HairGeoset, LightBand, LightParamsRecord, LightRecord, LightSkyboxRecord, LiquidLayer,
-    LiquidTypeRecord, MapRecord, Model, Placements, Texture, Tile, Wdl, Wdt, Wmo,
+    LiquidTypeRecord, MapRecord, Model, Placements, Texture, Tile, Wdl, Wdt, Wmo, ZoneLightRecord,
 };
 use uniwow_api::vfs::{self, Vfs, VfsState};
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, Registrar, egui, log, rfd, serde_json};
@@ -49,11 +52,14 @@ use dbc::Tables;
 /// The setting holding the folder of the client.
 const CLIENT_FOLDER: &str = "client_folder";
 
-/// The client once open: its archives, its FileDataIDs, and its tables, each read when first asked.
+/// The client once open: its folder, its archives, its FileDataIDs, and its tables, each read when
+/// first asked, as the zones of light of its Wow.exe.
 struct Client {
+    folder: PathBuf,
     chain: Chain,
     file_ids: FileIds,
     tables: Tables,
+    zones: OnceLock<Result<Arc<Vec<ZoneLightRecord>>, String>>,
     /// The WDT of each map read, by its folder in lower case.
     wdts: Mutex<HashMap<String, Arc<Wdt>>>,
 }
@@ -65,12 +71,33 @@ impl Client {
         let chain = Chain::new(sources);
         let (file_ids, refused) = FileIds::load(folder, &chain);
         let client = Self {
+            folder: folder.to_path_buf(),
             chain,
             file_ids,
             tables: Tables::new(locale),
+            zones: OnceLock::new(),
             wdts: Mutex::default(),
         };
         (client, refused)
+    }
+
+    /// The zones of light of the Wow.exe of its folder, its name in any case.
+    fn zone_lights(&self) -> Result<Arc<Vec<ZoneLightRecord>>, String> {
+        self.zones
+            .get_or_init(|| {
+                let exe = std::fs::read_dir(&self.folder)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Result::ok)
+                    .find(|entry| entry.file_name().eq_ignore_ascii_case("wow.exe"))
+                    .ok_or("no Wow.exe in the client's folder")?
+                    .path();
+                let bytes = std::fs::read(&exe).map_err(|e| format!("{}: {e}", exe.display()))?;
+                zones::read(&bytes)
+                    .map(Arc::new)
+                    .map_err(|e| format!("{}: {e}", exe.display()))
+            })
+            .clone()
     }
 
     fn wdt(&self, directory: &str) -> Result<Arc<Wdt>, String> {
@@ -391,6 +418,11 @@ impl Formats for Files {
         self.check_thread("LightSkybox.dbc");
         let client = self.client()?;
         client.tables.light_skyboxes(&client.chain)
+    }
+
+    fn zone_lights(&self) -> Result<Arc<Vec<ZoneLightRecord>>, String> {
+        self.check_thread("Wow.exe");
+        self.client()?.zone_lights()
     }
 
     fn model(&self, file: &FileRef) -> Result<Model, String> {

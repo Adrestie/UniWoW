@@ -9,14 +9,14 @@ use std::time::{Duration, Instant};
 use uniwow_api::formats::{
     AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef,
     Formats, GameObjectDisplay, HairGeoset, LightBand, LightParamsRecord, LightRecord, MapRecord, Model, Texture, Tile,
-    Wdl, Wdt, Wmo,
+    Wdl, Wdt, Wmo, ZoneLightRecord,
 };
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::vfs::{Vfs, VfsState};
 use uniwow_api::viewport::{self, MapLight, Sun};
 use uniwow_api::{
-    CallId, CommandInfo, Context, Editor, EditorBackend, Event, JobFn, JobId, JobOutcome, Module, PropertyValue,
-    Registrar, egui, egui_wgpu,
+    CallId, CommandInfo, Context, Editor, EditorBackend, Event, JobContext, JobFn, JobId, JobOutcome, Module,
+    PropertyValue, Registrar, egui, egui_wgpu,
 };
 
 use crate::light::{Tables, colour_at, map_light, number_at, sun_direction};
@@ -83,26 +83,34 @@ fn params(id: u32, river: f32) -> LightParamsRecord {
     }
 }
 
+/// The tables of `tables`: their lights, params, colours and numbers.
+type Parts = (
+    Vec<LightRecord>,
+    Vec<LightParamsRecord>,
+    Vec<LightBand<[u8; 3]>>,
+    Vec<LightBand<f32>>,
+);
+
 /// Tables of a global light (params 1: diffuse 100, ambient 40, fog from 0.25 of 18,000) and of
 /// local lights: 2 at 1,000, 0, whole within 100 yards, fading to 300, of params 2 (diffuse 200,
 /// no ambient band, no fog), its params under the water 4 (diffuse 60, fog to 100 yards); 3 at
 /// 1,100, 0, within 50 to 150 yards, of params 3 (diffuse 0).
-fn tables() -> Tables {
-    let lights = [
+fn parts() -> Parts {
+    let lights = vec![
         light(1, [0.0; 2], [0.0; 2], [1, 0]),
         light(2, [1_000.0, 0.0], [100.0, 300.0], [2, 4]),
         light(3, [1_100.0, 0.0], [50.0, 150.0], [3, 0]),
     ];
-    let records = [params(1, 0.1), params(2, 0.5), params(3, 0.9), params(4, 0.3)];
+    let records = vec![params(1, 0.1), params(2, 0.5), params(3, 0.9), params(4, 0.3)];
     // The bands of the params `p`: colours from 18 p − 17, numbers from 6 p − 5.
-    let colours = [
+    let colours = vec![
         greys(1, &[(0, 100)]),
         greys(2, &[(0, 40)]),
         greys(19, &[(0, 200)]),
         greys(37, &[(0, 0)]),
         greys(55, &[(0, 60)]),
     ];
-    let fog = [
+    let fog = vec![
         numbers(1, &[(0, 18_000.0)]),
         numbers(2, &[(0, 0.25)]),
         numbers(7, &[(0, 0.0)]),
@@ -110,7 +118,12 @@ fn tables() -> Tables {
         numbers(19, &[(0, 3_600.0)]),
         numbers(3, &[(0, 0.0), (1440, 10.0)]),
     ];
-    Tables::new(&lights, &records, &colours, &fog)
+    (lights, records, colours, fog)
+}
+
+fn tables() -> Tables {
+    let (lights, records, colours, fog) = parts();
+    Tables::new(&lights, &records, &colours, &fog, &[])
 }
 
 fn diffuse(mixed: &crate::light::Mixed) -> f32 {
@@ -161,7 +174,7 @@ fn the_params_of_a_slot_are_taken_and_those_of_the_first_where_a_light_has_none(
     assert_eq!(tables.light_at(9, [0.0; 2], 0.0, 0, true).unwrap().used, [(1, 1.0)]);
     // Params unknown: none.
     assert!(
-        Tables::new(&[light(1, [0.0; 2], [0.0; 2], [5, 0])], &[], &[], &[])
+        Tables::new(&[light(1, [0.0; 2], [0.0; 2], [5, 0])], &[], &[], &[], &[])
             .light_at(0, [0.0; 2], 0.0, 0, true)
             .is_none()
     );
@@ -170,13 +183,13 @@ fn the_params_of_a_slot_are_taken_and_those_of_the_first_where_a_light_has_none(
 #[test]
 fn the_fog_of_a_global_light_that_gives_none_is_noggit_s() {
     let lights = [light(1, [0.0; 2], [0.0; 2], [1, 0])];
-    let tables = Tables::new(&lights, &[params(1, 0.1)], &[], &[]);
+    let tables = Tables::new(&lights, &[params(1, 0.1)], &[], &[], &[]);
     let light = tables.light_at(0, [0.0; 2], 0.0, 0, true).unwrap();
     assert_eq!(light.values.numbers[0..2], [Some(6_500.0), Some(0.1)]);
     assert_eq!(light.values.colours[0], None, "a band absent");
     // Given, but 0.
     let zero = [numbers(1, &[(0, 0.0)]), numbers(2, &[(0, 0.0)])];
-    let tables = Tables::new(&lights, &[params(1, 0.1)], &[], &zero);
+    let tables = Tables::new(&lights, &[params(1, 0.1)], &[], &zero, &[]);
     let light = tables.light_at(0, [0.0; 2], 0.0, 0, true).unwrap();
     assert_eq!(light.values.numbers[0..2], [Some(6_500.0), Some(0.1)]);
 }
@@ -188,6 +201,7 @@ fn a_band_is_read_by_its_keys_in_the_order_of_their_times() {
         &[params(1, 0.1)],
         &[],
         &[numbers(3, &[(1440, 4.0), (0, 2.0)])],
+        &[],
     );
     let light = tables.light_at(0, [0.0; 2], 720.0, 0, true).unwrap();
     assert_eq!(light.values.numbers[2], Some(3.0));
@@ -203,7 +217,7 @@ fn a_light_of_equal_radii_holds_the_place_within_them_wholly() {
         light(1, [0.0; 2], [0.0; 2], [1, 0]),
         light(2, [100.0, 0.0], [50.0, 50.0], [2, 0]),
     ];
-    let tables = Tables::new(&lights, &[params(1, 0.1), params(2, 0.5)], &[], &[]);
+    let tables = Tables::new(&lights, &[params(1, 0.1), params(2, 0.5)], &[], &[], &[]);
     assert_eq!(
         tables.light_at(0, [140.0, 0.0], 0.0, 0, true).unwrap().used,
         [(1, 1.0), (2, 1.0)]
@@ -213,7 +227,13 @@ fn a_light_of_equal_radii_holds_the_place_within_them_wholly() {
     let mut over = light(3, [0.0; 2], [64.0, 64.0], [2, 0]);
     over.position = [0.0, 36.0, 0.0];
     let middle = 32.0 * uniwow_api::formats::TILE;
-    let tables = Tables::new(&[lights[0].clone(), over], &[params(1, 0.1), params(2, 0.5)], &[], &[]);
+    let tables = Tables::new(
+        &[lights[0].clone(), over],
+        &[params(1, 0.1), params(2, 0.5)],
+        &[],
+        &[],
+        &[],
+    );
     assert_eq!(
         tables.light_at(0, [middle + 64.0, middle], 0.0, 0, true).unwrap().used,
         [(1, 1.0), (3, 1.0)]
@@ -221,6 +241,221 @@ fn a_light_of_equal_radii_holds_the_place_within_them_wholly() {
     // A global light of its own, not the light 1 of another map.
     assert!(!tables.light_at(0, [0.0; 2], 0.0, 0, true).unwrap().fallback);
     assert!(tables.light_at(9, [0.0; 2], 0.0, 0, true).unwrap().fallback);
+}
+
+/// A zone of light of the map 0 within `points`, giving the light `light`.
+fn zone(light: u32, points: &[[f32; 2]]) -> ZoneLightRecord {
+    ZoneLightRecord {
+        map: 0,
+        light,
+        points: points.to_vec(),
+    }
+}
+
+/// The tables of a global light (diffuse 100), the light 2 of `tables` (diffuse 200), the lights
+/// 5 and 6 of the zones `zones`, far from the places of the tests and a few yards wide, of params 5
+/// (diffuse 0) and 6 (diffuse 250).
+fn zoned(zones: &[ZoneLightRecord]) -> Tables {
+    let lights = [
+        light(1, [0.0; 2], [0.0; 2], [1, 0]),
+        light(2, [1_000.0, 0.0], [100.0, 300.0], [2, 4]),
+        light(5, [9_000.0, 9_000.0], [1.0, 4.0], [5, 0]),
+        light(6, [9_000.0, 9_100.0], [1.0, 4.0], [6, 0]),
+    ];
+    let records = [params(1, 0.1), params(2, 0.5), params(5, 0.2), params(6, 0.4)];
+    let colours = [
+        greys(1, &[(0, 100)]),
+        greys(19, &[(0, 200)]),
+        greys(73, &[(0, 0)]),
+        greys(91, &[(0, 250)]),
+    ];
+    Tables::new(&lights, &records, &colours, &[], zones)
+}
+
+/// The ids of the lights mixed in, in their order.
+fn ids(mixed: &crate::light::Mixed) -> Vec<u32> {
+    mixed.used.iter().map(|(id, _)| *id).collect()
+}
+
+#[test]
+fn a_zone_of_light_weighs_from_50_yards_outside_its_edge_to_50_within() {
+    let square = [
+        [-3_000.0, -1_000.0],
+        [-3_000.0, 1_000.0],
+        [-1_000.0, 1_000.0],
+        [-1_000.0, -1_000.0],
+    ];
+    let tables = zoned(&[zone(5, &square)]);
+    let at = |place: [f32; 2]| tables.light_at(0, place, 0.0, 0, true).unwrap();
+    // Within it by 50 yards or more: whole, its diffuse 0 over the global's 100.
+    for place in [[-2_000.0, 0.0], [-1_050.0, 0.0], [-2_000.0, 950.0]] {
+        let within = at(place);
+        assert_eq!(
+            (within.used.clone(), within.zones),
+            (vec![(1, 1.0), (5, 1.0)], 1),
+            "{place:?}"
+        );
+        assert!(diffuse(&within).abs() < 1e-3);
+    }
+    // Across its edge, by the distance to it: three quarters 25 yards within, half on it, a quarter
+    // 25 yards outside, also from a corner; nothing 50 yards outside.
+    for (place, weight) in [
+        ([-1_025.0, 0.0], 0.75),
+        ([-1_000.0, 0.0], 0.5),
+        ([-975.0, 0.0], 0.25),
+        ([-980.0, 1_015.0], 0.25),
+        ([-3_020.0, -1_015.0], 0.25),
+    ] {
+        let near = at(place);
+        assert_eq!(ids(&near), [1, 5], "{place:?}");
+        assert!((near.used[1].1 - weight).abs() < 1e-4, "{place:?}: {:?}", near.used);
+        assert!((diffuse(&near) - 100.0 * (1.0 - weight)).abs() < 1e-2, "{place:?}");
+    }
+    for place in [[-950.0, 0.0], [-970.0, 1_040.0], [-2_000.0, 1_060.0]] {
+        let away = at(place);
+        assert_eq!((ids(&away), away.zones), (vec![1], 0), "{place:?}");
+    }
+    // Switched off with the local lights; of its own map only.
+    assert_eq!(
+        tables.light_at(0, [-2_000.0, 0.0], 0.0, 0, false).unwrap().used,
+        [(1, 1.0)]
+    );
+    let other = ZoneLightRecord {
+        map: 1,
+        ..zone(5, &square)
+    };
+    assert_eq!(
+        ids(&zoned(&[other]).light_at(0, [-2_000.0, 0.0], 0.0, 0, true).unwrap()),
+        [1]
+    );
+}
+
+#[test]
+fn a_zone_of_light_holds_what_its_outline_holds_however_it_turns() {
+    // An L: its notch, from 100 to 300 on both axes, outside it.
+    let shape = [
+        [0.0, 0.0],
+        [0.0, 300.0],
+        [100.0, 300.0],
+        [100.0, 100.0],
+        [300.0, 100.0],
+        [300.0, 0.0],
+    ];
+    let mut reversed = shape;
+    reversed.reverse();
+    // Its points in either order.
+    for shape in [shape, reversed] {
+        let tables = zoned(&[zone(5, &shape)]);
+        for (place, weight) in [
+            ([50.0, 250.0], Some(1.0)),
+            ([250.0, 50.0], Some(1.0)),
+            ([200.0, 80.0], Some(0.7)),
+            ([80.0, 200.0], Some(0.7)),
+            ([200.0, 120.0], Some(0.3)),
+            ([120.0, 200.0], Some(0.3)),
+            ([250.0, 250.0], None),
+        ] {
+            let mixed = tables.light_at(0, place, 0.0, 0, true).unwrap();
+            let found = mixed.used.get(1).map(|(_, weight)| *weight);
+            let same = match (found, weight) {
+                (Some(found), Some(weight)) => (found - weight).abs() < 1e-4,
+                (found, weight) => found.is_none() && weight.is_none(),
+            };
+            assert!(same, "{shape:?} {place:?}: {:?}", mixed.used);
+        }
+    }
+}
+
+#[test]
+fn zones_are_mixed_after_the_global_light_and_before_the_local_ones_five_at_most() {
+    // Around the light 2: the zone first, the local light last, its diffuse 200 kept.
+    let around = [[700.0, -300.0], [700.0, 300.0], [1_300.0, 300.0], [1_300.0, -300.0]];
+    let tables = zoned(&[zone(6, &around)]);
+    let both = tables.light_at(0, [1_000.0, 0.0], 0.0, 0, true).unwrap();
+    assert_eq!((both.used.clone(), both.zones), (vec![(1, 1.0), (6, 1.0), (2, 1.0)], 1));
+    assert!((diffuse(&both) - 200.0).abs() < 1e-3);
+    // Seven zones holding the place: the first five, in their order, those far from it not
+    // counted; a zone whose light the tables lack, or without outline, left out before them.
+    let square = [
+        [-3_000.0, -1_000.0],
+        [-3_000.0, 1_000.0],
+        [-1_000.0, 1_000.0],
+        [-1_000.0, -1_000.0],
+    ];
+    let far = square.map(|[x, y]| [x, y + 5_000.0]);
+    let mut zones = vec![zone(99, &square), zone(5, &[])];
+    zones.extend([6, 6, 6, 6, 6].map(|light| zone(light, &far)));
+    zones.extend([5, 6, 5, 6, 6, 5, 5].map(|light| zone(light, &square)));
+    let many = zoned(&zones).light_at(0, [-2_000.0, 0.0], 0.0, 0, true).unwrap();
+    assert_eq!((ids(&many), many.zones), (vec![1, 5, 6, 5, 6, 6], 5));
+    assert!((diffuse(&many) - 250.0).abs() < 1e-3, "the last mixed weighs last");
+}
+
+#[test]
+fn a_local_light_whose_outer_radius_is_under_3_yards_is_left_out() {
+    let lights = [
+        light(1, [0.0; 2], [0.0; 2], [1, 0]),
+        light(2, [500.0, 0.0], [1.0, 2.99], [2, 0]),
+        light(3, [600.0, 0.0], [1.0, 3.0], [2, 0]),
+    ];
+    let tables = Tables::new(&lights, &[params(1, 0.1), params(2, 0.5)], &[], &[], &[]);
+    assert_eq!(tables.light_at(0, [500.0, 0.0], 0.0, 0, true).unwrap().used, [(1, 1.0)]);
+    assert_eq!(
+        tables.light_at(0, [600.0, 0.0], 0.0, 0, true).unwrap().used,
+        [(1, 1.0), (3, 1.0)]
+    );
+}
+
+#[test]
+fn lights_sharing_a_centre_are_mixed_the_widest_inner_radius_first() {
+    let records = [params(1, 0.1), params(2, 0.5), params(3, 0.9)];
+    let colours = [greys(1, &[(0, 100)]), greys(19, &[(0, 200)]), greys(37, &[(0, 0)])];
+    // The lights 2 (diffuse 200) and 3 (diffuse 0), 3 `apart` yards north of 2 and `up` yards
+    // higher, of inner radii `inner`; the place 30 yards west of 2.
+    let mixed = |apart: f32, up: f32, inner: [f32; 2]| {
+        let mut third = light(3, [1_000.0 + apart, 0.0], [inner[1], 300.0], [3, 0]);
+        third.position[1] += up * 36.0;
+        let lights = [
+            light(1, [0.0; 2], [0.0; 2], [1, 0]),
+            light(2, [1_000.0, 0.0], [inner[0], 300.0], [2, 0]),
+            third,
+        ];
+        let tables = Tables::new(&lights, &records, &colours, &[], &[]);
+        let mixed = tables.light_at(0, [1_000.0, 30.0], 0.0, 0, true).unwrap();
+        (ids(&mixed), diffuse(&mixed).round())
+    };
+    // Within a third of a yard: the widest inner radius first, the narrowest weighing last.
+    assert_eq!(mixed(0.2, 0.0, [100.0, 50.0]), (vec![1, 2, 3], 0.0));
+    assert_eq!(mixed(0.2, 0.0, [50.0, 100.0]), (vec![1, 3, 2], 200.0));
+    assert_eq!(mixed(0.0, 0.33, [50.0, 100.0]), (vec![1, 3, 2], 200.0));
+    // Farther apart, on the map or in height: the farthest first, then by id.
+    assert_eq!(mixed(0.5, 0.0, [100.0, 50.0]), (vec![1, 3, 2], 200.0));
+    assert_eq!(mixed(0.0, 10.0, [50.0, 100.0]), (vec![1, 2, 3], 0.0));
+    // A centre shared through a light near both: the three by their inner radii.
+    let lights = [
+        light(1, [0.0; 2], [0.0; 2], [1, 0]),
+        light(2, [1_000.0, 0.0], [100.0, 300.0], [2, 0]),
+        light(3, [1_000.3, 0.0], [60.0, 300.0], [3, 0]),
+        light(4, [1_000.6, 0.0], [50.0, 300.0], [2, 0]),
+    ];
+    let tables = Tables::new(&lights, &records, &colours, &[], &[]);
+    assert_eq!(
+        ids(&tables.light_at(0, [1_000.0, 30.0], 0.0, 0, true).unwrap()),
+        [1, 2, 3, 4]
+    );
+    // The same, the light near both listed first: 4 led to 2, then 3 to 2 through it, at the
+    // centre of 2 although 3's is nearer.
+    let lights = [
+        light(1, [0.0; 2], [0.0; 2], [1, 0]),
+        light(4, [1_000.0, 0.0], [60.0, 300.0], [2, 0]),
+        light(2, [999.75, 0.0], [50.0, 300.0], [2, 0]),
+        light(3, [1_000.25, 0.0], [100.0, 300.0], [3, 0]),
+    ];
+    let tables = Tables::new(&lights, &records, &colours, &[], &[]);
+    assert_eq!(
+        ids(&tables.light_at(0, [1_001.0, 30.0], 0.0, 0, true).unwrap()),
+        [1, 3, 4, 2]
+    );
 }
 
 #[test]
@@ -262,7 +497,7 @@ fn the_light_given_to_the_view_is_the_fixed_one_where_the_tables_give_none() {
     // No band but the colour of the fog: the fixed sun, the fog of Noggit (6,500 36ths of a yard
     // and 0.1).
     let lights = [light(1, [0.0; 2], [0.0; 2], [1, 0])];
-    let empty = Tables::new(&lights, &[params(1, 0.1)], &[greys(8, &[(0, 128)])], &[]);
+    let empty = Tables::new(&lights, &[params(1, 0.1)], &[greys(8, &[(0, 128)])], &[], &[]);
     let values = empty.light_at(0, [0.0; 2], 0.0, 0, true).unwrap().values;
     let given = map_light(&values, 0.0, true);
     assert_eq!(
@@ -318,10 +553,28 @@ fn the_light_is_a_category_of_the_settings_noon_by_default_still() {
     );
 }
 
-/// Formats that read nothing: the jobs of the tests are never run.
-struct NoFormats;
+/// Formats that read the tables of `tables` and the zones of light `zones`, or why they cannot,
+/// and nothing else.
+struct TestFormats {
+    zones: Result<Vec<ZoneLightRecord>, String>,
+}
 
-impl Formats for NoFormats {
+impl Formats for TestFormats {
+    fn lights(&self) -> Result<Arc<Vec<LightRecord>>, String> {
+        Ok(Arc::new(parts().0))
+    }
+    fn light_params(&self) -> Result<Arc<Vec<LightParamsRecord>>, String> {
+        Ok(Arc::new(parts().1))
+    }
+    fn light_colours(&self) -> Result<Arc<Vec<LightBand<[u8; 3]>>>, String> {
+        Ok(Arc::new(parts().2))
+    }
+    fn light_numbers(&self) -> Result<Arc<Vec<LightBand<f32>>>, String> {
+        Ok(Arc::new(parts().3))
+    }
+    fn zone_lights(&self) -> Result<Arc<Vec<ZoneLightRecord>>, String> {
+        self.zones.clone().map(Arc::new)
+    }
     fn maps(&self) -> Result<Arc<Vec<MapRecord>>, String> {
         Err("none".to_owned())
     }
@@ -470,14 +723,15 @@ impl EditorBackend for Shown {
     }
 }
 
-/// A host offering `formats` and `vfs`, counting the jobs started, never run, and those cancelled,
-/// its editor `editor`.
+/// A host offering `formats` and `vfs`, counting the jobs started, kept unrun for the test to run
+/// them, and those cancelled, its editor `editor`.
 struct Host {
     formats: Arc<dyn Formats>,
     files: Arc<dyn Vfs>,
     view: viewport::Handle,
     seen: Arc<View>,
     started: Vec<String>,
+    jobs: Vec<JobFn>,
     cancelled: Vec<JobId>,
     settings: HashMap<String, Value>,
     editor: Arc<Shown>,
@@ -486,11 +740,14 @@ struct Host {
 fn host(files: Arc<Files>) -> Host {
     let seen = Arc::new(View::default());
     Host {
-        formats: Arc::new(NoFormats),
+        formats: Arc::new(TestFormats {
+            zones: Err("none".to_owned()),
+        }),
         files,
         view: seen.clone(),
         seen,
         started: Vec::new(),
+        jobs: Vec::new(),
         cancelled: Vec::new(),
         settings: HashMap::new(),
         editor: Arc::new(Shown {
@@ -531,8 +788,9 @@ impl uniwow_api::Host for Host {
         self.settings.insert(key.to_owned(), value);
     }
     fn report_failure(&mut self, _reporter: &str, _culprit: &str, _message: &str) {}
-    fn spawn(&mut self, _owner: &str, label: &str, _job: JobFn) -> JobId {
+    fn spawn(&mut self, _owner: &str, label: &str, job: JobFn) -> JobId {
         self.started.push(label.to_owned());
+        self.jobs.push(job);
         JobId(self.started.len() as u64)
     }
     fn spawn_thread(&mut self, owner: &str, label: &str, job: JobFn) -> JobId {
@@ -566,7 +824,7 @@ fn the_tables_are_read_once_the_client_is_open_and_again_once_it_changes() {
     module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
     module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
     assert_eq!(host.started.len(), 1);
-    let refused: Result<Arc<Tables>, String> = Err("refused".to_owned());
+    let refused: Result<(Arc<Tables>, Option<String>), String> = Err("refused".to_owned());
     module.on_job(
         JobId(1),
         JobOutcome::Done(Box::new(refused)),
@@ -587,7 +845,7 @@ fn the_tables_are_read_once_the_client_is_open_and_again_once_it_changes() {
     assert_eq!(host.cancelled, [JobId(2)]);
     assert_eq!(host.started.len(), 2);
     // A job of before coming back is not taken.
-    let read: Result<Arc<Tables>, String> = Ok(Arc::new(Tables::default()));
+    let read: Result<(Arc<Tables>, Option<String>), String> = Ok((Arc::new(Tables::default()), None));
     module.on_job(
         JobId(2),
         JobOutcome::Done(Box::new(read)),
@@ -622,6 +880,28 @@ fn the_tables_are_read_once_the_client_is_open_and_again_once_it_changes() {
         module.tables.as_ref().map(|read| read.clone().err()),
         Some(Some("boom".to_owned()))
     );
+    // Read without the zones of light: the tables taken, why said; forgotten once the client changes.
+    *files.0.lock().unwrap() = VfsState::Ready {
+        archives: 7,
+        files: 150,
+    };
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    let read: Result<(Arc<Tables>, Option<String>), String> =
+        Ok((Arc::new(Tables::default()), Some("no Wow.exe".to_owned())));
+    module.on_job(
+        JobId(5),
+        JobOutcome::Done(Box::new(read)),
+        &mut Context::new(&mut host, "lighting"),
+    );
+    assert!(matches!(module.tables, Some(Ok(_))));
+    assert_eq!(module.zones_unread.as_deref(), Some("no Wow.exe"));
+    *files.0.lock().unwrap() = VfsState::Ready {
+        archives: 8,
+        files: 160,
+    };
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert_eq!(module.zones_unread, None);
+    assert_eq!(host.started.len(), 6);
 }
 
 #[test]
@@ -679,4 +959,66 @@ fn the_light_is_that_of_the_map_shown_at_the_camera_s_place_on_it() {
     assert!(host.seen.0.lock().unwrap().is_some());
     module.shutdown();
     assert!(host.seen.0.lock().unwrap().is_none());
+}
+
+/// The texts the panel of `module` draws.
+fn panel(module: &mut crate::LightingModule, host: &mut Host) -> Vec<String> {
+    let egui = egui::Context::default();
+    let mut output = egui.run_ui(egui::RawInput::default(), |ui| {
+        module.panel_ui("lighting", ui, &mut Context::new(host, "lighting"));
+    });
+    output.textures_delta.clear();
+    output
+        .shapes
+        .iter()
+        .filter_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_zones_of_light_are_read_with_the_tables_and_said_in_the_panel() {
+    let files = Arc::new(Files(Mutex::new(VfsState::Ready { archives: 1, files: 1 })));
+    // Around the light 2: a zone of the light 3, whole at the place of the camera.
+    let around = [[700.0, -300.0], [700.0, 300.0], [1_300.0, 300.0], [1_300.0, -300.0]];
+    let refused = "no Wow.exe in the client's folder".to_owned();
+    for zones in [Ok(vec![zone(3, &around)]), Err(refused.clone())] {
+        let mut host = host(files.clone());
+        host.formats = Arc::new(TestFormats { zones: zones.clone() });
+        *host.editor.map.lock().unwrap() = json!({ "id": 0, "name": "Azeroth" });
+        *host.editor.camera.lock().unwrap() = Some([920.0, -50.0, 600.0]);
+        let egui = egui::Context::default();
+        let mut module = crate::LightingModule::default();
+        module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+        let job = host.jobs.remove(0);
+        let editor = Editor::new(host.editor.clone(), "lighting");
+        let read = job(&JobContext::new(Arc::default(), Arc::default(), editor));
+        module.on_job(
+            JobId(1),
+            JobOutcome::Done(read),
+            &mut Context::new(&mut host, "lighting"),
+        );
+        module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+        let light = module.shown.as_ref().and_then(|shown| shown.light.clone()).unwrap();
+        let texts = panel(&mut module, &mut host);
+        let mixed = texts.iter().find(|text| text.starts_with("Lights mixed")).unwrap();
+        if zones.is_ok() {
+            assert_eq!((light.used, light.zones), (vec![(1, 1.0), (3, 1.0), (2, 1.0)], 1));
+            assert_eq!(
+                mixed,
+                "Lights mixed, by their weights: 1 (global) 1.00, 3 (zone) 1.00, 2 1.00"
+            );
+            assert!(
+                !texts.iter().any(|text| text.starts_with("No zones of light")),
+                "{texts:?}"
+            );
+        } else {
+            // Without them, the light of the tables, why said.
+            assert_eq!(light.used, [(1, 1.0), (2, 1.0)]);
+            assert_eq!(mixed, "Lights mixed, by their weights: 1 (global) 1.00, 2 1.00");
+            assert!(texts.contains(&format!("No zones of light: {refused}")), "{texts:?}");
+        }
+    }
 }
