@@ -334,6 +334,58 @@ fn the_blended_order_is_kept_until_two_cross_by_the_margin() {
 }
 
 #[test]
+fn the_blended_instances_are_put_the_farthest_first_and_their_order_kept_until_two_cross() {
+    let key = |at| (7, 1, at);
+    let (mut kept, mut order) = (Vec::new(), Vec::new());
+    assert!(layer::order_blended(Vec::new(), &[], &mut kept, &mut order), "none");
+    assert!(order.is_empty());
+    // Sorted, those at the same distance in the order found.
+    let found = vec![key(0), key(1), key(2), key(3), key(4)];
+    let mut distances = [20.0, 50.0, 10.0, 30.0, 20.0];
+    assert!(!layer::order_blended(found.clone(), &distances, &mut kept, &mut order));
+    assert_eq!(order, [1, 3, 0, 4, 2]);
+    assert_eq!(kept, found);
+    // The fourth farther than the second by less than the margin: kept.
+    distances[3] = 51.5;
+    assert!(layer::order_blended(found.clone(), &distances, &mut kept, &mut order));
+    assert_eq!(order, [1, 3, 0, 4, 2]);
+    // By more: sorted again.
+    distances[3] = 53.0;
+    assert!(!layer::order_blended(found.clone(), &distances, &mut kept, &mut order));
+    assert_eq!(order, [3, 1, 0, 4, 2]);
+    // As many, one of another key: sorted again, though in order.
+    let other = vec![key(0), key(1), key(2), key(3), key(9)];
+    assert!(!layer::order_blended(other.clone(), &distances, &mut kept, &mut order));
+    assert_eq!(kept, other);
+    // Fewer: sorted again.
+    assert!(!layer::order_blended(
+        vec![key(1), key(3)],
+        &[50.0, 53.0],
+        &mut kept,
+        &mut order
+    ));
+    assert_eq!(order, [1, 0]);
+    // Distances not numbers, infinite, of either sign, as `f32::total_cmp` orders them.
+    let odd = [
+        0.0,
+        -0.0,
+        f32::INFINITY,
+        -f32::NAN,
+        1.0,
+        f32::NAN,
+        f32::NEG_INFINITY,
+        -1.0,
+    ];
+    assert!(!layer::order_blended(
+        (0..8).map(key).collect(),
+        &odd,
+        &mut kept,
+        &mut order
+    ));
+    assert_eq!(order, [5, 2, 4, 0, 1, 7, 6, 3]);
+}
+
+#[test]
 fn the_nearest_point_of_a_box_and_whether_it_is_in_sight() {
     let bounds = [Vec3::new(-1.0, -1.0, 0.0), Vec3::new(1.0, 1.0, 2.0)];
     assert_eq!(layer::nearest(Vec3::new(4.0, 0.0, 1.0), bounds), 3.0);

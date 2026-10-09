@@ -151,11 +151,7 @@ pub fn plan_of(published: &Published, looks: &HashMap<LookId, Arc<Ready>>, table
                     slot,
                 });
                 plan.instances += u64::from(group.count);
-                if tables.looks[slot as usize]
-                    .blended
-                    .iter()
-                    .any(|records| !records.is_empty())
-                {
+                if !tables.looks[slot as usize].states.is_empty() {
                     plan.blended.push((index, slot));
                 }
             }
@@ -184,10 +180,53 @@ pub fn owner_bounds(published: &Published, looks: &HashMap<LookId, Arc<Ready>>) 
 /// Whether the blended groups at `distances`, in the order drawn last, may stay so: none nearer
 /// than the next by more than the margin.
 pub fn still_ordered(distances: &[f32]) -> bool {
-    distances.windows(2).all(|pair| {
-        let margin = SWAP_YARDS.max(pair[1] * SWAP_SHARE);
-        pair[0] + margin >= pair[1]
-    })
+    distances.windows(2).all(|pair| in_order(pair[0], pair[1]))
+}
+
+/// Whether what stands at `before`, drawn first, may stay before what stands at `after`: not nearer
+/// than it by more than the margin.
+fn in_order(before: f32, after: f32) -> bool {
+    let margin = SWAP_YARDS.max(after * SWAP_SHARE);
+    before + margin >= after
+}
+
+/// The key by which `distance` sorts the farthest first: its bits put in the order of
+/// `f32::total_cmp`, inverted.
+fn farthest_first(distance: f32) -> u32 {
+    let bits = distance.to_bits();
+    !(if bits >> 31 != 0 { !bits } else { bits | 1 << 31 })
+}
+
+/// The order the blended instances found are drawn in, the farthest first, by their places among
+/// them: `found` their keys, in the order found, at `distances`. The order before, `order` of the
+/// instances `kept`, stays while the same are found in the same order and none is nearer than the
+/// next by more than the margin; otherwise they are sorted again, those at the same distance in the
+/// order found, and kept for the next frame. Whether the order before stayed.
+pub fn order_blended(
+    found: Vec<BlendedKey>,
+    distances: &[f32],
+    kept: &mut Vec<BlendedKey>,
+    order: &mut Vec<u32>,
+) -> bool {
+    debug_assert_eq!(found.len(), distances.len());
+    debug_assert_eq!(order.len(), kept.len());
+    if found == *kept
+        && order
+            .windows(2)
+            .all(|pair| in_order(distances[pair[0] as usize], distances[pair[1] as usize]))
+    {
+        return true;
+    }
+    let mut sorted: Vec<u64> = distances
+        .iter()
+        .enumerate()
+        .map(|(at, distance)| (u64::from(farthest_first(*distance)) << 32) | at as u64)
+        .collect();
+    sorted.sort_unstable();
+    order.clear();
+    order.extend(sorted.into_iter().map(|key| key as u32));
+    *kept = found;
+    false
 }
 
 /// A group of a look of its own drawn this frame.
@@ -233,7 +272,7 @@ pub fn rank(state: &State) -> (usize, u16, bool, bool, bool) {
 
 /// An instance of a look with blended batches: its owner, the owner's layout and its place there,
 /// by which its order is kept from a frame to the next.
-type BlendedKey = (u32, u64, u32);
+pub type BlendedKey = (u32, u64, u32);
 
 /// What the bundle was recorded with: the generations of the looks and of the arena of the
 /// instances, each group with its layout and level, the blended groups in their order, and those
@@ -256,12 +295,15 @@ pub struct ModelsLayer {
     /// When the bundle was recorded, in the last second.
     recordings: VecDeque<Instant>,
     /// With the pool: the choice by the GPU, the bind group the vertex shader of the pool reads and
-    /// the generation of the pool it was made at, and the blended instances in the order drawn last.
+    /// the generation of the pool it was made at.
     choice: Option<Choice>,
     pool_group: Option<(wgpu::BindGroup, (u64, u64))>,
     /// The bind group of the bones, and the bones it was made with.
     skin_group: Option<(wgpu::BindGroup, Option<Arc<Animated>>)>,
+    /// The blended instances of the pool found last, in the order found, and the order they were
+    /// drawn in, by their place among them.
     blended: Vec<BlendedKey>,
+    blended_order: Vec<u32>,
     /// The bounds of each owner (`owner_bounds`), by its number, with the publication and the
     /// generation of the looks they were made of, the publication held so that its place is not
     /// taken by another.
@@ -290,6 +332,7 @@ impl ModelsLayer {
             pool_group: None,
             skin_group: None,
             blended: Vec::new(),
+            blended_order: Vec::new(),
             owner_bounds: HashMap::new(),
             plans: HashMap::new(),
             stats: LayerStats::default(),
@@ -366,10 +409,13 @@ impl Layer for ModelsLayer {
             )
         };
         let surfaces = liquids.map(|liquids| liquids.surfaces());
+        // Beyond the surface when one of the eye and the point lies under the water and the other
+        // not, the eye told once.
+        let eye_under = surfaces.as_ref().is_some_and(|surfaces| surfaces.under(view.eye));
         let beyond = |point: Vec3| {
             surfaces
                 .as_ref()
-                .is_some_and(|surfaces| surfaces.phase(view.eye, point) == Phase::Beyond)
+                .is_some_and(|surfaces| surfaces.under(point) != eye_under)
         };
         let (camera, _) = self.camera.get_or_insert_with(|| {
             let buffer = shared.device.create_buffer(&wgpu::BufferDescriptor {
@@ -407,7 +453,11 @@ impl Layer for ModelsLayer {
         let mut layouts = Vec::new();
         let mut bone_moves: Vec<Move> = Vec::new();
         let mut chosen = Vec::new();
-        let mut candidates: Vec<(f32, BlendedKey, Blended, bool)> = Vec::new();
+        // The blended instances of the pool found, with whether they are beyond the water, their
+        // distances and their keys, in the same order.
+        let mut candidates: Vec<(Blended, bool)> = Vec::new();
+        let mut distances: Vec<f32> = Vec::new();
+        let mut found: Vec<BlendedKey> = Vec::new();
         let (mut instances, mut groups, mut seen) = (0u64, 0usize, 0usize);
         // The owners animated as the thread saw them, with where the table of their bones begins.
         let snapshots: HashMap<u32, (&Arc<crate::groups::Published>, u32, u32)> = animated
@@ -512,14 +562,14 @@ impl Layer for ModelsLayer {
                         .get(at as usize)
                         .map_or(group.low, |instance| instance.transform.w_axis.truncate());
                     candidates.push((
-                        view.eye.distance(origin),
-                        (slot.number, published.layout, at),
                         Blended {
                             index: first + at,
                             slot: look_slot,
                         },
                         beyond(origin),
                     ));
+                    distances.push(view.eye.distance(origin));
+                    found.push((slot.number, published.layout, at));
                 }
             }
             // The looks of their own, by group in sight.
@@ -571,30 +621,12 @@ impl Layer for ModelsLayer {
             self.order = order.into_iter().map(|(key, _)| key).collect();
         }
         self.drawn = drawn;
-        // The blended instances of the pool, the farthest first, in the same way.
-        let at: HashMap<BlendedKey, usize> = candidates
-            .iter()
-            .enumerate()
-            .map(|(index, (_, key, _, _))| (*key, index))
-            .collect();
-        let same_set = self.blended.len() == at.len() && self.blended.iter().all(|key| at.contains_key(key));
-        let kept = same_set && still_ordered(&self.blended.iter().map(|key| candidates[at[key]].0).collect::<Vec<_>>());
-        let blended: Vec<(Blended, bool)> = if kept {
-            self.blended
-                .iter()
-                .map(|key| (candidates[at[key]].2, candidates[at[key]].3))
-                .collect()
-        } else {
-            candidates.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-            self.blended = candidates.iter().map(|(_, key, _, _)| *key).collect();
-            candidates
-                .iter()
-                .map(|(_, _, instance, beyond)| (*instance, *beyond))
-                .collect()
-        };
+        // The blended instances of the pool, the farthest first, the order before kept while it may.
+        order_blended(found, &distances, &mut self.blended, &mut self.blended_order);
         // Those beyond the surface of the water from the eye, then those on its side, each in order.
         let (mut beyond_water, mut near_water) = (Vec::new(), Vec::new());
-        for (instance, beyond) in blended {
+        for &at in &self.blended_order {
+            let (instance, beyond) = candidates[at as usize];
             if beyond {
                 beyond_water.push(instance);
             } else {

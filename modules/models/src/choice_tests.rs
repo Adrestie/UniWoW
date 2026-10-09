@@ -12,10 +12,13 @@ use uniwow_api::models::{Geosets, Look, Models};
 use uniwow_api::viewport::Layer;
 use uniwow_api::wgpu;
 
-use crate::choice::Tables;
+use crate::choice::{Blended, LEVELS, TableLook, Tables, Templates, states_of, templates};
+use crate::gpu::State;
+use crate::layer::rank;
 use crate::lock;
 use crate::pool;
 use crate::pool_tests::{LEFT, Pooled, RIGHT, colours, only, pixel, skin};
+use crate::pooled::Record;
 use crate::tests::{AIM, FRONT, Fake, depth_at, instance, middle, plain, render, settled, square};
 
 /// Unlit and unfogged: a pixel is the colour of its texture.
@@ -556,10 +559,157 @@ fn the_order_of_blended_instances_is_kept_until_two_cross_by_the_margin() {
     bench.service.place("test", &[half(1, 0, 1.0), half(2, 1, 0.8)]);
     let seen = middle(&render(bench, FRONT, AIM));
     assert!(stored(seen, 0.25, 0.5), "kept: {seen:?}");
-    // Behind it by more: sorted again.
-    bench.service.place("test", &[half(1, 0, 1.0), half(2, 1, -2.0)]);
+    // The red now nearer than it by more, both on the same tile: sorted again.
+    bench.service.place("test", &[half(1, 0, 3.5), half(2, 1, 0.8)]);
     let seen = middle(&render(bench, FRONT, AIM));
     assert!(stored(seen, 0.5, 0.25), "sorted: {seen:?}");
+}
+
+/// A record of the blending `blending`, its numbers told apart by `at`.
+fn record(at: u32, blending: u16, two_sided: bool) -> Record {
+    Record {
+        first_index: at,
+        count: 3 * at,
+        base_vertex: 10 * at as i32,
+        material: 100 + at,
+        state: State {
+            blending,
+            two_sided,
+            depth_test: true,
+            depth_write: blending <= 1,
+        },
+    }
+}
+
+/// The templates of `blended` written state by state, each read in every record of every instance
+/// at every level of `skins`.
+fn templates_one_state_at_a_time(skins: &[Vec<Vec<Record>>], blended: [&[Blended]; 2]) -> Templates {
+    let mut made = Templates::default();
+    for (part, instances) in blended.iter().enumerate() {
+        let records = |instance: &Blended| {
+            skins[instance.slot as usize]
+                .iter()
+                .take(LEVELS)
+                .enumerate()
+                .flat_map(|(level, records)| records.iter().map(move |record| (level as u32, *record)))
+                .filter(|(_, record)| record.state.blended())
+                .collect::<Vec<_>>()
+        };
+        let mut states: Vec<State> = Vec::new();
+        for instance in *instances {
+            for (_, record) in records(instance) {
+                if !states.contains(&record.state) {
+                    states.push(record.state);
+                }
+            }
+        }
+        states.sort_by_key(rank);
+        for state in states {
+            let start = made.entries.len() as u32;
+            for instance in *instances {
+                for (level, record) in records(instance)
+                    .into_iter()
+                    .filter(|(_, record)| record.state == state)
+                {
+                    made.words.extend([
+                        record.count,
+                        record.first_index,
+                        record.base_vertex as u32,
+                        made.entries.len() as u32,
+                        instance.index,
+                        level + 1,
+                        made.regions.len() as u32,
+                    ]);
+                    made.entries.push([instance.index, record.material]);
+                }
+            }
+            made.regions.push((state, start, made.entries.len() as u32 - start));
+        }
+        if part == 0 {
+            made.beyond = made.regions.len();
+        }
+    }
+    made
+}
+
+#[test]
+fn the_templates_are_written_by_state_in_the_order_drawn_then_by_instance_and_level() {
+    // Looks of several blended states, found in an order other than the one drawn, at several
+    // levels, some records opaque, one state told apart by its test of the depth alone; the last
+    // look of none.
+    let (alpha, add_without_alpha, add, modulate, blend_add) = (2, 3, 4, 5, 7);
+    let mut untested = record(14, alpha, false);
+    untested.state.depth_test = false;
+    let skins = vec![
+        vec![
+            vec![record(1, add, false), record(2, alpha, false)],
+            vec![record(3, alpha, false)],
+            vec![record(4, add, false), record(5, 0, false)],
+            vec![record(6, alpha, true)],
+        ],
+        vec![
+            vec![record(7, alpha, false)],
+            vec![record(8, modulate, false)],
+            vec![],
+            vec![record(9, alpha, false), record(10, alpha, false)],
+        ],
+        vec![
+            vec![record(11, blend_add, false), untested],
+            vec![record(12, add_without_alpha, false)],
+        ],
+        vec![vec![record(13, 1, false)]],
+    ];
+    let looks: Vec<TableLook> = skins
+        .iter()
+        .map(|skins| TableLook {
+            most: 0,
+            states: states_of(skins),
+        })
+        .collect();
+    assert!(looks[3].states.is_empty());
+    let at = |index, slot| Blended { index, slot };
+    let beyond = [at(20, 1), at(21, 0), at(22, 1), at(23, 2)];
+    let near = [at(24, 0), at(25, 2), at(26, 0), at(27, 3)];
+    let made = templates(&looks, [&beyond, &near]);
+    assert_eq!(made, templates_one_state_at_a_time(&skins, [&beyond, &near]));
+    for part in [[&[][..], &near[..]], [&beyond[..], &[][..]], [&[][..], &[][..]]] {
+        assert_eq!(templates(&looks, part), templates_one_state_at_a_time(&skins, part));
+    }
+    // Beyond: alpha without the test of the depth, alpha, alpha on both faces, blend add, add
+    // without alpha, add, mod; near: the same but mod.
+    let blendings: Vec<(u16, bool, bool)> = made
+        .regions
+        .iter()
+        .map(|(state, _, _)| (state.blending, state.two_sided, state.depth_test))
+        .collect();
+    let drawn = [
+        (alpha, false, false),
+        (alpha, false, true),
+        (alpha, true, true),
+        (blend_add, false, true),
+        (add_without_alpha, false, true),
+        (add, false, true),
+    ];
+    let beyond_states: Vec<_> = drawn.iter().copied().chain([(modulate, false, true)]).collect();
+    assert_eq!(blendings, [beyond_states, drawn.to_vec()].concat());
+    assert_eq!(made.beyond, 7);
+    // Of the alpha tested: the second look's records at levels 0 and 3, the first's at 0 and 1,
+    // the second's again.
+    let (_, start, count) = made.regions[1];
+    let first: Vec<[u32; 2]> = made.entries[start as usize..(start + count) as usize].to_vec();
+    assert_eq!(
+        first,
+        [
+            [20, 107],
+            [20, 109],
+            [20, 110],
+            [21, 102],
+            [21, 103],
+            [22, 107],
+            [22, 109],
+            [22, 110]
+        ]
+    );
 }
 
 #[test]

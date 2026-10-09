@@ -79,8 +79,9 @@ pub fn planes(view_proj: Mat4) -> [[f32; 4]; 5] {
 pub struct TableLook {
     /// The most references of a level: the most entries an instance writes.
     pub most: u32,
-    /// Its blended records at each level.
-    pub blended: Vec<Vec<Record>>,
+    /// Its blended states, each with its records and their levels: the levels in order, the
+    /// records of a level in theirs.
+    pub states: Vec<(State, Vec<(u32, Record)>)>,
 }
 
 /// What the GPU chooses from, made again when the looks drawn change: the looks of the pool by
@@ -153,18 +154,7 @@ impl Tables {
                     .map(|level| level.len() as u32)
                     .max()
                     .unwrap_or(0),
-                blended: look
-                    .skins
-                    .iter()
-                    .take(LEVELS)
-                    .map(|records| {
-                        records
-                            .iter()
-                            .filter(|record| record.state.blended())
-                            .copied()
-                            .collect()
-                    })
-                    .collect(),
+                states: states_of(&look.skins),
             });
         }
         let region_words: Vec<u32> = regions.iter().flat_map(|(_, start, count)| [*start, *count]).collect();
@@ -194,6 +184,101 @@ impl Tables {
             offsets,
         }
     }
+}
+
+/// The blended states of a look of the records `skins` at each level, each with its records and
+/// their levels, in the order found.
+pub fn states_of(skins: &[Vec<Record>]) -> Vec<(State, Vec<(u32, Record)>)> {
+    let mut states: Vec<(State, Vec<(u32, Record)>)> = Vec::new();
+    for (level, records) in skins.iter().take(LEVELS).enumerate() {
+        for record in records.iter().filter(|record| record.state.blended()) {
+            match states.iter_mut().find(|(state, _)| *state == record.state) {
+                Some((_, kept)) => kept.push((level as u32, *record)),
+                None => states.push((record.state, vec![(level as u32, *record)])),
+            }
+        }
+    }
+    states
+}
+
+/// The templates of the blended instances, as the GPU reads them: their words and their entries,
+/// the regions of their states (each state, where its templates begin and how many), and how many
+/// of those regions are of the instances beyond the water.
+#[derive(Debug, Default, PartialEq)]
+pub struct Templates {
+    pub words: Vec<u32>,
+    pub entries: Vec<[u32; 2]>,
+    pub regions: Vec<(State, u32, u32)>,
+    pub beyond: usize,
+}
+
+/// The templates of the instances `blended` of the looks `looks` by their slot: those beyond the
+/// water, then those on the eye's side; of each part each blended state in the order drawn, its
+/// instances in theirs, for each a template at each level of its records of that state.
+pub fn templates(looks: &[TableLook], blended: [&[Blended]; 2]) -> Templates {
+    let mut made = Templates::default();
+    for (part, instances) in blended.iter().enumerate() {
+        // The states of the looks found, each look read once.
+        let mut found = vec![false; looks.len()];
+        let mut slots = Vec::new();
+        let mut states: Vec<State> = Vec::new();
+        for instance in *instances {
+            if !std::mem::replace(&mut found[instance.slot as usize], true) {
+                slots.push(instance.slot as usize);
+                for (state, _) in &looks[instance.slot as usize].states {
+                    if !states.contains(state) {
+                        states.push(*state);
+                    }
+                }
+            }
+        }
+        states.sort_by_key(rank);
+        // Of each look found, where its states are among those of the part.
+        let mut places = vec![Vec::new(); looks.len()];
+        for slot in slots {
+            places[slot] = looks[slot]
+                .states
+                .iter()
+                .map(|(state, _)| states.iter().position(|kept| kept == state).expect("found"))
+                .collect();
+        }
+        // The instances of each state, in their order, with the state's place in their look's, and
+        // the templates they make.
+        let mut gathered: Vec<Vec<(Blended, usize)>> = vec![Vec::new(); states.len()];
+        let mut count = 0;
+        for instance in *instances {
+            let look = &looks[instance.slot as usize];
+            for (own, place) in places[instance.slot as usize].iter().enumerate() {
+                gathered[*place].push((*instance, own));
+                count += look.states[own].1.len();
+            }
+        }
+        made.words.reserve(count * TEMPLATE);
+        made.entries.reserve(count);
+        for (state, of_state) in states.iter().zip(gathered) {
+            let region = made.regions.len() as u32;
+            let start = made.entries.len() as u32;
+            for (instance, own) in of_state {
+                for (level, record) in &looks[instance.slot as usize].states[own].1 {
+                    made.words.extend([
+                        record.count,
+                        record.first_index,
+                        record.base_vertex as u32,
+                        made.entries.len() as u32,
+                        instance.index,
+                        level + 1,
+                        region,
+                    ]);
+                    made.entries.push([instance.index, record.material]);
+                }
+            }
+            made.regions.push((*state, start, made.entries.len() as u32 - start));
+        }
+        if part == 0 {
+            made.beyond = made.regions.len();
+        }
+    }
+    made
 }
 
 /// A group given, as the GPU reads it: its first instance in the arena of the instances, its count,
@@ -528,53 +613,15 @@ impl Choice {
         let places = (arena.0.size() / INSTANCE) as u32;
         let new_arena = self.arena.as_ref().is_none_or(|(_, generation)| *generation != arena.1);
         self.arena = Some(arena);
-        // The templates: the instances beyond the water, then those on the eye's side; of each
-        // part each blended state in the order drawn, its instances in theirs, for each a template
-        // at each level.
-        let mut template_words: Vec<u32> = Vec::with_capacity((blended[0].len() + blended[1].len()) * TEMPLATE);
-        let mut template_entries: Vec<[u32; 2]> = Vec::new();
-        let mut blended_regions = Vec::new();
-        let mut beyond_regions = 0;
-        for (part, instances) in blended.iter().enumerate() {
-            let mut states: Vec<State> = Vec::new();
-            for instance in *instances {
-                for records in &tables.looks[instance.slot as usize].blended {
-                    for record in records {
-                        if !states.contains(&record.state) {
-                            states.push(record.state);
-                        }
-                    }
-                }
-            }
-            states.sort_by_key(rank);
-            for state in &states {
-                let region = blended_regions.len();
-                let start = template_entries.len() as u32;
-                for instance in *instances {
-                    for (level, records) in tables.looks[instance.slot as usize].blended.iter().enumerate() {
-                        for record in records.iter().filter(|record| record.state == *state) {
-                            template_words.extend([
-                                record.count,
-                                record.first_index,
-                                record.base_vertex as u32,
-                                template_entries.len() as u32,
-                                instance.index,
-                                level as u32 + 1,
-                                region as u32,
-                            ]);
-                            template_entries.push([instance.index, record.material]);
-                        }
-                    }
-                }
-                blended_regions.push((*state, start, template_entries.len() as u32 - start));
-            }
-            if part == 0 {
-                beyond_regions = blended_regions.len();
-            }
-        }
-        let templates = template_entries.len() as u32;
+        let Templates {
+            words: template_words,
+            entries: template_entries,
+            regions: blended_regions,
+            beyond: beyond_regions,
+        } = templates(&tables.looks, blended);
+        let template_count = template_entries.len() as u32;
         let records = tables.records;
-        let entries: u64 = u64::from(templates)
+        let entries: u64 = u64::from(template_count)
             + groups
                 .iter()
                 .map(|group| u64::from(group.count) * u64::from(tables.looks[group.slot as usize].most))
@@ -587,8 +634,8 @@ impl Choice {
             records,
             2 * records,
             3 * records,
-            3 * records + templates,
-            3 * records + templates + regions,
+            3 * records + template_count,
+            3 * records + template_count + regions,
         ];
         let blocks_at = work_offsets[4] + STATS as u32;
         let region_words: Vec<u32> = blended_regions
@@ -602,12 +649,14 @@ impl Choice {
             region_words.len() as u32,
             (region_words.len() + group_words.len()) as u32,
         ];
-        let frame_words = [region_words, group_words, template_words].concat();
+        // Written in one write, each part where it goes, not gathered first.
+        let frame_words = [region_words, group_words, template_words];
+        let frame_length: usize = frame_words.iter().map(Vec::len).sum();
         let params = Params {
             planes: planes(view_proj),
             eye: [eye.x, eye.y, eye.z, reach],
             limits: [LIMITS[0], LIMITS[1], LIMITS[2], MARGIN],
-            sizes: [records, templates, groups.len() as u32, templates],
+            sizes: [records, template_count, groups.len() as u32, template_count],
             regions: [
                 tables.regions.len() as u32,
                 blended_regions.len() as u32,
@@ -644,7 +693,7 @@ impl Choice {
         made |= sized(
             &device,
             &mut self.frames,
-            (frame_words.len().max(4) * 4) as u64,
+            (frame_length.max(4) * 4) as u64,
             storage,
             "models choice of the frame",
         );
@@ -658,7 +707,7 @@ impl Choice {
         made |= sized(
             &device,
             &mut self.args,
-            u64::from(records + templates).max(1) * ARGS,
+            u64::from(records + template_count).max(1) * ARGS,
             wgpu::BufferUsages::STORAGE | indirect | wgpu::BufferUsages::COPY_SRC,
             "models draws of the frame",
         );
@@ -686,13 +735,16 @@ impl Choice {
             self.bind_groups = None;
         }
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
-        journal::uploaded((size_of_val(&params) + frame_words.len() * 4 + template_entries.len() * 8) as u64);
-        if !frame_words.is_empty() {
-            queue.write_buffer(
-                self.frames.as_ref().expect("sized"),
-                0,
-                bytemuck::cast_slice(&frame_words),
-            );
+        journal::uploaded((size_of_val(&params) + frame_length * 4 + template_entries.len() * 8) as u64);
+        if let Some(size) = wgpu::BufferSize::new((frame_length * 4) as u64)
+            && let Some(mut view) = queue.write_buffer_with(self.frames.as_ref().expect("sized"), 0, size)
+        {
+            let mut rest = view.slice(..);
+            for words in &frame_words {
+                let (mut part, after) = rest.split_at(words.len() * 4);
+                part.copy_from_slice(bytemuck::cast_slice(words));
+                rest = after;
+            }
         }
         if !template_entries.is_empty() {
             queue.write_buffer(
@@ -702,7 +754,7 @@ impl Choice {
             );
         }
         self.groups = groups.len() as u32;
-        self.templates = templates;
+        self.templates = template_count;
         self.blocks_count = blocks;
         self.work_offsets = work_offsets;
         self.blended_regions = blended_regions;

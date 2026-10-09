@@ -6048,6 +6048,39 @@ crowded views), made no more.
   the review, fails. Reviewed by another instance: nothing serious or middling; light points
   taken: the levels carried over once the arena grows, comments and this section set right.
 
+#### The blended instances of the pool, lightened
+
+Asked by the user after the instances read in the arena: the instances of the looks with blended
+batches, handled one by one on the interface thread at each frame, drawn as before.
+
+- Whether an instance is beyond the surface of the water: the eye is looked up in the surfaces
+  once a frame, not once an instance.
+- The order, the farthest first (`layer::order_blended`): the instances found are kept in the
+  order found, with the order they were drawn in by their places among them; that order stays
+  while the same are found in the same order and none is nearer than the next by more than the
+  margin, without a map of the instances; otherwise they are sorted again, by keys of their
+  distances in the order of `f32::total_cmp` then the order found, which is that of the owners,
+  the layouts and the places as before.
+- The templates (`choice::templates`): the tables hold, for each look, its blended states with
+  their records and levels (`TableLook::states`); the instances of a part are gathered by state
+  in one pass, in the same order as before (the state, the instance, the level, the record). The
+  words of the frame go in one write, each part where it goes, not gathered first.
+- Measured by a probe of 5,000 instances: the templates 0.48 → 0.35 ms, the order kept
+  0.47 → 0.05 ms, sorted again 0.33 → 0.05 ms, the water 0.13 → 0.07 ms.
+- **Tested**: the templates against the way before, one state at a time, on looks of several states
+  at several levels, one told apart by its test of the depth alone, a look of none, a part empty;
+  the order put, kept within the margin, sorted again past it, with another key, with fewer, a tie,
+  and distances infinite or not numbers of either sign, ordered as by `total_cmp`; the test of the
+  order on the GPU now crossing the margin on one tile, as before the instance changed tile and so
+  was sorted again anyway. 20 changes made on purpose: 19 made a test fail, the one left, a state's
+  records split between two entries of the same state, writing the same templates. Reviewed by
+  another instance: nothing serious; one middling point taken, the order without a test of its own,
+  now a function tested without the GPU; light points taken: the order of `total_cmp` reproduced,
+  the frame in one write, the test of the templates widened, a name no longer hiding the function;
+  left: the rule of the water copied in the layer, the keys found made anew at each frame. A second
+  review, of those corrections: nothing serious or middling; the order of `total_cmp` tested on both
+  signs.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around
