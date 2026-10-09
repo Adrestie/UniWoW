@@ -51,14 +51,20 @@ pub trait Viewport: Send + Sync {
 }
 
 /// The light of the map at the place of the camera and the hour: its sun, the colour of its fog in
-/// linear, and where its fog starts and ends, in yards, and its rate when the fog of the game is
-/// drawn (`Fog`), none for the editor's.
+/// linear, where its fog starts and ends, in yards, and its rate when the fog of the game is drawn
+/// (`Fog`), none for the editor's, and its sky (`Sky`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapLight {
     pub sun: Sun,
     pub fog_colour: [f32; 3],
     pub fog: Option<[f32; 3]>,
+    pub sky: Sky,
 }
+
+/// The colours of the sky, in gamma, from its top down to its fog (the bands 2 to 7 of a light): its
+/// top, its middle, towards the horizon, over it, the horizon and the fog, on the rings of the dome
+/// of the sky as Noggit draws it, 90°, 18°, 10°, 3° and 0° high, then the fog from −30° down.
+pub type Sky = [[f32; 3]; 6];
 
 /// The WGSL of a colour in gamma made linear (`linear`) and back (`srgb`), which the shaders of the
 /// view share.
@@ -132,10 +138,10 @@ fn light(normal: vec3<f32>) -> vec3<f32> {
 /// The share of the editor's fog at its middle distance (`FOG_WGSL`).
 pub const NEAR_FOG: f32 = 0.55;
 
-/// The fog of the view and its colour, that of the sky, in linear. The editor's when `rate` is 0: by
-/// the distance on the ground from the eye, none up to `start`, `NEAR_FOG` of it at `middle`, all of
-/// it from `end`. The game's otherwise, as the client draws it: by the depth along the view,
-/// 1 − ((end − depth) / (end − start))^rate, `middle` unused.
+/// The fog of the view and its colour, that of the sky without the light of a map, in linear. The
+/// editor's when `rate` is 0: by the distance on the ground from the eye, none up to `start`,
+/// `NEAR_FOG` of it at `middle`, all of it from `end`. The game's otherwise, as the client draws
+/// it: by the depth along the view, 1 − ((end − depth) / (end − start))^rate, `middle` unused.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Fog {
     pub colour: [f32; 3],
@@ -329,6 +335,8 @@ pub struct View {
     pub time: f32,
     pub fog: Fog,
     pub sun: Sun,
+    /// The sky of the light of the map, none for one of the colour of the fog alone.
+    pub sky: Option<Sky>,
 }
 
 /// How a layer draws: in a render bundle of its own, which the viewport records and keeps by its

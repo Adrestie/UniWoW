@@ -12,7 +12,7 @@ use uniwow_api::formats::{
     Formats, GameObjectDisplay, HairGeoset, Layer, MapRecord, Model, Texture, TextureFormat, Tile, Wdl, Wdt,
 };
 use uniwow_api::glam::{Mat4, Vec3};
-use uniwow_api::viewport::{self, Allowance, Layer as _, Phase, Stage, Target, View};
+use uniwow_api::viewport::{self, Allowance, Layer as _, Phase, Sky, Stage, Target, View};
 use uniwow_api::{JobId, JobOutcome, bytemuck, egui, egui_wgpu, wgpu};
 
 use crate::gpu::{self, Shared};
@@ -1158,9 +1158,22 @@ fn render_fogged(
     gpu: &egui_wgpu::RenderState,
     layer: &mut TerrainLayer,
     target: &Target,
-    (eye, look): (Vec3, Vec3),
+    eyes: (Vec3, Vec3),
     phases: &[Phase],
     fog: viewport::Fog,
+) -> Vec<u8> {
+    render_lit(gpu, layer, target, eyes, phases, (fog, None))
+}
+
+/// What `render_in` draws, `place` the eye and where it looks, in the fog `fog`, under the sky
+/// `sky` of a light.
+fn render_lit(
+    gpu: &egui_wgpu::RenderState,
+    layer: &mut TerrainLayer,
+    target: &Target,
+    (eye, look): (Vec3, Vec3),
+    phases: &[Phase],
+    (fog, sky): (viewport::Fog, Option<Sky>),
 ) -> Vec<u8> {
     let size = [64u32, 64];
     let view = View {
@@ -1172,6 +1185,7 @@ fn render_fogged(
         time: 0.0,
         fog,
         sun: Default::default(),
+        sky,
     };
     layer.prepare(gpu, &view);
     // A bundle for each phase, run in their order.
@@ -1409,6 +1423,114 @@ fn a_tile_is_one_draw_its_chunks_textured_from_two_arrays_and_the_horizon_beyond
     assert!(black == later.len() / 4, "black {black}");
     assert_eq!(layer.stats().draws, 3, "and the sky");
     assert_eq!(layer.stage(), Stage::Ground, "drawn with its sky before the scene");
+}
+
+#[test]
+fn the_sky_of_a_light_is_drawn_on_noggit_s_dome_where_nothing_else_is() {
+    let Some(gpu) = device() else {
+        eprintln!("skipped: no software adapter for a device");
+        return;
+    };
+    let target = Target {
+        sample_count: 1,
+        ..TARGET
+    };
+    let shared = Arc::new(Shared::new(&gpu, &target).unwrap());
+    // A map shown and nothing of it loaded: the sky over all the view.
+    let scene = Arc::new(Mutex::new(Scene {
+        map: Some([[-10.0 * TILE; 2], [10.0 * TILE; 2]]),
+        reach: 100_000.0,
+        ..Scene::default()
+    }));
+    let mut layer = TerrainLayer::new(Arc::new(Mutex::new(Some(shared))), scene);
+    // Red at its top, green at 18°, blue at 10°, yellow at 3°, cyan at 0°, magenta from -30° down.
+    let sky: Sky = [
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 1.0],
+        [1.0, 0.0, 1.0],
+    ];
+    let [x, y] = id(32, 32).centre();
+    let eye = Vec3::new(x, y, 50.0);
+    // The middle of the view, `height` degrees high.
+    let seen = |layer: &mut TerrainLayer, height: f32, sky: Option<Sky>| {
+        let towards = Vec3::new(height.to_radians().cos(), 0.0, height.to_radians().sin());
+        let pixels = render_lit(
+            &gpu,
+            layer,
+            &target,
+            (eye, eye + towards * 100.0),
+            &Phase::ALL,
+            (viewport::Fog::default(), sky),
+        );
+        let at = (32 * 64 + 32) * 4;
+        [pixels[at], pixels[at + 1], pixels[at + 2]]
+    };
+    let near = |pixel: [u8; 3], wanted: [u8; 3]| pixel.iter().zip(wanted).all(|(a, b)| a.abs_diff(b) <= 4);
+    // 54° high, halfway along the chord from the ring of 90° to that of 18°: their colours mixed by
+    // half in gamma, the pixel read a little lower.
+    let half = seen(&mut layer, 54.0, Some(sky));
+    assert!(near(half, [128, 128, 0]), "{half:?}");
+    // 36° high, the pixel read 35.1°: 0.736 of the chord, not 0.762 of the angle between the rings.
+    let lower = seen(&mut layer, 36.0, Some(sky));
+    assert!(near(lower, [67, 188, 0]), "{lower:?}");
+    // 14° and -15° high, read 13.1° and -15.9°: between 18° and 10°, between 0° and -30°.
+    let between = seen(&mut layer, 14.0, Some(sky));
+    assert!(near(between, [0, 99, 156]), "{between:?}");
+    let under = seen(&mut layer, -15.0, Some(sky));
+    assert!(near(under, [135, 120, 255]), "{under:?}");
+    // Between -30° and -90°, the fog alone. Looking 1.5° up, the pixel read, half a pixel under
+    // the middle, 0.6° up: four fifths of the chord from the ring of 3° to that of 0°.
+    assert_eq!(seen(&mut layer, -60.0, Some(sky)), [255, 0, 255]);
+    let over = seen(&mut layer, 1.5, Some(sky));
+    assert!(near(over, [51, 255, 204]), "{over:?}");
+    // Without the light of a map: the colour of the fog everywhere.
+    let fog = viewport::Fog::default().colour.map(|channel| {
+        let gamma = 1.055 * channel.powf(1.0 / 2.4) - 0.055;
+        (gamma * 255.0).round() as u8
+    });
+    assert!(near(seen(&mut layer, 54.0, None), fog));
+}
+
+#[test]
+fn the_sky_is_seen_from_the_screen_as_precisely_far_from_the_middle_of_the_world() {
+    // The direction of a place on the screen, from the eye `eye` looking along `towards`.
+    let seen = |eye: Vec3, towards: Vec3, screen: [f32; 2]| {
+        let view = View {
+            view_proj: Mat4::perspective_infinite_reverse_rh(45f32.to_radians(), 16.0 / 9.0, 0.1)
+                * Mat4::look_to_rh(eye, towards, Vec3::Z),
+            view: Mat4::look_to_rh(eye, towards, Vec3::Z),
+            eye,
+            size: [1920, 1080],
+            time: 0.0,
+            fog: viewport::Fog::default(),
+            sun: Default::default(),
+            sky: None,
+        };
+        let values = crate::layer::camera_values(&view);
+        let sky_from_screen = Mat4::from_cols_slice(&values[40..56]);
+        (sky_from_screen * uniwow_api::glam::Vec4::new(screen[0], screen[1], 1.0, 0.0))
+            .truncate()
+            .normalize()
+    };
+    let towards = Vec3::new(0.8, -0.3, 0.05).normalize();
+    for screen in [[0.0, 0.0], [0.9, -0.7], [-1.0, 1.0], [0.3, 0.05]] {
+        let near = seen(Vec3::new(0.0, 0.0, 10.0), towards, screen);
+        for eye in [
+            Vec3::new(17_000.0, 17_000.0, 100.0),
+            Vec3::new(30_000.0, -30_000.0, 500.0),
+        ] {
+            let far = seen(eye, towards, screen);
+            assert!(
+                near.angle_between(far) < 1e-4,
+                "{screen:?} from {eye}: {near} against {far}"
+            );
+        }
+    }
+    // Its middle where the eye looks.
+    assert!(seen(Vec3::new(17_000.0, 17_000.0, 100.0), towards, [0.0, 0.0]).angle_between(towards) < 1e-4);
 }
 
 #[test]

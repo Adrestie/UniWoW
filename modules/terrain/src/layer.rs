@@ -1,13 +1,13 @@
 //! The layer of the terrain in the 3D view: the tiles in sight a draw each at their level of detail,
-//! the horizon in one draw, its tiles drawn in detail left out, and last the sky in the colour of the
-//! fog, where nothing was drawn. Its bundle is kept while the tiles drawn, their levels and the arrays of textures stay the
+//! the horizon in one draw, its tiles drawn in detail left out, and last the sky, where nothing was
+//! drawn. Its bundle is kept while the tiles drawn, their levels and the arrays of textures stay the
 //! same; the camera, which moves at every frame, is written in `prepare` into its buffer.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use uniwow_api::glam::{Mat4, Vec3, Vec4};
+use uniwow_api::glam::{Mat3, Mat4, Vec3, Vec4};
 use uniwow_api::journal;
 use uniwow_api::viewport::{Layer, LayerStats, Phase, Stage, Target, View};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
@@ -78,7 +78,9 @@ pub fn farthest(eye: Vec3, map: [[f32; 2]; 2]) -> f32 {
         .fold(0.0, f32::max)
 }
 
-/// The camera of the shaders: the view, the sun and the fog of `view`.
+/// The camera of the shaders: the view, the sun, the fog and the sky of `view`, the direction a
+/// place on the screen is seen in from the eye by the inverse of what `view_proj` does to a direction,
+/// its columns of x, y and w without its translation, so that it keeps its precision anywhere.
 pub fn camera_values(view: &View) -> [f32; CAMERA] {
     let mut values = [0f32; CAMERA];
     values[..16].copy_from_slice(&view.view_proj.to_cols_array());
@@ -89,6 +91,16 @@ pub fn camera_values(view: &View) -> [f32; CAMERA] {
     values[32..35].copy_from_slice(&view.fog.colour);
     values[36..39].copy_from_slice(&[view.fog.start, view.fog.middle, view.fog.end]);
     values[39] = view.fog.rate;
+    let [x, y, z, _] = view.view_proj.to_cols_array_2d();
+    let seen = |column: [f32; 4]| Vec3::new(column[0], column[1], column[3]);
+    let sky_from_screen = Mat3::from_cols(seen(x), seen(y), seen(z)).inverse();
+    values[40..56].copy_from_slice(&Mat4::from_mat3(sky_from_screen).to_cols_array());
+    if let Some(sky) = view.sky {
+        for (at, colour) in sky.iter().enumerate() {
+            values[56 + 4 * at..59 + 4 * at].copy_from_slice(colour);
+            values[59 + 4 * at] = 1.0;
+        }
+    }
     values
 }
 

@@ -411,6 +411,7 @@ fn view(eye: Vec3, target: Vec3) -> View {
         time: 0.0,
         fog: Default::default(),
         sun: Default::default(),
+        sky: None,
     }
 }
 

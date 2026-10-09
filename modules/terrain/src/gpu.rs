@@ -35,7 +35,7 @@ fn source(shader: &str) -> String {
 }
 
 /// Floats of the shaders' `Camera`.
-pub const CAMERA: usize = 40;
+pub const CAMERA: usize = 80;
 
 /// What the tiles, the horizon and the sky share: the device, the layouts and the pipelines, the
 /// samplers, an empty array for the slots without one, and the arrays of textures.

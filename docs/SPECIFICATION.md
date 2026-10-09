@@ -6272,7 +6272,7 @@ death are left to the panel, if at all.
 **Decided by the user**, after the proposal:
 
 - The light in a module of its own (`lighting`), the view falling back to the fixed light when it is
-  stopped; the sky drawn by it.
+  stopped; the sky drawn by it (in 9.7b, the terrain draws it, with the colours the light gives).
 - The lighting of Noggit: the ambient light by the angle and the diffuse, in gamma as the client,
   then once in linear before the textures are multiplied, checked on a known pixel of a capture.
 - The sun by Noggit's table, once a day, the side lit checked on a capture.
@@ -6526,6 +6526,40 @@ default.
   is its far clip, a cut at the end of the fog not found there; `view_depth` holds for a perspective
   only). 40 changes made on purpose, 17 before the review and 23 after it, all caught, one once a
   light without a band of fog was tested.
+
+#### Step 9.7b, as built: the sky
+
+Decided by the user before it: the terrain draws the dome of the sky with the colours the light
+gives, rather than a layer of `lighting` over its sky.
+
+- **The view** (`core/api`): `MapLight::sky` (`Sky`), the six colours of the sky in gamma, the bands
+  2 to 7 of the light from its top down to its fog; `View::sky` carries them, none without a light.
+- **The light** (`light.rs`): `map_light` gives the bands 2 to 7, a band the light lacks taking the
+  colour of its fog, the fixed fog's in gamma where it has none.
+- **The terrain** draws its sky where nothing else was drawn, as before, also through its holes: on
+  the dome Noggit draws around the eye, its rings 90°, 18°, 10°, 3° and 0° high coloured by the top,
+  the middle, towards the horizon, over it and the horizon, then the fog from −30° down; each pixel
+  by the height it is seen at, its colour that of the chord between the two rings around it where
+  the ray crosses it, mixed in gamma as the faces of the dome mix the colours of their corners, then
+  made linear; unfogged. The direction of a pixel is the inverse of what `view_proj` does to a
+  direction, its columns of x, y and w without its translation, which keeps its precision anywhere
+  on the map. Without the light of a map, the sky is of the colour of the fog, as before. The
+  mountains of the horizon stay in the colour of the fog.
+- **Not in 9.7b**: the clouds, the sun, the moons and the stars; the models of the sky
+  (`LightSkybox`, 9.7e).
+- **Tested**: the dome on a map shown with nothing of it loaded: 54° high, halfway along the chord
+  from the ring of 90° to that of 18°, their colours mixed by half in gamma; 35.1° high, 0.736 of
+  the chord, not 0.762 of the angle between the rings; 0.6° high, four fifths of the chord from 3°
+  to 0°; 13.1° and −15.9° high, between 18° and 10°, between 0° and −30°; under −30°, the fog; the
+  directions of the screen the same 17,000 and 42,000 yards from the middle of the world as at it,
+  to a ten-thousandth of a radian; without a light, the colour of the fog; the light giving its
+  bands, the colour of its fog for one it lacks, the fixed fog's in gamma without one; the view
+  carrying the sky of the light, none without it. 15 changes made on purpose, all caught, one once
+  the chord was tested away from its middle. Reviewed by another instance: one middling point
+  corrected, the direction of the sky first taken through the inverse of the view, which brought the
+  place of the eye back in and lost a degree 17,000 yards from the middle of the world; light points
+  taken (two rings tested, two comments made true), the cost of the trigonometry of the shader
+  signalled.
 
 #### Tests
 

@@ -441,12 +441,23 @@ fn linear(gamma: f32) -> f32 {
     }
 }
 
+/// The value in gamma of a linear value, as an sRGB target encodes it.
+fn gamma(linear: f32) -> f32 {
+    if linear <= 0.003_130_8 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    }
+}
+
 /// The light of `values` at `time` the view draws with: its sun, in the direction of the hour, its
 /// diffuse and ambient light (the fixed light's where it has none); the colour of its fog, made
-/// linear (the fixed one where it has none); and the fog of the game `game_fog`, where it starts
-/// and ends and its rate, when it is drawn (`Tables::fog_of_the_game`).
+/// linear (the fixed one where it has none); the fog of the game `game_fog`, where it starts and
+/// ends and its rate, when it is drawn (`Tables::fog_of_the_game`); and its sky, the bands 2 to 7
+/// in gamma, the colour of its fog where it has none.
 pub fn map_light(values: &Values, time: f32, game_fog: Option<[f32; 3]>) -> MapLight {
     let fixed = Sun::default();
+    let fog = values.colours[7].unwrap_or(Fog::default().colour.map(gamma));
     MapLight {
         sun: Sun {
             direction: sun_direction(time),
@@ -455,6 +466,7 @@ pub fn map_light(values: &Values, time: f32, game_fog: Option<[f32; 3]>) -> MapL
         },
         fog_colour: values.colours[7].map_or(Fog::default().colour, |colour| colour.map(linear)),
         fog: game_fog,
+        sky: std::array::from_fn(|band| values.colours[2 + band].unwrap_or(fog)),
     }
 }
 

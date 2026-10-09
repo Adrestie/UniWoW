@@ -508,6 +508,28 @@ fn the_light_given_to_the_view_is_the_fixed_one_where_the_tables_give_none() {
         "a grey fog, made linear: {:?}",
         given.fog_colour
     );
+    // Its sky the bands 2 to 7 in gamma, the colour of its fog where it lacks one.
+    let grey = 128.0 / 255.0;
+    assert_eq!(given.sky, [[grey; 3]; 6]);
+    let topped = Tables::new(
+        &lights,
+        &[params(1, 0.1)],
+        &[greys(3, &[(0, 255)]), greys(7, &[(0, 51)]), greys(8, &[(0, 128)])],
+        &[],
+        &[],
+    );
+    let values = topped.light_at(0, [0.0; 2], 0.0, 0, true).unwrap().values;
+    let sky = map_light(&values, 0.0, None).sky;
+    assert_eq!(sky, [[1.0; 3], [grey; 3], [grey; 3], [grey; 3], [0.2; 3], [grey; 3]]);
+    // Without a colour of fog either, that of the fixed fog, in gamma.
+    let values = tables.light_at(0, [-5_000.0, 0.0], 0.0, 0, true).unwrap().values;
+    let fixed = viewport::Fog::default().colour;
+    let sky = map_light(&values, 0.0, None).sky;
+    for (channel, linear) in sky[3].iter().zip(fixed) {
+        let back = ((channel + 0.055) / 1.055).powf(2.4);
+        assert!((back - linear).abs() < 1e-4, "{sky:?}");
+    }
+    assert!(sky.iter().all(|colour| *colour == sky[0]));
 }
 
 #[test]
