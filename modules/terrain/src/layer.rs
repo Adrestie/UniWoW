@@ -88,6 +88,7 @@ pub fn camera_values(view: &View) -> [f32; CAMERA] {
     values[28..31].copy_from_slice(&view.eye.to_array());
     values[32..35].copy_from_slice(&view.fog.colour);
     values[36..39].copy_from_slice(&[view.fog.start, view.fog.middle, view.fog.end]);
+    values[39] = view.fog.rate;
     values
 }
 

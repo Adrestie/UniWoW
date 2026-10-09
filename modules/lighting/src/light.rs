@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use uniwow_api::formats::{LightBand, LightParamsRecord, LightRecord, TILE};
+use uniwow_api::viewport::{Fog, MapLight, Sun};
 
 /// A day, in half-minutes.
 pub const DAY: f32 = 2880.0;
@@ -220,6 +221,48 @@ impl Tables {
             used,
             fallback: own.is_none(),
         })
+    }
+}
+
+/// The angle of the light of the sun from the top, in degrees, at 0, 6, 12 and 18 h (Noggit's table).
+const SUN_ANGLES: [f32; 4] = [127.0, 110.0, 127.0, 110.0];
+
+/// The direction towards the sun at `time`, in half-minutes, in the axes of the world (north, west,
+/// up): Noggit's table read as it reads it for the models, between its hours, once a day; always to
+/// the north-west, from 20° to 37° high.
+pub fn sun_direction(time: f32) -> [f32; 3] {
+    let quarter = time.rem_euclid(DAY) / (DAY / 4.0);
+    let at = (quarter.floor() as usize).min(3);
+    let share = quarter - at as f32;
+    let angle = mix(SUN_ANGLES[at], SUN_ANGLES[(at + 1) % 4], share).to_radians();
+    let across = angle.sin() * std::f32::consts::FRAC_1_SQRT_2;
+    [across, across, -angle.cos()]
+}
+
+/// The linear value of a value in gamma, as an sRGB target encodes it back.
+fn linear(gamma: f32) -> f32 {
+    if gamma <= 0.04045 {
+        gamma / 12.92
+    } else {
+        ((gamma + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// The light of `values` at `time` the view draws with: its sun, in the direction of the hour, its
+/// diffuse and ambient light (the fixed light's where it has none); the colour of its fog, made
+/// linear (the fixed one where it has none); and, with `game_fog`, where its fog starts and ends,
+/// in yards.
+pub fn map_light(values: &Values, time: f32, game_fog: bool) -> MapLight {
+    let fixed = Sun::default();
+    let end = values.numbers[0].unwrap_or(FOG_END) / UNIT;
+    MapLight {
+        sun: Sun {
+            direction: sun_direction(time),
+            colour: values.colours[0].unwrap_or(fixed.colour),
+            ambient: values.colours[1].unwrap_or(fixed.ambient),
+        },
+        fog_colour: values.colours[7].map_or(Fog::default().colour, |colour| colour.map(linear)),
+        fog: game_fog.then(|| [values.numbers[1].unwrap_or(FOG_START) * end, end]),
     }
 }
 

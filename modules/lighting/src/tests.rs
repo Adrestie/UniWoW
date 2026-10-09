@@ -13,12 +13,13 @@ use uniwow_api::formats::{
 };
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::vfs::{Vfs, VfsState};
+use uniwow_api::viewport::{self, MapLight, Sun};
 use uniwow_api::{
     CallId, CommandInfo, Context, Editor, EditorBackend, Event, JobFn, JobId, JobOutcome, Module, PropertyValue,
     Registrar, egui, egui_wgpu,
 };
 
-use crate::light::{Tables, colour_at, number_at};
+use crate::light::{Tables, colour_at, map_light, number_at, sun_direction};
 
 /// A band of numbers of `keys`.
 fn numbers(id: u32, keys: &[(u32, f32)]) -> LightBand<f32> {
@@ -223,6 +224,61 @@ fn a_light_of_equal_radii_holds_the_place_within_them_wholly() {
 }
 
 #[test]
+fn the_sun_turns_once_a_day_by_noggit_s_table_to_the_north_west() {
+    let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-3);
+    // 37° high at midnight and noon, 20° at 6 h and 18 h, between them linearly by the angle.
+    for (hour, towards) in [
+        (0.0, [0.565, 0.565, 0.602]),
+        (6.0, [0.664, 0.664, 0.342]),
+        (12.0, [0.565, 0.565, 0.602]),
+        (18.0, [0.664, 0.664, 0.342]),
+        (24.0, [0.565, 0.565, 0.602]),
+    ] {
+        assert!(
+            close(sun_direction(hour * 120.0), towards),
+            "{hour} h: {:?}",
+            sun_direction(hour * 120.0)
+        );
+    }
+    let three = sun_direction(360.0);
+    assert!((three[2] - (-(118.5f32.to_radians().cos()))).abs() < 1e-4, "{three:?}");
+}
+
+#[test]
+fn the_light_given_to_the_view_is_the_fixed_one_where_the_tables_give_none() {
+    let tables = tables();
+    let values = tables.light_at(0, [920.0, -50.0], 0.0, 0, true).unwrap().values;
+    let given = map_light(&values, 0.0, true);
+    assert_eq!(given.sun.colour, [200.0 / 255.0; 3], "the diffuse of the light 2");
+    assert_eq!(given.sun.ambient, [40.0 / 255.0; 3], "the ambient of the global light");
+    assert_eq!(
+        given.fog_colour,
+        viewport::Fog::default().colour,
+        "no fog band: the fixed colour"
+    );
+    // The fog of the game from a quarter of 500 yards.
+    assert_eq!(given.fog, Some([125.0, 500.0]));
+    assert_eq!(map_light(&values, 0.0, false).fog, None, "the editor's");
+    // No band but the colour of the fog: the fixed sun, the fog of Noggit (6,500 36ths of a yard
+    // and 0.1).
+    let lights = [light(1, [0.0; 2], [0.0; 2], [1, 0])];
+    let empty = Tables::new(&lights, &[params(1, 0.1)], &[greys(8, &[(0, 128)])], &[]);
+    let values = empty.light_at(0, [0.0; 2], 0.0, 0, true).unwrap().values;
+    let given = map_light(&values, 0.0, true);
+    assert_eq!(
+        (given.sun.colour, given.sun.ambient),
+        (Sun::default().colour, Sun::default().ambient)
+    );
+    assert!(
+        (given.fog_colour[0] - 0.2158).abs() < 1e-3,
+        "a grey fog, made linear: {:?}",
+        given.fog_colour
+    );
+    let fog = given.fog.unwrap();
+    assert!((fog[1] - 6_500.0 / 36.0).abs() < 1e-3 && (fog[0] - 0.1 * fog[1]).abs() < 1e-3);
+}
+
+#[test]
 fn the_hour_set_turns_at_its_speed_past_midnight() {
     assert_eq!(crate::half_minutes(720.0, 0, 100.0), 1440.0, "still");
     assert_eq!(crate::half_minutes(720.0, 60, 2.0), 1680.0, "two hours in two seconds");
@@ -256,7 +312,8 @@ fn the_light_is_a_category_of_the_settings_noon_by_default_still() {
         [
             ("hour", [0, 1439], 720),
             ("speed", [0, 1440], 0),
-            ("local_lights", [0, 1], 1)
+            ("local_lights", [0, 1], 1),
+            ("game_fog", [0, 1], 1)
         ]
     );
 }
@@ -339,6 +396,33 @@ impl Vfs for Files {
     }
 }
 
+/// A view that keeps the light it is given.
+#[derive(Default)]
+struct View(Mutex<Option<MapLight>>);
+
+impl viewport::Viewport for View {
+    fn add_layer(&self, _owner: &str, _layer: Box<dyn viewport::Layer>) {}
+    fn remove_layers(&self, _owner: &str) {}
+    fn target(&self) -> viewport::Target {
+        unimplemented!("the light draws nothing")
+    }
+    fn wait_frame(&self, _after: u64, _timeout: Duration) -> Option<viewport::Frame> {
+        None
+    }
+    fn tell_budget(&self, _owner: &str, _demand: viewport::Demand) -> viewport::Allowance {
+        unimplemented!("the light keeps nothing on the GPU")
+    }
+    fn allowance(&self) -> viewport::Allowance {
+        unimplemented!("the light keeps nothing on the GPU")
+    }
+    fn set_budget(&self, _bytes: u64) {}
+    fn set_fog(&self, _fog: viewport::Fog) {}
+    fn set_light(&self, owner: &str, light: Option<MapLight>) {
+        assert_eq!(owner, "lighting", "given as the module");
+        *self.0.lock().unwrap() = light;
+    }
+}
+
 /// An editor whose terrain shows the map `map` (none for `null`) and whose camera stands at
 /// `camera`, unread when none.
 struct Shown {
@@ -391,6 +475,8 @@ impl EditorBackend for Shown {
 struct Host {
     formats: Arc<dyn Formats>,
     files: Arc<dyn Vfs>,
+    view: viewport::Handle,
+    seen: Arc<View>,
     started: Vec<String>,
     cancelled: Vec<JobId>,
     settings: HashMap<String, Value>,
@@ -398,9 +484,12 @@ struct Host {
 }
 
 fn host(files: Arc<Files>) -> Host {
+    let seen = Arc::new(View::default());
     Host {
         formats: Arc::new(NoFormats),
         files,
+        view: seen.clone(),
+        seen,
         started: Vec::new(),
         cancelled: Vec::new(),
         settings: HashMap::new(),
@@ -419,6 +508,7 @@ impl uniwow_api::Host for Host {
         match id {
             "formats" => Some(&self.formats),
             "vfs" => Some(&self.files),
+            "viewport" => Some(&self.view),
             _ => None,
         }
     }
@@ -556,6 +646,11 @@ fn the_light_is_that_of_the_map_shown_at_the_camera_s_place_on_it() {
     );
     let light = shown.light.as_ref().unwrap();
     assert_eq!(light.used, [(1, 1.0), (2, 1.0)]);
+    // Given to the view, the fog of the game by default.
+    let given = host.seen.0.lock().unwrap().expect("given");
+    assert_eq!(Some(given), shown.given);
+    assert_eq!(given.fog, Some([125.0, 500.0]));
+    assert_eq!(given.sun.direction, sun_direction(1440.0));
     // At noon by default, in half-minutes, the hour read by the bands.
     assert_eq!(shown.time, 1440.0);
     assert_eq!(light.values.numbers[2], Some(10.0));
@@ -568,7 +663,20 @@ fn the_light_is_that_of_the_map_shown_at_the_camera_s_place_on_it() {
     *host.editor.camera.lock().unwrap() = None;
     module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
     assert_eq!(module.shown.as_ref().map(|shown| shown.place), Some([920.0, -50.0]));
+    assert!(host.seen.0.lock().unwrap().is_some(), "the light before kept");
+    // The fog of the editor chosen.
+    *host.editor.camera.lock().unwrap() = Some([920.0, -50.0, 600.0]);
+    host.settings.insert("game_fog".to_owned(), json!(0));
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert_eq!(host.seen.0.lock().unwrap().unwrap().fog, None);
     *host.editor.map.lock().unwrap() = Value::Null;
     module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
     assert!(module.shown.is_none());
+    assert!(host.seen.0.lock().unwrap().is_none(), "no map: the fixed light");
+    // Stopped: taken back from the view.
+    *host.editor.map.lock().unwrap() = json!({ "id": 0, "name": "Azeroth" });
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert!(host.seen.0.lock().unwrap().is_some());
+    module.shutdown();
+    assert!(host.seen.0.lock().unwrap().is_none());
 }

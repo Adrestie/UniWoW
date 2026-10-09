@@ -6352,6 +6352,56 @@ glow (`LightParams`); the highlights of the terrain; the lights of the models (M
   cancelled not tried again; the services used declared). To decide in 9.7a2: what is drawn for a
   band the global light lacks (only the params 477 lack two).
 
+#### Step 9.7a2, as built: the light drawn
+
+Decided by the user before it: a band the global light lacks takes the fixed light's value.
+
+- **The view** (`core/api`): `Viewport::set_light` takes the module that gives it and a `MapLight`
+  or none: its sun, the colour of its fog in linear, and where its fog starts and ends when the fog
+  of the game is drawn. The view draws with its sun and the colour of its fog over the distances the
+  terrain sets (`set_fog`), or over its own with the curve of the game; without it, with the fixed
+  sun. None takes back only the light the module gave; the view takes it back too when that module
+  fails. `Sun` now holds its diffuse (`colour`) and ambient light in gamma, the fixed ones chosen so
+  that a face turned away from the sun and one facing it are as bright as before (0.7793 and 0.1427:
+  0.45 and 1 in linear). `Fog` gains `rate`: 0 for the editor's fog, two smoothsteps by the distance
+  on the ground, mixed in linear and not bounded, as before; otherwise the game's, as Noggit's
+  shaders draw it, 1 − ((end − distance) / (end − start))^rate by the distance from the eye, its
+  start an absolute distance (Noggit multiplies it by its end once more), its rate `fog_rate`: 1.5
+  plus 5.5 times what the span leaves of 1,583⅓ yards; mixed in gamma, as the client draws to its
+  target, the colour bounded to 1 first.
+- **The shaders**: what they share in WGSL is now `core/api`'s, put before each layer's own:
+  `LINEAR_WGSL` (a colour in gamma made linear, `linear`, and back, `srgb`), `FOG_WGSL`
+  (`fog_amount`, and `fog_mix`, which mixes the fog as above) and `LIGHT_WGSL` (`light`: the ambient
+  light from 0.9 to 1.1 times as the face turns to the sun, plus the diffuse by the angle, in gamma,
+  made linear once, multiplying the colour in linear), used by the terrain and its horizon, the
+  models, the buildings outside and the water (its fog). Their copies in each module are gone. The
+  rate goes in the fourth number of the fog of each camera.
+- **The module `lighting`** gives the view, at each frame, the light of the place and the hour (none
+  without a map, the light before kept while the camera's place cannot be read), and takes it back
+  when it stops. Its sun: Noggit's table read once a day, towards the north-west, 37° high at 0 h
+  and 12 h, 20° at 6 h and 18 h; its diffuse and ambient the bands 0 and 1, its fog the band 7 made
+  linear, each the fixed light's where the tables give none; the fog of the game by default (a
+  setting, *Fog of the game (1) or of the editor (0)*), its end the number 0 in yards and its start
+  the number 1 times it. The panel says the sun's height and the fog given.
+- **Not in 9.7a2**: the sky (still the colour of the fog, now the light's: 9.7b), the water's
+  colours and the fog under it (9.7c), the insides (9.7d). The comparison with captures of the game
+  at a known hour waits for the user's captures.
+- **Tested**: a face of a building lit in gamma facing the sun and from behind (163 and 92 of 255
+  for an ambient light of 0.4 and a diffuse of 0.2), one so dark that its low part makes it linear;
+  the fog of the game over a face lit past white, about 5 yards from an eye 3 yards up, by the
+  distance from the eye and mixed in gamma; a model lit the same and fogged the same; the tiles of
+  the terrain under a fog of the game covering all, then under one covering nearly three quarters of
+  the middle, by the distance from the eye, mixed in gamma; the water under a fog of the game, by
+  the distance from the eye and mixed in gamma; the view given the light of a map, its sun and
+  colour of fog over the terrain's distances, the fog of the game and its rate, the light taken back
+  only by the module that gave it and when that module fails; the sun of the hours, between them,
+  past midnight; the light given from the tables, the fixed light's where they give none, a grey fog
+  made linear, the fog of the game and the editor's; the module giving it as itself, the fog of the
+  editor chosen, none without a map, the light kept while the camera is unread, taken back when it
+  stops. 45 changes made on purpose, the 13 last after the review; all those of the code as it
+  stands caught; those the first run found untested in the copies of the shaders of the terrain, the
+  models and the water led to their sharing.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

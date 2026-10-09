@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use uniwow_api::formats::{self, Texture, TextureFormat};
 use uniwow_api::journal;
-use uniwow_api::viewport::{Target, View};
+use uniwow_api::viewport::{self, Target, View};
 use uniwow_api::wgpu::util::DeviceExt;
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
@@ -251,6 +251,7 @@ pub fn camera_values(view: &View, reach: f32) -> [f32; CAMERA] {
     values[31] = reach;
     values[32..35].copy_from_slice(&view.fog.colour);
     values[36..39].copy_from_slice(&[view.fog.start, view.fog.middle, view.fog.end]);
+    values[39] = view.fog.rate;
     for (at, row) in [40, 44, 48].into_iter().zip(0..3) {
         values[at..at + 3].copy_from_slice(&view.view.row(row).truncate().normalize_or_zero().to_array());
     }
@@ -357,9 +358,16 @@ impl Shared {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("models"),
             source: wgpu::ShaderSource::Wgsl(
-                [include_str!("common.wgsl"), posing, include_str!("models.wgsl")]
-                    .concat()
-                    .into(),
+                [
+                    viewport::LINEAR_WGSL,
+                    viewport::FOG_WGSL,
+                    viewport::LIGHT_WGSL,
+                    include_str!("common.wgsl"),
+                    posing,
+                    include_str!("models.wgsl"),
+                ]
+                .concat()
+                .into(),
             ),
         });
         let address = |wrap: bool| {

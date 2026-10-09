@@ -1,6 +1,6 @@
 // The tiles of 3.3.5a, a draw each: up to four textures a chunk, taken from the arrays of the
 // terrain by the codes of its tile, blended by its alpha maps, darkened by its baked shadow,
-// coloured by its vertex colours, lit by a fixed sun, fogged.
+// coloured by its vertex colours, lit by the sun of the view, fogged.
 
 // The texels of blending of the 256 chunks of a tile: three alpha maps in red, green and blue,
 // the shadow in alpha; and the textures of each chunk, a code each: the slot of its array in the

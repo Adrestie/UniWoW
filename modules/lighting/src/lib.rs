@@ -1,7 +1,7 @@
 //! The light of the map the terrain shows, at the place of the camera on it and at the hour of the
-//! settings, from the tables of the client (`light`): computed at each frame and said in the panel,
-//! not yet given to the view. The tables are read by a job once the client's archives are open, and
-//! again whenever they change.
+//! settings, from the tables of the client (`light`): computed at each frame, given to the view
+//! (`Viewport::set_light`) and said in the panel; taken back when the module stops. The tables are
+//! read by a job once the client's archives are open, and again whenever they change.
 
 mod light;
 #[cfg(test)]
@@ -13,15 +13,20 @@ use std::time::Instant;
 use uniwow_api::formats;
 use uniwow_api::serde_json::json;
 use uniwow_api::vfs::{self, VfsState};
+use uniwow_api::viewport::{self, MapLight};
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, PropertyValue, Registrar, SettingSpec, egui, log};
 
 use light::{COLOURS, DAY, Mixed, NUMBERS, Tables};
 
 /// The settings: the hour, in minutes from midnight; how many minutes of the game pass in a second;
-/// whether the local lights are mixed in.
+/// whether the local lights are mixed in; whether the fog is the game's or the editor's.
 const HOUR: &str = "hour";
 const SPEED: &str = "speed";
 const LOCAL: &str = "local_lights";
+const FOG: &str = "game_fog";
+
+/// The id of the module, as its manifest gives it: the owner of the light it gives the view.
+const OWNER: &str = "lighting";
 
 /// The names of the bands of colours and of numbers, by their place.
 const COLOUR_NAMES: [&str; COLOURS] = [
@@ -59,6 +64,7 @@ fn settings() -> Vec<SettingSpec> {
         SettingSpec::integer(HOUR, "Hour, in minutes from midnight", [0, 1439], 720),
         SettingSpec::integer(SPEED, "Minutes of the game in a second", [0, 1440], 0),
         SettingSpec::integer(LOCAL, "Local lights mixed in (1) or not (0)", [0, 1], 1),
+        SettingSpec::integer(FOG, "Fog of the game (1) or of the editor (0)", [0, 1], 1),
     ]
 }
 
@@ -74,13 +80,14 @@ fn half_minutes(from: f64, speed: i64, seconds: f64) -> f32 {
 }
 
 /// What the panel says of the light last computed: the map, by its id and name, the place, the hour
-/// in half-minutes, and the light, none when the tables give none.
+/// in half-minutes, and the light, none when the tables give none, with what the view was given.
 struct Shown {
     map: u32,
     name: String,
     place: [f32; 2],
     time: f32,
     light: Option<Mixed>,
+    given: Option<MapLight>,
 }
 
 #[derive(Default)]
@@ -93,6 +100,8 @@ struct LightingModule {
     /// The hour and the speed set, the hour in minutes it turns from, and since when.
     set: Option<(i64, i64, f64, Instant)>,
     shown: Option<Shown>,
+    /// The view the light is given to, taken back from it when the module stops.
+    view: Option<viewport::Handle>,
 }
 
 impl LightingModule {
@@ -114,11 +123,20 @@ impl LightingModule {
         half_minutes(from, speed, 0.0)
     }
 
-    /// At each frame: the tables read once the client's archives are open, again once they change;
-    /// the light of the map shown at the place of the camera and at the hour, for the panel.
+    /// At each frame: the light of the map shown given to the view, none while there is none.
     fn steer(&mut self, ctx: &mut Context) {
+        let given = self.light(ctx);
+        self.view = ctx.service(viewport::SERVICE);
+        if let Some(view) = &self.view {
+            view.set_light(OWNER, given);
+        }
+    }
+
+    /// The tables read once the client's archives are open, again once they change; the light of
+    /// the map shown at the place of the camera and at the hour, for the view and the panel.
+    fn light(&mut self, ctx: &mut Context) -> Option<MapLight> {
         let (Some(formats), Some(files)) = (ctx.service(formats::SERVICE), ctx.service(vfs::SERVICE)) else {
-            return;
+            return None;
         };
         let client = match files.state() {
             VfsState::Ready { archives, files } => Some((archives, files)),
@@ -132,12 +150,10 @@ impl LightingModule {
             self.tables = None;
             self.shown = None;
         }
-        if self.client.is_none() {
-            return;
-        }
+        self.client?;
         let tables = match &self.tables {
             Some(Ok(tables)) => tables.clone(),
-            Some(Err(_)) => return,
+            Some(Err(_)) => return None,
             None => {
                 if self.reading.is_none() {
                     self.reading = Some(ctx.spawn("Read the tables of the lights", move |_| {
@@ -149,11 +165,11 @@ impl LightingModule {
                         )))
                     }));
                 }
-                return;
+                return None;
             }
         };
         let specs = settings();
-        let [hour, speed, local] = [HOUR, SPEED, LOCAL].map(|key| {
+        let [hour, speed, local, fog] = [HOUR, SPEED, LOCAL, FOG].map(|key| {
             specs
                 .iter()
                 .find(|spec| spec.key == key)
@@ -168,19 +184,26 @@ impl LightingModule {
             .and_then(|map| Some((map.get("id")?.as_u64()? as u32, map.get("name")?.as_str()?.to_owned())));
         let Some((map, name)) = map else {
             self.shown = None;
-            return;
+            return None;
         };
+        // The camera unread: the light before kept.
         let Ok(PropertyValue::Vector([x, y, _])) = ctx.read_property("viewport/camera_position") else {
-            return;
+            return self.shown.as_ref().and_then(|shown| shown.given);
         };
         let place = [x as f32, y as f32];
+        let light = tables.light_at(map, place, time, 0, local == 1);
+        let given = light
+            .as_ref()
+            .map(|light| light::map_light(&light.values, time, fog == 1));
         self.shown = Some(Shown {
             map,
             name,
             place,
             time,
-            light: tables.light_at(map, place, time, 0, local == 1),
+            light,
+            given,
         });
+        given
     }
 }
 
@@ -225,7 +248,7 @@ impl Module for LightingModule {
         };
         let minutes = (shown.time / 2.0) as u32;
         ui.label(format!(
-            "{} ({}), at {:.0}, {:.0}, at {:02}:{:02}; not yet given to the view",
+            "{} ({}), at {:.0}, {:.0}, at {:02}:{:02}",
             shown.name,
             shown.map,
             shown.place[0],
@@ -233,6 +256,16 @@ impl Module for LightingModule {
             minutes / 60,
             minutes % 60
         ));
+        if let Some(given) = &shown.given {
+            let fog = match given.fog {
+                Some([start, end]) => format!("the game's, from {start:.0} to {end:.0} yards"),
+                None => "the editor's".to_owned(),
+            };
+            ui.label(format!(
+                "Given to the view: the sun {:.0}° high; the fog {fog}",
+                given.sun.direction[2].asin().to_degrees()
+            ));
+        }
         let Some(light) = &shown.light else {
             ui.colored_label(ui.visuals().warn_fg_color, "No light for this map.");
             return;
@@ -292,6 +325,12 @@ impl Module for LightingModule {
     fn windows_ui(&mut self, _egui: &egui::Context, ctx: &mut Context) {
         // The only call at every frame, whatever panel is shown.
         self.steer(ctx);
+    }
+
+    fn shutdown(&mut self) {
+        if let Some(view) = self.view.take() {
+            view.set_light(OWNER, None);
+        }
     }
 
     fn on_job(&mut self, job: JobId, outcome: JobOutcome, _ctx: &mut Context) {

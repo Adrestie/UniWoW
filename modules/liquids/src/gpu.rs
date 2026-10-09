@@ -15,7 +15,7 @@ use uniwow_api::arena::{Arena, Refusal};
 use uniwow_api::formats::{FileRef, Formats, LiquidTypeRecord};
 use uniwow_api::glam::Vec3;
 use uniwow_api::texture_arrays::{Placed, TextureArrays};
-use uniwow_api::viewport::{Target, View};
+use uniwow_api::viewport::{self, Target, View};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
 use crate::mesh::{self, Meshes, Vertex};
@@ -79,12 +79,13 @@ pub fn camera_values(view: &View) -> [f32; CAMERA] {
     values[19] = view.time;
     values[20..23].copy_from_slice(&view.fog.colour);
     values[24..27].copy_from_slice(&[view.fog.start, view.fog.middle, view.fog.end]);
+    values[27] = view.fog.rate;
     values
 }
 
 /// The shader, after `liquids.wgsl`: its arrays read by slot.
 fn shader(slots: usize) -> String {
-    let mut source = String::from(include_str!("liquids.wgsl"));
+    let mut source = [viewport::LINEAR_WGSL, viewport::FOG_WGSL, include_str!("liquids.wgsl")].concat();
     for slot in 0..slots {
         let _ = writeln!(
             source,

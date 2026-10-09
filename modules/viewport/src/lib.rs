@@ -25,7 +25,8 @@ use uniwow_api::hotkey::{Hotkey, HotkeyKind, Keys};
 use uniwow_api::journal;
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::viewport::{
-    self, Allowance, Demand, Drawing, Fog, Frame, Label, Layer, MAX_FRAME_WAIT, Phase, Pyramid, Sun, Target, View,
+    self, Allowance, Demand, Drawing, Fog, Frame, Label, Layer, MAX_FRAME_WAIT, MapLight, Phase, Pyramid, Sun, Target,
+    View,
 };
 use uniwow_api::{
     Context, DockArea, Event, MODULE_FAILED_TOPIC, Module, PropertyKind, PropertyValue, Registrar, SettingSpec, egui,
@@ -122,8 +123,50 @@ fn point_argument(arguments: &Value, name: &str, reach: f64) -> Result<Vec3, Str
     }
 }
 
-/// The camera and frame drawn, the camera locked once, with the fog set last.
-fn view(shared: &Camera, size: [u32; 2], time: f32, fog: Fog) -> View {
+/// The fog the terrain sets and the light the module of the light sets, with that module, which the
+/// view draws with.
+#[derive(Clone, Debug, Default)]
+struct Lighting {
+    fog: Fog,
+    light: Option<(String, MapLight)>,
+}
+
+impl Lighting {
+    /// The light `owner` gives; none takes back its own.
+    fn give(&mut self, owner: &str, light: Option<MapLight>) {
+        match light {
+            Some(light) => self.light = Some((owner.to_owned(), light)),
+            None if self.light.as_ref().is_some_and(|(by, _)| by == owner) => self.light = None,
+            None => {}
+        }
+    }
+
+    /// The fog and the sun of the view: the light's sun and colour of the fog over the terrain's
+    /// fog, and the light's distances with the curve of the game when it gives them; the fixed light
+    /// without it.
+    fn resolved(&self) -> (Fog, Sun) {
+        let Some((_, light)) = self.light else {
+            return (self.fog, Sun::default());
+        };
+        let mut fog = Fog {
+            colour: light.fog_colour,
+            ..self.fog
+        };
+        if let Some([start, end]) = light.fog {
+            fog = Fog {
+                start,
+                middle: (start + end) / 2.0,
+                end,
+                rate: viewport::fog_rate(start, end),
+                ..fog
+            };
+        }
+        (fog, light.sun)
+    }
+}
+
+/// The camera and frame drawn, the camera locked once, with the fog and the sun set last.
+fn view(shared: &Camera, size: [u32; 2], time: f32, (fog, sun): (Fog, Sun)) -> View {
     let mut camera = camera(shared);
     let aspect = size[0] as f32 / size[1] as f32;
     // Kept for viewport.frame, which fits a box in the width as in the height.
@@ -135,7 +178,7 @@ fn view(shared: &Camera, size: [u32; 2], time: f32, fog: Fog) -> View {
         size,
         time,
         fog,
-        sun: Sun::default(),
+        sun,
     }
 }
 
@@ -273,7 +316,7 @@ struct Service {
     layers: Layers,
     frames: Arc<FrameSignal>,
     budget: Budget,
-    fog: Arc<Mutex<Fog>>,
+    lighting: Arc<Mutex<Lighting>>,
 }
 
 impl viewport::Viewport for Service {
@@ -320,7 +363,14 @@ impl viewport::Viewport for Service {
     }
 
     fn set_fog(&self, fog: Fog) {
-        *self.fog.lock().unwrap_or_else(|e| e.into_inner()) = fog;
+        self.lighting.lock().unwrap_or_else(|e| e.into_inner()).fog = fog;
+    }
+
+    fn set_light(&self, owner: &str, light: Option<MapLight>) {
+        self.lighting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .give(owner, light);
     }
 }
 
@@ -456,8 +506,8 @@ struct ViewportModule {
     /// What the layers wrote over the view at the last frame, with the transform it was drawn with.
     labels: (Mat4, Vec<Label>),
     budget: Budget,
-    /// The fog the layers draw with, as the terrain sets it.
-    fog: Arc<Mutex<Fog>>,
+    /// The fog the layers draw with, as the terrain sets it, and the light of the map.
+    lighting: Arc<Mutex<Lighting>>,
 }
 
 impl Default for ViewportModule {
@@ -484,7 +534,7 @@ impl Default for ViewportModule {
             allocator: None,
             labels: (Mat4::IDENTITY, Vec::new()),
             budget: Arc::default(),
-            fog: Arc::default(),
+            lighting: Arc::default(),
         }
     }
 }
@@ -495,7 +545,7 @@ impl Module for ViewportModule {
             layers: self.layers.clone(),
             frames: self.frames.clone(),
             budget: self.budget.clone(),
-            fog: self.fog.clone(),
+            lighting: self.lighting.clone(),
         });
         let gpu_memory = reg.gpu_memory;
         reg.panel("view", "3D View", DockArea::Center)
@@ -663,11 +713,7 @@ impl Module for ViewportModule {
         if event.topic == MODULE_FAILED_TOPIC
             && let Some(id) = event.payload.get("id").and_then(|v| v.as_str())
         {
-            remove(&self.layers, id);
-            let mut state = budget(&self.budget);
-            if state.demands.remove(id).is_some() {
-                state.allow();
-            }
+            self.failed(id);
         }
     }
 
@@ -684,6 +730,17 @@ impl Module for ViewportModule {
 }
 
 impl ViewportModule {
+    /// What the module `id`, failed, gave the view taken back: its layers, what it told the budget,
+    /// its light.
+    fn failed(&self, id: &str) {
+        remove(&self.layers, id);
+        let mut state = budget(&self.budget);
+        if state.demands.remove(id).is_some() {
+            state.allow();
+        }
+        self.lighting.lock().unwrap_or_else(|e| e.into_inner()).give(id, None);
+    }
+
     /// Moves the camera as the user asks: the right or middle drag looks, or turns around the
     /// target while the orbit hotkey is held; with the pointer over the view, the hotkeys fly and
     /// the wheel sets the speed. A left click does nothing: it is kept for the tools to come.
@@ -788,7 +845,7 @@ impl ViewportModule {
             &self.camera,
             size,
             self.start.elapsed().as_secs_f32(),
-            *self.fog.lock().unwrap_or_else(|e| e.into_inner()),
+            self.lighting.lock().unwrap_or_else(|e| e.into_inner()).resolved(),
         );
         let new_device = self.device.as_ref() != Some(&gpu.device);
         if new_device {
@@ -1661,7 +1718,12 @@ mod tests {
         every.version.store(u64::MAX, Ordering::Relaxed);
         add(&layers, "terrain", &kept, false);
         add(&layers, "cube", &every, false);
-        let view = view(&Camera::default(), [64, 64], 0.0, viewport::Fog::default());
+        let view = view(
+            &Camera::default(),
+            [64, 64],
+            0.0,
+            (viewport::Fog::default(), viewport::Sun::default()),
+        );
         let targets = Targets::new(&gpu);
         let frames = |new_device| {
             let Drawn {
@@ -1714,12 +1776,13 @@ mod tests {
 
     #[test]
     fn the_fog_set_is_given_to_every_layer_with_the_view_of_the_next_frame() {
-        let fog = Arc::new(std::sync::Mutex::new(viewport::Fog::default()));
+        let module = super::ViewportModule::default();
+        let lighting = module.lighting.clone();
         let service = super::Service {
             layers: Layers::default(),
             frames: Arc::default(),
             budget: Default::default(),
-            fog: fog.clone(),
+            lighting: lighting.clone(),
         };
         use uniwow_api::viewport::Viewport as _;
         let set = viewport::Fog {
@@ -1727,15 +1790,65 @@ mod tests {
             start: 10.0,
             middle: 20.0,
             end: 30.0,
+            rate: 0.0,
         };
         service.set_fog(set);
-        let view = super::view(&Camera::default(), [64, 64], 0.0, *fog.lock().unwrap());
+        let view = super::view(&Camera::default(), [64, 64], 0.0, lighting.lock().unwrap().resolved());
         assert_eq!(view.fog, set);
         assert_eq!(
             view.sun,
             viewport::Sun::default(),
-            "the sun of before, until the lights of the maps"
+            "the fixed light without the light of a map"
         );
+        // The light of a map: its sun and the colour of its fog over the terrain's distances.
+        let sun = viewport::Sun {
+            direction: [0.0, 0.0, 1.0],
+            colour: [0.5, 0.25, 0.0],
+            ambient: [0.2; 3],
+        };
+        let light = viewport::MapLight {
+            sun,
+            fog_colour: [0.0, 0.0, 1.0],
+            fog: None,
+        };
+        service.set_light("lighting", Some(light));
+        let view = super::view(&Camera::default(), [64, 64], 0.0, lighting.lock().unwrap().resolved());
+        assert_eq!(view.sun, sun);
+        assert_eq!(
+            view.fog,
+            viewport::Fog {
+                colour: [0.0, 0.0, 1.0],
+                ..set
+            }
+        );
+        // The fog of the game: its distances and its curve, steeper as it is short.
+        service.set_light(
+            "lighting",
+            Some(viewport::MapLight {
+                fog: Some([125.0, 500.0]),
+                ..light
+            }),
+        );
+        let fog = super::view(&Camera::default(), [64, 64], 0.0, lighting.lock().unwrap().resolved()).fog;
+        assert_eq!([fog.start, fog.end], [125.0, 500.0]);
+        assert!((fog.rate - 5.697).abs() < 1e-3, "{}", fog.rate);
+        assert_eq!(viewport::fog_rate(0.0, 2_000.0), 1.5, "past its span, the gentlest");
+        // Taken back only by the module that gave it: the fixed light again.
+        service.set_light("terrain", None);
+        assert_eq!(
+            lighting.lock().unwrap().resolved().1,
+            sun,
+            "not the terrain's to take back"
+        );
+        service.set_light("lighting", None);
+        let view = super::view(&Camera::default(), [64, 64], 0.0, lighting.lock().unwrap().resolved());
+        assert_eq!((view.fog, view.sun), (set, viewport::Sun::default()));
+        // Taken back too when that module fails, not when another does.
+        service.set_light("lighting", Some(light));
+        module.failed("terrain");
+        assert_eq!(lighting.lock().unwrap().resolved().1, sun);
+        module.failed("lighting");
+        assert_eq!(lighting.lock().unwrap().resolved(), (set, viewport::Sun::default()));
     }
 
     #[test]
@@ -1750,7 +1863,7 @@ mod tests {
             layers: Layers::default(),
             frames: Arc::default(),
             budget: shared.clone(),
-            fog: Arc::default(),
+            lighting: Arc::default(),
         };
         use uniwow_api::viewport::Viewport as _;
         service.set_budget(100 << 20);
@@ -1879,7 +1992,7 @@ mod tests {
             layers: Layers::default(),
             frames: Arc::default(),
             budget: module.budget.clone(),
-            fog: Arc::default(),
+            lighting: Arc::default(),
         };
         use uniwow_api::viewport::Viewport as _;
         service.set_budget(512 << 20);
@@ -1891,7 +2004,12 @@ mod tests {
     #[test]
     fn a_label_is_written_where_its_point_falls_in_the_view_and_not_behind_the_eye() {
         let shared = Camera::default();
-        let view = view(&shared, [200, 100], 0.0, viewport::Fog::default());
+        let view = view(
+            &shared,
+            [200, 100],
+            0.0,
+            (viewport::Fog::default(), viewport::Sun::default()),
+        );
         let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(200.0, 100.0));
         let target = camera(&shared).target();
         let centre = project(&view.view_proj, rect, target).expect("the point looked at");
@@ -1988,7 +2106,12 @@ mod tests {
     fn a_frame_locks_the_camera_once() {
         let shared = Camera::default();
         // A second lock while the first is held would never return.
-        let drawn = view(&shared, [640, 480], 0.0, viewport::Fog::default());
+        let drawn = view(
+            &shared,
+            [640, 480],
+            0.0,
+            (viewport::Fog::default(), viewport::Sun::default()),
+        );
         assert_eq!(drawn.eye, camera(&shared).eye());
     }
 
@@ -2197,7 +2320,12 @@ mod tests {
         );
         add(&layers, "bundled", &Counts::default(), false);
         let targets = Targets::new(&gpu);
-        let view = view(&Camera::default(), [8, 8], 0.0, viewport::Fog::default());
+        let view = view(
+            &Camera::default(),
+            [8, 8],
+            0.0,
+            (viewport::Fog::default(), viewport::Sun::default()),
+        );
         let mut frames: Vec<GpuFrame> = Vec::new();
         for _ in 0..6 {
             let drawn = targets.draw(&layers, &gpu, &view, false, Some(&mut timer));
@@ -2715,7 +2843,12 @@ fn cs_main() {
             eprintln!("skipped: no software adapter for a device");
             return;
         };
-        let view = view(&Camera::default(), [8, 8], 0.0, viewport::Fog::default());
+        let view = view(
+            &Camera::default(),
+            [8, 8],
+            0.0,
+            (viewport::Fog::default(), viewport::Sun::default()),
+        );
         let targets = Targets::new(&gpu);
         // The last drawn covers the view: a bundle after the pass, then the pass after a bundle,
         // then a pass after another pass and a bundle.
@@ -2751,7 +2884,12 @@ fn cs_main() {
             eprintln!("skipped: no software adapter for a device");
             return;
         };
-        let view = view(&Camera::default(), [8, 8], 0.0, viewport::Fog::default());
+        let view = view(
+            &Camera::default(),
+            [8, 8],
+            0.0,
+            (viewport::Fog::default(), viewport::Sun::default()),
+        );
         let targets = Targets::new(&gpu);
         // Half red, blended in front without writing the depth, as a blended batch of the models,
         // added before the terrain as their module starts first. Behind it, the ground, green,
@@ -2786,7 +2924,12 @@ fn cs_main() {
             eprintln!("skipped: no software adapter for a device");
             return;
         };
-        let view = view(&Camera::default(), [8, 8], 0.0, viewport::Fog::default());
+        let view = view(
+            &Camera::default(),
+            [8, 8],
+            0.0,
+            (viewport::Fog::default(), viewport::Sun::default()),
+        );
         let targets = Targets::new(&gpu);
         // Red beyond the surface, blue the water, green on this side, each half over what is
         // under it; added in the other order, the water in its stage: the phases order them.
@@ -2816,7 +2959,12 @@ fn cs_main() {
             eprintln!("skipped: no software adapter for a device");
             return;
         };
-        let view = view(&Camera::default(), [8, 8], 0.0, viewport::Fog::default());
+        let view = view(
+            &Camera::default(),
+            [8, 8],
+            0.0,
+            (viewport::Fog::default(), viewport::Sun::default()),
+        );
         let targets = Targets::new(&gpu);
         let greater = wgpu::CompareFunction::Greater;
         // Half red blended, of a layer added first; green opaque, writing its depth at 0.5, of a
@@ -2853,7 +3001,12 @@ fn cs_main() {
             eprintln!("skipped: no software adapter for a device");
             return;
         };
-        let view = view(&Camera::default(), [8, 8], 0.0, viewport::Fog::default());
+        let view = view(
+            &Camera::default(),
+            [8, 8],
+            0.0,
+            (viewport::Fog::default(), viewport::Sun::default()),
+        );
         // A bundle recorded for the view's multisampling, run in a pass of one sample: refused when
         // the pass is finished, no layer drawn in it to blame.
         let targets = Targets::with_samples(&gpu, 1);
@@ -2884,7 +3037,12 @@ fn cs_main() {
             eprintln!("skipped: no software adapter for a device");
             return;
         };
-        let view = view(&Camera::default(), [8, 8], 0.0, viewport::Fog::default());
+        let view = view(
+            &Camera::default(),
+            [8, 8],
+            0.0,
+            (viewport::Fog::default(), viewport::Sun::default()),
+        );
         let targets = Targets::new(&gpu);
         let layers = Layers::default();
         put(&layers, "chosen", Painter::new(Drawing::Pass, RED).computing());
@@ -2899,7 +3057,12 @@ fn cs_main() {
             eprintln!("skipped: no software adapter for a device");
             return;
         };
-        let view = view(&Camera::default(), [8, 8], 0.0, viewport::Fog::default());
+        let view = view(
+            &Camera::default(),
+            [8, 8],
+            0.0,
+            (viewport::Fog::default(), viewport::Sun::default()),
+        );
         let entry = |painter: Painter| Entry {
             owner: "painter".to_owned(),
             layer: Box::new(painter),
@@ -2918,7 +3081,12 @@ fn cs_main() {
             eprintln!("skipped: no software adapter for a device");
             return;
         };
-        let view = view(&Camera::default(), [8, 8], 0.0, viewport::Fog::default());
+        let view = view(
+            &Camera::default(),
+            [8, 8],
+            0.0,
+            (viewport::Fog::default(), viewport::Sun::default()),
+        );
         let targets = Targets::new(&gpu);
         for (fault, said) in [
             (Fault::PanicComputing, "panicked while computing"),
@@ -3297,7 +3465,12 @@ fn main() {
             eprintln!("skipped: no software adapter for a device");
             return;
         };
-        let view = view(&Camera::default(), [8, 8], 0.0, viewport::Fog::default());
+        let view = view(
+            &Camera::default(),
+            [8, 8],
+            0.0,
+            (viewport::Fog::default(), viewport::Sun::default()),
+        );
         let targets = Targets::new(&gpu);
         let layers = Layers::default();
         put(

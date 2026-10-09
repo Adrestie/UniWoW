@@ -604,6 +604,21 @@ fn the_water_is_drawn_over_what_lies_under_it_without_hiding_what_is_blended_bey
         "{}",
         magma.stats().items
     );
+    // In the fog of the game, blue, from 2 to 42 yards at the rate 2: at 22 yards from the eye,
+    // 1 − (20 / 40)² of it, mixed in gamma as the client.
+    let mut fogged = view(above, down);
+    fogged.fog = uniwow_api::viewport::Fog {
+        colour: [0.0, 0.0, 1.0],
+        start: 2.0,
+        middle: 22.0,
+        end: 42.0,
+        rate: 2.0,
+    };
+    let seen = middle(&gpu, &mut magma, &fogged, None);
+    assert!(
+        seen[0].abs_diff(64) <= 2 && seen[1] == 0 && seen[2].abs_diff(191) <= 2,
+        "{seen:?}"
+    );
     // Under the shallow water, seen through it: tinted.
     let (mut liquids, surfaces) = bench(
         &gpu,

@@ -9,12 +9,13 @@
 
 struct Camera {
     view_proj: mat4x4<f32>,
-    // The direction towards the sun, its colour, and the light everywhere.
+    // The direction towards the sun, its colour on the ground and the light everywhere, in gamma.
     sun: vec4<f32>,
     sun_colour: vec4<f32>,
     ambient: vec4<f32>,
     eye: vec4<f32>,
-    // The colour of the fog; where it starts, its middle and where it covers all, on the ground.
+    // The colour of the fog; where it starts, its middle and where it covers all, and the rate of
+    // the game's fog, 0 for the editor's.
     fog_colour: vec4<f32>,
     fog: vec4<f32>,
     // The axes of the camera, across, up and back.
@@ -51,9 +52,7 @@ struct Material {
 @group(1) @binding(3) var layer_sampler: sampler;
 
 const NONE: u32 = 0xFFFFFFFFu;
-// The share of the fog at its middle; the alpha under which a pixel without an alpha key is not
-// drawn.
-const NEAR_FOG: f32 = 0.55;
+// The alpha under which a pixel without an alpha key is not drawn.
 const LEAST_ALPHA: f32 = 1.0 / 255.0;
 // The blending of an opaque material.
 const OPAQUE: u32 = 0u;
@@ -159,19 +158,6 @@ fn combine(shader: u32, one: vec4<f32>, two: vec4<f32>, blend: f32) -> vec4<f32>
     }
 }
 
-// The linear value of a value in gamma, as an sRGB target encodes it back.
-fn linear(gamma: vec3<f32>) -> vec3<f32> {
-    let low = gamma / 12.92;
-    let high = pow((gamma + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
-    return select(high, low, gamma <= vec3<f32>(0.04045));
-}
-
-fn fog_amount(position: vec3<f32>) -> f32 {
-    let distance = length(position.xy - camera.eye.xy);
-    return NEAR_FOG * smoothstep(camera.fog.x, camera.fog.y, distance)
-        + (1.0 - NEAR_FOG) * smoothstep(camera.fog.y, camera.fog.z, distance);
-}
-
 // The colour of the fog of a batch but a mod2x one: the view's, black, or white.
 fn fog_colour(mode: f32) -> vec3<f32> {
     if mode > 1.5 {
@@ -219,33 +205,32 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
     var rgb = linear(clamp(combined.rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
     if shading.y < 0.5 {
-        let lit = max(dot(normalize(in.normal), camera.sun.xyz), 0.0);
-        let outside = camera.ambient.rgb + camera.sun_colour.rgb * lit;
+        let outside = light(in.normal);
         // Inside: the vertex colours, halved when fixed, and the ambient colour, both in gamma.
         let coloured = (in.group & HAS_COLOURS) != 0u;
         let inside = linear(select(vec3<f32>(0.0), in.colour1.rgb * 2.0, coloured) + in.ambient);
         // By the kind of the batch: a transition adds the light outside by the alpha of its vertex
         // colours to theirs, which the fix darkened by the rest; without colours, its group says.
-        var light = outside;
+        var lit = outside;
         switch (in.group >> 8u) & 3u {
             case 0u: {
                 if coloured {
-                    light = inside + outside * in.colour1.a;
+                    lit = inside + outside * in.colour1.a;
                 } else if (in.group & OUTSIDE) == 0u {
-                    light = inside;
+                    lit = inside;
                 }
             }
-            case 1u: { light = inside; }
+            case 1u: { lit = inside; }
             default: {}
         }
         // A building lit as one: outside, its ambient colour added at the drawing.
         if (in.group & LIT_AS_ONE) != 0u {
-            light = outside + linear(in.ambient);
+            lit = outside + linear(in.ambient);
         }
         if (material.flags.x & LIT_OUTSIDE) != 0u {
-            light = outside;
+            lit = outside;
         }
-        rgb = rgb * light;
+        rgb = rgb * lit;
     }
-    return vec4<f32>(mix(rgb, fog_colour(shading.w), fog), alpha);
+    return vec4<f32>(fog_mix(rgb, fog_colour(shading.w), fog), alpha);
 }

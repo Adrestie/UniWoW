@@ -263,6 +263,8 @@ fn drawn_on(
         layer,
         scene,
         wall: crate::tests::flat(0.0),
+        sun: Default::default(),
+        fog: Default::default(),
     };
     let placed = Instance {
         id: 1,

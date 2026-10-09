@@ -1150,6 +1150,18 @@ fn render_in(
     look: Vec3,
     phases: &[Phase],
 ) -> Vec<u8> {
+    render_fogged(gpu, layer, target, (eye, look), phases, viewport::Fog::default())
+}
+
+/// What `render_in` draws, `place` the eye and where it looks, in the fog `fog`.
+fn render_fogged(
+    gpu: &egui_wgpu::RenderState,
+    layer: &mut TerrainLayer,
+    target: &Target,
+    (eye, look): (Vec3, Vec3),
+    phases: &[Phase],
+    fog: viewport::Fog,
+) -> Vec<u8> {
     let size = [64u32, 64];
     let view = View {
         view_proj: Mat4::perspective_infinite_reverse_rh(90f32.to_radians(), 1.0, 0.1)
@@ -1158,7 +1170,7 @@ fn render_in(
         eye,
         size,
         time: 0.0,
-        fog: Default::default(),
+        fog,
         sun: Default::default(),
     };
     layer.prepare(gpu, &view);
@@ -1304,6 +1316,38 @@ fn a_tile_is_one_draw_its_chunks_textured_from_two_arrays_and_the_horizon_beyond
     );
     let [red, green, _, ground, _] = counts(&above);
     assert!(red > 1200 && green > 1200, "red {red}, green {green}, ground {ground}");
+    // In a blue fog of the game covering all past a yard: blue.
+    let fog = viewport::Fog {
+        colour: [0.0, 0.0, 1.0],
+        start: 0.0,
+        middle: 0.5,
+        end: 1.0,
+        rate: 2.0,
+    };
+    let eyes = (Vec3::new(x + 1.0, y, 250.0), Vec3::new(x, y, 0.0));
+    let fogged = render_fogged(&gpu, &mut layer, &target, eyes, &Phase::ALL, fog);
+    let [red, green, blue, _, _] = counts(&fogged);
+    assert!(
+        red == 0 && green == 0 && blue > 2400,
+        "red {red}, green {green}, blue {blue}"
+    );
+    // From 243 yards over the tile, at the height 7, in a fog of the game from 100 to 400 yards:
+    // 1 − (157 / 300)² of it at the middle, by the distance from the eye, none there by the
+    // distance on the ground; mixed in gamma as the client, its blue 185 of 255.
+    let fog = viewport::Fog {
+        start: 100.0,
+        middle: 250.0,
+        end: 400.0,
+        ..fog
+    };
+    let fogged = render_fogged(&gpu, &mut layer, &target, eyes, &Phase::ALL, fog);
+    let [red, green, blue, _, _] = counts(&fogged);
+    assert!(
+        red == 0 && green == 0 && blue > 4000,
+        "red {red}, green {green}, blue {blue}"
+    );
+    let centre = &fogged[(32 * 64 + 32) * 4..][..4];
+    assert!(centre[2].abs_diff(185) <= 2, "{centre:?}");
     let stats = layer.stats();
     assert_eq!(stats.draws, 2, "the tile in one draw, and the horizon");
     assert_eq!(

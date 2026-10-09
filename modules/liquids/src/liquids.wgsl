@@ -11,7 +11,8 @@ struct Camera {
     view_proj: mat4x4<f32>,
     // The eye, and the time of the frame in seconds.
     eye: vec4<f32>,
-    // The colour of the fog; where it starts, its middle and where it covers all, on the ground.
+    // The colour of the fog; where it starts, its middle and where it covers all, and the rate of
+    // the game's fog, 0 for the editor's.
     fog_colour: vec4<f32>,
     fog: vec4<f32>,
 };
@@ -29,8 +30,6 @@ struct LiquidType {
 @group(1) @binding(1) var liquid_sampler: sampler;
 
 const NONE: u32 = 0xFFFFFFFFu;
-// The share of the fog at its middle.
-const NEAR_FOG: f32 = 0.55;
 // The colour of the water, shallow and deep, in gamma, its alpha so.
 const SHALLOW: vec4<f32> = vec4<f32>(0.24, 0.35, 0.31, 0.65);
 const DEEP: vec4<f32> = vec4<f32>(0.18, 0.28, 0.27, 0.9);
@@ -61,19 +60,6 @@ fn vs_main(in: VertexIn) -> VertexOut {
     out.world = in.position;
     out.slot = in.slot;
     return out;
-}
-
-// The linear value of a value in gamma, as an sRGB target encodes it back.
-fn linear(gamma: vec3<f32>) -> vec3<f32> {
-    let low = gamma / 12.92;
-    let high = pow((gamma + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
-    return select(high, low, gamma <= vec3<f32>(0.04045));
-}
-
-fn fog_amount(position: vec3<f32>) -> f32 {
-    let distance = length(position.xy - camera.eye.xy);
-    return NEAR_FOG * smoothstep(camera.fog.x, camera.fog.y, distance)
-        + (1.0 - NEAR_FOG) * smoothstep(camera.fog.y, camera.fog.z, distance);
 }
 
 @fragment
@@ -108,6 +94,6 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         gamma = clamp(texel.rgb + colour.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
         alpha = colour.a;
     }
-    let rgb = mix(linear(gamma), camera.fog_colour.rgb, fog_amount(in.world));
+    let rgb = fog_mix(linear(gamma), camera.fog_colour.rgb, fog_amount(in.world));
     return vec4<f32>(rgb, alpha);
 }

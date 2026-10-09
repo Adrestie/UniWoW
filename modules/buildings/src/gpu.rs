@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use uniwow_api::arena::{Arena, Refusal};
 use uniwow_api::formats::{Formats, Wmo, WmoMaterial};
 use uniwow_api::texture_arrays::{NONE, Placed, TextureArrays};
-use uniwow_api::viewport::{Target, View};
+use uniwow_api::viewport::{self, Target, View};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
 use crate::cells::Cells;
@@ -157,6 +157,7 @@ pub fn camera_values(view: &View) -> [f32; CAMERA] {
     values[28..31].copy_from_slice(&view.eye.to_array());
     values[32..35].copy_from_slice(&view.fog.colour);
     values[36..39].copy_from_slice(&[view.fog.start, view.fog.middle, view.fog.end]);
+    values[39] = view.fog.rate;
     for (at, row) in [40, 44, 48].into_iter().zip(0..3) {
         values[at..at + 3].copy_from_slice(&view.view.row(row).truncate().normalize_or_zero().to_array());
     }
@@ -165,7 +166,13 @@ pub fn camera_values(view: &View) -> [f32; CAMERA] {
 
 /// The shader, after `buildings.wgsl`: its arrays read by slot.
 fn shader(slots: usize) -> String {
-    let mut source = String::from(include_str!("buildings.wgsl"));
+    let mut source = [
+        viewport::LINEAR_WGSL,
+        viewport::FOG_WGSL,
+        viewport::LIGHT_WGSL,
+        include_str!("buildings.wgsl"),
+    ]
+    .concat();
     for slot in 0..slots {
         let _ = writeln!(
             source,

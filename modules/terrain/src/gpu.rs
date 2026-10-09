@@ -10,7 +10,7 @@ use uniwow_api::bytemuck::Zeroable;
 use uniwow_api::formats::{Formats, Layer, Tile};
 use uniwow_api::journal;
 use uniwow_api::texture_arrays::{NONE, Placed, TextureArrays};
-use uniwow_api::viewport::Target;
+use uniwow_api::viewport::{self, Target};
 use uniwow_api::wgpu::util::DeviceExt;
 use uniwow_api::{bytemuck, egui_wgpu, parallel_for, wgpu};
 
@@ -22,8 +22,17 @@ use crate::model::{TileId, TileModel, chunk_bounds};
 /// The arrays of textures the shader of the tiles binds at once.
 pub const SLOTS: usize = 12;
 
-const TILES_SHADER: &str = concat!(include_str!("common.wgsl"), include_str!("terrain.wgsl"));
-const HORIZON_SHADER: &str = concat!(include_str!("common.wgsl"), include_str!("horizon.wgsl"));
+/// The shader of the tiles, or of the horizon, `shader`, after what it shares.
+fn source(shader: &str) -> String {
+    [
+        viewport::LINEAR_WGSL,
+        viewport::FOG_WGSL,
+        viewport::LIGHT_WGSL,
+        include_str!("common.wgsl"),
+        shader,
+    ]
+    .concat()
+}
 
 /// Floats of the shaders' `Camera`.
 pub const CAMERA: usize = 40;
@@ -175,11 +184,11 @@ impl Shared {
         let mask_layout = layout("terrain horizon", &[uniform_entry(0, wgpu::ShaderStages::VERTEX)]);
         let tiles_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("terrain"),
-            source: wgpu::ShaderSource::Wgsl(TILES_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(source(include_str!("terrain.wgsl")).into()),
         });
         let horizon_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("terrain horizon"),
-            source: wgpu::ShaderSource::Wgsl(HORIZON_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(source(include_str!("horizon.wgsl")).into()),
         });
         let pipeline = make_pipeline(
             device,

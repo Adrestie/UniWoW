@@ -16,7 +16,7 @@ use uniwow_api::formats::{
 };
 use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::models::{Extent, Geosets, Instance, Look, LookId, LookState, Models, Motion};
-use uniwow_api::viewport::{Drawing, Layer, Phase, Pyramid, Target, View};
+use uniwow_api::viewport::{Drawing, Fog, Layer, Phase, Pyramid, Sun, Target, View};
 use uniwow_api::{Event, MODULE_FAILED_TOPIC, bytemuck, egui, egui_wgpu, serde_json, wgpu};
 
 use crate::cache::Cache;
@@ -797,6 +797,9 @@ pub struct Bench {
     /// first, the left first in each, as the pyramid the layer tests against gives it: 0, the
     /// farthest, hides nothing.
     pub wall: [[f32; 2]; 2],
+    /// The sun and the fog of the view.
+    pub sun: Sun,
+    pub fog: Fog,
 }
 
 /// A wall at `depth` over the whole view.
@@ -838,6 +841,8 @@ pub fn bench_on(model: Model, red: [u8; 4], pooled: bool) -> Option<Bench> {
         layer,
         scene,
         wall: flat(0.0),
+        sun: Sun::default(),
+        fog: Fog::default(),
     })
 }
 
@@ -937,8 +942,8 @@ pub fn render(bench: &mut Bench, eye: Vec3, look: Vec3) -> Vec<u8> {
         eye,
         size: [size, size],
         time: 0.0,
-        fog: Default::default(),
-        sun: Default::default(),
+        fog: bench.fog,
+        sun: bench.sun,
     };
     bench.layer.prepare(&gpu, &view);
     let in_pass = bench.layer.drawing() == Drawing::Pass;
@@ -1118,6 +1123,38 @@ fn a_model_is_drawn_where_its_instance_stands_lit_and_one_sided() {
     assert!(red(seen), "{seen:?}");
     assert!(seen[0] < 255, "lit by the sun and the ambient: {seen:?}");
     assert_eq!(middle(&render(&mut bench, BEHIND, AIM)), BLACK, "its back culled");
+    // Lit as the client in gamma: 1.1 times the ambient light plus the diffuse facing the sun, 0.9
+    // times the ambient light from behind.
+    for (towards, lit) in [(1.0, 163), (-1.0, 92)] {
+        bench.sun = Sun {
+            direction: [towards, 0.0, 0.0],
+            colour: [0.2; 3],
+            ambient: [0.4; 3],
+        };
+        let seen = middle(&render(&mut bench, FRONT, AIM));
+        assert!(seen[0].abs_diff(lit) <= 2 && seen[1] == 0, "{seen:?}");
+    }
+    // In the fog of the game, blue, from 2 to 10 yards at the rate 2: at 5 yards from an eye 3 yards
+    // up, 1 − (5 / 8)² of it, by the distance from the eye; mixed in gamma as the client, over a red
+    // lit past 1, bounded first. The pixel read, half a pixel off the middle, is a little farther.
+    bench.sun = Sun {
+        direction: [1.0, 0.0, 0.0],
+        colour: [1.0; 3],
+        ambient: [1.0; 3],
+    };
+    bench.fog = Fog {
+        colour: [0.0, 0.0, 1.0],
+        start: 2.0,
+        middle: 6.0,
+        end: 10.0,
+        rate: 2.0,
+    };
+    let seen = middle(&render(&mut bench, Vec3::new(4.0, 0.0, 4.0), AIM));
+    assert!(
+        seen[0].abs_diff(97) <= 2 && seen[1] == 0 && seen[2].abs_diff(158) <= 2,
+        "{seen:?}"
+    );
+    (bench.sun, bench.fog) = (Sun::default(), Fog::default());
     // Hidden by its owner, then shown again.
     let shown = bench.service.shown("test");
     shown.store(false, std::sync::atomic::Ordering::Relaxed);

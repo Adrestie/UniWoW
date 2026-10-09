@@ -105,6 +105,8 @@ impl Pooled {
                 layer,
                 scene,
                 wall: crate::tests::flat(0.0),
+                sun: Default::default(),
+                fog: Default::default(),
             },
             shared,
             caches: Caches::default(),

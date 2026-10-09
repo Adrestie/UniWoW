@@ -42,19 +42,103 @@ pub trait Viewport: Send + Sync {
     /// Sets the fog every layer draws with from the next frame, as the layer that knows how far the
     /// world is drawn says: the terrain, by its reach.
     fn set_fog(&self, fog: Fog);
+
+    /// Sets the light of the map from the next frame, as the module `owner` of the light says: the
+    /// sun and the colour of the fog of the view; its distances too when it gives them, those set by
+    /// `set_fog` otherwise. None takes back the light `owner` gave, as does its failure. Without it,
+    /// the fixed sun (`Sun::default`) and the fog set by `set_fog`.
+    fn set_light(&self, owner: &str, light: Option<MapLight>);
 }
 
-/// The share of the fog at its middle distance.
+/// The light of the map at the place of the camera and the hour: its sun, the colour of its fog in
+/// linear, and where its fog starts and ends when the fog of the game is drawn, none for the
+/// editor's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MapLight {
+    pub sun: Sun,
+    pub fog_colour: [f32; 3],
+    pub fog: Option<[f32; 2]>,
+}
+
+/// The WGSL of a colour in gamma made linear (`linear`) and back (`srgb`), which the shaders of the
+/// view share.
+pub const LINEAR_WGSL: &str = r"// The linear value of a value in gamma, as an sRGB target encodes it back.
+fn linear(gamma: vec3<f32>) -> vec3<f32> {
+    let low = gamma / 12.92;
+    let high = pow((gamma + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return select(high, low, gamma <= vec3<f32>(0.04045));
+}
+
+// The value in gamma of a linear value, as an sRGB target encodes it.
+fn srgb(value: vec3<f32>) -> vec3<f32> {
+    let low = value * 12.92;
+    let high = 1.055 * pow(value, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    return select(high, low, value <= vec3<f32>(0.0031308));
+}
+";
+
+/// The WGSL of the fog of the view (`fog_amount`, `fog_mix`), which the shaders of the view share,
+/// for a uniform `camera` with an `eye` and a `fog` as `Fog` gives them: where it starts, its middle,
+/// where it ends and its rate; with `LINEAR_WGSL`.
+pub const FOG_WGSL: &str = r"// The share of the editor's fog at its middle.
+const NEAR_FOG: f32 = 0.55;
+
+// The fog of the view: the game's when its rate is given, by the distance from the eye, as Noggit's
+// shaders draw it; the editor's otherwise, by the distance on the ground.
+fn fog_amount(position: vec3<f32>) -> f32 {
+    if camera.fog.w > 0.0 {
+        let distance = length(position - camera.eye.xyz);
+        let left = clamp((camera.fog.z - distance) / max(camera.fog.z - camera.fog.x, 0.001), 0.0, 1.0);
+        return 1.0 - pow(left, camera.fog.w);
+    }
+    let distance = length(position.xy - camera.eye.xy);
+    return NEAR_FOG * smoothstep(camera.fog.x, camera.fog.y, distance)
+        + (1.0 - NEAR_FOG) * smoothstep(camera.fog.y, camera.fog.z, distance);
+}
+
+// `colour`, linear, under the fog of the colour `fog` by `amount`: the game's mixed in gamma as the
+// client draws, the colour bounded to 1 first; the editor's in linear.
+fn fog_mix(colour: vec3<f32>, fog: vec3<f32>, amount: f32) -> vec3<f32> {
+    if camera.fog.w > 0.0 {
+        let bounded = clamp(colour, vec3<f32>(0.0), vec3<f32>(1.0));
+        return linear(mix(srgb(bounded), srgb(fog), amount));
+    }
+    return mix(colour, fog, amount);
+}
+";
+
+/// The WGSL of the light of the view (`light`), which the shaders of the view share, for a uniform
+/// `camera` with a `sun`, a `sun_colour` and an `ambient` as `Sun` gives them; with `LINEAR_WGSL`.
+pub const LIGHT_WGSL: &str = r"// The light of a face of `normal`, as Noggit lights it and the client in gamma: the ambient light
+// from 0.9 to 1.1 times as the face turns to the sun, plus the diffuse by the angle; made linear.
+fn light(normal: vec3<f32>) -> vec3<f32> {
+    let facing = clamp(dot(normalize(normal), camera.sun.xyz), 0.0, 1.0);
+    return linear(camera.ambient.rgb * (0.9 + 0.2 * facing) + camera.sun_colour.rgb * facing);
+}
+";
+
+/// The span of the fog of the game past which its curve is the gentlest, in yards (Noggit's).
+pub const FOG_SPAN: f32 = 1_583.333_4;
+
+/// How steep the fog of the game from `start` to `end` is drawn: 1.5, up to 7 for a short one.
+pub fn fog_rate(start: f32, end: f32) -> f32 {
+    1.5 + 5.5 * (1.0 - (end - start) / FOG_SPAN).clamp(0.0, 1.0)
+}
+
+/// The share of the editor's fog at its middle distance (`FOG_WGSL`).
 pub const NEAR_FOG: f32 = 0.55;
 
-/// The fog of the view, by the distance on the ground from the eye: none up to `start`, `NEAR_FOG`
-/// of it at `middle`, all of it from `end`; and its colour, that of the sky.
+/// The fog of the view and its colour, that of the sky, in linear. The editor's when `rate` is 0: by
+/// the distance on the ground from the eye, none up to `start`, `NEAR_FOG` of it at `middle`, all of
+/// it from `end`. The game's otherwise, as Noggit's shaders draw it: by the distance from the eye,
+/// 1 − ((end − distance) / (end − start))^rate, `middle` unused.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Fog {
     pub colour: [f32; 3],
     pub start: f32,
     pub middle: f32,
     pub end: f32,
+    pub rate: f32,
 }
 
 impl Default for Fog {
@@ -65,11 +149,15 @@ impl Default for Fog {
             start: 1.0e9,
             middle: 2.0e9,
             end: 4.0e9,
+            rate: 0.0,
         }
     }
 }
 
-/// The light of the sun: the direction towards it, its colour, and the light everywhere.
+/// The light of the sun: the direction towards it, its colour on the ground (diffuse) and the light
+/// everywhere (ambient), both in gamma. A face is lit, as Noggit lights it and the client in gamma,
+/// by the ambient light from 0.9 to 1.1 times as the face turns to the sun, plus the diffuse by the
+/// angle, made linear once, then multiplying its colour.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sun {
     pub direction: [f32; 3],
@@ -78,12 +166,13 @@ pub struct Sun {
 }
 
 impl Default for Sun {
-    /// The light the terrain had before the lights of the maps come.
+    /// The light the terrain had before the lights of the maps: as bright as it, 0.45 in linear,
+    /// on a face turned away from the sun, and 1 on one facing it.
     fn default() -> Self {
         Self {
             direction: glam::Vec3::new(0.4, 0.3, 0.85).normalize().to_array(),
-            colour: [0.55; 3],
-            ambient: [0.45; 3],
+            colour: [0.1427; 3],
+            ambient: [0.7793; 3],
         }
     }
 }

@@ -579,8 +579,13 @@ fn row(gpu: &egui_wgpu::RenderState, layer: &mut BuildingsLayer, eye: Vec3) -> V
 
 /// The middle row of what `layer` draws in `phases` seen from `eye` towards the origin.
 fn row_in(gpu: &egui_wgpu::RenderState, layer: &mut BuildingsLayer, eye: Vec3, phases: &[Phase]) -> Vec<[u8; 4]> {
+    row_of(gpu, layer, &view(eye), phases)
+}
+
+/// The middle row of what `layer` draws in `phases` seen by `view`.
+fn row_of(gpu: &egui_wgpu::RenderState, layer: &mut BuildingsLayer, view: &View, phases: &[Phase]) -> Vec<[u8; 4]> {
     let size = 32u32;
-    let view = view(eye);
+    let view = *view;
     layer.prepare(gpu, &view);
     let texture = |format, usage| {
         gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -771,6 +776,57 @@ fn a_building_is_drawn_where_the_buildings_last_given_place_it() {
     assert_eq!(layer.stats().triangles, 0, "none in sight");
     assert_eq!(seen(&mut layer), [white, white]);
     assert_eq!(layer.stats().triangles, 10);
+}
+
+#[test]
+fn outside_a_face_is_lit_in_gamma_by_the_ambient_light_turned_and_the_diffuse_then_fogged() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    let front = Vec3::new(5.0, 0.0, 0.0);
+    let Some(mut lit) = bench(&gpu, square(material(0, 0), false, None)) else {
+        return;
+    };
+    // White, outside: 1.1 times the ambient light plus the diffuse facing the sun, 0.9 times the
+    // ambient light from behind, in gamma, as the target stores them.
+    let sun = |towards: f32| uniwow_api::viewport::Sun {
+        direction: [towards, 0.0, 0.0],
+        colour: [0.2; 3],
+        ambient: [0.4; 3],
+    };
+    let mut seen = view(front);
+    seen.sun = sun(1.0);
+    let facing = row_of(&gpu, &mut lit, &seen, &Phase::ALL)[16];
+    assert!(facing[0].abs_diff(163) <= 1 && facing[0] == facing[2], "{facing:?}");
+    seen.sun = sun(-1.0);
+    let behind = row_of(&gpu, &mut lit, &seen, &Phase::ALL)[16];
+    assert!(behind[0].abs_diff(92) <= 1, "{behind:?}");
+    // So dark that it is made linear by its low part: black.
+    seen.sun.ambient = [0.0011; 3];
+    let dark = row_of(&gpu, &mut lit, &seen, &Phase::ALL)[16];
+    assert!(dark[0] <= 1, "{dark:?}");
+    // The fog of the game, red, from 2 to 10 yards at the rate 2: at 5 yards from an eye 3 yards up,
+    // 1 − (5 / 8)² of it, by the distance from the eye, not on the ground; mixed in gamma as the
+    // client, over a face lit past white, bounded first. The pixel read, half a pixel off the
+    // middle, is a little farther: 97 of 255, not 100.
+    let mut fogged = view(Vec3::new(4.0, 0.0, 3.0));
+    fogged.sun = uniwow_api::viewport::Sun {
+        colour: [1.0; 3],
+        ambient: [1.0; 3],
+        ..sun(1.0)
+    };
+    fogged.fog = uniwow_api::viewport::Fog {
+        colour: [1.0, 0.0, 0.0],
+        start: 2.0,
+        middle: 6.0,
+        end: 10.0,
+        rate: 2.0,
+    };
+    let pixel = row_of(&gpu, &mut lit, &fogged, &Phase::ALL)[16];
+    assert!(
+        pixel[0] == 255 && pixel[1].abs_diff(97) <= 2 && pixel[1] == pixel[2],
+        "{pixel:?}"
+    );
 }
 
 #[test]

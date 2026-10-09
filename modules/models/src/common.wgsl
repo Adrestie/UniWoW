@@ -1,17 +1,18 @@
 // What the shaders of the models share: the camera, a vertex placed by its instance, the
 // environment mapped as WotLK maps it, the pixel shaders of WotLK, which combine the textures in
-// gamma, and the end of a pixel: its alpha tested as WotLK tests it, then lit by the sun and fogged
-// as the view says, in its linear space.
+// gamma, and the end of a pixel: its alpha tested as WotLK tests it, then lit by the sun in the
+// linear space of the view and fogged as the view says.
 
 struct Camera {
     view_proj: mat4x4<f32>,
-    // The direction towards the sun, its colour, and the light everywhere.
+    // The direction towards the sun, its colour on the ground and the light everywhere, in gamma.
     sun: vec4<f32>,
     sun_colour: vec4<f32>,
     ambient: vec4<f32>,
     // The eye, and how far an instance is drawn: this many times its radius.
     eye: vec4<f32>,
-    // The colour of the fog; where it starts, its middle and where it covers all, on the ground.
+    // The colour of the fog; where it starts, its middle and where it covers all, and the rate of
+    // the game's fog, 0 for the editor's.
     fog_colour: vec4<f32>,
     fog: vec4<f32>,
     // The axes of the camera, across, up and back.
@@ -21,9 +22,8 @@ struct Camera {
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
-// The share of the fog at its middle; the least radius an instance's reach counts; the alpha under
-// which a pixel of a batch without an alpha key is not drawn.
-const NEAR_FOG: f32 = 0.55;
+// The least radius an instance's reach counts; the alpha under which a pixel of a batch without an
+// alpha key is not drawn.
 const LEAST_RADIUS: f32 = 1.0;
 const LEAST_ALPHA: f32 = 1.0 / 255.0;
 
@@ -115,12 +115,6 @@ fn coordinates(source: u32, first: vec2<f32>, second: vec2<f32>, env: vec2<f32>,
     return vec2<f32>(dot(u, point), dot(v, point));
 }
 
-fn fog_amount(position: vec3<f32>) -> f32 {
-    let distance = length(position.xy - camera.eye.xy);
-    return NEAR_FOG * smoothstep(camera.fog.x, camera.fog.y, distance)
-        + (1.0 - NEAR_FOG) * smoothstep(camera.fog.y, camera.fog.z, distance);
-}
-
 // The colour of the fog of a batch but a mod2x one: the view's, black, or white.
 fn fog_colour(mode: f32) -> vec3<f32> {
     if mode > 1.5 {
@@ -165,13 +159,6 @@ fn combine(shader: u32, colour: vec4<f32>, one: vec4<f32>, two: vec4<f32>) -> ve
     }
 }
 
-// The linear value of a value in gamma, as an sRGB target encodes it back.
-fn linear(gamma: vec3<f32>) -> vec3<f32> {
-    let low = gamma / 12.92;
-    let high = pow((gamma + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
-    return select(high, low, gamma <= vec3<f32>(0.04045));
-}
-
 // The pixel of a batch whose textures are `combined` in gamma, `element` the alpha of the batch and
 // its instance; `flags` its alpha key (0 for none), whether unlit and unfogged, and the colour of its
 // fog (0 the view's, 1 black, 2 white, 3 grey for mod2x). Not drawn under its alpha as WotLK tests
@@ -189,11 +176,10 @@ fn shade(combined: vec4<f32>, element: f32, flags: vec4<f32>, normal: vec3<f32>,
         let gamma = mix(combined.rgb, vec3<f32>(0.5), fog);
         return vec4<f32>(pow(gamma * 2.0, vec3<f32>(2.2)) * 0.5, alpha);
     }
-    // In the linear space of the view, as the terrain: lit, then fogged.
+    // In the linear space of the view, as the terrain: lit, then fogged as the view mixes its fog.
     var rgb = linear(clamp(combined.rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
     if flags.y < 0.5 {
-        let lit = max(dot(normalize(normal), camera.sun.xyz), 0.0);
-        rgb = rgb * (camera.ambient.rgb + camera.sun_colour.rgb * lit);
+        rgb = rgb * light(normal);
     }
-    return vec4<f32>(mix(rgb, fog_colour(flags.w), fog), alpha);
+    return vec4<f32>(fog_mix(rgb, fog_colour(flags.w), fog), alpha);
 }

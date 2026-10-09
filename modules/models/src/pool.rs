@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use uniwow_api::arena::Arena;
 use uniwow_api::texture_arrays::TextureArrays;
-use uniwow_api::viewport::Target;
+use uniwow_api::viewport::{self, Target};
 use uniwow_api::{bytemuck, wgpu};
 
 use crate::gpu::{State, Vertex};
@@ -47,7 +47,13 @@ pub const ENTRY: u64 = 8;
 /// The shader of the pool, after `common.wgsl` and `skin.wgsl`: its bindings, its arrays read by
 /// slot, its entry points.
 fn shader(slots: usize) -> String {
-    let mut source = String::from(include_str!("common.wgsl"));
+    let mut source = [
+        viewport::LINEAR_WGSL,
+        viewport::FOG_WGSL,
+        viewport::LIGHT_WGSL,
+        include_str!("common.wgsl"),
+    ]
+    .concat();
     source.push_str(include_str!("skin.wgsl"));
     source.push_str(include_str!("pool.wgsl"));
     for slot in 0..slots {
