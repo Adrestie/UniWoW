@@ -100,7 +100,9 @@ impl Service {
                 device,
                 queue,
                 "models instances",
-                wgpu::BufferUsages::VERTEX,
+                // Read as the vertices of the instances, and by the choice and the shaders of the
+                // pool where each owner's are.
+                wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE,
                 size_of::<InstanceGpu>() as u64,
                 1 << 12,
             ))

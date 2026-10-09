@@ -28,7 +28,7 @@ use uniwow_api::viewport::{Drawing, Layer, LayerStats, Phase, Pyramid, Target, V
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
 use crate::animator::{Animated, AnimationStats};
-use crate::choice::{Blended, Choice, GroupOfFrame, Move, Section, Tables};
+use crate::choice::{Blended, Choice, GroupOfFrame, Move, Tables};
 use crate::gpu::{CAMERA, Shared, State, camera_values};
 use crate::groups::Published;
 use crate::loading::{LookGpu, Ready};
@@ -123,7 +123,7 @@ pub struct OwnerPlan {
     pub own: Vec<usize>,
     /// The instances of the pooled groups.
     pub instances: u64,
-    /// The instances its groups take in the buffer of the frame: to the end of the last.
+    /// The instances its groups take from where its own begin in the arena: to the end of the last.
     pub used: u32,
 }
 
@@ -198,8 +198,6 @@ struct Drawn {
     buffer: Arc<wgpu::Buffer>,
     first: u32,
     instances: std::ops::Range<u32>,
-    /// Where its owner's instances begin in the buffer of the frame.
-    base: u32,
     level: usize,
     distance: f32,
     blended: bool,
@@ -407,12 +405,10 @@ impl Layer for ModelsLayer {
         let levels = std::mem::take(&mut self.levels);
         let mut drawn = Vec::new();
         let mut layouts = Vec::new();
-        let mut owners: Vec<(Arc<wgpu::Buffer>, u32, Section)> = Vec::new();
         let mut bone_moves: Vec<Move> = Vec::new();
         let mut chosen = Vec::new();
         let mut candidates: Vec<(f32, BlendedKey, Blended, bool)> = Vec::new();
         let (mut instances, mut groups, mut seen) = (0u64, 0usize, 0usize);
-        let mut base = 0u32;
         // The owners animated as the thread saw them, with where the table of their bones begins.
         let snapshots: HashMap<u32, (&Arc<crate::groups::Published>, u32, u32)> = animated
             .iter()
@@ -444,7 +440,7 @@ impl Layer for ModelsLayer {
             let first = written.first();
             groups += published.groups.len();
             // An owner hidden, then one out of reach or out of sight by its bounds, is not given to
-            // the frame, its instances nor its bones copied.
+            // the frame, nor its bones copied.
             if !slot.shown.load(Ordering::Relaxed) {
                 present.insert(slot.number);
                 continue;
@@ -487,15 +483,14 @@ impl Layer for ModelsLayer {
                 }
             };
             let used = plan.used;
-            owners.push((buffer.clone(), first, (slot.number, published.layout, base, used)));
             if let Some((at, count)) = table
                 && count.min(used) > 0
             {
-                bone_moves.push((u64::from(at) * 4, u64::from(base) * 4, u64::from(count.min(used)) * 4));
+                bone_moves.push((u64::from(at) * 4, u64::from(first) * 4, u64::from(count.min(used)) * 4));
             }
             // From the pool: every group given to the GPU, which chooses each instance in sight.
             chosen.extend(plan.pooled.iter().map(|group| GroupOfFrame {
-                first: base + group.first,
+                first: first + group.first,
                 ..*group
             }));
             seen += plan.pooled.len();
@@ -520,7 +515,7 @@ impl Layer for ModelsLayer {
                         view.eye.distance(origin),
                         (slot.number, published.layout, at),
                         Blended {
-                            index: base + at,
+                            index: first + at,
                             slot: look_slot,
                         },
                         beyond(origin),
@@ -552,13 +547,11 @@ impl Layer for ModelsLayer {
                     buffer: buffer.clone(),
                     first,
                     instances: group.first..group.first + group.count,
-                    base,
                     level,
                     distance,
                     beyond: beyond((group.low + group.high) * 0.5),
                 });
             }
-            base += used;
         }
         self.owner_bounds.retain(|number, _| present.contains(number));
         self.plans.retain(|number, _| present.contains(number));
@@ -626,7 +619,7 @@ impl Layer for ModelsLayer {
                 let bones = animated.as_ref().map(|animated| (animated.buffer.clone(), bone_moves));
                 let made = choice.frame(
                     &gpu.queue,
-                    &owners,
+                    arena.clone(),
                     bones,
                     &chosen,
                     [&beyond_water, &near_water],
@@ -801,12 +794,9 @@ impl Layer for ModelsLayer {
         let (Some((_, camera)), Some(pool)) = (&self.camera, self.pool()) else {
             return;
         };
-        // The looks of their own posed from the instances of the frame and its table of bones, once
-        // made; at rest from their owner's buffer before.
-        let frame = match (&self.choice, &self.skin_group) {
-            (Some(choice), Some((skin, _))) if choice.tables.is_some() => {
-                choice.buffers().map(|(instances, _)| (instances, skin))
-            }
+        // The looks of their own posed by the table of the bones, once made; at rest before.
+        let posing = match (&self.choice, &self.skin_group) {
+            (Some(choice), Some((skin, _))) if choice.tables.is_some() => Some(skin),
             _ => None,
         };
         let pooled = match (
@@ -843,26 +833,14 @@ impl Layer for ModelsLayer {
                     if !bound {
                         pass.set_bind_group(0, camera, &[]);
                         pass.set_vertex_buffer(0, model.vertices.slice(..));
-                        match frame {
-                            Some((instances, posing)) => {
-                                pass.set_vertex_buffer(1, instances.slice(..));
-                                pass.set_bind_group(2, posing, &[]);
-                            }
-                            None => {
-                                pass.set_vertex_buffer(1, group.buffer.slice(..));
-                                pass.set_bind_group(2, &pool.rest, &[]);
-                            }
-                        }
+                        pass.set_vertex_buffer(1, group.buffer.slice(..));
+                        pass.set_bind_group(2, posing.unwrap_or(&pool.rest), &[]);
                         pass.set_index_buffer(skin.indices.slice(..), skin.format);
                         bound = true;
                     }
-                    let instances = match frame {
-                        Some(_) => group.base + group.instances.start..group.base + group.instances.end,
-                        None => group.in_arena(),
-                    };
                     pass.set_pipeline(&batch.pipeline);
                     pass.set_bind_group(1, &batch.group, &[]);
-                    pass.draw_indexed(batch.indices.clone(), 0, instances);
+                    pass.draw_indexed(batch.indices.clone(), 0, group.in_arena());
                 }
             }
         }

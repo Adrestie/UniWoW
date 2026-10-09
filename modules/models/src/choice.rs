@@ -196,7 +196,7 @@ impl Tables {
     }
 }
 
-/// A group in sight, as the GPU reads it: its first instance in the buffer of the frame, its count,
+/// A group given, as the GPU reads it: its first instance in the arena of the instances, its count,
 /// the slot of its look.
 #[derive(Clone, Copy, Debug)]
 pub struct GroupOfFrame {
@@ -206,18 +206,14 @@ pub struct GroupOfFrame {
 }
 
 /// An instance of a look with blended batches, in the order its templates are drawn: its place in
-/// the buffer of the frame and the slot of its look.
+/// the arena of the instances and the slot of its look.
 #[derive(Clone, Copy, Debug)]
 pub struct Blended {
     pub index: u32,
     pub slot: u32,
 }
 
-/// An owner's instances in the buffer of the frame: its number, its layout, where they begin, how
-/// many.
-pub type Section = (u32, u64, u32, u32);
-
-/// Where an owner's levels or the table of its bones move, in bytes: from, to, how many.
+/// Where the table of an owner's bones goes, in bytes: from, to, how many.
 pub type Move = (u64, u64, u64);
 
 const FREE: u8 = 0;
@@ -287,8 +283,10 @@ pub struct Choice {
     /// record drawn otherwise, those without instances drawing none.
     pub packed: bool,
     pub tables: Option<Arc<Tables>>,
-    instances: Option<wgpu::Buffer>,
-    /// For each instance of the frame, its first bone plus one, 0 at rest: copied from the tables
+    /// The arena of the owners' instances, read where each owner's are, and its generation: a new
+    /// buffer once it grew.
+    arena: Option<(Arc<wgpu::Buffer>, u64)>,
+    /// For each instance of the arena, its first bone plus one, 0 at rest: copied from the tables
     /// of the owners the thread of the animations wrote, from its buffer.
     bone_table: Option<wgpu::Buffer>,
     bones: Option<(Arc<wgpu::Buffer>, Vec<Move>)>,
@@ -296,14 +294,12 @@ pub struct Choice {
     work: Option<wgpu::Buffer>,
     entries: Option<wgpu::Buffer>,
     args: Option<wgpu::Buffer>,
-    /// The levels, written in turn: `last` the one written by the frame before, of the owners'
-    /// sections then.
+    /// The levels of the instances of the arena, written in turn: `last` the one written by the
+    /// frame before.
     levels: [Option<wgpu::Buffer>; 2],
     last: usize,
-    sections: Vec<Section>,
-    /// When the sections changed: the buffer of the levels before, and where each owner kept
-    /// moves (from, to, bytes).
-    moved: Option<(wgpu::Buffer, Vec<Move>)>,
+    /// Once the arena grew, the levels before, copied into the new buffer read at the next frame.
+    carried: Option<wgpu::Buffer>,
     /// The bind groups of the choice, by the buffer of levels written; made again with the buffers.
     bind_groups: Option<[wgpu::BindGroup; 2]>,
     /// What this frame chooses from: its groups, its templates, its blocks of records, the offsets
@@ -317,7 +313,6 @@ pub struct Choice {
     /// those on the eye's side.
     pub blended_regions: Vec<(State, u32, u32)>,
     beyond_regions: usize,
-    copies: Vec<(Arc<wgpu::Buffer>, u64, u64, u64)>,
     readbacks: Vec<Readback>,
     pub drawn: Drawn,
 }
@@ -422,7 +417,7 @@ impl Choice {
             }),
             packed,
             tables: None,
-            instances: None,
+            arena: None,
             bone_table: None,
             bones: None,
             frames: None,
@@ -431,8 +426,7 @@ impl Choice {
             args: None,
             levels: [None, None],
             last: 0,
-            sections: Vec::new(),
-            moved: None,
+            carried: None,
             bind_groups: None,
             groups: 0,
             templates: 0,
@@ -440,7 +434,6 @@ impl Choice {
             work_offsets: [0; 5],
             blended_regions: Vec::new(),
             beyond_regions: 0,
-            copies: Vec::new(),
             readbacks: (0..3)
                 .map(|_| Readback {
                     buffer: device.create_buffer(&wgpu::BufferDescriptor {
@@ -501,26 +494,26 @@ impl Choice {
         }
     }
 
-    /// The buffers the vertex shader reads: the instances of the frame and the entries.
+    /// The buffers the vertex shader reads: the arena of the instances and the entries.
     pub fn buffers(&self) -> Option<(&wgpu::Buffer, &wgpu::Buffer)> {
-        Some((self.instances.as_ref()?, self.entries.as_ref()?))
+        Some((&*self.arena.as_ref()?.0, self.entries.as_ref()?))
     }
 
-    /// Where the bones of each instance of the frame begin, plus one.
+    /// Where the bones of each instance of the arena begin, plus one.
     pub fn bone_table(&self) -> Option<&wgpu::Buffer> {
         self.bone_table.as_ref()
     }
 
-    /// The frame: the owners' instances (each the arena, where its own begin there, and its
-    /// section) to copy into one buffer, and the tables of their bones from the buffer of the
-    /// animations (where each owner's begins, where it goes, its bytes), the groups in sight, the
-    /// instances of looks with blended batches in the order they are drawn; its tables of the frame
-    /// and its parameters written. Whether a buffer the vertex shader reads was made again.
+    /// The frame: the arena of the owners' instances and its generation, each instance read where
+    /// its owner's are there; the tables of their bones from the buffer of the animations (where
+    /// each owner's begins, where it goes in the arena, its bytes); the groups given, the instances
+    /// of looks with blended batches in the order they are drawn; its tables of the frame and its
+    /// parameters written. Whether a buffer the vertex shader reads was made again.
     #[allow(clippy::too_many_arguments)]
     pub fn frame(
         &mut self,
         queue: &wgpu::Queue,
-        owners: &[(Arc<wgpu::Buffer>, u32, Section)],
+        arena: Option<(Arc<wgpu::Buffer>, u64)>,
         bones: Option<(Arc<wgpu::Buffer>, Vec<Move>)>,
         groups: &[GroupOfFrame],
         blended: [&[Blended]; 2],
@@ -528,25 +521,13 @@ impl Choice {
         eye: Vec3,
         reach: f32,
     ) -> bool {
-        let Some(tables) = &self.tables else {
+        let (Some(tables), Some(arena)) = (&self.tables, arena) else {
             return false;
         };
-        let instances: u32 = owners
-            .iter()
-            .map(|(_, _, (_, _, base, used))| base + used)
-            .max()
-            .unwrap_or(0);
-        self.copies = owners
-            .iter()
-            .map(|(buffer, first, (_, _, base, used))| {
-                (
-                    buffer.clone(),
-                    u64::from(*first) * INSTANCE,
-                    u64::from(*used) * INSTANCE,
-                    u64::from(*base) * INSTANCE,
-                )
-            })
-            .collect();
+        // Every instance of the arena may be chosen, by its place there.
+        let places = (arena.0.size() / INSTANCE) as u32;
+        let new_arena = self.arena.as_ref().is_none_or(|(_, generation)| *generation != arena.1);
+        self.arena = Some(arena);
         // The templates: the instances beyond the water, then those on the eye's side; of each
         // part each blended state in the order drawn, its instances in theirs, for each a template
         // at each level.
@@ -643,25 +624,21 @@ impl Choice {
         let device = self.device.clone();
         let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
         let indirect = wgpu::BufferUsages::INDIRECT;
-        let read = sized(
-            &device,
-            &mut self.instances,
-            u64::from(instances.max(1)) * INSTANCE,
-            storage | wgpu::BufferUsages::VERTEX,
-            "models instances of the frame",
-        ) | sized(
-            &device,
-            &mut self.entries,
-            entries.max(1) * ENTRY,
-            storage,
-            "models entries of the frame",
-        ) | sized(
-            &device,
-            &mut self.bone_table,
-            u64::from(instances.max(1)) * 4,
-            storage,
-            "models bone table of the frame",
-        );
+        let read = new_arena
+            | sized(
+                &device,
+                &mut self.entries,
+                entries.max(1) * ENTRY,
+                storage,
+                "models entries of the frame",
+            )
+            | sized(
+                &device,
+                &mut self.bone_table,
+                u64::from(places.max(1)) * 4,
+                storage,
+                "models bone table of the arena",
+            );
         self.bones = bones;
         let mut made = read;
         made |= sized(
@@ -685,14 +662,16 @@ impl Choice {
             wgpu::BufferUsages::STORAGE | indirect | wgpu::BufferUsages::COPY_SRC,
             "models draws of the frame",
         );
-        // The levels before, where each owner kept had them, when the sections changed.
-        let level_bytes = u64::from(instances.max(1)) * 4;
+        // The levels of the instances of the arena; once it grew, those before carried over, the
+        // places there kept.
+        let level_bytes = u64::from(places.max(1)) * 4;
         let before = self.levels[self.last].clone();
         let grown = self
             .levels
             .iter()
             .any(|buffer| buffer.as_ref().is_none_or(|buffer| buffer.size() < level_bytes));
         if grown {
+            self.carried = before;
             self.levels = std::array::from_fn(|_| {
                 Some(device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("models levels"),
@@ -703,24 +682,6 @@ impl Choice {
             });
             made = true;
         }
-        let sections: Vec<Section> = owners.iter().map(|(_, _, section)| *section).collect();
-        self.moved = None;
-        if (grown || sections != self.sections)
-            && let Some(before) = before
-        {
-            let moves = sections
-                .iter()
-                .filter_map(|(number, layout, base, used)| {
-                    self.sections
-                        .iter()
-                        .find(|kept| (kept.0, kept.1, kept.3) == (*number, *layout, *used))
-                        .map(|kept| (u64::from(kept.2) * 4, u64::from(*base) * 4, u64::from(*used) * 4))
-                })
-                .filter(|(_, _, bytes)| *bytes > 0)
-                .collect();
-            self.moved = Some((before, moves));
-        }
-        self.sections = sections;
         if made {
             self.bind_groups = None;
         }
@@ -754,7 +715,7 @@ impl Choice {
         if self.bind_groups.is_none() {
             let tables = self.tables.as_ref()?;
             let levels = [self.levels[0].as_ref()?, self.levels[1].as_ref()?];
-            let buffers = [self.instances.as_ref()?, &tables.buffer, self.frames.as_ref()?];
+            let buffers = [&*self.arena.as_ref()?.0, &tables.buffer, self.frames.as_ref()?];
             let (work, entries, args) = (self.work.as_ref()?, self.entries.as_ref()?, self.args.as_ref()?);
             let group = |written: usize| {
                 self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -805,22 +766,19 @@ impl Choice {
         self.bind_groups.as_ref()
     }
 
-    /// The computing of the frame before its first pass: the owners' instances copied, the levels
-    /// before put where the owners are now, the instances drawn at the frame before chosen, their
+    /// The computing of the frame before its first pass: the tables of the bones put where their
+    /// owners' instances are in the arena, the instances drawn at the frame before chosen, their
     /// draws packed and their entries written.
     pub fn compute(&mut self, encoder: &mut wgpu::CommandEncoder) {
-        let (Some(instances), Some(work), Some(read), Some(written)) = (
-            self.instances.clone(),
+        let (Some(work), Some(read), Some(written)) = (
             self.work.clone(),
             self.levels[self.last].clone(),
             self.levels[1 - self.last].clone(),
         ) else {
             return;
         };
-        for (buffer, from, bytes, at) in &self.copies {
-            if *bytes > 0 {
-                encoder.copy_buffer_to_buffer(buffer, *from, &instances, *at, *bytes);
-            }
+        if let Some(before) = self.carried.take() {
+            encoder.copy_buffer_to_buffer(&before, 0, &read, 0, before.size().min(read.size()));
         }
         if let Some(table) = &self.bone_table {
             encoder.clear_buffer(table, 0, None);
@@ -830,19 +788,9 @@ impl Choice {
                 }
             }
         }
-        // The buffer written by the frame before is read; when the owners moved, it is first made
-        // of what each owner kept, from where it was.
-        let mut reading = self.last;
-        if let Some((before, moves)) = self.moved.take() {
-            encoder.clear_buffer(&written, 0, None);
-            for (from, to, bytes) in moves {
-                encoder.copy_buffer_to_buffer(&before, from, &written, to, bytes);
-            }
-            reading = 1 - self.last;
-        }
-        let writing = 1 - reading;
-        let target = if writing == self.last { &read } else { &written };
-        encoder.clear_buffer(target, 0, None);
+        // The buffer written by the frame before is read, the other written.
+        let writing = 1 - self.last;
+        encoder.clear_buffer(&written, 0, None);
         encoder.clear_buffer(&work, 0, None);
         self.last = writing;
         let (groups, templates, blocks) = (self.groups, self.templates, self.blocks_count);
@@ -1006,10 +954,5 @@ impl Choice {
             (u64::from(self.work_offsets[3]) + tables.regions.len() as u64) * 4,
         );
         (args, counts[self.work_offsets[3] as usize..].to_vec())
-    }
-
-    /// The owners given to the frame, where their instances are copied.
-    pub fn sections(&self) -> &[Section] {
-        &self.sections
     }
 }

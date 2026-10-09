@@ -6024,6 +6024,30 @@ Decided by the user, after the walk: the groups and the steering first.
   the releases are decided again on. 23 changes made on purpose: 22 made a test fail, the last, a
   width of the rows other than the dispatch's, being the same as it in the test.
 
+#### The instances read where they are in the arena
+
+Asked by the user after the groups and the steering: the copies of each owner's instances into a
+buffer of the frame, a command a copy at each frame (about 1.7 ms of the interface thread in the
+crowded views), made no more.
+
+- The choice and the shaders of the pool read each instance where its owner's are in the arena of
+  the instances (`STORAGE` too now), the groups given and the blended instances by those places:
+  nothing is copied, whatever the owners in sight. The levels of the frame before and the table of
+  the bones are of the size of the arena, the tables of the bones of the animated owners copied
+  where their instances are there; once the arena grows, the places kept, the levels before are
+  carried over into the new buffers. A range given back is placed again only once the frames that
+  drew it no longer hold its publication, its places read as 0 by then. The arena of the instances
+  is now as large as a binding of storage takes at most (`max_storage_buffer_binding_size`, up to
+  2 GB asked of the device by the kernel).
+- The looks of their own read their instances from the arena as before, posed by the same table.
+- **Tested**: an owner, then another whose instances make the arena grow, each drawn where it
+  stands; a level kept across the growth of the arena; the tests of the groups, of the blended, of the bones and of the levels, as before. 8
+  changes made on purpose: 6 made a test fail; of the 2 left, the arena kept from an earlier frame
+  now fails, and the one saying a new buffer of the arena, the table of the bones growing with it,
+  is the same as the code in every case the arena gives; the levels not carried over, added after
+  the review, fails. Reviewed by another instance: nothing serious or middling; light points
+  taken: the levels carried over once the arena grows, comments and this section set right.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

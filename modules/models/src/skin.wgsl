@@ -1,7 +1,8 @@
 // The vertices posed by their bones and their materials as they move (after common.wgsl), as the
 // thread of the animations wrote them for the frame.
 
-// For each instance of the frame, where its first bone begins plus one, in vectors; 0 at rest.
+// For each instance of the arena, by its place there, where its first bone begins plus one, in
+// vectors; 0 at rest.
 @group(2) @binding(0) var<storage, read> bone_table: array<u32>;
 // The bones, each the first three rows of its matrix; the slots of the materials of an instance
 // before its first, each its colour then the rows of the transforms of its two textures.
@@ -12,7 +13,7 @@ struct Posed {
     normal: vec3<f32>,
 };
 
-// The first bone, plus one, of the instance `index` of the frame.
+// The first bone, plus one, of the instance at `index` in the arena.
 fn first_bone(index: u32) -> u32 {
     return bone_table[index];
 }

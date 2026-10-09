@@ -1,6 +1,6 @@
 // The models drawn from what they share (after common.wgsl and skin.wgsl): for each instance
 // drawn, by the number of its draw (`instance_index`, its first instance pointing into the entries
-// of the frame), its entry gives its instance among those of the frame and its material; its
+// of the frame), its entry gives its place in the arena of the instances and its material; its
 // vertices are posed by its bones when the thread of the animations wrote them; its textures are
 // read from the arrays by slot (the bindings of the arrays and `sampled` follow, written for the
 // count of slots).

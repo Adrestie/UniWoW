@@ -227,6 +227,51 @@ fn an_owner_is_planned_again_once_the_tables_or_the_looks_held_change() {
 }
 
 #[test]
+fn the_instances_are_read_where_they_are_in_the_arena_once_it_grew() {
+    let fake = Fake {
+        model: Some({
+            let mut model = square(0, 0);
+            model.textures[0].source = ModelTextureSource::Filled(11);
+            model
+        }),
+        textures: colours(),
+        ..Fake::default()
+    };
+    let Some(mut pooled) = Pooled::new(pool::SLOTS) else {
+        return;
+    };
+    for file in ["red.blp", "green.blp"] {
+        assert!(pooled.add(&fake, &skin(file)));
+    }
+    let bench = &mut pooled.bench;
+    bench
+        .service
+        .place("first", &[instance(1, 0, Vec3::new(0.0, -1.5, 0.0), 0.5)]);
+    let image = settled(bench, FRONT, AIM);
+    assert!(only(pixel(&image, LEFT.0, LEFT.1), 0));
+    let held = bench.service.instances().expect("made").buffer().expect("written").1;
+    // An owner of more instances than the arena held: a new buffer, its last instance in sight.
+    let mut many: Vec<_> = (0..5_000u64)
+        .map(|at| instance(at + 2, 1, Vec3::new(-crate::groups::TILE * 2.0, 0.0, 0.0), 0.5))
+        .collect();
+    many.push(instance(1, 1, Vec3::new(0.0, 1.5, 0.0), 0.5));
+    bench.service.place("many", &many);
+    let grown = bench.service.instances().expect("made").buffer().expect("written").1;
+    assert_ne!(grown, held, "the arena grew");
+    let image = settled(bench, FRONT, AIM);
+    assert!(
+        only(pixel(&image, LEFT.0, LEFT.1), 0),
+        "{:?}",
+        pixel(&image, LEFT.0, LEFT.1)
+    );
+    assert!(
+        only(pixel(&image, RIGHT.0, RIGHT.1), 1),
+        "{:?}",
+        pixel(&image, RIGHT.0, RIGHT.1)
+    );
+}
+
+#[test]
 fn more_groups_than_a_side_of_a_dispatch_are_all_chosen() {
     let fake = Fake {
         model: Some(square(0, 0)),
@@ -283,6 +328,36 @@ fn the_level_of_an_instance_is_kept_until_past_its_limit_by_the_margin() {
     settled(&mut pooled.bench, FRONT, AIM);
     let stats = pooled.bench.layer.stats();
     assert!(stats.items.contains("levels [0, 1, 0, 0]"), "{}", stats.items);
+}
+
+#[test]
+fn a_level_is_kept_once_the_arena_grows() {
+    let fake = Fake {
+        model: Some(levelled((PLAIN, 0))),
+        textures: levels_textures(),
+        ..Fake::default()
+    };
+    let Some(mut pooled) = Pooled::new(pool::SLOTS) else {
+        return;
+    };
+    assert!(pooled.add(&fake, &look("square.m2")));
+    let bench = &mut pooled.bench;
+    for ratio in [42.0, 38.0] {
+        bench.service.place("test", &[instance(1, 0, at_ratio(ratio), 1.0)]);
+        render(bench, FRONT, AIM);
+    }
+    // Another owner of more instances than the arena held, out of sight: a new buffer.
+    let held = bench.service.instances().expect("made").buffer().expect("written").1;
+    let many: Vec<_> = (0..5_000u64)
+        .map(|at| instance(at + 1, 0, Vec3::new(-crate::groups::TILE * 2.0, 0.0, 0.0), 1.0))
+        .collect();
+    bench.service.place("many", &many);
+    assert_ne!(
+        bench.service.instances().expect("made").buffer().expect("written").1,
+        held
+    );
+    let seen = middle(&render(bench, FRONT, AIM));
+    assert_eq!(level_seen(seen), 1, "kept at 38 radii, carried over");
 }
 
 #[test]
@@ -498,7 +573,7 @@ fn an_owner_out_of_sight_is_not_given_to_the_frame() {
         return;
     };
     assert!(pooled.add(&fake, &look("square.m2")));
-    // An owner beside the view, another in sight: the second alone in the frame, from its start.
+    // An owner beside the view, another in sight: the second alone given to the GPU.
     pooled
         .bench
         .service
@@ -509,22 +584,16 @@ fn an_owner_out_of_sight_is_not_given_to_the_frame() {
         .place("seen", &[instance(2, 0, Vec3::new(-2.0, 0.0, 0.0), 1.0)]);
     let image = settled(&mut pooled.bench, FRONT, AIM);
     assert!(only(middle(&image), 0), "{:?}", middle(&image));
-    let given = |pooled: &mut Pooled| {
-        let choice = pooled.bench.layer.choice().expect("with the pool");
-        choice
-            .sections()
-            .iter()
-            .map(|section| (section.2, section.3))
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(given(&mut pooled), [(0, 1)]);
+    let items = pooled.bench.layer.stats().items;
+    assert!(items.contains("1 instances in 1 groups given of 2"), "{items}");
     // Both in sight, both given.
     pooled
         .bench
         .service
         .place("aside", &[instance(1, 0, Vec3::new(-2.0, 0.5, 0.0), 1.0)]);
     render(&mut pooled.bench, FRONT, AIM);
-    assert_eq!(given(&mut pooled), [(0, 1), (1, 1)]);
+    let items = pooled.bench.layer.stats().items;
+    assert!(items.contains("2 instances in 2 groups given of 2"), "{items}");
 }
 
 #[test]

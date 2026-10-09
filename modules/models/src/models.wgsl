@@ -1,7 +1,7 @@
 // The models drawn with buffers and textures of their own (after common.wgsl, and skin.wgsl with
 // the pool or rest.wgsl without): a batch of a model for every instance of a group, its instances
-// read as vertices, its one or two textures and what its shader reads bound for it; with the pool,
-// its instances are those of the frame, its vertices posed by their bones.
+// read as vertices from the arena of the instances, its one or two textures and what its shader
+// reads bound for it; with the pool, its vertices posed by their bones.
 
 struct Batch {
     // Its colour and transparency at rest, its weight included.
