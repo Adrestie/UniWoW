@@ -6137,6 +6137,156 @@ covers a whole chunk under another, the two were added.
   what the tile stores where it holds shares; light points taken: a name no longer hiding the
   function, the shares of texels each by itself, the layers without 0x100 counted in the client.
 
+#### Step 9.7, proposed: the light of the map
+
+Asked by the user after the blending of the textures. Until now the light is fixed: a sun of 0.55
+and an ambient light of 0.45 (`Sun::default`), a grey-blue fog whose colour is also the sky, the
+water coloured by values taken from captures at noon, no hour. Every step since 9.2 left its part
+of the light here: the colours of the terrain, the models, the buildings and the water, the sky,
+the glow of the buildings at night, the insides and the lights of the buildings (`MOLT`), the
+doodads inside, the highlights, the fog under the water, and the lighting in gamma of the client
+where the editor lights in linear (9.4c2).
+
+**Checked before proposing**, by probes not kept over the client of `E:` (marked *client*), and in
+the sources of Noggit, read for the facts only (marked *Noggit*; *Noggit, of the client* where its
+comments say they come from the client's code):
+
+- **The tables** (*client*, their fields as *Noggit* reads them): `Light.dbc`, 771 lights: an id,
+  a map, a position and two radii, eight `LightParams`. `LightParams.dbc`, 859: whether the sky is
+  highlighted, a `LightSkybox`, a type of cloud, a full-screen glow, the alphas of the river and of
+  the ocean, shallow and deep. `LightIntBand.dbc`, 15,460 bands of colours, 18 by params (the band
+  `i` of the params `p` the id `18 p − 17 + i`; the params 477 lack two of theirs), and
+  `LightFloatBand.dbc`, 5,154 bands of numbers, 6 by params (`6 p − 5 + i`): up to 16 keys a band, a
+  time each in half-minutes from midnight (2,880 a day) and a colour `0x00RRGGBB` or a number, read
+  between two keys linearly, past the last towards the first of the next day. `LightSkybox.dbc`,
+  156: a model of the sky and its flags (0x1 its animation follows the hour, 0x2 the stars and the
+  sky drawn under it).
+- **The bands** (*Noggit*): colours 0 the light of the sun on the ground (diffuse), 1 the ambient
+  light, 2 to 6 the sky from its top to the horizon, 7 the fog (and the mountains of the horizon), 8
+  the opacity of the shadows (perhaps unused in 3.3.5a), 9 the sun (its highlights and rays too), 10
+  its halo, 11 to 13 the clouds (13 perhaps unused), 14 and 15 the ocean shallow and deep, 16 and 17
+  the river. Numbers: 0 where the fog ends (in 36ths of a yard), 1 where it begins, a share of its
+  end (0 in a local light meaning no fog given, the lights before kept; in the global one, 180
+  yards and 0.1), 2 the glow of the sun and moons through the clouds, 3 the density of the clouds,
+  4 and 5 unknown. A band absent or without keys gives black in Noggit.
+- **A light at a place**: a map has at most one global light, at the position 0, 0, 0 (*client*:
+  Azeroth 1, Kalimdor 191, Outland 374, Northrend 752, never two; *Noggit* falls back to the light 1
+  for a map without one, which 9.7a1 does too), and local ones, spheres in the axes of the file and
+  in 36ths of a yard (world = 17,066⅔ − z / 36, 17,066⅔ − x / 36, y / 36, as the doodads; *client*:
+  from 18 to 2,650 yards; 339 inner and 506 outer at the median in Azeroth), weighing 1 within
+  their inner radius and falling linearly to 0 at their outer one (*Noggit*). As *Noggit* mixes
+  them, by the distance from the eye in three dimensions: the global light first, then each local
+  one the eye is within, the farthest first, mixed in by its weight; what the client does where two
+  overlap is not established. Of the eight params (*Noggit*): clear weather, then under the water,
+  storm, storm under the water, death; *Noggit* draws with the first, its editor of lights choosing
+  another for one light. Northrend has, besides, eleven zones of light by polygons that 3.3.5a holds
+  in its code (*Noggit*; moved to a table in 4.0): their lights (825, 914, 959…) are spheres of 6 to
+  13 yards (*client*), reached only through those polygons, which are in none of its files; until
+  9.7e, Northrend differs from the game, those small spheres counted as local lights.
+- **The global light of Azeroth at noon** (*client*, as stored): diffuse 255, 136, 0, ambient 104,
+  130, 154, sky top 0, 31, 73, fog 77, 120, 143, ocean 17, 75, 89 and 0, 29, 41; the fog from 125 to
+  500 yards; that of Northrend ends at 889. The editor draws to the whole map: the game's distances
+  would hide all but the first 500 yards.
+- **The lighting** (*Noggit*, its constants seemingly the client's): the ambient light from × 0.9 on
+  a face turned away from the sun (Noggit bounds the angle; whether the client does is not
+  established) to × 1.1 on one facing it, plus the diffuse by the angle, the texture lit bounded to
+  1; in gamma, as the client lights. With the colours above, a face lit by the sun at noon comes to
+  1.45, 1.09, 0.66 in gamma, about twice as bright in red and green, in linear, as the editor's sum
+  in linear of the same colours: the space and the formula are to be decided.
+- **The sun** (*Noggit*, without saying where from): a table by the hour, read as Noggit reads it
+  for the models and the buildings, gives towards the sun, in the axes of the editor (north, west,
+  up): 0.565, 0.565, 0.602 at 0 h and 12 h (37° high, to the north-west), 0.664, 0.664, 0.342 at
+  6 h and 18 h (20°), never setting; Noggit reads it in other axes for the terrain (the sun then to
+  the south-east, 34° high) and turns it twice a day, neither of which is followed. The editor's
+  sun today is to the north-west too, 60° high. The side of a wall lit in a capture will tell.
+- **The fog** (*Noggit*, read in its shaders): from where it begins to where it ends by the distance
+  from the eye in three dimensions (by the depth in the view for the models), its amount 1 − ((end −
+  distance) / (end − start))^rate, the rate 1.5 plus 5.5 times what the span of the fog leaves of
+  1,583⅓ yards (791⅔ for the maps of the first game, by its comment): for Azeroth at noon about 5.7,
+  the fog at nine tenths 250 yards away. Noggit multiplies its start by its end twice, which fills
+  everything with fog, and draws none by default. The editor's fog is two smoothsteps by the
+  distance on the ground, between three distances: taking the game's would change the type `Fog` and
+  who sets it.
+- **The water and the liquids** (*client*): `LiquidType`'s field 3 is 1 for every water and ocean
+  of the world, 2 for the magmas, 3 for the slimes, 0 for three waters of instances and an orange
+  slime (the definitions of WoWDBDefs name it a bank of sounds): it does not tell the ocean from the
+  river, which *Noggit* reads from it. The oceans would be the types named so (2, 6, 10, 14) and the
+  chunks of `MCLQ` with the flag 0x8, which a capture of a lake and of the sea will check. Under its
+  surface (*client*): for the waters, a darkening down to 30 yards, of the fog and the ambient light
+  by half, of the diffuse not at all; the light 7 for the magmas, 6 for the slimes; how the client
+  applies them is not established. The alphas come from `LightParams` (correcting 9.6e, which put
+  them in `LightFloatBand`), shallow and deep, the colour added to the texture (*Noggit*).
+- **The buildings** (*Noggit, of the client*): the glow at night of their materials with the flag
+  0x10, by their emissive colour, full until 6 h, none from 7 h to 20 h 30, full again from 21 h 30.
+  The insides lit by the ambient colour of the building and the vertex colours (*Noggit*); `MOLT`
+  read, not drawn by Noggit.
+- **The sky** (*Noggit*): a dome of rings at 90°, 18°, 10°, 3°, 0°, −30° and −90°, coloured by the
+  bands 2, 3, 4, 5, 6, 7 and 7, unfogged, drawn first.
+- **The hour**: Noggit starts at noon and turns by keys; the live world receives no hour from the
+  server, whose observer would have to send it.
+
+**In six parts, each measured and reviewed before the next:**
+
+1. **9.7a1, the light of a place and an hour, not yet drawn.** The five tables read by `formats`;
+   the light of a map at a place and an hour, for the params of a slot (clear, under the water…) or
+   the light a liquid names, a pure function tested on tables the tests write, and on those of the
+   client when its folder is given; a band absent or without keys left out, not mixed in as black;
+   the hour a setting of the view; the panel says the lights mixed, their weights and the hour.
+   Nothing changes on screen.
+2. **9.7a2, the light drawn.** What the view carries (a `Light`: its 18 colours and 6 numbers
+   mixed, the alphas, the hour), the colour of the fog apart from its distances, which the terrain
+   still sets unless the fog of the game is decided; every layer lit by it, in the space and by the
+   formula decided, the sun in the direction decided; compared with captures of the game at a known
+   hour (noted on each capture), within and between local lights, outside and on a known pixel.
+   Every view validated so far changes.
+3. **9.7b, the sky**: the dome of the bands of the sky around the eye in place of the sky of the
+   fog's colour, which also fills what the holes of the terrain show (question 14 of 9.6d1), drawn
+   by the module of the light or by the terrain as decided; the mountains of the horizon in the
+   fog's colour.
+4. **9.7c, the water**: its colours and alphas from the light, the oceans by their types, checked
+   on captures; `liquids` telling the liquid over the eye (its type and the depth of the eye under
+   its surface), the view carrying them; under the surface the second params and the darkening of
+   `LiquidType`, the light of the magma and of the slime, and the distances of the fog under the
+   water as decided; the gain of the magma looked at again.
+5. **9.7d, the buildings and their doodads**: the glow at night of their materials; the light of the
+   insides (0.8 times as bright as the game's and less blue so far), between the vertex colours not
+   halved, the light of the map mixed in as later clients do, and the lights of the building
+   (`MOLT`), decided by captures; the colour of a doodad inside (`MODD`) given to `models`; the
+   highlight of the specular and metal shaders by the sun's colour.
+6. **9.7e, optional**: the models of the sky (`LightSkybox`, a building's `MOSB`), the fogs of the
+   buildings (`MFOG`), the hour of the server through the observer. The zones of light of Northrend
+   only from the user's own data of a later client, never in this repository.
+
+**To decide by the user:** where the light is computed (a module of its own, the view falling back
+to the fixed light when it is stopped, or the terrain, as 9.4 said); the space and the formula of
+the lighting (Noggit's, in gamma, then once in linear, or the editor's sum in linear); the direction
+of the sun (Noggit's table by the hour, once a day, or a fixed one for editing); the place the light
+is taken at (the eye, as Noggit, or the eye's place on the map whatever its height, the camera of
+the editor often hundreds of yards up) and a switch for the local lights; the fog (the editor's
+distances and curve, the game's by the curve of Noggit's shaders, its start corrected, or a setting
+between them; under the water, the game's?); the hour (still at noon, or turning); the parts to make
+and their order. The light of the insides is decided in 9.7d, on captures; the params of storm and
+death are left to the panel, if at all.
+
+**Decided by the user**, after the proposal:
+
+- The light in a module of its own (`lighting`), the view falling back to the fixed light when it is
+  stopped; the sky drawn by it.
+- The lighting of Noggit: the ambient light by the angle and the diffuse, in gamma as the client,
+  then once in linear before the textures are multiplied, checked on a known pixel of a capture.
+- The sun by Noggit's table, once a day, the side lit checked on a capture.
+- The light taken at the eye's place on the map, whatever its height, with a switch for the local
+  lights.
+- The fog of the game by default (its distances and the curve of Noggit's shaders, its start
+  corrected), the editor's to be chosen in the settings; under the water, the game's.
+- The hour a setting, noon by default, still, with a speed to make it turn.
+- The parts 9.7a1, 9.7a2, 9.7b, 9.7c and 9.7d in that order, each validated before the next; 9.7e
+  decided later.
+
+**Not in 9.7**: the clouds, the sun, the moons and the stars drawn; the weather; the full-screen
+glow (`LightParams`); the highlights of the terrain; the lights of the models (M2); the flag
+"window" and the diffuse colour of the materials of the buildings.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around
