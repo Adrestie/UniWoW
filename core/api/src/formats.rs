@@ -228,10 +228,22 @@ pub enum FileRef {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Wdt {
     /// The flags of `MPHD`: 0x1 a map made of one building, 0x2 vertex colours in its tiles, 0x4
-    /// alpha maps of 8 bits.
+    /// alpha maps of 8 bits (or 0x80, `BIG_ALPHA`).
     pub flags: u32,
     /// Whether the tile `<map>_<x>_<y>` exists, at `y * 64 + x`.
     pub tiles: Vec<bool>,
+}
+
+/// The flags of `MPHD` that make the alpha maps of a map 8 bits a texel, as wow.export reads them:
+/// 0x4, or 0x80 of later clients.
+pub const BIG_ALPHA: u32 = 0x4 | 0x80;
+
+impl Wdt {
+    /// Whether the alpha maps of its tiles are of 8 bits, each the share of its layer, rather than
+    /// of 4 bits, each laid over the layers before it.
+    pub fn big_alpha(&self) -> bool {
+        self.flags & BIG_ALPHA != 0
+    }
 }
 
 /// The heights of a map at low resolution, from its WDL, which the client draws as the horizon
@@ -276,7 +288,9 @@ pub struct Chunk {
     /// A bit per quad of its 8 × 8, row by row from bit 0, set for a hole.
     pub holes: u64,
     pub layers: Vec<Layer>,
-    /// The alpha map of each layer after the first: 64 × 64 bytes, row by row.
+    /// The alpha map of each layer after the first: 64 × 64 bytes, row by row, as the tile stores
+    /// it: in a map of big alpha (`Wdt::big_alpha`), the share of its layer; otherwise, how much its
+    /// layer covers those before it, which a module drawing or writing the tile must keep apart.
     pub alphas: Vec<Vec<u8>>,
     /// The shadow baked in it: 64 × 64 bytes, 255 in shadow; empty when it has none.
     pub shadow: Vec<u8>,

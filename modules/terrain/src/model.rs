@@ -36,8 +36,9 @@ pub struct ChunkId {
     pub index: [u32; 2],
 }
 
-/// A tile loaded: its data as read, and the chunks changed in it, a bit each; none yet, as nothing
-/// is edited in this milestone.
+/// A tile loaded: its data as read, its alpha maps the share of each layer whatever its map
+/// (`read_tile`), and the chunks changed in it, a bit each; none yet, as nothing is edited in this
+/// milestone.
 pub struct TileModel {
     pub id: TileId,
     pub tile: Tile,

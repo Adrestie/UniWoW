@@ -207,6 +207,51 @@ fn a_light_tile_keeps_the_corners_of_its_chunks_and_its_skirts_and_its_blending_
 }
 
 #[test]
+fn the_alpha_maps_covering_the_layers_before_are_made_the_share_of_each() {
+    // Over a texel: the last map covers a quarter, the one before half of what is left, the first
+    // all the rest, leaving nothing to the layer under them; then two maps, the last covering all.
+    let mut alphas = vec![vec![255; 4096], vec![128; 4096], vec![64; 4096]];
+    mesh::shares(&mut alphas);
+    assert_eq!([alphas[0][0], alphas[1][0], alphas[2][0]], [95, 96, 64]);
+    assert_eq!(alphas[0][4095], 95, "every texel");
+    let mut alphas = vec![vec![200; 4096], vec![255; 4096]];
+    mesh::shares(&mut alphas);
+    assert_eq!([alphas[0][0], alphas[1][0]], [0, 255]);
+    // Nothing over it: the first map's share is what it covers.
+    let mut alphas = vec![vec![30; 4096], vec![0; 4096]];
+    mesh::shares(&mut alphas);
+    assert_eq!([alphas[0][0], alphas[1][0]], [30, 0]);
+    // Each texel by itself.
+    let mut alphas = vec![vec![0; 4096], vec![0; 4096], vec![0; 4096]];
+    for (texel, values) in [[255, 128, 64], [0, 255, 0], [100, 0, 0]].iter().enumerate() {
+        for (map, value) in values.iter().enumerate() {
+            alphas[map][texel] = *value;
+        }
+    }
+    mesh::shares(&mut alphas);
+    let texel = |at: usize| [alphas[0][at], alphas[1][at], alphas[2][at]];
+    assert_eq!(
+        [texel(0), texel(1), texel(2), texel(3)],
+        [[95, 96, 64], [0, 255, 0], [100, 0, 0], [0, 0, 0]]
+    );
+}
+
+#[test]
+fn a_tile_of_a_map_of_4_bits_is_read_with_its_alpha_maps_made_shares_and_one_of_8_bits_as_it_is() {
+    for (flags, shares) in [(0x0, [161, 50]), (0x4, [200, 50]), (0x80, [200, 50])] {
+        let fake = Fake {
+            tile: Some((tile(), flags)),
+            ..Fake::default()
+        };
+        let read = crate::read_tile(&fake, "Map", id(30, 30)).unwrap();
+        for chunk in &read.chunks {
+            assert_eq!([chunk.alphas[0][17], chunk.alphas[1][17]], shares, "flags {flags:#x}");
+        }
+    }
+    assert!(crate::read_tile(&Fake::default(), "Map", id(30, 30)).is_err(), "none");
+}
+
+#[test]
 fn the_texels_of_blending_carry_three_alpha_maps_and_the_shadow() {
     let texels = mesh::blend(&chunk([0, 0], [0.0; 3], 0));
     assert_eq!(texels.len(), 64 * 64 * 4);
@@ -711,6 +756,8 @@ fn the_horizon_is_a_mesh_of_the_heights_of_the_wdl_facing_up_its_tiles_drawn_in_
 struct Fake {
     stored: AtomicUsize,
     decoded: AtomicUsize,
+    /// A tile it gives at every place, of a map with these flags of `MPHD`; none by default.
+    tile: Option<(Tile, u32)>,
 }
 
 fn rgba() -> Texture {
@@ -760,10 +807,16 @@ impl Formats for Fake {
         Err("no building".to_owned())
     }
     fn wdt(&self, _directory: &str) -> Result<Arc<Wdt>, String> {
-        Err("no WDT".to_owned())
+        match &self.tile {
+            Some((_, flags)) => Ok(Arc::new(Wdt {
+                flags: *flags,
+                tiles: vec![true; 4096],
+            })),
+            None => Err("no WDT".to_owned()),
+        }
     }
     fn tile(&self, _directory: &str, _x: u32, _y: u32) -> Result<Option<Tile>, String> {
-        Ok(None)
+        Ok(self.tile.as_ref().map(|(tile, _)| tile.clone()))
     }
     fn wdl(&self, _directory: &str) -> Result<Option<Wdl>, String> {
         Ok(None)

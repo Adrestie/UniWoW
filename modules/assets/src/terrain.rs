@@ -4,10 +4,7 @@
 //! wow.export (MIT, see THIRD_PARTY.md). A tile of 3.3.5a finds the parts of its chunks by the
 //! offsets of their header, as the client does; a split tile by walking them, as wow.export does.
 
-use uniwow_api::formats::{Building, Chunk, Doodad, FileRef, Layer, Placements, Tile, Wdl, Wdt};
-
-/// The flags of `MPHD` that make the alpha maps 8 bits a texel, as wow.export reads them.
-const BIG_ALPHA: u32 = 0x4 | 0x80;
+use uniwow_api::formats::{BIG_ALPHA, Building, Chunk, Doodad, FileRef, Layer, Placements, Tile, Wdl, Wdt};
 
 /// The flags of a chunk.
 const HAS_SHADOW: u32 = 0x1;

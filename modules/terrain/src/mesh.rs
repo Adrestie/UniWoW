@@ -259,8 +259,25 @@ pub fn light_blend(chunk: &Chunk) -> Vec<u8> {
     texels
 }
 
-/// The texels of blending of a chunk, 64 × 64, row by row: the alpha maps of its layers after the
-/// first in red, green and blue, its shadow in alpha.
+/// The alpha maps `alphas` of a chunk's layers after the first, each covering the layers before it
+/// as the maps of 4 bits do, made the share of each layer, as the maps of 8 bits are: from the
+/// last, each takes its alpha of what the layers after it leave.
+pub fn shares(alphas: &mut [Vec<u8>]) {
+    for texel in 0..64 * 64 {
+        let mut left = 255u32;
+        for map in alphas.iter_mut().rev() {
+            if let Some(value) = map.get_mut(texel) {
+                let share = (u32::from(*value) * left + 127) / 255;
+                left -= share;
+                *value = share as u8;
+            }
+        }
+    }
+}
+
+/// The texels of blending of a chunk, 64 × 64, row by row: the share of each of its layers after the
+/// first in red, green and blue, its alpha maps made shares already when its map stores them
+/// otherwise (`shares`, by `read_tile`); its shadow in alpha.
 pub fn blend(chunk: &Chunk) -> Vec<u8> {
     let mut texels = vec![0u8; 64 * 64 * 4];
     for (channel, map) in chunk.alphas.iter().take(3).enumerate() {

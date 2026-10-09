@@ -75,12 +75,25 @@ fn list_maps(formats: &dyn Formats) -> Result<Vec<MapChoice>, String> {
 /// cancelled.
 type Loaded = Result<Option<(Option<TileModel>, TileGpu)>, String>;
 
+/// The tile `tile` of the map `directory`, its alpha maps the share of each layer, as the shader
+/// blends them: those of a map without big alpha made so (`mesh::shares`), whatever the map. A
+/// writer of such a map turns them back into how much each layer covers those before it.
+fn read_tile(formats: &dyn Formats, directory: &str, tile: TileId) -> Result<formats::Tile, String> {
+    let mut read = formats
+        .tile(directory, tile.x, tile.y)?
+        .ok_or_else(|| "named by its WDT, but not read".to_owned())?;
+    if !formats.wdt(directory)?.big_alpha() {
+        for chunk in &mut read.chunks {
+            mesh::shares(&mut chunk.alphas);
+        }
+    }
+    Ok(read)
+}
+
 /// Reads the tile `tile` of the map `directory`, then builds its resources as `kind` says, a full
 /// tile keeping its model.
 fn load(formats: &dyn Formats, shared: &Shared, directory: &str, tile: TileId, kind: Kind, job: &JobContext) -> Loaded {
-    let read = formats
-        .tile(directory, tile.x, tile.y)?
-        .ok_or_else(|| "named by its WDT, but not read".to_owned())?;
+    let read = read_tile(formats, directory, tile)?;
     if job.is_cancelled() {
         return Ok(None);
     }

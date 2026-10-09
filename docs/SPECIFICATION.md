@@ -2325,9 +2325,10 @@ First part (9.2b), the readers of the terrain and of the textures:
   (flag 0x10000).
 - The alpha maps: compressed in runs, of 8 bits when the WDT has the flag 0x4 or 0x80, else of 4
   bits, with their last row and column copied from the ones before when the chunk lacks the flag
-  0x8000, as the description of the format says and wow.export does not. The shadows baked in,
-  the vertex colours (stored blue first, given red first), the holes of 3.3.5a widened to the 8 × 8
-  quads, the references of doodads and buildings.
+  0x8000, as the description of the format says and wow.export does not (those of 4 bits made the
+  share of each layer by the terrain, see « The blending of the textures of the terrain »). The
+  shadows baked in, the vertex colours (stored blue first, given red first), the holes of 3.3.5a
+  widened to the 8 × 8 quads, the references of doodads and buildings.
 - Positions: a chunk's as the file gives it. The client places a chunk by its tile and index,
   which the 17 tiles of the row 60 of Azeroth contradict, all at [3200, 1066.67, 0]. The doodads
   and buildings keep the axes of the file, world = (17066⅔ − z, 17066⅔ − x, y), checked on the
@@ -2371,7 +2372,8 @@ Second part (9.2c), the module `terrain`, with the two points of the review of 9
   and their WDT, named in the locale of the client), the map chosen kept in its settings (`map`)
   and shown again at start; the camera placed over the middle of the map, 1,200 yards high and 800
   aside, through the properties of the viewport, without history.
-- The model (`model`): a tile as read, its chunks able to be marked changed, a bit each, which
+- The model (`model`): a tile as read, its alpha maps the share of each layer (see « The blending
+  of the textures of the terrain »), its chunks able to be marked changed, a bit each, which
   nothing marks yet; a chunk known by its tile and index. `model`, `mesh` and `gpu` are public, for
   the editing to come.
 - A chunk is placed by its tile and its index, as the client does, `Chunk::position` giving only
@@ -2394,7 +2396,8 @@ Second part (9.2c), the module `terrain`, with the two points of the review of 9
 - The layer keeps its bundle while the tiles drawn and those in sight stay the same, a tile in
   sight when its bounds may meet the view; the camera written in `prepare`; a draw a chunk, with its
   four textures. Its shader blends the layers by their alpha maps (the first by what the others
-  leave), repeats a texture eight times across a chunk, multiplies by twice the vertex colour,
+  leave; the maps of 4 bits made shares first, see « The blending of the textures of the
+  terrain »), repeats a texture eight times across a chunk, multiplies by twice the vertex colour,
   darkens by the shadow baked in, and lights by a fixed sun until the lights of the map (9.7). The
   triangles face up, counter-clockwise; their backs are not drawn.
 - On the user's client (deDE since 5 October), Azeroth chosen: 39 tiles drawn and 223 MB on the GPU
@@ -6110,6 +6113,29 @@ were sent to the GPU from the jobs.
   the building moved seen where it stands, the list made outside the lock of the scene. A second
   review, of those corrections: nothing serious; one middling point taken, the first of the five
   buildings set aside so that entries not bound again are seen.
+
+#### The blending of the textures of the terrain
+
+Seen by the user since the first tiles, over the Barrens: squares of a chunk where a texture shows
+whole or too bright, cut sharply from the chunks around. The tiles read whole (the maps of 4 bits,
+2,048 bytes a layer, their offsets one after the other), the fault was in the blending: the shader
+takes each alpha map as the share of its layer (the first taking what the others leave), as the
+maps of 8 bits of Northrend are (`MPHD` 0x4: 0xE there); the maps of 4 bits of Azeroth, Kalimdor
+and Outland (`MPHD` 0x0) say how much each layer covers those before it, so that where a layer
+covers a whole chunk under another, the two were added.
+
+- The terrain reads a tile of a map without big alpha (`Wdt::big_alpha`, `formats::BIG_ALPHA`, the
+  rule the reading of the alpha maps keeps) with its maps made shares (`mesh::shares`), as Noggit
+  does before drawing (its facts read only): from the last layer, each takes its alpha of what the
+  layers after it leave. `Formats::tile` keeps what the tile stores (`Chunk::alphas`); the model
+  of the terrain holds the shares, which a writer of a map without big alpha will turn back into
+  how much each layer covers those before it. In the client, every layer after the first has the
+  flag 0x100 and no map of 4 bits is compressed (1.15 million layers of the four continents read).
+- **Tested**: the shares of three layers and of two; a tile of a map of 4 bits read with its maps
+  made shares, those of `MPHD` 0x4 or 0x80 as they are. 6 changes made on purpose, all caught.
+  Reviewed by another instance: nothing serious; one middling point taken, the model said to hold
+  what the tile stores where it holds shares; light points taken: a name no longer hiding the
+  function, the shares of texels each by itself, the layers without 0x100 counted in the client.
 
 #### Tests
 
