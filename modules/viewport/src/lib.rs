@@ -652,6 +652,9 @@ impl Module for ViewportModule {
 
         let targets = self.targets.as_ref().expect("created above");
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        // Over black: egui lets what lies under an image show by what its alpha leaves of 1, which
+        // the layers leave below 1 (a texture's alpha, a batch modulating it) without meaning it.
+        ui.painter().rect_filled(rect, 0.0, egui::Color32::BLACK);
         ui.painter().image(targets.texture_id, rect, uv, egui::Color32::WHITE);
         let caption = format!(
             "{} layers · {} · wheel: speed {:.0} yd/s",
@@ -1890,11 +1893,12 @@ mod tests {
         assert_eq!(super::budget(&shared).unsaved, Some(100 << 20), "kept in the settings");
     }
 
-    /// A host keeping the settings of the module, on a GPU of `gpu_memory` bytes.
+    /// A host keeping the settings of the module, on a GPU of `gpu_memory` bytes, the device `gpu`.
     #[derive(Default)]
     struct SettingsHost {
         settings: std::collections::HashMap<String, uniwow_api::serde_json::Value>,
         gpu_memory: Option<u64>,
+        gpu: Option<egui_wgpu::RenderState>,
     }
 
     impl uniwow_api::Host for SettingsHost {
@@ -1913,7 +1917,7 @@ mod tests {
         }
 
         fn gpu(&self) -> Option<&egui_wgpu::RenderState> {
-            None
+            self.gpu.as_ref()
         }
 
         fn gpu_memory(&self) -> Option<u64> {
@@ -1999,6 +2003,45 @@ mod tests {
         module.windows_ui(&egui, &mut Context::new(&mut host, "viewport"));
         assert_eq!(host.settings["gpu_budget_mb"], json!(512));
         assert_eq!(super::budget(&module.budget).bytes, 512 << 20);
+    }
+
+    #[test]
+    fn the_image_of_the_view_is_shown_over_black_whatever_alpha_the_layers_leave_in_it() {
+        use uniwow_api::{Context, Module};
+        let Some(gpu) = gpu() else {
+            eprintln!("skipped: no software adapter for a device");
+            return;
+        };
+        let mut module = ViewportModule::default();
+        let mut host = SettingsHost {
+            gpu: Some(gpu),
+            ..SettingsHost::default()
+        };
+        module.init(&mut Context::new(&mut host, "viewport"));
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(64.0, 64.0))),
+            ..egui::RawInput::default()
+        };
+        let mut output = egui::Context::default().run_ui(input, |ui| {
+            module.panel_ui("view", ui, &mut Context::new(&mut host, "viewport"));
+        });
+        output.textures_delta.clear();
+        let texture = module.targets.as_ref().expect("drawn").texture_id;
+        let shapes: Vec<&egui::Shape> = output.shapes.iter().map(|clipped| &clipped.shape).collect();
+        let image = shapes
+            .iter()
+            .position(|shape| matches!(shape, egui::Shape::Mesh(mesh) if mesh.texture_id == texture))
+            .expect("the image of the view");
+        let egui::Shape::Mesh(mesh) = shapes[image] else {
+            unreachable!("found as a mesh")
+        };
+        assert!(
+            image > 0
+                && matches!(shapes[image - 1], egui::Shape::Rect(under)
+                    if under.fill == egui::Color32::BLACK && under.rect == mesh.calc_bounds()),
+            "{:?}",
+            shapes.get(image.wrapping_sub(1))
+        );
     }
 
     #[test]

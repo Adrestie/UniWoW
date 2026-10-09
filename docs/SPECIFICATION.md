@@ -6401,6 +6401,11 @@ Decided by the user before it: a band the global light lacks takes the fixed lig
   stops. 45 changes made on purpose, the 13 last after the review; all those of the code as it
   stands caught; those the first run found untested in the copies of the shaders of the terrain, the
   models and the water led to their sharing.
+- **Corrected after it**: the image of the view is shown over black. egui lets what lies under an
+  image show by what its alpha leaves of 1, and the layers leave it below 1 (a texture's alpha, a
+  batch modulating it): the panel showed through, a light edge around the leaves of the trees, there
+  since the models are drawn and revealed by the fog of the game covering them. Tested: the image
+  drawn over a black rectangle of its size.
 
 #### Tests
 
