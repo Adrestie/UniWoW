@@ -191,6 +191,9 @@ fn the_client_s_liquids_read_whole_and_lie_over_the_ground_they_cover() {
         (liquid.depth_table, liquid.depth_scale)
     };
     assert_eq!([depths(5), depths(2), depths(181)], [(1, 1.5), (1, 1.5), (0, 8.5)]);
+    // The params of the light within the magmas, the slimes and the green lava; none for the waters.
+    let light = |id: u32| types.iter().find(|liquid| liquid.id == id).unwrap().light;
+    assert_eq!([3, 19, 4, 21, 15, 5, 2, 181].map(light), [7, 7, 6, 6, 6, 0, 0, 0]);
     for map in ["Azeroth", "Kalimdor", "Expansion01", "Northrend"] {
         let wdt = client.wdt(map).unwrap();
         let tiles: Vec<u32> = (0..4096).filter(|index| wdt.tiles[*index as usize]).collect();

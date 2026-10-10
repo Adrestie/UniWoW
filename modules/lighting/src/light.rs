@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use uniwow_api::formats::{LightBand, LightParamsRecord, LightRecord, TILE, ZoneLightRecord};
+use uniwow_api::formats::{LightBand, LightParamsRecord, LightRecord, LiquidTypeRecord, TILE, ZoneLightRecord};
 use uniwow_api::viewport::{Fog, MapLight, Sun, Water};
 
 /// A day, in half-minutes.
@@ -156,7 +156,22 @@ fn to_edge(place: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     off[0] * off[0] + off[1] * off[1]
 }
 
-/// The tables of the lights, by map and by id, and the zones of light by map, in their order.
+/// Where the eye is (0x7F3230): out of every liquid; in one without a light of its own, as the
+/// water, each light then taken by its params under the water (its slot 1); or in one with a light
+/// of its own, as the magma and the slime, the params it names in place of every light.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Immersion {
+    #[default]
+    Dry,
+    Under,
+    Lit(u32),
+}
+
+/// How much steeper the fog of the curved maps is under a liquid (0x7F1A09).
+const STEEPER_UNDER: f32 = 2.0;
+
+/// The tables of the lights, by map and by id, the zones of light by map, in their order, and the
+/// params of the light of each type of liquid that has one.
 #[derive(Default)]
 pub struct Tables {
     lights: HashMap<u32, Vec<LightRecord>>,
@@ -171,6 +186,7 @@ pub struct Tables {
     centres: HashMap<u32, (u32, [f32; 2])>,
     /// Every light, by id.
     by_id: HashMap<u32, LightRecord>,
+    liquids: HashMap<u32, u32>,
 }
 
 /// Whether `light` is the global light of its map, at 0, 0, 0.
@@ -264,6 +280,45 @@ impl Tables {
             colours: colours.iter().map(sorted).collect(),
             numbers: numbers.iter().map(sorted).collect(),
             zones: by_zone,
+            liquids: HashMap::new(),
+        }
+    }
+
+    /// The tables with the params of the light of each of the types of liquid `types` naming one.
+    pub fn with_liquids(mut self, types: &[LiquidTypeRecord]) -> Self {
+        self.liquids = types
+            .iter()
+            .filter(|liquid| liquid.light != 0)
+            .map(|liquid| (liquid.id, liquid.light))
+            .collect();
+        self
+    }
+
+    /// Where the eye in the liquid of the type `liquid` is, none for no liquid: under it, or lit by
+    /// its own light where its type names one (0x7F32E6).
+    pub fn immersion(&self, liquid: Option<u16>) -> Immersion {
+        match liquid {
+            None => Immersion::Dry,
+            Some(liquid) => self
+                .liquids
+                .get(&u32::from(liquid))
+                .map_or(Immersion::Under, |params| Immersion::Lit(*params)),
+        }
+    }
+
+    /// The light of the map `map` at the place `place` on it, at `time`, the eye where `immersion`
+    /// says: that of the lights there for their first slot (`light_at`), for their slot under the
+    /// water under a liquid without a light of its own; the values of the light of the liquid
+    /// otherwise, alone, no light mixed in. None where the params are unknown.
+    pub fn light_in(&self, map: u32, place: [f32; 2], time: f32, local: bool, immersion: Immersion) -> Option<Mixed> {
+        match immersion {
+            Immersion::Lit(params) => Some(Mixed {
+                values: self.values(params, time)?,
+                used: Vec::new(),
+                zones: 0,
+                fallback: false,
+            }),
+            _ => self.light_at(map, place, time, slot(immersion), local),
         }
     }
 
@@ -363,26 +418,46 @@ impl Tables {
         })
     }
 
-    /// The fog of the game where `mixed` was taken, on the map `map`, for the slot `slot` (the
-    /// client's for the slot 0, the eye out of the water) at `time`, as Wow.exe 12340 draws it with
-    /// the far clip `far`: the fog of each light mixed in, prepared (`prepared_fog`) from its
-    /// bands, one it lacks read as 0 as the client reads it, mixed by its weight in the order of
-    /// `mixed` (0x7ED4C0); then its end within the far clip, its start the share of it (0x7F16F0).
+    /// The fog of the game where `mixed` was taken, on the map `map`, the eye where `immersion`
+    /// says, at `time`, as Wow.exe 12340 draws it with the far clip `far`: the fog of each light
+    /// mixed in, for the slot `mixed` was taken for, or of the light of the liquid alone, prepared
+    /// (`prepared_fog`) from its bands, one it lacks read as 0 as the client reads it, mixed by its
+    /// weight in the order of `mixed` (0x7ED4C0); then its end within the far clip, its start the
+    /// share of it (0x7F16F0); under a liquid, its rate twice as steep on the curved maps (0x7F1A09).
     /// Where it starts and ends, in yards, and its rate; none without a light.
-    pub fn fog_of_the_game(&self, mixed: &Mixed, map: u32, slot: usize, time: f32, far: f32) -> Option<[f32; 3]> {
-        let mut lights = mixed.used.iter().filter_map(|(id, weight)| {
-            let values = self.values(params_of(self.by_id.get(id)?, slot), time)?;
+    pub fn fog_of_the_game(
+        &self,
+        mixed: &Mixed,
+        map: u32,
+        immersion: Immersion,
+        time: f32,
+        far: f32,
+    ) -> Option<[f32; 3]> {
+        let prepared = |params: u32, weight: f32| {
+            let values = self.values(params, time)?;
             let [end, share] = [
                 values.numbers[0].unwrap_or(0.0) / UNIT,
                 values.numbers[1].unwrap_or(0.0),
             ];
-            Some((prepared_fog(end, share, map, far), *weight))
-        });
-        let (first, _) = lights.next()?;
-        let [end, share, rate] = lights.fold(first, |kept, (given, weight)| {
-            std::array::from_fn(|at| mix(kept[at], given[at], weight))
+            Some((prepared_fog(end, share, map, far), weight))
+        };
+        let lights: Vec<([f32; 3], f32)> = match immersion {
+            Immersion::Lit(params) => prepared(params, 1.0).into_iter().collect(),
+            _ => mixed
+                .used
+                .iter()
+                .filter_map(|(id, weight)| prepared(params_of(self.by_id.get(id)?, slot(immersion)), *weight))
+                .collect(),
+        };
+        let (first, _) = *lights.first()?;
+        let [end, share, rate] = lights[1..].iter().fold(first, |kept, (given, weight)| {
+            std::array::from_fn(|at| mix(kept[at], given[at], *weight))
         });
         let end = end.min(far);
+        let rate = match immersion != Immersion::Dry && map >= CURVED_FROM {
+            true => rate * STEEPER_UNDER,
+            false => rate,
+        };
         Some([share * end, end, rate])
     }
 
@@ -454,9 +529,10 @@ fn gamma(linear: f32) -> f32 {
 /// diffuse and ambient light (the fixed light's where it has none); the colour of its fog, made
 /// linear (the fixed one where it has none); the fog of the game `game_fog`, where it starts and
 /// ends and its rate, when it is drawn (`Tables::fog_of_the_game`); its sky, the bands 2 to 7 in
-/// gamma, the colour of its fog where it has none; and the light of its water, its bands black where
-/// it has none, as Noggit reads them, with the alphas of its params.
-pub fn map_light(values: &Values, time: f32, game_fog: Option<[f32; 3]>) -> MapLight {
+/// gamma, the colour of its fog where it has none, or that colour all over when the eye is
+/// `immersed` in a liquid, the client drawing no sky then (0x79ACAF); and the light of its water, its
+/// bands black where it has none, as Noggit reads them, with the alphas of its params.
+pub fn map_light(values: &Values, time: f32, game_fog: Option<[f32; 3]>, immersed: bool) -> MapLight {
     let fixed = Sun::default();
     let fog = values.colours[7].unwrap_or(Fog::default().colour.map(gamma));
     let band = |band: usize| values.colours[band].unwrap_or([0.0; 3]);
@@ -472,7 +548,10 @@ pub fn map_light(values: &Values, time: f32, game_fog: Option<[f32; 3]>) -> MapL
         },
         fog_colour: values.colours[7].map_or(Fog::default().colour, |colour| colour.map(linear)),
         fog: game_fog,
-        sky: std::array::from_fn(|band| values.colours[2 + band].unwrap_or(fog)),
+        sky: match immersed {
+            true => [fog; 6],
+            false => std::array::from_fn(|band| values.colours[2 + band].unwrap_or(fog)),
+        },
         water: Water {
             river: [with(16, values.river_alphas[0]), with(17, values.river_alphas[1])],
             ocean: [with(14, values.ocean_alphas[0]), with(15, values.ocean_alphas[1])],
@@ -520,6 +599,12 @@ fn curve(start: f32, end: f32, far: f32) -> f32 {
     } else {
         1.5
     }
+}
+
+/// The slot of the params of each light the eye takes where `immersion` says: under the water, the
+/// second (0x7F33AD); the first otherwise.
+fn slot(immersion: Immersion) -> usize {
+    usize::from(immersion == Immersion::Under)
 }
 
 /// The params of the slot `slot` of `light`, or those of its first slot where it has none there (a

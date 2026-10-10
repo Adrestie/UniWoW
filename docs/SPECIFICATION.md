@@ -6638,6 +6638,148 @@ user's client gives to all its waters but three.
   bands 0 and 1 while those of the water are then black, the colours of the vertices of the
   buildings' water for 9.7d, the ramps the client's types name not checked by its test.
 
+#### Step 9.7c2, as built: under the surface
+
+Decided by the user before it: the effect over the whole screen under a liquid (a ripple of the
+image and a blur, of the chain of the full-screen glow) left for later, with the glow; the gain of
+the magma, 1.35, kept, the client having none in its magma, the brightening seen in the game most
+likely coming from its full-screen glow.
+
+- **Read in the client** (Wow.exe 12340 and the tables of the user's client):
+  - **The liquid the eye is in** (0x790920, at each frame, without hysteresis): that of the eye of
+    the camera, not of the character. With the camera in a building, the first of its groups the
+    camera is in alone; otherwise the groups outside of the buildings around it, then the terrain
+    (0x7A0820): the cell of the chunk under the eye, the first liquid of that chunk whose cell there
+    is covered (0x7CE1F0) and whose surface, read between the heights of the four corners of the
+    cell (0x7CE0B0), is over the eye or no more than a hundredth of a yard under it, the eye over
+    the ground or no more than a hundredth of a yard under it (the ground at −10,000 in a hole). It
+    keeps the type and D, the surface less the height of the eye (0x79098B in a building, 0x7909B9
+    on the terrain), which 0x780620 gives on.
+  - **The light within** (0x7F3230): a type naming params of its own light (its field 10, an id of
+    `LightParams`: 7 for the magmas, 6 for the slimes and the green lava, none for the waters) takes
+    them in place of every light, global, zones and local (0x7F32E6); in any other liquid, every
+    light takes the params of its slot 1, under the water (0x7F33AD, 0x7F1360), the storm those of
+    its slot 3.
+  - **The darkening by the depth** (0x7F3350) of the fog, the ambient and the diffuse by the fields
+    6 to 9 of the type: by clamp(−D / its depth of full darkness, 0, 1) (0x7F362B–0x7F364F), D
+    positive under the surface: nothing is darkened. The colour of the fog is written over by the
+    band 7 afterwards anyway (0x7F16F0).
+  - **The fog** from the same light, its rate twice as steep under any liquid on the curved maps
+    (0x7F1A09); **the sky** not drawn under a liquid, the screen cleared to the colour of the fog
+    (0x79ACAF).
+  - **The screen** (0x4F8770): under a liquid, the chain of the full-screen glow takes its ripple
+    (FFXGlowWave), the image moved by up to 3 texels by a texture of waves and a blur mixed at
+    84/255. **The surface seen from under**: the same batch, material and shader, no face culled.
+    **The magma** (vsLiquidMagma, psLiquidMagma): the colour of its vertices, white on the terrain,
+    times its texture, unlit, then fogged; no gain.
+- **The view** (`core/api`): `Liquids::liquid_at`, the type of the liquid a point lies in;
+  `LiquidTypeRecord::light`, the params of the light of a type, its field 10.
+- **The liquids** keep the layers of each tile held and give the liquid at a point as the client
+  finds the one the eye is in, among the liquids of the terrain. The ground under the point is not
+  looked at, the terrain giving no height; the liquids of the buildings are left out, with the rule
+  of the building the camera is in (9.7d).
+- **The light** asks at each frame for the liquid at the eye (`Immersion`): out of any liquid; under
+  one without a light of its own, every light by its params under the water (those of its first slot
+  where it has none, as before); in one with its own, its params alone, no light mixed in. The fog
+  of the game of that light, twice as steep under a liquid on the curved maps; the sky of the colour
+  of the fog under a liquid. The panel says the liquid the eye is in and the light it takes, or that
+  the params of its light are unknown. The lights of the types of liquid are read with the tables;
+  where they cannot be, the light is read without them, why said in the panel, as for the zones of
+  light. The gain of the magma, 1.35, is kept.
+- **Not in 9.7c2**: the darkening, inert in the client; the ripple and the blur of the screen, with
+  the glow, later; the storm; the particles around the eye; the liquids of the buildings, their
+  insides and their fogs under the water (`MFOG`, 9.7d).
+- **Tested**: the liquid at a point, under a surface rising across the rows and the columns, within
+  a hundredth of a yard over it, not over it; out of a cell not covered, out of the chunk on its
+  four sides; the mean of the corners at the middle of a cell whose far corner alone is higher; the
+  first of two layers, a water over a magma; by the layers of its tile, not of the tile beside,
+  given once they changed; the immersion of a water, of a magma lit by its own params, of a type
+  unknown; within a local light, its params under the water and their fog; in the magma, its params
+  alone and their fog, none for params unknown; on Northrend, the fog twice as steep under a liquid,
+  its distances kept, and of the magma too; the sky of the colour of the fog under a liquid; the
+  module asking at the eye, giving the view the light under the water without sky, that of the
+  magma, saying both in its panel, then the sky again; the lights of the liquids read with the
+  tables, the light read without them, why said, and the params of a light unknown, said; the params
+  of the light of the magmas, the slimes, the green lava and the waters of the user's client. 27
+  changes made on purpose, all caught. Reviewed by another instance: nothing grave; two middling
+  points: LiquidType.dbc made needed for every light, now read as the zones of light are, the light
+  read without it; the darkening inert, the link 0x780620 and the sign of D in both branches checked
+  and cited. Light points: comments rewrapped, the panel for params unknown, the ground worded;
+  signalled, a case out of the chunk that a looser bound would pass, the order the client keeps the
+  liquids of a chunk in not traced.
+
+#### Step 9.7c2, as built: under the surface
+
+Decided by the user before it: the effect over the whole screen under a liquid (a ripple of the
+image and a blur, of the chain of the full-screen glow) left for later, with the glow; the gain of
+the magma, 1.35, kept, the client having none in its magma, the brightening seen in the game most
+likely coming from its full-screen glow.
+
+- **Read in the client** (Wow.exe 12340 and the tables of the user's client):
+  - **The liquid the eye is in** (0x790920, at each frame, without hysteresis): that of the eye of
+    the camera, not of the character. With the camera in a building, the first of its groups the
+    camera is in alone; otherwise the groups outside of the buildings around it, then the terrain
+    (0x7A0820): the cell of the chunk under the eye, the first liquid of that chunk whose cell there
+    is covered (0x7CE1F0) and whose surface, read between the heights of the four corners of the
+    cell (0x7CE0B0), is over the eye or no more than a hundredth of a yard under it, the eye over
+    the ground or no more than a hundredth of a yard under it (the ground at −10,000 in a hole). It
+    keeps the type and D, the surface less the height of the eye (0x79098B in a building, 0x7909B9
+    on the terrain), which 0x780620 gives on.
+  - **The light within** (0x7F3230): a type naming params of its own light (its field 10, an id of
+    `LightParams`: 7 for the magmas, 6 for the slimes and the green lava, none for the waters) takes
+    them in place of every light, global, zones and local (0x7F32E6); in any other liquid, every
+    light takes the params of its slot 1, under the water (0x7F33AD, 0x7F1360), the storm those of
+    its slot 3.
+  - **The darkening by the depth** (0x7F3350) of the fog, the ambient and the diffuse by the fields
+    6 to 9 of the type: by clamp(−D / its depth of full darkness, 0, 1) (0x7F362B–0x7F364F), D
+    positive under the surface: nothing is darkened. The colour of the fog is written over by the
+    band 7 afterwards anyway (0x7F16F0).
+  - **The fog** from the same light, its rate twice as steep under any liquid on the curved maps
+    (0x7F1A09); **the sky** not drawn under a liquid, the screen cleared to the colour of the fog
+    (0x79ACAF).
+  - **The screen** (0x4F8770): under a liquid, the chain of the full-screen glow takes its ripple
+    (FFXGlowWave), the image moved by up to 3 texels by a texture of waves and a blur mixed at
+    84/255. **The surface seen from under**: the same batch, material and shader, no face culled.
+    **The magma** (vsLiquidMagma, psLiquidMagma): the colour of its vertices, white on the terrain,
+    times its texture, unlit, then fogged; no gain.
+- **The view** (`core/api`): `Liquids::liquid_at`, the type of the liquid a point lies in;
+  `LiquidTypeRecord::light`, the params of the light of a type, its field 10.
+- **The liquids** keep the layers of each tile held and give the liquid at a point as the client
+  finds the one the eye is in, among the liquids of the terrain. The ground under the point is not
+  looked at, the terrain giving no height; the liquids of the buildings are left out, with the rule
+  of the building the camera is in (9.7d).
+- **The light** asks at each frame for the liquid at the eye (`Immersion`): out of any liquid; under
+  one without a light of its own, every light by its params under the water (those of its first slot
+  where it has none, as before); in one with its own, its params alone, no light mixed in. The fog
+  of the game of that light, twice as steep under a liquid on the curved maps; the sky of the colour
+  of the fog under a liquid. The panel says the liquid the eye is in and the light it takes, or that
+  the params of its light are unknown. The lights of the types of liquid are read with the tables;
+  where they cannot be, the light is read without them, why said in the panel, as for the zones of
+  light. The gain of the magma, 1.35, is kept.
+- **Not in 9.7c2**: the darkening, inert in the client; the ripple and the blur of the screen, with
+  the glow, later; the storm; the particles around the eye; the liquids of the buildings, their
+  insides and their fogs under the water (`MFOG`, 9.7d).
+- **Tested**: the liquid at a point, under a surface rising across the rows and the columns, within
+  a hundredth of a yard over it, not over it; out of a cell not covered, out of the chunk on its
+  four sides; the mean of the corners at the middle of a cell whose far corner alone is higher; the
+  first of two layers, a water over a magma; by the layers of its tile, not of the tile beside,
+  given once they changed; the immersion of a water, of a magma lit by its own params, of a type
+  unknown; within a local light, its params under the water and their fog; in the magma, its params
+  alone and their fog, none for params unknown; on Northrend, the fog twice as steep under a liquid,
+  its distances kept, and of the magma too; the sky of the colour of the fog under a liquid; the
+  module asking at the eye, giving the view the light under the water without sky, that of the
+  magma, saying both in its panel, then the sky again; the lights of the liquids read with the
+  tables, the light read without them, why said, and the params of a light unknown, said; the params
+  of the light of the magmas, the slimes, the green lava and the waters of the user's client. 27
+  changes made on purpose, all caught. Reviewed by another instance: nothing grave; two middling
+  points: LiquidType.dbc made needed for every light, now read as the zones of light are, the light
+  read without it; the darkening inert, the link 0x780620 and the sign of D in both branches checked
+  and cited. Light points: comments rewrapped, the panel for params unknown, the ground worded;
+  signalled, a case out of the chunk that a looser bound would pass, the order the client keeps the
+  liquids of a chunk in not traced. The corrections reviewed again: nothing grave nor middling;
+  signalled, the reason the lights of the liquids were not read not tested as forgotten when the
+  client changes.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

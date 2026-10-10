@@ -8,9 +8,10 @@ use std::time::{Duration, Instant};
 
 use uniwow_api::formats::{
     AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef,
-    Formats, GameObjectDisplay, HairGeoset, LightBand, LightParamsRecord, LightRecord, MapRecord, Model, Texture, Tile,
-    Wdl, Wdt, Wmo, ZoneLightRecord,
+    Formats, GameObjectDisplay, HairGeoset, LightBand, LightParamsRecord, LightRecord, LiquidTypeRecord, MapRecord,
+    Model, Texture, Tile, Wdl, Wdt, Wmo, ZoneLightRecord,
 };
+use uniwow_api::liquids::{Liquids, Surfaces};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::vfs::{Vfs, VfsState};
 use uniwow_api::viewport::{self, MapLight, Sun};
@@ -19,7 +20,7 @@ use uniwow_api::{
     PropertyValue, Registrar, egui, egui_wgpu,
 };
 
-use crate::light::{Tables, colour_at, map_light, number_at, prepared_fog, sun_direction};
+use crate::light::{Immersion, Tables, colour_at, map_light, number_at, prepared_fog, sun_direction};
 
 /// A band of numbers of `keys`.
 fn numbers(id: u32, keys: &[(u32, f32)]) -> LightBand<f32> {
@@ -91,10 +92,10 @@ type Parts = (
     Vec<LightBand<f32>>,
 );
 
-/// Tables of a global light (params 1: diffuse 100, ambient 40, fog from 0.25 of 18,000) and of
-/// local lights: 2 at 1,000, 0, whole within 100 yards, fading to 300, of params 2 (diffuse 200,
-/// no ambient band, no fog), its params under the water 4 (diffuse 60, fog to 100 yards); 3 at
-/// 1,100, 0, within 50 to 150 yards, of params 3 (diffuse 0).
+/// Tables of a global light (params 1: diffuse 100, ambient 40, the top of the sky white, fog from
+/// 0.25 of 18,000) and of local lights: 2 at 1,000, 0, whole within 100 yards, fading to 300, of
+/// params 2 (diffuse 200, no ambient band, no fog), its params under the water 4 (diffuse 60, fog
+/// to 100 yards); 3 at 1,100, 0, within 50 to 150 yards, of params 3 (diffuse 0).
 fn parts() -> Parts {
     let lights = vec![
         light(1, [0.0; 2], [0.0; 2], [1, 0]),
@@ -106,6 +107,7 @@ fn parts() -> Parts {
     let colours = vec![
         greys(1, &[(0, 100)]),
         greys(2, &[(0, 40)]),
+        greys(3, &[(0, 255)]),
         greys(19, &[(0, 200)]),
         greys(37, &[(0, 0)]),
         greys(55, &[(0, 60)]),
@@ -124,6 +126,27 @@ fn parts() -> Parts {
 fn tables() -> Tables {
     let (lights, records, colours, fog) = parts();
     Tables::new(&lights, &records, &colours, &fog, &[])
+}
+
+/// A type of liquid `id`, the params of its own light `light`, 0 for none.
+fn liquid(id: u32, light: u32) -> LiquidTypeRecord {
+    LiquidTypeRecord {
+        id,
+        name: String::new(),
+        kind: 1,
+        material: 1,
+        vertex_format: Some(0),
+        textures: Default::default(),
+        animation: [0.0; 2],
+        depth_table: 0,
+        depth_scale: 1.0,
+        light,
+    }
+}
+
+/// The types of liquid of the tests: a water, 5, and a magma, 3, lit by the params 4.
+fn liquids() -> Vec<LiquidTypeRecord> {
+    vec![liquid(5, 0), liquid(3, 4)]
 }
 
 fn diffuse(mixed: &crate::light::Mixed) -> f32 {
@@ -491,7 +514,7 @@ fn the_light_of_the_water_is_that_of_its_bands_with_the_alphas_of_its_params() {
     ];
     let tables = Tables::new(&lights, &[params(1, 0.1)], &bands, &[], &[]);
     let values = tables.light_at(0, [0.0; 2], 0.0, 0, true).unwrap().values;
-    let water = map_light(&values, 0.0, None).water;
+    let water = map_light(&values, 0.0, None, false).water;
     assert_eq!(water.sun, [1.0; 3]);
     assert_eq!(water.ocean, [[0.2, 0.2, 0.2, 0.75], [0.4, 0.4, 0.4, 1.0]]);
     assert_eq!(
@@ -505,7 +528,7 @@ fn the_light_of_the_water_is_that_of_its_bands_with_the_alphas_of_its_params() {
 fn the_light_given_to_the_view_is_the_fixed_one_where_the_tables_give_none() {
     let tables = tables();
     let values = tables.light_at(0, [920.0, -50.0], 0.0, 0, true).unwrap().values;
-    let given = map_light(&values, 0.0, Some([1.0, 2.0, 3.0]));
+    let given = map_light(&values, 0.0, Some([1.0, 2.0, 3.0]), false);
     assert_eq!(given.sun.colour, [200.0 / 255.0; 3], "the diffuse of the light 2");
     assert_eq!(given.sun.ambient, [40.0 / 255.0; 3], "the ambient of the global light");
     assert_eq!(
@@ -515,12 +538,12 @@ fn the_light_given_to_the_view_is_the_fixed_one_where_the_tables_give_none() {
     );
     // The fog of the game given, none for the editor's.
     assert_eq!(given.fog, Some([1.0, 2.0, 3.0]));
-    assert_eq!(map_light(&values, 0.0, None).fog, None, "the editor's");
+    assert_eq!(map_light(&values, 0.0, None, false).fog, None, "the editor's");
     // No band but the colour of the fog: the fixed sun.
     let lights = [light(1, [0.0; 2], [0.0; 2], [1, 0])];
     let empty = Tables::new(&lights, &[params(1, 0.1)], &[greys(8, &[(0, 128)])], &[], &[]);
     let values = empty.light_at(0, [0.0; 2], 0.0, 0, true).unwrap().values;
-    let given = map_light(&values, 0.0, None);
+    let given = map_light(&values, 0.0, None, false);
     assert_eq!(
         (given.sun.colour, given.sun.ambient),
         (Sun::default().colour, Sun::default().ambient)
@@ -541,17 +564,20 @@ fn the_light_given_to_the_view_is_the_fixed_one_where_the_tables_give_none() {
         &[],
     );
     let values = topped.light_at(0, [0.0; 2], 0.0, 0, true).unwrap().values;
-    let sky = map_light(&values, 0.0, None).sky;
+    let sky = map_light(&values, 0.0, None, false).sky;
     assert_eq!(sky, [[1.0; 3], [grey; 3], [grey; 3], [grey; 3], [0.2; 3], [grey; 3]]);
     // Without a colour of fog either, that of the fixed fog, in gamma.
     let values = tables.light_at(0, [-5_000.0, 0.0], 0.0, 0, true).unwrap().values;
     let fixed = viewport::Fog::default().colour;
-    let sky = map_light(&values, 0.0, None).sky;
+    let sky = map_light(&values, 0.0, None, false).sky;
     for (channel, linear) in sky[3].iter().zip(fixed) {
         let back = ((channel + 0.055) / 1.055).powf(2.4);
         assert!((back - linear).abs() < 1e-4, "{sky:?}");
     }
-    assert!(sky.iter().all(|colour| *colour == sky[0]));
+    assert!(
+        sky[0] == [1.0; 3] && sky[1..].iter().all(|colour| *colour == sky[1]),
+        "its top its own, the bands it lacks of the fixed fog: {sky:?}"
+    );
 }
 
 #[test]
@@ -589,11 +615,68 @@ fn the_fog_of_a_light_is_prepared_straight_before_outland_and_curved_to_the_far_
 }
 
 #[test]
+fn under_a_liquid_the_lights_take_their_params_under_the_water_or_the_liquid_its_own_alone() {
+    let tables = tables().with_liquids(&liquids());
+    assert_eq!(
+        [5, 3, 99].map(|liquid| tables.immersion(Some(liquid))),
+        [Immersion::Under, Immersion::Lit(4), Immersion::Under],
+        "a water, a magma lit by its own params, a type unknown under the water"
+    );
+    assert_eq!(tables.immersion(None), Immersion::Dry);
+    // Within the light 2: its clear params, diffuse 200; under the water, its params 4, diffuse 60,
+    // the global light without params under the water keeping its own.
+    let place = [920.0, -50.0];
+    let dry = tables.light_in(0, place, 0.0, true, Immersion::Dry).unwrap();
+    let under = tables.light_in(0, place, 0.0, true, Immersion::Under).unwrap();
+    assert_eq!((ids(&dry), ids(&under)), (vec![1, 2], vec![1, 2]));
+    assert!((diffuse(&dry) - 200.0).abs() < 1e-3 && (diffuse(&under) - 60.0).abs() < 1e-3);
+    // Its fog under the water, to 100 yards from 0.
+    let fog = |mixed, map, immersion| tables.fog_of_the_game(mixed, map, immersion, 0.0, 1_277.0).unwrap();
+    assert_eq!(fog(&under, 0, Immersion::Under), [0.0, 100.0, 1.0]);
+    // In the magma, anywhere: the params 4 alone, no light mixed in, their fog too.
+    let lit = tables
+        .light_in(0, [-5_000.0, 0.0], 0.0, true, Immersion::Lit(4))
+        .unwrap();
+    assert!(lit.used.is_empty());
+    assert!((diffuse(&lit) - 60.0).abs() < 1e-3);
+    assert_eq!(fog(&lit, 0, Immersion::Lit(4)), [0.0, 100.0, 1.0]);
+    assert!(
+        tables.light_in(0, place, 0.0, true, Immersion::Lit(99)).is_none(),
+        "params unknown"
+    );
+    // On Northrend, of the light 1 from a quarter of 500 yards, curved: twice as steep under a
+    // liquid, its distances kept.
+    let northrend = tables.light_in(571, place, 0.0, true, Immersion::Under).unwrap();
+    let [start, end, rate] = fog(&northrend, 571, Immersion::Dry);
+    assert_eq!([start, end], [319.25, 1_277.0]);
+    assert!((rate - (1.5 + 5.5 * (1.0 - 375.0 / 500.0))).abs() < 1e-4, "{rate}");
+    assert_eq!(fog(&northrend, 571, Immersion::Under), [start, end, rate * 2.0]);
+    let curved_lit = fog(&lit, 571, Immersion::Lit(4))[2];
+    assert!(
+        (curved_lit - 2.0 * (1.5 + 5.5 * (1.0 - 100.0 / 500.0))).abs() < 1e-4,
+        "{curved_lit}"
+    );
+    // Under a liquid, no sky: the colour of the fog all over.
+    let grey = 128.0 / 255.0;
+    let lights = [light(1, [0.0; 2], [0.0; 2], [1, 0])];
+    let skied = Tables::new(
+        &lights,
+        &[params(1, 0.1)],
+        &[greys(3, &[(0, 255)]), greys(8, &[(0, 128)])],
+        &[],
+        &[],
+    );
+    let values = skied.light_at(0, [0.0; 2], 0.0, 0, true).unwrap().values;
+    assert_eq!(map_light(&values, 0.0, None, false).sky[0], [1.0; 3]);
+    assert_eq!(map_light(&values, 0.0, None, true).sky, [[grey; 3]; 6]);
+}
+
+#[test]
 fn the_fog_of_the_game_is_that_of_the_lights_mixed_within_the_far_clip() {
     let tables = tables();
     let fog = |place: [f32; 2], map: u32, far: f32| {
         let mixed = tables.light_at(map, place, 0.0, 0, true).unwrap();
-        tables.fog_of_the_game(&mixed, map, 0, 0.0, far).unwrap()
+        tables.fog_of_the_game(&mixed, map, Immersion::Dry, 0.0, far).unwrap()
     };
     // The global light alone: from a quarter of 500 yards, straight; within the far clip.
     assert_eq!(fog([-5_000.0, 0.0], 0, 1_277.0), [125.0, 500.0, 1.0]);
@@ -627,7 +710,9 @@ fn the_fog_of_the_game_is_that_of_the_lights_mixed_within_the_far_clip() {
     let mixed = curved.light_at(571, [800.0, 0.0], 0.0, 0, true).unwrap();
     assert_eq!(ids(&mixed), [1, 2]);
     assert!((mixed.used[1].1 - 0.5).abs() < 1e-4, "{:?}", mixed.used);
-    let fog = curved.fog_of_the_game(&mixed, 571, 0, 0.0, 1_277.0).unwrap();
+    let fog = curved
+        .fog_of_the_game(&mixed, 571, Immersion::Dry, 0.0, 1_277.0)
+        .unwrap();
     let rate = (1.5 + 5.5 * (1.0 - 150.0 / 500.0) + 1.5) / 2.0;
     assert!(
         fog.iter()
@@ -682,6 +767,7 @@ fn the_light_is_a_category_of_the_settings_noon_by_default_still() {
 /// and nothing else.
 struct TestFormats {
     zones: Result<Vec<ZoneLightRecord>, String>,
+    liquids: Result<Vec<LiquidTypeRecord>, String>,
 }
 
 impl Formats for TestFormats {
@@ -699,6 +785,9 @@ impl Formats for TestFormats {
     }
     fn zone_lights(&self) -> Result<Arc<Vec<ZoneLightRecord>>, String> {
         self.zones.clone().map(Arc::new)
+    }
+    fn liquid_types(&self) -> Result<Arc<Vec<LiquidTypeRecord>>, String> {
+        self.liquids.clone().map(Arc::new)
     }
     fn maps(&self) -> Result<Arc<Vec<MapRecord>>, String> {
         Err("none".to_owned())
@@ -848,11 +937,30 @@ impl EditorBackend for Shown {
     }
 }
 
-/// A host offering `formats` and `vfs`, counting the jobs started, kept unrun for the test to run
-/// them, and those cancelled, its editor `editor`.
+/// Liquids where the eye is in the liquid `liquid`, keeping the point last asked.
+#[derive(Default)]
+struct Pond {
+    liquid: Mutex<Option<u16>>,
+    asked: Mutex<Option<[f32; 3]>>,
+}
+
+impl Liquids for Pond {
+    fn surfaces(&self) -> Arc<Surfaces> {
+        Arc::default()
+    }
+    fn liquid_at(&self, at: [f32; 3]) -> Option<u16> {
+        *self.asked.lock().unwrap() = Some(at);
+        *self.liquid.lock().unwrap()
+    }
+}
+
+/// A host offering `formats`, `vfs`, `viewport` and `liquids`, counting the jobs started, kept
+/// unrun for the test to run them, and those cancelled, its editor `editor`.
 struct Host {
     formats: Arc<dyn Formats>,
     files: Arc<dyn Vfs>,
+    pond: Arc<Pond>,
+    liquids: uniwow_api::liquids::Handle,
     view: viewport::Handle,
     seen: Arc<View>,
     started: Vec<String>,
@@ -864,9 +972,13 @@ struct Host {
 
 fn host(files: Arc<Files>) -> Host {
     let seen = Arc::new(View::default());
+    let pond = Arc::new(Pond::default());
     Host {
+        liquids: pond.clone(),
+        pond,
         formats: Arc::new(TestFormats {
             zones: Err("none".to_owned()),
+            liquids: Ok(liquids()),
         }),
         files,
         view: seen.clone(),
@@ -891,6 +1003,7 @@ impl uniwow_api::Host for Host {
             "formats" => Some(&self.formats),
             "vfs" => Some(&self.files),
             "viewport" => Some(&self.view),
+            "liquids" => Some(&self.liquids),
             _ => None,
         }
     }
@@ -949,7 +1062,7 @@ fn the_tables_are_read_once_the_client_is_open_and_again_once_it_changes() {
     module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
     module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
     assert_eq!(host.started.len(), 1);
-    let refused: Result<(Arc<Tables>, Option<String>), String> = Err("refused".to_owned());
+    let refused: Result<crate::Read, String> = Err("refused".to_owned());
     module.on_job(
         JobId(1),
         JobOutcome::Done(Box::new(refused)),
@@ -970,7 +1083,7 @@ fn the_tables_are_read_once_the_client_is_open_and_again_once_it_changes() {
     assert_eq!(host.cancelled, [JobId(2)]);
     assert_eq!(host.started.len(), 2);
     // A job of before coming back is not taken.
-    let read: Result<(Arc<Tables>, Option<String>), String> = Ok((Arc::new(Tables::default()), None));
+    let read: Result<crate::Read, String> = Ok((Arc::new(Tables::default()), None, None));
     module.on_job(
         JobId(2),
         JobOutcome::Done(Box::new(read)),
@@ -1011,8 +1124,7 @@ fn the_tables_are_read_once_the_client_is_open_and_again_once_it_changes() {
         files: 150,
     };
     module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
-    let read: Result<(Arc<Tables>, Option<String>), String> =
-        Ok((Arc::new(Tables::default()), Some("no Wow.exe".to_owned())));
+    let read: Result<crate::Read, String> = Ok((Arc::new(Tables::default()), Some("no Wow.exe".to_owned()), None));
     module.on_job(
         JobId(5),
         JobOutcome::Done(Box::new(read)),
@@ -1061,6 +1173,48 @@ fn the_light_is_that_of_the_map_shown_at_the_camera_s_place_on_it() {
     assert_eq!(shown.time, 1440.0);
     assert_eq!(light.values.numbers[2], Some(10.0));
     assert!((diffuse(light) - 200.0).abs() < 1e-3);
+    assert_eq!(
+        *host.pond.asked.lock().unwrap(),
+        Some([920.0, -50.0, 600.0]),
+        "asked at the eye"
+    );
+    // The eye under a water: the params under the water of the lights, their fog, no sky; in the
+    // magma, the light of its params alone, said in the panel.
+    module.tables = Some(Ok(Arc::new(tables().with_liquids(&liquids()))));
+    *host.pond.liquid.lock().unwrap() = Some(5);
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    let shown = module.shown.as_ref().unwrap();
+    assert_eq!((shown.liquid, shown.immersion), (Some(5), Immersion::Under));
+    assert!((diffuse(shown.light.as_ref().unwrap()) - 60.0).abs() < 1e-3);
+    let given = host.seen.0.lock().unwrap().unwrap();
+    assert_eq!(given.fog, Some([0.0, 100.0, 1.0]));
+    assert!(
+        given.sky.iter().all(|colour| *colour == given.sky[0]) && given.sky[0] != [1.0; 3],
+        "the colour of the fog all over, not the white top of the sky"
+    );
+    assert!(
+        panel(&mut module, &mut host)
+            .iter()
+            .any(|text| text.contains("the params under the water"))
+    );
+    *host.pond.liquid.lock().unwrap() = Some(3);
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    let shown = module.shown.as_ref().unwrap();
+    assert_eq!(shown.immersion, Immersion::Lit(4));
+    assert!(shown.light.as_ref().unwrap().used.is_empty());
+    assert!(
+        panel(&mut module, &mut host)
+            .iter()
+            .any(|text| text.contains("The eye in the liquid 3: the light of its params 4"))
+    );
+    *host.pond.liquid.lock().unwrap() = None;
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert_eq!(module.shown.as_ref().unwrap().immersion, Immersion::Dry);
+    assert_eq!(
+        host.seen.0.lock().unwrap().unwrap().sky[0],
+        [1.0; 3],
+        "out of it, the sky again"
+    );
     // The local lights switched off.
     host.settings.insert("local_lights".to_owned(), json!(0));
     module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
@@ -1112,6 +1266,64 @@ fn panel(module: &mut crate::LightingModule, host: &mut Host) -> Vec<String> {
 }
 
 #[test]
+fn the_lights_of_the_liquids_are_read_with_the_tables_the_light_read_without_them_if_need_be() {
+    let files = Arc::new(Files(Mutex::new(VfsState::Ready { archives: 1, files: 1 })));
+    let refused = "LiquidType.dbc refused".to_owned();
+    for liquids in [Ok(liquids()), Err(refused.clone())] {
+        let mut host = host(files.clone());
+        host.formats = Arc::new(TestFormats {
+            zones: Ok(Vec::new()),
+            liquids: liquids.clone(),
+        });
+        *host.editor.map.lock().unwrap() = json!({ "id": 0, "name": "Azeroth" });
+        *host.editor.camera.lock().unwrap() = Some([920.0, -50.0, 600.0]);
+        *host.pond.liquid.lock().unwrap() = Some(3);
+        let egui = egui::Context::default();
+        let mut module = crate::LightingModule::default();
+        module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+        let job = host.jobs.remove(0);
+        let editor = Editor::new(host.editor.clone(), "lighting");
+        let read = job(&JobContext::new(Arc::default(), Arc::default(), editor));
+        module.on_job(
+            JobId(1),
+            JobOutcome::Done(read),
+            &mut Context::new(&mut host, "lighting"),
+        );
+        module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+        let immersion = module.shown.as_ref().unwrap().immersion;
+        let texts = panel(&mut module, &mut host);
+        if liquids.is_ok() {
+            assert_eq!(immersion, Immersion::Lit(4), "in the magma, its light");
+            assert_eq!(module.liquids_unread, None);
+        } else {
+            // Without them, the light of the tables, the eye under the water of the magma, why said.
+            assert_eq!(immersion, Immersion::Under);
+            assert!(host.seen.0.lock().unwrap().is_some(), "a light still");
+            assert!(
+                texts.contains(&format!("No lights of the liquids: {refused}")),
+                "{texts:?}"
+            );
+        }
+    }
+    // In a liquid whose params are unknown: said.
+    let mut host = host(files);
+    let mut module = crate::LightingModule {
+        client: Some((1, 1)),
+        tables: Some(Ok(Arc::new(tables().with_liquids(&[liquid(3, 99)])))),
+        ..Default::default()
+    };
+    *host.editor.map.lock().unwrap() = json!({ "id": 0, "name": "Azeroth" });
+    *host.editor.camera.lock().unwrap() = Some([920.0, -50.0, 600.0]);
+    *host.pond.liquid.lock().unwrap() = Some(3);
+    module.windows_ui(&egui::Context::default(), &mut Context::new(&mut host, "lighting"));
+    let texts = panel(&mut module, &mut host);
+    assert!(
+        texts.contains(&"The eye in the liquid 3: the params 99 of its light unknown.".to_owned()),
+        "{texts:?}"
+    );
+}
+
+#[test]
 fn the_zones_of_light_are_read_with_the_tables_and_said_in_the_panel() {
     let files = Arc::new(Files(Mutex::new(VfsState::Ready { archives: 1, files: 1 })));
     // Around the light 2: a zone of the light 3, whole at the place of the camera.
@@ -1119,7 +1331,10 @@ fn the_zones_of_light_are_read_with_the_tables_and_said_in_the_panel() {
     let refused = "no Wow.exe in the client's folder".to_owned();
     for zones in [Ok(vec![zone(3, &around)]), Err(refused.clone())] {
         let mut host = host(files.clone());
-        host.formats = Arc::new(TestFormats { zones: zones.clone() });
+        host.formats = Arc::new(TestFormats {
+            zones: zones.clone(),
+            liquids: Ok(liquids()),
+        });
         *host.editor.map.lock().unwrap() = json!({ "id": 0, "name": "Azeroth" });
         *host.editor.camera.lock().unwrap() = Some([920.0, -50.0, 600.0]);
         let egui = egui::Context::default();

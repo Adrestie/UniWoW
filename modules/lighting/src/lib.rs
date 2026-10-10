@@ -1,8 +1,8 @@
 //! The light of the map the terrain shows, at the place of the camera on it and at the hour of the
-//! settings, from the tables of the client and the zones of light of its Wow.exe (`light`): computed
-//! at each frame, given to the view (`Viewport::set_light`) and said in the panel; taken back when
-//! the module stops. They are read by a job once the client's archives are open, and again whenever
-//! they change.
+//! settings, from the tables of the client and the zones of light of its Wow.exe (`light`), the eye
+//! in a liquid or not as the service `liquids` says: computed at each frame, given to the view
+//! (`Viewport::set_light`) and said in the panel; taken back when the module stops. They are read
+//! by a job once the client's archives are open, and again whenever they change.
 
 mod light;
 #[cfg(test)]
@@ -11,13 +11,13 @@ mod tests;
 use std::sync::Arc;
 use std::time::Instant;
 
-use uniwow_api::formats;
 use uniwow_api::serde_json::json;
 use uniwow_api::vfs::{self, VfsState};
 use uniwow_api::viewport::{self, MapLight};
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, PropertyValue, Registrar, SettingSpec, egui, log};
+use uniwow_api::{formats, liquids};
 
-use light::{COLOURS, DAY, Mixed, NUMBERS, Tables};
+use light::{COLOURS, DAY, Immersion, Mixed, NUMBERS, Tables};
 
 /// The settings: the hour, in minutes from midnight; how many minutes of the game pass in a second;
 /// whether the zones of light and the local lights are mixed in; whether the fog is the game's or
@@ -89,13 +89,19 @@ fn half_minutes(from: f64, speed: i64, seconds: f64) -> f32 {
     (minutes(from, speed, seconds) * 2.0) as f32 % DAY
 }
 
+/// The tables read, and why the zones of light and the lights of the liquids could not be, if so.
+type Read = (Arc<Tables>, Option<String>, Option<String>);
+
 /// What the panel says of the light last computed: the map, by its id and name, the place, the hour
-/// in half-minutes, and the light, none when the tables give none, with what the view was given.
+/// in half-minutes, the liquid the eye is in and where that puts it, and the light, none when the
+/// tables give none, with what the view was given.
 struct Shown {
     map: u32,
     name: String,
     place: [f32; 2],
     time: f32,
+    liquid: Option<u16>,
+    immersion: Immersion,
     light: Option<Mixed>,
     given: Option<MapLight>,
 }
@@ -107,6 +113,8 @@ struct LightingModule {
     client: Option<(usize, usize)>,
     tables: Option<Result<Arc<Tables>, String>>,
     zones_unread: Option<String>,
+    /// Why the lights of the types of liquid could not be read, the tables read without them.
+    liquids_unread: Option<String>,
     reading: Option<JobId>,
     /// The hour and the speed set, the hour in minutes it turns from, and since when.
     set: Option<(i64, i64, f64, Instant)>,
@@ -160,6 +168,7 @@ impl LightingModule {
             self.client = client;
             self.tables = None;
             self.zones_unread = None;
+            self.liquids_unread = None;
             self.shown = None;
         }
         self.client?;
@@ -169,16 +178,19 @@ impl LightingModule {
             None => {
                 if self.reading.is_none() {
                     self.reading = Some(ctx.spawn("Read the tables of the lights", move |_| {
-                        // Without its zones of light, the light of the tables.
+                        // Without its zones of light or the lights of its liquids, the light of
+                        // the tables.
                         let zones = formats.zone_lights();
+                        let liquids = formats.liquid_types();
                         let tables = Tables::new(
                             &formats.lights()?,
                             &formats.light_params()?,
                             &formats.light_colours()?,
                             &formats.light_numbers()?,
                             zones.as_deref().map(Vec::as_slice).unwrap_or_default(),
-                        );
-                        Ok::<_, String>((Arc::new(tables), zones.err()))
+                        )
+                        .with_liquids(liquids.as_deref().map(Vec::as_slice).unwrap_or_default());
+                        Ok::<_, String>((Arc::new(tables), zones.err(), liquids.err()))
                     }));
                 }
                 return None;
@@ -203,20 +215,26 @@ impl LightingModule {
             return None;
         };
         // The camera unread: the light before kept.
-        let Ok(PropertyValue::Vector([x, y, _])) = ctx.read_property("viewport/camera_position") else {
+        let Ok(PropertyValue::Vector([x, y, z])) = ctx.read_property("viewport/camera_position") else {
             return self.shown.as_ref().and_then(|shown| shown.given);
         };
         let place = [x as f32, y as f32];
-        let light = tables.light_at(map, place, time, 0, local == 1);
+        let liquid = ctx
+            .service(liquids::SERVICE)
+            .and_then(|liquids| liquids.liquid_at([x as f32, y as f32, z as f32]));
+        let immersion = tables.immersion(liquid);
+        let light = tables.light_in(map, place, time, local == 1, immersion);
         let given = light.as_ref().map(|light| {
-            let game_fog = (fog == 1).then(|| tables.fog_of_the_game(light, map, 0, time, far as f32));
-            light::map_light(&light.values, time, game_fog.flatten())
+            let game_fog = (fog == 1).then(|| tables.fog_of_the_game(light, map, immersion, time, far as f32));
+            light::map_light(&light.values, time, game_fog.flatten(), immersion != Immersion::Dry)
         });
         self.shown = Some(Shown {
             map,
             name,
             place,
             time,
+            liquid,
+            immersion,
             light,
             given,
         });
@@ -286,7 +304,13 @@ impl Module for LightingModule {
             ));
         }
         let Some(light) = &shown.light else {
-            ui.colored_label(ui.visuals().warn_fg_color, "No light for this map.");
+            let said = match (shown.liquid, shown.immersion) {
+                (Some(liquid), Immersion::Lit(params)) => {
+                    format!("The eye in the liquid {liquid}: the params {params} of its light unknown.")
+                }
+                _ => "No light for this map.".to_owned(),
+            };
+            ui.colored_label(ui.visuals().warn_fg_color, said);
             return;
         };
         let used: Vec<String> = light
@@ -303,9 +327,30 @@ impl Module for LightingModule {
                 format!("{id}{kind} {weight:.2}")
             })
             .collect();
-        ui.label(format!("Lights mixed, by their weights: {}", used.join(", ")));
+        match (shown.liquid, shown.immersion) {
+            (Some(liquid), Immersion::Lit(params)) => {
+                ui.label(format!(
+                    "The eye in the liquid {liquid}: the light of its params {params}, in place of every light"
+                ));
+            }
+            (Some(liquid), _) => {
+                ui.label(format!(
+                    "The eye in the liquid {liquid}: the params under the water of each light"
+                ));
+                ui.label(format!("Lights mixed, by their weights: {}", used.join(", ")));
+            }
+            (None, _) => {
+                ui.label(format!("Lights mixed, by their weights: {}", used.join(", ")));
+            }
+        }
         if let Some(reason) = &self.zones_unread {
             ui.colored_label(ui.visuals().warn_fg_color, format!("No zones of light: {reason}"));
+        }
+        if let Some(reason) = &self.liquids_unread {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!("No lights of the liquids: {reason}"),
+            );
         }
         egui::Grid::new("lighting colours").striped(true).show(ui, |ui| {
             for (name, colour) in COLOUR_NAMES.iter().zip(&light.values.colours) {
@@ -365,9 +410,10 @@ impl Module for LightingModule {
             JobOutcome::Panicked(message) => Err(message),
             // Cancelled from the jobs: not read again before the client's archives change.
             JobOutcome::Cancelled => Err("their reading was cancelled".to_owned()),
-            outcome => match outcome.take::<Result<(Arc<Tables>, Option<String>), String>>() {
-                Some(read) => read.map(|(tables, zones_unread)| {
+            outcome => match outcome.take::<Result<Read, String>>() {
+                Some(read) => read.map(|(tables, zones_unread, liquids_unread)| {
                     self.zones_unread = zones_unread;
+                    self.liquids_unread = liquids_unread;
                     tables
                 }),
                 None => return,
@@ -378,6 +424,9 @@ impl Module for LightingModule {
         }
         if let Some(reason) = &self.zones_unread {
             log::warn!("the zones of light are not read: {reason}");
+        }
+        if let Some(reason) = &self.liquids_unread {
+            log::warn!("the lights of the liquids are not read: {reason}");
         }
     }
 }

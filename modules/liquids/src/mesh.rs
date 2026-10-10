@@ -12,6 +12,8 @@ use uniwow_api::liquids::{CELL, Placed, Surfaces};
 /// The kinds of a type of liquid that are not water.
 const MAGMA: u32 = 2;
 const SLIME: u32 = 3;
+/// How far over the surface of a liquid a point still lies in it, in yards (0x9F1968).
+const OVER: f32 = 0.01;
 
 /// Whether a type of liquid of `kind` is water, drawn blended, rather than magma or slime.
 pub fn is_water(kind: u32) -> bool {
@@ -178,6 +180,29 @@ pub fn meshes(layers: &[LiquidLayer], kind: impl Fn(u16) -> Option<(u32, bool)>)
         }
     }
     meshes
+}
+
+/// The type of the first of `layers` the point `at` lies in, as the client finds the liquid the eye
+/// is in (0x7A0820, 0x7CE1F0, 0x7CE0B0): the cell of its chunk holding the point covered, and the
+/// point under its surface there, read between the heights of the corners of that cell along the
+/// columns then the rows, or no more than `OVER` over it.
+pub fn liquid_at(layers: &[LiquidLayer], at: [f32; 3]) -> Option<u16> {
+    layers.iter().find_map(|layer| {
+        let [row, column] = [(layer.corner[0] - at[0]) / CELL, (layer.corner[1] - at[1]) / CELL];
+        if !(0.0..8.0).contains(&row) || !(0.0..8.0).contains(&column) {
+            return None;
+        }
+        let [r, c] = [row as usize, column as usize];
+        if layer.tiles >> (r * 8 + c) & 1 == 0 {
+            return None;
+        }
+        let height = |r: usize, c: usize| layer.heights.get(r * LIQUID_SIDE + c).copied().unwrap_or_default();
+        let [down, across] = [row - r as f32, column - c as f32];
+        let near = height(r, c) + (height(r, c + 1) - height(r, c)) * across;
+        let far = height(r + 1, c) + (height(r + 1, c + 1) - height(r + 1, c)) * across;
+        let surface = near + (far - near) * down;
+        (at[2] < surface + OVER).then_some(layer.liquid)
+    })
 }
 
 /// The meshes of the liquid `placed` by another module, its type given its slot in the table and

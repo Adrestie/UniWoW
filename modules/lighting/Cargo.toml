@@ -19,4 +19,4 @@ name = "Lighting"
 category = "World"
 # Services the module cannot work without, and services it uses when present.
 requires = []
-uses = ["viewport", "vfs", "formats"]
+uses = ["viewport", "vfs", "formats", "liquids"]

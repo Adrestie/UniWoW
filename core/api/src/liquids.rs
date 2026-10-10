@@ -40,6 +40,17 @@ pub trait Liquids: Send + Sync {
     fn clear(&self, owner: &str) {
         let _ = owner;
     }
+
+    /// The type of the liquid the point `at` of the world lies in, of `LiquidType.dbc`, as the client
+    /// finds the one the eye is in (0x7A0820): of the liquids of the tiles held, water, magma or
+    /// slime, the first of the chunk under the point whose cell there is covered and whose surface,
+    /// between the heights of the corners of that cell, is over the point or no more than a
+    /// hundredth of a yard under it; the ground there not looked at, where the client wants the point
+    /// over it. The liquids other modules place are left out. None by default.
+    fn liquid_at(&self, at: [f32; 3]) -> Option<u16> {
+        let _ = at;
+        None
+    }
 }
 
 /// A liquid another module places, in the world: its type of `LiquidType.dbc`; its vertices, each

@@ -3,11 +3,12 @@
 //! the reach the budget of the view lets load and the room of the arenas holding them, let go
 //! beyond the reach it lets keep; their meshes put on the GPU and drawn by the layer of the module;
 //! the surfaces of their water given through the service `liquids`, by which the other layers tell
-//! what they blend beyond the water from what is on the eye's side. A tile refused for want of room
-//! is read again once the arenas gave a range back or the camera moved. The liquids other modules
-//! place through the service, as `buildings` those of its groups, are put on the GPU by jobs, drawn
-//! while their owners show them, and their water added to the surfaces. Nothing is changed: no undo
-//! entry, no file written.
+//! what they blend beyond the water from what is on the eye's side, and the liquid at a point, by
+//! which the light tells the one the eye is in. A tile refused for want of room is read again once
+//! the arenas gave a range back or the camera moved. The liquids other modules place through the
+//! service, as `buildings` those of its groups, are put on the GPU by jobs, drawn while their
+//! owners show them, and their water added to the surfaces. Nothing is changed: no undo entry, no
+//! file written.
 
 mod gpu;
 mod layer;
@@ -21,7 +22,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use uniwow_api::arena::{self, Refusal};
-use uniwow_api::formats::{self, TILE, TileId, Wdt};
+use uniwow_api::formats::{self, LiquidLayer, TILE, TileId, Wdt};
 use uniwow_api::glam::Vec3;
 use uniwow_api::journal;
 use uniwow_api::liquids::{self, Grid, Liquids, Placed, Surfaces};
@@ -50,11 +51,16 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 type Pouring = Vec<(Placed, Arc<AtomicBool>)>;
 type Pour = Arc<Pouring>;
 
-/// The surfaces of the water held, given to the other modules; and the liquids they placed or took
-/// away since the module last took them, by owner, none for those taken away.
+/// The layers of the tiles held, by tile as `Surfaces` keeps them.
+type Layers = HashMap<[i32; 2], Arc<Vec<LiquidLayer>>>;
+
+/// The surfaces of the water held and the layers of the tiles held, given to the other modules; and
+/// the liquids they placed or took away since the module last took them, by owner, none for those
+/// taken away.
 #[derive(Default)]
 struct Water {
     surfaces: Mutex<Arc<Surfaces>>,
+    layers: Mutex<Arc<Layers>>,
     placed: Mutex<HashMap<String, Option<Pouring>>>,
 }
 
@@ -74,6 +80,11 @@ impl Liquids for Water {
 
     fn clear(&self, owner: &str) {
         lock(&self.placed).insert(owner.to_owned(), None);
+    }
+
+    fn liquid_at(&self, at: [f32; 3]) -> Option<u16> {
+        let layers = journal::lock(&self.layers, "liquids layers").clone();
+        mesh::liquid_at(layers.get(&Surfaces::tile(Surfaces::cell(at[0], at[1])))?, at)
     }
 }
 
@@ -130,10 +141,12 @@ fn pour(
     Ok(poured)
 }
 
-/// The liquids of a tile read: on the GPU, none where it has none; the surface of its water.
+/// The liquids of a tile read: on the GPU, none where it has none; the surface of its water; its
+/// layers, by which the liquid at a point is found.
 struct Held {
     gpu: Option<Arc<TileGpu>>,
     grid: Option<Arc<Grid>>,
+    layers: Arc<Vec<LiquidLayer>>,
 }
 
 /// A read of a tile, or why it could not be read.
@@ -154,7 +167,15 @@ fn read(formats: &dyn formats::Formats, shared: &Arc<Shared>, directory: &str, t
     Ok(Held {
         gpu: gpu::upload(shared, &meshes)?.map(Arc::new),
         grid,
+        layers: Arc::new(layers),
     })
+}
+
+/// The layers of the tiles `held`, shared, not copied.
+fn layers(held: &HashMap<TileId, Held>) -> Layers {
+    held.iter()
+        .map(|(tile, held)| ([tile.y as i32, tile.x as i32], held.layers.clone()))
+        .collect()
 }
 
 /// The surfaces of the water of the tiles `held`, their grids shared, not copied.
@@ -499,8 +520,8 @@ impl LiquidsModule {
         }
     }
 
-    /// Gives the layer and the surfaces the tiles held, when they changed: the grids of their water
-    /// shared, not copied.
+    /// Gives the layer, the surfaces and the layers the tiles held, when they changed: the grids of
+    /// their water and their layers shared, not copied.
     fn publish(&mut self) {
         if !self.changed {
             return;
@@ -520,6 +541,7 @@ impl LiquidsModule {
             surfaces.merge(&poured.surfaces);
         }
         *lock(&self.water.surfaces) = Arc::new(surfaces);
+        *lock(&self.water.layers) = Arc::new(layers(&self.held));
         let mut scene = lock(&self.scene);
         scene.tiles = self.held.values().filter_map(|held| held.gpu.clone()).collect();
         scene.placed = poured

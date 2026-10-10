@@ -1,10 +1,10 @@
 //! Tests of the liquids: their meshes, flat layers by rectangles, and the surfaces of their water,
-//! the frames of a type, its ramp and its table of depths, the ramps of the water, the tiles read
-//! and let go; and, on the software adapter of the system when it has one, a tile read giving the
-//! water over it by its place in the world, a tile refused for want of room put on the GPU once a
-//! range is given back, the water drawn over the magma under it, a blended batch under its surface
-//! seen through it and one over it drawn over it, from over the water and from under it, the water
-//! writing no depth, and the water under the light of a map.
+//! the liquid a point lies in, the frames of a type, its ramp and its table of depths, the ramps of
+//! the water, the tiles read and let go; and, on the software adapter of the system when it has
+//! one, a tile read giving the water over it by its place in the world, a tile refused for want of
+//! room put on the GPU once a range is given back, the water drawn over the magma under it, a
+//! blended batch under its surface seen through it and one over it drawn over it, from over the
+//! water and from under it, the water writing no depth, and the water under the light of a map.
 
 use std::future::Future;
 use std::pin::pin;
@@ -82,6 +82,75 @@ fn a_layer_is_two_triangles_a_tile_it_covers_its_water_giving_the_height_of_its_
     assert_eq!(surfaces.surface(x, y), None, "a tile not covered");
     let (x, y) = middle(7.0, 7.0);
     assert_eq!(surfaces.surface(x, y), None, "magma is no water");
+}
+
+#[test]
+fn the_liquid_at_a_point_is_the_first_whose_cell_there_is_covered_and_its_surface_over_it() {
+    // A water over the cells 0, 0 and 0, 1 of its chunk, its surface rising by 2 a column and by 4 a
+    // row, at 1 at the corner.
+    let corner = [100.0, 200.0];
+    let mut water = layer(5, corner, 1.0, 0b11, 0);
+    for row in 0..LIQUID_SIDE {
+        for column in 0..LIQUID_SIDE {
+            water.heights[row * LIQUID_SIDE + column] = 1.0 + 2.0 * column as f32 + 4.0 * row as f32;
+        }
+    }
+    // The point a quarter of a cell down the rows and a cell and a half across: its surface at 5.
+    let at = |row: f32, column: f32, z: f32| [corner[0] - row * CELL, corner[1] - column * CELL, z];
+    let layers = std::slice::from_ref(&water);
+    assert_eq!(mesh::liquid_at(layers, at(0.25, 1.5, 4.99)), Some(5));
+    assert_eq!(
+        mesh::liquid_at(layers, at(0.25, 1.5, 5.005)),
+        Some(5),
+        "a hundredth of a yard over it at most"
+    );
+    assert_eq!(mesh::liquid_at(layers, at(0.25, 1.5, 5.02)), None);
+    assert_eq!(
+        mesh::liquid_at(layers, at(1.5, 0.5, -100.0)),
+        None,
+        "a cell not covered"
+    );
+    for (row, column) in [(-0.5, 0.5), (0.5, -0.5), (8.5, 0.5), (0.5, 8.5)] {
+        assert_eq!(
+            mesh::liquid_at(layers, at(row, column, -100.0)),
+            None,
+            "out of its chunk"
+        );
+    }
+    // A cell whose far corner alone is higher, at 5: at its middle, the mean of its corners, 2.
+    let mut bump = layer(6, corner, 1.0, 1, 0);
+    bump.heights[LIQUID_SIDE + 1] = 5.0;
+    let bump = std::slice::from_ref(&bump);
+    assert_eq!(mesh::liquid_at(bump, at(0.5, 0.5, 1.98)), Some(6));
+    assert_eq!(mesh::liquid_at(bump, at(0.5, 0.5, 2.02)), None);
+    // Under a magma too, deeper: the first in their order.
+    let magma = layer(7, corner, -5.0, 1, 255);
+    let deep = at(0.25, 0.5, -6.0);
+    assert_eq!(mesh::liquid_at(&[water.clone(), magma.clone()], deep), Some(5));
+    assert_eq!(mesh::liquid_at(&[magma.clone(), water.clone()], deep), Some(7));
+    assert_eq!(
+        mesh::liquid_at(&[magma, water.clone()], at(0.25, 0.5, 0.0)),
+        Some(5),
+        "over the magma"
+    );
+    // The layers of the tiles held given to the service once they changed.
+    let mut module = crate::LiquidsModule::default();
+    let tile = TileId { x: 31, y: 49 };
+    let mut pond = water;
+    pond.corner = [ORIGIN - 49.0 * TILE, ORIGIN - 31.0 * TILE];
+    let point = [pond.corner[0] - 0.25 * CELL, pond.corner[1] - 0.5 * CELL, 0.0];
+    module.held.insert(
+        tile,
+        crate::Held {
+            gpu: None,
+            grid: None,
+            layers: Arc::new(vec![pond]),
+        },
+    );
+    assert_eq!(module.water.liquid_at(point), None, "not yet given");
+    module.changed = true;
+    module.publish();
+    assert_eq!(module.water.liquid_at(point), Some(5));
 }
 
 #[test]
@@ -180,6 +249,7 @@ fn record(id: u32, kind: u32, material: u32, texture: &str) -> LiquidTypeRecord 
         animation: [2.0, 3.0],
         depth_table: 0,
         depth_scale: 1.0,
+        light: 0,
     }
 }
 
@@ -598,13 +668,33 @@ fn a_tile_read_gives_the_water_over_it_by_its_place_in_the_world() {
         held.gpu.as_ref().map(|gpu| (gpu.water.len(), gpu.opaque.len())),
         Some((6, 0))
     );
-    let surfaces = crate::surfaces(&std::collections::HashMap::from([(tile, held)]));
+    let held = std::collections::HashMap::from([(tile, held)]);
+    let surfaces = crate::surfaces(&held);
     let corner = [ORIGIN - 49.0 * TILE, ORIGIN - 31.0 * TILE];
     assert_eq!(surfaces.surface(corner[0] - 1.0, corner[1] - 1.0), Some(2.5));
     assert_eq!(
         surfaces.surface(corner[0] - 1.0, corner[1] - CELL * 8.0 - 1.0),
         None,
         "the chunk beside"
+    );
+    // The liquid at a point, by the layers of its tile.
+    let water = crate::Water::default();
+    *water.layers.lock().unwrap() = Arc::new(crate::layers(&held));
+    assert_eq!(water.liquid_at([corner[0] - 1.0, corner[1] - 1.0, 2.0]), Some(5));
+    assert_eq!(
+        water.liquid_at([corner[0] - 1.0, corner[1] - 1.0, 3.0]),
+        None,
+        "over it"
+    );
+    assert_eq!(
+        water.liquid_at([corner[0] - 1.0, corner[1] - CELL * 8.0 - 1.0, 2.0]),
+        None,
+        "the chunk beside"
+    );
+    assert_eq!(
+        water.liquid_at([corner[0] + 1.0, corner[1] - 1.0, 2.0]),
+        None,
+        "the tile beside"
     );
 }
 

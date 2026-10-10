@@ -352,9 +352,10 @@ pub struct LiquidLayer {
 /// (`LiquidMaterial.dbc`, 3 the procedural water) and the format of the vertices it names (0
 /// heights and depths, 1 heights and coordinates, 2 depths), its six textures (a frame number where
 /// a name holds `%d`, none where empty), the two numbers of its animation: for magma and slime how
-/// fast its coordinates run, for water the scale of its texture and its turn in degrees; and the
-/// table its depths are read by (`Int[0]`: 0 that of the rivers, 1 that of the oceans) and how far
-/// they are stretched (`Float[2]`).
+/// fast its coordinates run, for water the scale of its texture and its turn in degrees; the table
+/// its depths are read by (`Int[0]`: 0 that of the rivers, 1 that of the oceans) and how far they
+/// are stretched (`Float[2]`); and the params of the light (`LightParams.dbc`) the eye takes within
+/// it in place of the lights of the place, 0 for none (its field 10).
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiquidTypeRecord {
     pub id: u32,
@@ -366,6 +367,7 @@ pub struct LiquidTypeRecord {
     pub animation: [f32; 2],
     pub depth_table: u32,
     pub depth_scale: f32,
+    pub light: u32,
 }
 
 /// A light of `Light.dbc`, as the file stores it: its map, its centre and its two radii (where it
