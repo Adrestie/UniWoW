@@ -480,6 +480,28 @@ fn the_sun_turns_once_a_day_by_noggit_s_table_to_the_north_west() {
 }
 
 #[test]
+fn the_light_of_the_water_is_that_of_its_bands_with_the_alphas_of_its_params() {
+    let lights = [light(1, [0.0; 2], [0.0; 2], [1, 0])];
+    // The bands 9, 14, 15 and 17 of the params 1; the band 16 lacking.
+    let bands = [
+        greys(10, &[(0, 255)]),
+        greys(15, &[(0, 51)]),
+        greys(16, &[(0, 102)]),
+        greys(18, &[(0, 204)]),
+    ];
+    let tables = Tables::new(&lights, &[params(1, 0.1)], &bands, &[], &[]);
+    let values = tables.light_at(0, [0.0; 2], 0.0, 0, true).unwrap().values;
+    let water = map_light(&values, 0.0, None).water;
+    assert_eq!(water.sun, [1.0; 3]);
+    assert_eq!(water.ocean, [[0.2, 0.2, 0.2, 0.75], [0.4, 0.4, 0.4, 1.0]]);
+    assert_eq!(
+        water.river,
+        [[0.0, 0.0, 0.0, 0.1], [0.8, 0.8, 0.8, 1.0]],
+        "black where a band lacks"
+    );
+}
+
+#[test]
 fn the_light_given_to_the_view_is_the_fixed_one_where_the_tables_give_none() {
     let tables = tables();
     let values = tables.light_at(0, [920.0, -50.0], 0.0, 0, true).unwrap().values;

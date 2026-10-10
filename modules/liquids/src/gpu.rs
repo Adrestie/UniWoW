@@ -4,7 +4,8 @@
 //! blended without writing the depth, magma and slime opaque. A tile is put there by the job that
 //! reads it, and its ranges given back when it is dropped. The frames of a type and their
 //! animation as Noggit draws them, read for the facts only: a procedural water (its material 3)
-//! takes the frames of `lake_a`.
+//! takes the frames of `lake_a`. The colours of the water, under the light of a map, from the ramps
+//! the client writes at each frame, the table of its depths and its ramp by its type.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -15,7 +16,7 @@ use uniwow_api::arena::{Arena, Refusal};
 use uniwow_api::formats::{FileRef, Formats, LiquidTypeRecord};
 use uniwow_api::glam::Vec3;
 use uniwow_api::texture_arrays::{Placed, TextureArrays};
-use uniwow_api::viewport::{self, Target, View};
+use uniwow_api::viewport::{self, Target, View, Water};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
 use crate::mesh::{self, Meshes, Vertex};
@@ -25,8 +26,19 @@ pub const SLOTS: usize = 16;
 /// The types of liquid the table holds, and the frames of a type.
 pub const TYPES: usize = 64;
 pub const FRAMES: usize = 32;
+/// The rows of a ramp of the water, and its ramps: of the river, of the ocean and of the buildings.
+pub const ROWS: usize = 64;
+pub const RAMPS: usize = 3;
 /// Floats of the shader's `Camera`.
-pub const CAMERA: usize = 28;
+pub const CAMERA: usize = 44 + 4 * ROWS * RAMPS;
+/// The names of the ramps the textures of a type give, in their order (0x8A2E20).
+const RAMP_NAMES: [&str; RAMPS] = [
+    "proceduralRiverDepthTex",
+    "proceduralOceanDepthTex",
+    "proceduralWmoWaterTex",
+];
+/// A type without a table of depths.
+pub const NO_TABLE: u32 = u32::MAX;
 /// The material of the procedural water, and the frames it is drawn with.
 const PROCEDURAL: u32 = 3;
 const PROCEDURAL_FRAMES: &str = r"XTextures\river\lake_a.%d.blp";
@@ -38,7 +50,8 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// A type of liquid as the shader reads it: the codes of its frames (`Placed::code`); how many
-/// frames, whether water, its material; the two numbers of its animation.
+/// frames, whether water, its ramp and its table of depths; the two numbers of its animation and the
+/// scale of its depths.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TypeGpu {
@@ -71,7 +84,70 @@ pub fn frames(record: &LiquidTypeRecord) -> (Vec<String>, [f32; 2]) {
     (names, animation)
 }
 
-/// The camera of the shader: the view, its eye and the time of the frame, its fog.
+/// The ramp of the water of `record`, by its place in `RAMP_NAMES`: the first of its textures that
+/// names one, where the client binds the texture of a fixed place (the second for its water of the
+/// first kind, the fifth for its procedural water); that of the river where none does. Both choices
+/// of the editor.
+pub fn ramp(record: &LiquidTypeRecord) -> u32 {
+    record
+        .textures
+        .iter()
+        .find_map(|name| RAMP_NAMES.iter().position(|ramp| name == ramp))
+        .unwrap_or(0) as u32
+}
+
+/// The table of the depths of `record` (0x79B870): that of the rivers (0) or of the oceans (1),
+/// where the vertices of its material give depths (its format 0 or 2); none otherwise.
+pub fn depth_table(record: &LiquidTypeRecord) -> u32 {
+    match (record.vertex_format, record.depth_table) {
+        (Some(0 | 2), table @ (0 | 1)) => table,
+        _ => NO_TABLE,
+    }
+}
+
+/// A value from 0 to 1 in 255ths, to the nearest, as the client turns the alphas (`fistp`).
+fn byte(value: f32) -> u8 {
+    (value * 255.0).round_ties_even().clamp(0.0, 255.0) as u8
+}
+
+/// A ramp from `shallow` to `deep`, red, green, blue and alpha, as the client writes it (0x8A2BF0):
+/// each row the shallow value and a 64th of the way to the deep one for each row before it, in
+/// 255ths, rounded down.
+fn ramp_rows(shallow: [f32; 4], deep: [f32; 4]) -> [[u8; 4]; ROWS] {
+    let [from, to] = [shallow, deep].map(|colour| colour.map(byte));
+    std::array::from_fn(|row| {
+        std::array::from_fn(|channel| {
+            let [from, to] = [i32::from(from[channel]), i32::from(to[channel])];
+            (from + (row as i32 * (to - from)).div_euclid(ROWS as i32)) as u8
+        })
+    })
+}
+
+/// The ramps of the water of `water` as the client writes them at each frame: the river's; the
+/// ocean's, its deepest row nine tenths as bright and opaque (0x8A2D61); the buildings', the deep
+/// colour of the river all along with the alphas of the river (0x8A2AC0). Their colours in 255ths
+/// of the values given, to the nearest, a choice of the editor: the client keeps its bands in
+/// bytes. The deepest row of the ocean each channel nine tenths of itself, to the nearest, where the
+/// client turns it through its hue, saturation and value, which may round a half the other way.
+pub fn ramps(water: &Water) -> [[[u8; 4]; ROWS]; RAMPS] {
+    let river = ramp_rows(water.river[0], water.river[1]);
+    let mut ocean = ramp_rows(water.ocean[0], water.ocean[1]);
+    let deepest = &mut ocean[ROWS - 1];
+    for channel in &mut deepest[..3] {
+        *channel = byte(f32::from(*channel) / 255.0 * 0.9);
+    }
+    deepest[3] = 255;
+    let mut buildings = river;
+    let deep = water.river[1].map(byte);
+    for row in &mut buildings {
+        row[..3].copy_from_slice(&deep[..3]);
+    }
+    [river, ocean, buildings]
+}
+
+/// The camera of the shader: the view, its eye and the time of the frame, its fog; the light of the
+/// water, when the view gives it: towards the sun, 1 after it, then its ambient light, its diffuse
+/// light and the colour of the sun on the water, in gamma, and its ramps, in 255ths.
 pub fn camera_values(view: &View) -> [f32; CAMERA] {
     let mut values = [0f32; CAMERA];
     values[..16].copy_from_slice(&view.view_proj.to_cols_array());
@@ -80,6 +156,17 @@ pub fn camera_values(view: &View) -> [f32; CAMERA] {
     values[20..23].copy_from_slice(&view.fog.colour);
     values[24..27].copy_from_slice(&[view.fog.start, view.fog.middle, view.fog.end]);
     values[27] = view.fog.rate;
+    if let Some(water) = &view.water {
+        values[28..31].copy_from_slice(&view.sun.direction);
+        values[31] = 1.0;
+        values[32..35].copy_from_slice(&view.sun.ambient);
+        values[36..39].copy_from_slice(&view.sun.colour);
+        values[40..43].copy_from_slice(&water.sun);
+        let rows = ramps(water).into_iter().flatten().flatten();
+        for (value, byte) in values[44..].iter_mut().zip(rows) {
+            *value = f32::from(byte) / 255.0;
+        }
+    }
     values
 }
 
@@ -324,10 +411,10 @@ impl Shared {
             info: [
                 placed.len() as u32,
                 u32::from(mesh::is_water(record.kind)),
-                record.material,
-                0,
+                ramp(record),
+                depth_table(record),
             ],
-            animation: [animation[0], animation[1], 0.0, 0.0],
+            animation: [animation[0], animation[1], record.depth_scale, 0.0],
         };
         self.queue.write_buffer(
             &self.table,

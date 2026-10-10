@@ -240,6 +240,8 @@ impl Tables {
                             dbc.string(row, 20)?,
                         ],
                         animation: [dbc.f32(row, 23), dbc.f32(row, 24)],
+                        depth_table: dbc.u32(row, 41),
+                        depth_scale: dbc.f32(row, 25),
                     })
                 };
                 read(chain, "LiquidType.dbc", 45, row, |liquid| liquid.id)

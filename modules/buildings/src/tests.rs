@@ -560,6 +560,7 @@ pub(crate) fn view(eye: Vec3) -> View {
         fog: Default::default(),
         sun: Default::default(),
         sky: None,
+        water: None,
     }
 }
 

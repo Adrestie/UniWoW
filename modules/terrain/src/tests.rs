@@ -1186,6 +1186,7 @@ fn render_lit(
         fog,
         sun: Default::default(),
         sky,
+        water: None,
     };
     layer.prepare(gpu, &view);
     // A bundle for each phase, run in their order.
@@ -1508,6 +1509,7 @@ fn the_sky_is_seen_from_the_screen_as_precisely_far_from_the_middle_of_the_world
             fog: viewport::Fog::default(),
             sun: Default::default(),
             sky: None,
+            water: None,
         };
         let values = crate::layer::camera_values(&view);
         let sky_from_screen = Mat4::from_cols_slice(&values[40..56]);

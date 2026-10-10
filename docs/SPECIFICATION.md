@@ -6205,9 +6205,9 @@ comments say they come from the client's code):
   distance) / (end − start))^rate, the rate 1.5 plus 5.5 times what the span of the fog leaves of
   1,583⅓ yards (791⅔ for the maps of the first game, by its comment): for Azeroth at noon about 5.7,
   the fog at nine tenths 250 yards away. Noggit multiplies its start by its end twice, which fills
-  everything with fog, and draws none by default. The client draws it otherwise (9.7a4). The editor's fog is two smoothsteps by the
-  distance on the ground, between three distances: taking the game's would change the type `Fog` and
-  who sets it.
+  everything with fog, and draws none by default. The client draws it otherwise (9.7a4). The
+  editor's fog is two smoothsteps by the distance on the ground, between three distances: taking the
+  game's would change the type `Fog` and who sets it.
 - **The water and the liquids** (*client*): `LiquidType`'s field 3 is 1 for every water and ocean
   of the world, 2 for the magmas, 3 for the slimes, 0 for three waters of instances and an orange
   slime (the definitions of WoWDBDefs name it a bank of sounds): it does not tell the ocean from the
@@ -6560,6 +6560,83 @@ gives, rather than a layer of `lighting` over its sky.
   place of the eye back in and lost a degree 17,000 yards from the middle of the world; light points
   taken (two rings tested, two comments made true), the cost of the trigonometry of the shader
   signalled.
+
+#### Step 9.7c1, as built: the surface of the water
+
+Decided by the user before it: 9.7c in two parts, the surface of the water (9.7c1), then what is
+under it (9.7c2); the water drawn by the formula of the client's water of the first kind
+(`CMaterialWater`), every water alike, rather than its procedural water, which the HD pack of the
+user's client gives to all its waters but three.
+
+- **Read in the client** (Wow.exe 12340, its shaders, and the tables of the user's client):
+  - **The ramps** (0x8A2BF0, 0x8A2AC0): the client writes at each frame three textures of 8 × 64
+    texels, from shallow to deep: the river's, from the band 16 to the band 17 with the alphas of
+    the river; the ocean's, from 14 to 15 with those of the ocean, its deepest row nine tenths as
+    bright (its value, in hue, saturation and value) and opaque; the buildings', the band 17 all
+    along (white in its right half, for the insides) with the alphas of the river. Each row the
+    shallow byte and a 64th of the way to the deep one for each row before it, rounded down; the
+    alphas in 255ths to the nearest. A type takes the ramp one of its textures names
+    (`proceduralRiverDepthTex`, `proceduralOceanDepthTex`, `proceduralWmoWaterTex`), not by its
+    field 3 nor by its flags.
+  - **Along the ramp** (0x79B870, 0x79E3C0, 0x7CE45F): each vertex by its depth byte, through the
+    table its type names (its field 41: 0 that of the rivers, the byte over 42, whole past it; 1
+    that of the oceans, the byte over 255) where the vertices of its material give depths (format 0
+    or 2), then stretched by its field 25; at the start otherwise. The ramp sampled at 64 times that
+    less half a row, between its rows, its edges held. The depth byte: of `MH2O`, the one after the
+    heights (format 0), the byte itself (format 2, 255 for a layer without vertices), 0 for the
+    other formats; of `MCLQ` and of a building's `MLIQ`, the first byte of a vertex.
+  - **The shader** (vsLiquidWater, psLiquidWater, alike in their versions 3.0 and ARB, but that the
+    ARB one bounds the colours of its vertices to 1): the colour of the ramp lit by the ambient
+    light (band 1) plus the diffuse (band 0) by the height of the sun, the surface facing up; plus
+    the texel of the water's texture; plus the alpha of that texel times the colour of the sun (band
+    9) reflected, by the half way between the eye and the sun to the power 6 (for each vertex), and
+    a quarter; its alpha that of the ramp; in gamma, then fogged. The texel's alpha is a mask: the
+    frames of `lake_a` and `ocean_h` are nearly black, of an alpha a fifth on average.
+  - **The user's client** (its HD pack): its waters and oceans, those of the buildings too, take the
+    procedural water (material 3: reflections by cube maps, maps of heights, Fresnel), the table of
+    the oceans stretched by half, the ramp their fifth texture names: the river's for the waters (1,
+    5, 9, 13, 17, 81), the ocean's for the oceans (2, 6, 10, 14, 100). The waters of Coilfang and of
+    Hyjal past and the orange slime take the first kind, by the table of the rivers, the slime
+    stretched 8.5 times. None takes the ramp of the buildings.
+- **The view** (`core/api`): `Water`, the colours of the river and of the ocean, shallow and deep,
+  each with its alpha, and the colour of the sun, in gamma; `MapLight::water`, and `View::water`,
+  none without the light of a map. `LiquidTypeRecord` gains the table of its depths and their
+  stretch; a layer of `MH2O` without vertices has depths of 0 where its format has none (1), 255
+  otherwise.
+- **The light** (`light.rs`): `map_light` gives the bands 16 and 17, 14 and 15, with the alphas of
+  the params, and the band 9; a band the light lacks black, as Noggit reads it.
+- **The liquids** write the three ramps at each frame as the client does, from the colours of the
+  light to the nearest 255th (a choice of the editor: the client keeps its bands in bytes); the
+  deepest row of the ocean each channel nine tenths of itself, to the nearest, where the client goes
+  through hue, saturation and value, which may round a half the other way. A type takes the ramp of
+  the first of its textures naming one, that of the river where none does (a choice of the editor);
+  the table and the stretch of its depths. The place along the ramp for each vertex, the ramp read
+  for each pixel; the sun reflected for each pixel too, where the client reflects it for each
+  vertex, the flat water being drawn by quads of up to 8 × 8 cells, over which the reflection of a
+  vertex would spread. The colour bounded to 1 before it is made linear and fogged, where the client
+  fogs it unbounded. The light of the ramp, its ambient and diffuse, is not bounded, as the version
+  3.0 writes it: whether its card bounds it is not established, and it often passes 1 at noon. The
+  water of a building takes the left half of its ramp, that of the outside; the right half, white by
+  the colour of its material, is for the insides (9.7d). Without the light of a map, the fixed
+  colours as before. As before too: the frames of `lake_a` for the procedural water (Noggit), the
+  magma and the slime.
+- **Not in 9.7c1**: what is under the surface (9.7c2); the factor the client applies to the ambient
+  and diffuse light by [0xD38F4C], not identified, none when nil; the insides of the buildings
+  (9.7d); the procedural water of the HD pack.
+- **Tested**: the ramps of a river rising in red, falling in green and by a unit in blue, of an
+  ocean and of the buildings, row by row; the ramp a type names, the river's for none, the first
+  named; its table by the format of its material; the light giving the bands of the water, black for
+  one it lacks, with the alphas of its params; the view carrying it, none without it; drawn, an
+  ocean at its deepest, opaque and darker, and at its shallowest, blended by its alpha, its texel
+  added and its alpha masking the sun reflected and the quarter; a river halfway between two rows,
+  stretched twice to its last, past 42 whole then stretched by half, without a table at its start; a
+  steep ramp lit three times, halfway between two rows, not at either; the client's types giving
+  their tables and stretches. 32 changes made on purpose, all caught, two once a steep ramp was lit
+  to show half a row. Reviewed by another instance: nothing grave nor middling; light points:
+  wordings made true (the bound of the light of the ramp, the ramp a type takes, the depths of a
+  layer without vertices, a message of a test); signalled, the fixed sun where a light lacks the
+  bands 0 and 1 while those of the water are then black, the colours of the vertices of the
+  buildings' water for 9.7d, the ramps the client's types name not checked by its test.
 
 #### Tests
 

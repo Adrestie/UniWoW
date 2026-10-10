@@ -26,7 +26,7 @@ use uniwow_api::journal;
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::viewport::{
     self, Allowance, Demand, Drawing, Fog, Frame, Label, Layer, MAX_FRAME_WAIT, MapLight, Phase, Pyramid, Sky, Sun,
-    Target, View,
+    Target, View, Water,
 };
 use uniwow_api::{
     Context, DockArea, Event, MODULE_FAILED_TOPIC, Module, PropertyKind, PropertyValue, Registrar, SettingSpec, egui,
@@ -141,12 +141,13 @@ impl Lighting {
         }
     }
 
-    /// The fog, the sun and the sky of the view: the light's sun, sky and colour of the fog over the
-    /// terrain's fog, and the light's distances and rate of the game when it gives them; the fixed
-    /// light and a sky of the colour of the fog without it.
-    fn resolved(&self) -> (Fog, Sun, Option<Sky>) {
+    /// The fog, the sun, the sky and the light of the water of the view: the light's sun, sky, water
+    /// and colour of the fog over the terrain's fog, and the light's distances and rate of the game
+    /// when it gives them; the fixed light, a sky of the colour of the fog and the fixed colours of
+    /// the water without it.
+    fn resolved(&self) -> (Fog, Sun, Option<Sky>, Option<Water>) {
         let Some((_, light)) = self.light else {
-            return (self.fog, Sun::default(), None);
+            return (self.fog, Sun::default(), None, None);
         };
         let mut fog = Fog {
             colour: light.fog_colour,
@@ -161,12 +162,17 @@ impl Lighting {
                 ..fog
             };
         }
-        (fog, light.sun, Some(light.sky))
+        (fog, light.sun, Some(light.sky), Some(light.water))
     }
 }
 
-/// The camera and frame drawn, the camera locked once, with the fog and the sun set last.
-fn view(shared: &Camera, size: [u32; 2], time: f32, (fog, sun, sky): (Fog, Sun, Option<Sky>)) -> View {
+/// The camera and frame drawn, the camera locked once, with the light of the view set last.
+fn view(
+    shared: &Camera,
+    size: [u32; 2],
+    time: f32,
+    (fog, sun, sky, water): (Fog, Sun, Option<Sky>, Option<Water>),
+) -> View {
     let mut camera = camera(shared);
     let aspect = size[0] as f32 / size[1] as f32;
     // Kept for viewport.frame, which fits a box in the width as in the height.
@@ -180,6 +186,7 @@ fn view(shared: &Camera, size: [u32; 2], time: f32, (fog, sun, sky): (Fog, Sun, 
         fog,
         sun,
         sky,
+        water,
     }
 }
 
@@ -1726,7 +1733,7 @@ mod tests {
             &Camera::default(),
             [64, 64],
             0.0,
-            (viewport::Fog::default(), viewport::Sun::default(), None),
+            (viewport::Fog::default(), viewport::Sun::default(), None, None),
         );
         let targets = Targets::new(&gpu);
         let frames = |new_device| {
@@ -1800,27 +1807,33 @@ mod tests {
         let view = super::view(&Camera::default(), [64, 64], 0.0, lighting.lock().unwrap().resolved());
         assert_eq!(view.fog, set);
         assert_eq!(
-            (view.sun, view.sky),
-            (viewport::Sun::default(), None),
-            "the fixed light and a sky of the colour of the fog without the light of a map"
+            (view.sun, view.sky, view.water),
+            (viewport::Sun::default(), None, None),
+            "without the light of a map: the fixed light, the colour of the fog and the fixed water"
         );
-        // The light of a map: its sun, its sky and the colour of its fog over the terrain's
-        // distances.
+        // The light of a map: its sun, its sky, its water and the colour of its fog over the
+        // terrain's distances.
         let sun = viewport::Sun {
             direction: [0.0, 0.0, 1.0],
             colour: [0.5, 0.25, 0.0],
             ambient: [0.2; 3],
         };
         let sky = [[0.1, 0.2, 0.3], [0.2; 3], [0.3; 3], [0.4; 3], [0.5; 3], [0.6; 3]];
+        let water = viewport::Water {
+            river: [[0.1, 0.2, 0.3, 0.4], [0.5; 4]],
+            ocean: [[0.6; 4], [0.7, 0.8, 0.9, 1.0]],
+            sun: [1.0, 0.5, 0.0],
+        };
         let light = viewport::MapLight {
             sun,
             fog_colour: [0.0, 0.0, 1.0],
             fog: None,
             sky,
+            water,
         };
         service.set_light("lighting", Some(light));
         let view = super::view(&Camera::default(), [64, 64], 0.0, lighting.lock().unwrap().resolved());
-        assert_eq!((view.sun, view.sky), (sun, Some(sky)));
+        assert_eq!((view.sun, view.sky, view.water), (sun, Some(sky), Some(water)));
         assert_eq!(
             view.fog,
             viewport::Fog {
@@ -1847,7 +1860,10 @@ mod tests {
         );
         service.set_light("lighting", None);
         let view = super::view(&Camera::default(), [64, 64], 0.0, lighting.lock().unwrap().resolved());
-        assert_eq!((view.fog, view.sun, view.sky), (set, viewport::Sun::default(), None));
+        assert_eq!(
+            (view.fog, view.sun, view.sky, view.water),
+            (set, viewport::Sun::default(), None, None)
+        );
         // Taken back too when that module fails, not when another does.
         service.set_light("lighting", Some(light));
         module.failed("terrain");
@@ -1855,7 +1871,7 @@ mod tests {
         module.failed("lighting");
         assert_eq!(
             lighting.lock().unwrap().resolved(),
-            (set, viewport::Sun::default(), None)
+            (set, viewport::Sun::default(), None, None)
         );
     }
 
@@ -2056,7 +2072,7 @@ mod tests {
             &shared,
             [200, 100],
             0.0,
-            (viewport::Fog::default(), viewport::Sun::default(), None),
+            (viewport::Fog::default(), viewport::Sun::default(), None, None),
         );
         let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(200.0, 100.0));
         let target = camera(&shared).target();
@@ -2158,7 +2174,7 @@ mod tests {
             &shared,
             [640, 480],
             0.0,
-            (viewport::Fog::default(), viewport::Sun::default(), None),
+            (viewport::Fog::default(), viewport::Sun::default(), None, None),
         );
         assert_eq!(drawn.eye, camera(&shared).eye());
     }
@@ -2372,7 +2388,7 @@ mod tests {
             &Camera::default(),
             [8, 8],
             0.0,
-            (viewport::Fog::default(), viewport::Sun::default(), None),
+            (viewport::Fog::default(), viewport::Sun::default(), None, None),
         );
         let mut frames: Vec<GpuFrame> = Vec::new();
         for _ in 0..6 {
@@ -2895,7 +2911,7 @@ fn cs_main() {
             &Camera::default(),
             [8, 8],
             0.0,
-            (viewport::Fog::default(), viewport::Sun::default(), None),
+            (viewport::Fog::default(), viewport::Sun::default(), None, None),
         );
         let targets = Targets::new(&gpu);
         // The last drawn covers the view: a bundle after the pass, then the pass after a bundle,
@@ -2936,7 +2952,7 @@ fn cs_main() {
             &Camera::default(),
             [8, 8],
             0.0,
-            (viewport::Fog::default(), viewport::Sun::default(), None),
+            (viewport::Fog::default(), viewport::Sun::default(), None, None),
         );
         let targets = Targets::new(&gpu);
         // Half red, blended in front without writing the depth, as a blended batch of the models,
@@ -2976,7 +2992,7 @@ fn cs_main() {
             &Camera::default(),
             [8, 8],
             0.0,
-            (viewport::Fog::default(), viewport::Sun::default(), None),
+            (viewport::Fog::default(), viewport::Sun::default(), None, None),
         );
         let targets = Targets::new(&gpu);
         // Red beyond the surface, blue the water, green on this side, each half over what is
@@ -3011,7 +3027,7 @@ fn cs_main() {
             &Camera::default(),
             [8, 8],
             0.0,
-            (viewport::Fog::default(), viewport::Sun::default(), None),
+            (viewport::Fog::default(), viewport::Sun::default(), None, None),
         );
         let targets = Targets::new(&gpu);
         let greater = wgpu::CompareFunction::Greater;
@@ -3053,7 +3069,7 @@ fn cs_main() {
             &Camera::default(),
             [8, 8],
             0.0,
-            (viewport::Fog::default(), viewport::Sun::default(), None),
+            (viewport::Fog::default(), viewport::Sun::default(), None, None),
         );
         // A bundle recorded for the view's multisampling, run in a pass of one sample: refused when
         // the pass is finished, no layer drawn in it to blame.
@@ -3089,7 +3105,7 @@ fn cs_main() {
             &Camera::default(),
             [8, 8],
             0.0,
-            (viewport::Fog::default(), viewport::Sun::default(), None),
+            (viewport::Fog::default(), viewport::Sun::default(), None, None),
         );
         let targets = Targets::new(&gpu);
         let layers = Layers::default();
@@ -3109,7 +3125,7 @@ fn cs_main() {
             &Camera::default(),
             [8, 8],
             0.0,
-            (viewport::Fog::default(), viewport::Sun::default(), None),
+            (viewport::Fog::default(), viewport::Sun::default(), None, None),
         );
         let entry = |painter: Painter| Entry {
             owner: "painter".to_owned(),
@@ -3133,7 +3149,7 @@ fn cs_main() {
             &Camera::default(),
             [8, 8],
             0.0,
-            (viewport::Fog::default(), viewport::Sun::default(), None),
+            (viewport::Fog::default(), viewport::Sun::default(), None, None),
         );
         let targets = Targets::new(&gpu);
         for (fault, said) in [
@@ -3517,7 +3533,7 @@ fn main() {
             &Camera::default(),
             [8, 8],
             0.0,
-            (viewport::Fog::default(), viewport::Sun::default(), None),
+            (viewport::Fog::default(), viewport::Sun::default(), None, None),
         );
         let targets = Targets::new(&gpu);
         let layers = Layers::default();

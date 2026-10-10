@@ -530,6 +530,7 @@ fn the_axes_of_the_camera_are_those_of_its_view_whatever_its_projection() {
                 fog: Default::default(),
                 sun: Default::default(),
                 sky: None,
+                water: None,
             },
             100.0,
         );

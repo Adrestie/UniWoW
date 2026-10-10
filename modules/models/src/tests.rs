@@ -945,6 +945,7 @@ pub fn render(bench: &mut Bench, eye: Vec3, look: Vec3) -> Vec<u8> {
         fog: bench.fog,
         sun: bench.sun,
         sky: None,
+        water: None,
     };
     bench.layer.prepare(&gpu, &view);
     let in_pass = bench.layer.drawing() == Drawing::Pass;

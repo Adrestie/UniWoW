@@ -52,19 +52,30 @@ pub trait Viewport: Send + Sync {
 
 /// The light of the map at the place of the camera and the hour: its sun, the colour of its fog in
 /// linear, where its fog starts and ends, in yards, and its rate when the fog of the game is drawn
-/// (`Fog`), none for the editor's, and its sky (`Sky`).
+/// (`Fog`), none for the editor's, its sky (`Sky`) and the light of its water (`Water`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapLight {
     pub sun: Sun,
     pub fog_colour: [f32; 3],
     pub fog: Option<[f32; 3]>,
     pub sky: Sky,
+    pub water: Water,
 }
 
 /// The colours of the sky, in gamma, from its top down to its fog (the bands 2 to 7 of a light): its
 /// top, its middle, towards the horizon, over it, the horizon and the fog, on the rings of the dome
 /// of the sky as Noggit draws it, 90°, 18°, 10°, 3° and 0° high, then the fog from −30° down.
 pub type Sky = [[f32; 3]; 6];
+
+/// The light of the water, in gamma: the colours of the river (the bands 16 and 17 of a light) and
+/// of the ocean (14 and 15), shallow then deep, each with its alpha (those of its params); and the
+/// colour of the sun (the band 9), which the water reflects.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Water {
+    pub river: [[f32; 4]; 2],
+    pub ocean: [[f32; 4]; 2],
+    pub sun: [f32; 3],
+}
 
 /// The WGSL of a colour in gamma made linear (`linear`) and back (`srgb`), which the shaders of the
 /// view share.
@@ -337,6 +348,8 @@ pub struct View {
     pub sun: Sun,
     /// The sky of the light of the map, none for one of the colour of the fog alone.
     pub sky: Option<Sky>,
+    /// The light of the water of the map, none for the fixed colours of the water.
+    pub water: Option<Water>,
 }
 
 /// How a layer draws: in a render bundle of its own, which the viewport records and keeps by its

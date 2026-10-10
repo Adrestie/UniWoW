@@ -1,9 +1,10 @@
 //! Tests of the liquids: their meshes, flat layers by rectangles, and the surfaces of their water,
-//! the frames of a type, the tiles read and let go; and, on the software adapter of the system when
-//! it has one, a tile read giving the water over it by its place in the world, a tile refused for
-//! want of room put on the GPU once a range is given back, the water
-//! drawn over the magma under it, a blended batch under its surface seen through it and one over it
-//! drawn over it, from over the water and from under it, the water writing no depth.
+//! the frames of a type, its ramp and its table of depths, the ramps of the water, the tiles read
+//! and let go; and, on the software adapter of the system when it has one, a tile read giving the
+//! water over it by its place in the world, a tile refused for want of room put on the GPU once a
+//! range is given back, the water drawn over the magma under it, a blended batch under its surface
+//! seen through it and one over it drawn over it, from over the water and from under it, the water
+//! writing no depth, and the water under the light of a map.
 
 use std::future::Future;
 use std::pin::pin;
@@ -19,7 +20,7 @@ use uniwow_api::formats::{
 };
 use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::liquids::{CELL, Liquids, Placed, Surfaces};
-use uniwow_api::viewport::{Layer, Phase, Target, View};
+use uniwow_api::viewport::{Layer, Phase, Sun, Target, View, Water};
 use uniwow_api::{bytemuck, egui, egui_wgpu, wgpu};
 
 use crate::gpu::{self, Shared};
@@ -177,6 +178,8 @@ fn record(id: u32, kind: u32, material: u32, texture: &str) -> LiquidTypeRecord 
             String::new(),
         ],
         animation: [2.0, 3.0],
+        depth_table: 0,
+        depth_scale: 1.0,
     }
 }
 
@@ -200,7 +203,50 @@ fn the_frames_of_a_type_are_those_its_texture_names_a_procedural_water_those_of_
     assert!(gpu::frames(&record(9, 0, 1, "")).0.is_empty());
 }
 
-/// The formats of the tests: the frames of the water black, the magma red.
+#[test]
+fn the_ramp_and_the_table_of_depths_of_a_water_are_those_its_type_gives() {
+    let mut water = record(5, 1, 3, r"XTextures\procWater\basicReflectionMap.blp");
+    assert_eq!(gpu::ramp(&water), 0, "none named: the river's");
+    water.textures[4] = "proceduralOceanDepthTex".to_owned();
+    assert_eq!(gpu::ramp(&water), 1);
+    water.textures[1] = "proceduralWmoWaterTex".to_owned();
+    assert_eq!(gpu::ramp(&water), 2, "the first named");
+    water.textures[1] = "proceduralRiverDepthTex".to_owned();
+    assert_eq!(gpu::ramp(&water), 0);
+    assert_eq!(gpu::depth_table(&water), gpu::NO_TABLE, "its material unknown");
+    for (format, table, expected) in [(0, 1, 1), (2, 0, 0), (1, 0, gpu::NO_TABLE), (0, 2, gpu::NO_TABLE)] {
+        water.vertex_format = Some(format);
+        water.depth_table = table;
+        assert_eq!(gpu::depth_table(&water), expected, "format {format}, table {table}");
+    }
+}
+
+#[test]
+fn the_ramps_of_the_water_are_written_as_the_client_writes_them() {
+    let water = Water {
+        river: [
+            [10.0 / 255.0, 200.0 / 255.0, 100.0 / 255.0, 0.25],
+            [74.0 / 255.0, 8.0 / 255.0, 99.0 / 255.0, 0.75],
+        ],
+        ocean: [[0.0, 0.0, 0.0, 0.5], [100.0 / 255.0, 50.0 / 255.0, 1.0, 0.5]],
+        sun: [1.0; 3],
+    };
+    let [river, ocean, buildings] = gpu::ramps(&water);
+    // A 64th of the way more each row, rounded down, the blue a unit down from the second row; the
+    // alphas from 64 to 191, their 255ths to the nearest.
+    assert_eq!(
+        [river[0], river[1], river[63]],
+        [[10, 200, 100, 64], [11, 197, 99, 65], [73, 11, 99, 189]]
+    );
+    // The ocean's deepest row nine tenths as bright and opaque.
+    assert_eq!([ocean[32], ocean[62]], [[50, 25, 127, 128], [96, 48, 247, 128]]);
+    assert_eq!(ocean[63], [88, 44, 226, 255]);
+    // The buildings': the deep colour of the river, its alphas.
+    assert_eq!([buildings[0], buildings[63]], [[74, 8, 99, 64], [74, 8, 99, 189]]);
+}
+
+/// The formats of the tests: the frames of the procedural water black, those of `glint` brown and
+/// half clear, the magma red.
 struct Liquid;
 
 impl Formats for Liquid {
@@ -263,6 +309,7 @@ impl Formats for Liquid {
     fn texture(&self, file: &FileRef) -> Result<Texture, String> {
         let colour = match file {
             FileRef::Path(path) if path.contains("lake_a") => [0, 0, 0, 255],
+            FileRef::Path(path) if path.contains("glint") => [40, 20, 0, 128],
             FileRef::Path(path) if path.contains("magma") => [255, 0, 0, 255],
             _ => return Err("none".to_owned()),
         };
@@ -412,6 +459,7 @@ fn view(eye: Vec3, target: Vec3) -> View {
         fog: Default::default(),
         sun: Default::default(),
         sky: None,
+        water: None,
     }
 }
 
@@ -512,13 +560,18 @@ fn middle(
     [data[at], data[at + 1], data[at + 2], data[at + 3]]
 }
 
-/// A layer drawing `layers` of a procedural water and a magma, and the surfaces of its water.
-fn bench(gpu: &egui_wgpu::RenderState, layers: &[LiquidLayer]) -> (LiquidsLayer, Surfaces) {
+/// A procedural water, of the type 5.
+fn procedural() -> LiquidTypeRecord {
+    record(5, 1, 3, r"XTextures\procWater\basicReflectionMap.blp")
+}
+
+/// A layer drawing `layers` of the water `water` and a magma, of the type 7, and the surfaces of its
+/// water.
+fn bench(gpu: &egui_wgpu::RenderState, water: &LiquidTypeRecord, layers: &[LiquidLayer]) -> (LiquidsLayer, Surfaces) {
     let shared = Arc::new(Shared::new(gpu, &TARGET).expect("the liquids on the device"));
-    let water = record(5, 1, 3, r"XTextures\procWater\basicReflectionMap.blp");
     let magma = record(7, 2, 2, r"XTextures\lava\magma0.blp");
     let meshes = mesh::meshes(layers, |liquid| {
-        let record = [&water, &magma]
+        let record = [water, &magma]
             .into_iter()
             .find(|record| record.id == u32::from(liquid))?;
         Some((shared.slot(&Liquid, record)?, mesh::is_water(record.kind)))
@@ -591,7 +644,7 @@ fn the_water_is_drawn_over_what_lies_under_it_without_hiding_what_is_blended_bey
         Vec3::new(83.0, 83.0, 30.0),
     );
     // The magma alone: red, opaque and unlit; its tile out of sight, not drawn.
-    let (mut magma, _) = bench(&gpu, &[layer(7, corner, -2.0, u64::MAX, 255)]);
+    let (mut magma, _) = bench(&gpu, &procedural(), &[layer(7, corner, -2.0, u64::MAX, 255)]);
     assert_eq!(middle(&gpu, &mut magma, &view(above, down), None), [255, 0, 0, 255]);
     assert!(
         magma.stats().items.starts_with("1 drawn of 1 tiles"),
@@ -623,6 +676,7 @@ fn the_water_is_drawn_over_what_lies_under_it_without_hiding_what_is_blended_bey
     // Under the shallow water, seen through it: tinted.
     let (mut liquids, surfaces) = bench(
         &gpu,
+        &procedural(),
         &[
             layer(7, corner, -2.0, u64::MAX, 255),
             layer(5, corner, 0.0, u64::MAX, 0),
@@ -658,6 +712,132 @@ fn the_water_is_drawn_over_what_lies_under_it_without_hiding_what_is_blended_bey
         ),
         through
     );
+}
+
+/// The value in gamma of a linear value, as an sRGB target encodes it, and back.
+fn srgb(value: f32) -> f32 {
+    if value <= 0.003_130_8 {
+        value * 12.92
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+fn linear(gamma: f32) -> f32 {
+    if gamma <= 0.040_45 {
+        gamma / 12.92
+    } else {
+        ((gamma + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+#[test]
+fn under_the_light_of_a_map_the_water_is_its_ramp_lit_plus_its_texel_and_the_sun_it_reflects() {
+    let Some(gpu) = device() else {
+        eprintln!("skipped: no software adapter for a device");
+        return;
+    };
+    let corner = [100.0, 100.0];
+    let mut seen = view(Vec3::new(83.0, 83.0, 20.0), Vec3::new(83.0, 83.0, -30.0));
+    // The sun 0.8 high: lit by the ambient 0.2 and 0.8 of the diffuse 0.5, 0.6 in all.
+    let towards = Vec3::new(0.0, 0.6, 0.8);
+    seen.sun = Sun {
+        direction: towards.to_array(),
+        colour: [0.5; 3],
+        ambient: [0.2; 3],
+    };
+    let deep = [200.0 / 255.0, 100.0 / 255.0, 50.0 / 255.0];
+    seen.water = Some(Water {
+        river: [[0.0, 0.0, 0.0, 1.0], [128.0 / 255.0, 64.0 / 255.0, 0.0, 1.0]],
+        ocean: [[deep[0], deep[1], deep[2], 0.5], [deep[0], deep[1], deep[2], 0.5]],
+        sun: [0.4, 0.0, 0.0],
+    });
+    // The sun on the water seen at the middle pixel, nearly straight down: by the half way between
+    // the eye and the sun, to the power 6, about 0.729.
+    let ray = seen
+        .view_proj
+        .inverse()
+        .project_point3(Vec3::new(1.0 / 16.0, -1.0 / 16.0, 1.0))
+        - seen.eye;
+    let half = (-ray.normalize() + towards).normalize();
+    let reflected = 0.4 * half.z.powi(6);
+    let near = |pixel: [u8; 4], expected: [f32; 3]| {
+        pixel[..3]
+            .iter()
+            .zip(expected)
+            .all(|(drawn, expected)| (f32::from(*drawn) - expected * 255.0).abs() <= 2.0)
+    };
+    // The ocean, its depths by the table of the oceans, at its deepest: its last row, nine tenths of
+    // its deep colour and opaque, lit; plus the brown texel; plus the half alpha of the texel times
+    // the sun reflected and a quarter.
+    let mut ocean = record(41, 0, 1, r"XTextures\river\glint.blp");
+    ocean.vertex_format = Some(0);
+    ocean.textures[1] = "proceduralOceanDepthTex".to_owned();
+    ocean.depth_table = 1;
+    let glint = [40.0 / 255.0, 20.0 / 255.0, 0.0, 128.0 / 255.0];
+    let (mut liquids, _) = bench(&gpu, &ocean, &[layer(41, corner, 0.0, u64::MAX, 255)]);
+    let drawn = middle(&gpu, &mut liquids, &seen, None);
+    let expected = [
+        0.6 * 180.0 / 255.0 + glint[0] + glint[3] * (reflected + 0.25),
+        0.6 * 90.0 / 255.0 + glint[1] + glint[3] * 0.25,
+        0.6 * 45.0 / 255.0 + glint[3] * 0.25,
+    ];
+    assert!(
+        near(drawn, expected) && drawn[3] == 255,
+        "{drawn:?} against {expected:?}"
+    );
+    // At its shallowest: its first row, of the alpha of the ocean, half, blended over black.
+    let (mut liquids, _) = bench(&gpu, &ocean, &[layer(41, corner, 0.0, u64::MAX, 0)]);
+    let drawn = middle(&gpu, &mut liquids, &seen, None);
+    let lit = [
+        0.6 * deep[0] + glint[0] + glint[3] * (reflected + 0.25),
+        0.6 * deep[1] + glint[1] + glint[3] * 0.25,
+        0.6 * deep[2] + glint[3] * 0.25,
+    ];
+    let expected = lit.map(|gamma| srgb(linear(gamma) * 128.0 / 255.0));
+    assert!(near(drawn, expected), "{drawn:?} against {expected:?}");
+    // The river, of the black texel of `lake_a`, opaque, its depths by the table of the rivers: at
+    // 21, halfway, between its rows 31 and 32, (62, 31) and (64, 32); stretched twice, its last row,
+    // (126, 63); past 42, whole, then stretched by half, halfway again; without a table, its first.
+    let mut river = record(1, 0, 1, r"XTextures\river\lake_a.blp");
+    river.vertex_format = Some(0);
+    river.textures[1] = "proceduralRiverDepthTex".to_owned();
+    for (depth, scale, format, ramp) in [
+        (21, 1.0, 0, [63.0, 31.5]),
+        (21, 2.0, 0, [126.0, 63.0]),
+        (84, 0.5, 0, [63.0, 31.5]),
+        (84, 1.0, 1, [0.0, 0.0]),
+    ] {
+        river.depth_scale = scale;
+        river.vertex_format = Some(format);
+        let (mut liquids, _) = bench(&gpu, &river, &[layer(1, corner, 0.0, u64::MAX, depth)]);
+        let drawn = middle(&gpu, &mut liquids, &seen, None);
+        let expected = [
+            0.6 * ramp[0] / 255.0 + reflected + 0.25,
+            0.6 * ramp[1] / 255.0 + 0.25,
+            0.25,
+        ];
+        assert!(
+            near(drawn, expected) && drawn[3] == 255,
+            "at {depth} stretched by {scale}: {drawn:?} against {expected:?}"
+        );
+    }
+    // A ramp rising to full red, lit three times: an eighth of the way along, by the table of the
+    // oceans stretched by an eighth, halfway between its rows 7 and 8, 27 and 31, not at either.
+    let mut steep = seen;
+    steep.sun.ambient = [3.0; 3];
+    steep.sun.colour = [0.0; 3];
+    steep.water = Some(Water {
+        river: [[0.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]],
+        ..seen.water.unwrap()
+    });
+    river.vertex_format = Some(0);
+    river.depth_table = 1;
+    river.depth_scale = 0.125;
+    let (mut liquids, _) = bench(&gpu, &river, &[layer(1, corner, 0.0, u64::MAX, 255)]);
+    let drawn = middle(&gpu, &mut liquids, &steep, None);
+    let expected = [3.0 * 29.0 / 255.0 + reflected + 0.25, 0.25, 0.25];
+    assert!(near(drawn, expected), "{drawn:?} against {expected:?}");
 }
 
 /// A square liquid of `liquid` over the origin at `height`, placed by another module.

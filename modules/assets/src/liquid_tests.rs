@@ -138,9 +138,10 @@ fn the_liquids_of_a_tile_are_its_layers_of_mh2o_and_the_older_ones_of_its_other_
     );
     assert_eq!(ocean.tiles, u64::MAX);
     assert!(ocean.heights.iter().all(|height| *height == -1.0) && ocean.depths.iter().all(|depth| *depth == 255));
-    // The magma: heights and coordinates in 255ths.
+    // The magma: heights and coordinates in 255ths, no depths, read as 0 as the client reads them.
     let magma = &layers[2];
     assert_eq!(magma.tiles, 1);
+    assert!(magma.depths.iter().all(|depth| *depth == 0));
     assert_eq!(magma.heights[at(1, 1)], 20.75);
     assert_eq!(
         [magma.coordinates[at(0, 1)], magma.coordinates[at(1, 0)]],
@@ -183,6 +184,13 @@ fn the_client_s_liquids_read_whole_and_lie_over_the_ground_they_cover() {
     let water = types.iter().find(|liquid| liquid.id == 5).unwrap();
     assert_eq!((water.kind, water.vertex_format), (1, Some(0)));
     assert_eq!(water.textures[5], r"XTextures\ocean\ocean_h.%d.blp");
+    // Their depths: the waters and oceans of the HD pack by the table of the oceans, stretched by
+    // half; the orange slime by that of the rivers, much stretched.
+    let depths = |id: u32| {
+        let liquid = types.iter().find(|liquid| liquid.id == id).unwrap();
+        (liquid.depth_table, liquid.depth_scale)
+    };
+    assert_eq!([depths(5), depths(2), depths(181)], [(1, 1.5), (1, 1.5), (0, 8.5)]);
     for map in ["Azeroth", "Kalimdor", "Expansion01", "Northrend"] {
         let wdt = client.wdt(map).unwrap();
         let tiles: Vec<u32> = (0..4096).filter(|index| wdt.tiles[*index as usize]).collect();

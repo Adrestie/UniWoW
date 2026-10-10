@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use uniwow_api::formats::{LightBand, LightParamsRecord, LightRecord, TILE, ZoneLightRecord};
-use uniwow_api::viewport::{Fog, MapLight, Sun};
+use uniwow_api::viewport::{Fog, MapLight, Sun, Water};
 
 /// A day, in half-minutes.
 pub const DAY: f32 = 2880.0;
@@ -453,11 +453,17 @@ fn gamma(linear: f32) -> f32 {
 /// The light of `values` at `time` the view draws with: its sun, in the direction of the hour, its
 /// diffuse and ambient light (the fixed light's where it has none); the colour of its fog, made
 /// linear (the fixed one where it has none); the fog of the game `game_fog`, where it starts and
-/// ends and its rate, when it is drawn (`Tables::fog_of_the_game`); and its sky, the bands 2 to 7
-/// in gamma, the colour of its fog where it has none.
+/// ends and its rate, when it is drawn (`Tables::fog_of_the_game`); its sky, the bands 2 to 7 in
+/// gamma, the colour of its fog where it has none; and the light of its water, its bands black where
+/// it has none, as Noggit reads them, with the alphas of its params.
 pub fn map_light(values: &Values, time: f32, game_fog: Option<[f32; 3]>) -> MapLight {
     let fixed = Sun::default();
     let fog = values.colours[7].unwrap_or(Fog::default().colour.map(gamma));
+    let band = |band: usize| values.colours[band].unwrap_or([0.0; 3]);
+    let with = |at: usize, alpha: f32| {
+        let [red, green, blue] = band(at);
+        [red, green, blue, alpha]
+    };
     MapLight {
         sun: Sun {
             direction: sun_direction(time),
@@ -467,6 +473,11 @@ pub fn map_light(values: &Values, time: f32, game_fog: Option<[f32; 3]>) -> MapL
         fog_colour: values.colours[7].map_or(Fog::default().colour, |colour| colour.map(linear)),
         fog: game_fog,
         sky: std::array::from_fn(|band| values.colours[2 + band].unwrap_or(fog)),
+        water: Water {
+            river: [with(16, values.river_alphas[0]), with(17, values.river_alphas[1])],
+            ocean: [with(14, values.ocean_alphas[0]), with(15, values.ocean_alphas[1])],
+            sun: band(9),
+        },
     }
 }
 

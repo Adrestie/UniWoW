@@ -94,7 +94,9 @@ fn new_layer(data: &[u8], at: usize, tile: [u32; 2], index: u32) -> Result<Liqui
         corner: corner(tile, index % 16, index / 16),
         tiles,
         heights: vec![low; size],
-        depths: vec![255; size],
+        // Of no depths: 0 where its format has none, as the client reads them; 255 otherwise, as
+        // the client reads those of the format 2.
+        depths: vec![if format == 1 { 0 } else { 255 }; size],
         coordinates: Vec::new(),
     };
     if vertices == 0 {

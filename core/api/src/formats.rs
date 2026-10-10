@@ -335,8 +335,9 @@ pub const LIQUID_SIDE: usize = 9;
 /// of highest X and Y, in world coordinates; the 8 × 8 tiles of the chunk it covers, a bit each,
 /// the bit `row * 8 + column`; and its 9 × 9 vertices, row by row as those of the terrain: a row
 /// goes down in Y, the rows go down in X, 4⅙ yards apart. Each vertex its height, its depth from 0
-/// to 255 (255 where its format has none), and its coordinates of texture where its format has
-/// them, none otherwise.
+/// to 255 (where it has none: 0 for heights and coordinates, as the client reads them; 255
+/// otherwise, as the client reads those of depths alone), and its coordinates of texture where its
+/// format has them, none otherwise.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiquidLayer {
     pub liquid: u16,
@@ -348,10 +349,12 @@ pub struct LiquidLayer {
 }
 
 /// A type of liquid of `LiquidType.dbc`: its kind (0 and 1 water, 2 magma, 3 slime), its material
-/// (`LiquidMaterial.dbc`, 3 the procedural water) and the format of the vertices it names (0 heights
-/// and depths, 1 heights and coordinates, 2 depths), its six textures (a frame number where a name holds `%d`, none where
-/// empty) and the two numbers of its animation: for magma and slime how fast its coordinates run,
-/// for water the scale of its texture and its turn in degrees.
+/// (`LiquidMaterial.dbc`, 3 the procedural water) and the format of the vertices it names (0
+/// heights and depths, 1 heights and coordinates, 2 depths), its six textures (a frame number where
+/// a name holds `%d`, none where empty), the two numbers of its animation: for magma and slime how
+/// fast its coordinates run, for water the scale of its texture and its turn in degrees; and the
+/// table its depths are read by (`Int[0]`: 0 that of the rivers, 1 that of the oceans) and how far
+/// they are stretched (`Float[2]`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiquidTypeRecord {
     pub id: u32,
@@ -361,6 +364,8 @@ pub struct LiquidTypeRecord {
     pub vertex_format: Option<u32>,
     pub textures: [String; 6],
     pub animation: [f32; 2],
+    pub depth_table: u32,
+    pub depth_scale: f32,
 }
 
 /// A light of `Light.dbc`, as the file stores it: its map, its centre and its two radii (where it
