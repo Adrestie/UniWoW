@@ -1,7 +1,8 @@
 //! What the liquids share on the GPU: the vertices of every tile in one arena and their indices in
-//! another, the textures of their types in arrays of `core/api`, a table of the types the shader
-//! reads (the codes of their frames, their kind, their animation), and the two pipelines: water
-//! blended without writing the depth, magma and slime opaque. A tile is put there by the job that
+//! another, the depths of the layers drawn by quads whose depths differ in a third, the textures of
+//! their types in arrays of `core/api`, a table of the types the shader reads (the codes of their
+//! frames, their kind, their animation), and the two pipelines: water blended without writing the
+//! depth, magma and slime opaque. A tile is put there by the job that
 //! reads it, and its ranges given back when it is dropped. The frames of a type and their
 //! animation as Noggit draws them, read for the facts only: a procedural water (its material 3)
 //! takes the frames of `lake_a`. The colours of the water, under the light of a map, from the ramps
@@ -19,7 +20,7 @@ use uniwow_api::texture_arrays::{Placed, TextureArrays};
 use uniwow_api::viewport::{self, Target, View, Water};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
-use crate::mesh::{self, Meshes, Vertex};
+use crate::mesh::{self, DEPTH_WORDS, Meshes, SLOT_BITS, Vertex};
 
 /// The arrays of textures the shader binds at once.
 pub const SLOTS: usize = 16;
@@ -191,6 +192,12 @@ fn shader(slots: usize) -> String {
         );
     }
     source.push_str("        default: { return vec4<f32>(1.0); }\n    }\n}\n");
+    let _ = writeln!(
+        source,
+        "\n// The depths of the layers drawn by quads whose depths differ, {DEPTH_WORDS} words a layer.\n\
+         @group(1) @binding({}) var<storage, read> depths: array<u32>;",
+        2 + slots
+    );
     source
 }
 
@@ -207,6 +214,12 @@ pub struct Shared {
     queue: wgpu::Queue,
     pub vertices: Arena,
     pub indices: Arena,
+    /// The depths of the layers drawn by quads whose depths differ, and what is bound before any.
+    pub depths: Arena,
+    no_depths: wgpu::Buffer,
+    /// Whether the tiles in sight are drawn by one `multi_draw_indexed_indirect` a phase, which the
+    /// device runs when it executes indirect draws; otherwise a draw a tile.
+    pub indirect: bool,
     pub arrays: TextureArrays,
     types: Mutex<Types>,
     pub table: wgpu::Buffer,
@@ -270,6 +283,16 @@ impl Shared {
             },
             count: None,
         }));
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 2 + SLOTS as u32,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("liquids"),
             entries: &entries,
@@ -354,6 +377,25 @@ impl Shared {
                 1 << 14,
             ),
             indices: Arena::new(device, queue, "liquids indices", wgpu::BufferUsages::INDEX, 4, 1 << 16),
+            depths: Arena::new(
+                device,
+                queue,
+                "liquids depths",
+                wgpu::BufferUsages::STORAGE,
+                (DEPTH_WORDS * 4) as u64,
+                1 << 8,
+            ),
+            no_depths: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("liquids no depths"),
+                size: (DEPTH_WORDS * 4) as u64,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }),
+            indirect: gpu
+                .adapter
+                .get_downlevel_capabilities()
+                .flags
+                .contains(wgpu::DownlevelFlags::INDIRECT_EXECUTION),
             arrays: TextureArrays::new(device, queue, "the liquids", SLOTS, false),
             types: Mutex::default(),
             table: device.create_buffer(&wgpu::BufferDescriptor {
@@ -426,9 +468,19 @@ impl Shared {
         Some(slot)
     }
 
-    /// The bind group of the frame: the table, the sampler and the arrays as last published.
+    /// What changes the bind group of a frame: the arrays and the buffer of the depths.
+    pub fn generation(&self) -> (u64, u64) {
+        (
+            self.arrays.generation(),
+            self.depths.buffer().map_or(0, |(_, generation)| generation),
+        )
+    }
+
+    /// The bind group of the frame: the table, the sampler, the arrays as last published and the
+    /// depths kept apart.
     pub fn bind_group(&self) -> wgpu::BindGroup {
         let (_, views) = self.arrays.views();
+        let depths = self.depths.buffer();
         let mut bound = vec![
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -443,6 +495,13 @@ impl Shared {
             binding: 2 + slot as u32,
             resource: wgpu::BindingResource::TextureView(view.as_ref().unwrap_or(&self.empty)),
         }));
+        bound.push(wgpu::BindGroupEntry {
+            binding: 2 + SLOTS as u32,
+            resource: depths
+                .as_ref()
+                .map_or(&self.no_depths, |(buffer, _)| buffer)
+                .as_entire_binding(),
+        });
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("liquids"),
             layout: &self.layout,
@@ -452,22 +511,28 @@ impl Shared {
 
     /// What the liquids take on the GPU: the buffers of their arenas, their arrays and their table.
     pub fn bytes(&self) -> u64 {
-        self.vertices.bytes().0 + self.indices.bytes().0 + self.arrays.bytes() + self.table.size()
+        self.vertices.bytes().0
+            + self.indices.bytes().0
+            + self.depths.bytes().0
+            + self.arrays.bytes()
+            + self.table.size()
     }
 
     /// The ranges given back by the arenas since they were made.
     pub fn given(&self) -> u64 {
-        self.vertices.given() + self.indices.given()
+        self.vertices.given() + self.indices.given() + self.depths.given()
     }
 }
 
 /// The liquids of a tile on the GPU: its vertices, the indices of its water and those of its magma
-/// and slime, each a range of the arena of the indices, and where its vertices begin; what it takes
-/// in each arena, the vertices' then the indices'.
+/// and slime, each a range of the arena of the indices, and where its vertices begin; the depths of
+/// its layers kept apart; what it takes in the arenas of the vertices and of the indices, the
+/// depths counted with the vertices.
 pub struct TileGpu {
     shared: Arc<Shared>,
     vertices: Range<u64>,
     indices: Range<u64>,
+    depths: Option<Range<u64>>,
     /// The box of its vertices in the world, which the view tests before drawing it.
     pub bounds: [Vec3; 2],
     pub base_vertex: i32,
@@ -481,20 +546,61 @@ impl Drop for TileGpu {
     fn drop(&mut self) {
         self.shared.vertices.give(self.vertices.clone());
         self.shared.indices.give(self.indices.clone());
+        if let Some(depths) = self.depths.clone() {
+            self.shared.depths.give(depths);
+        }
     }
 }
 
-/// `meshes` put on the GPU of `shared`; none when they hold nothing.
+/// `meshes` put on the GPU of `shared`; none when they hold nothing. The depths kept apart go first,
+/// the vertices pointing at them by their place in their arena.
 pub fn upload(shared: &Arc<Shared>, meshes: &Meshes) -> Result<Option<TileGpu>, Refusal> {
     if meshes.water.is_empty() && meshes.opaque.is_empty() {
         return Ok(None);
     }
-    let vertices = shared.vertices.put(bytemuck::cast_slice(&meshes.vertices))?;
+    let depths = if meshes.depths.is_empty() {
+        None
+    } else {
+        Some(shared.depths.put(bytemuck::cast_slice(&meshes.depths))?)
+    };
+    let give_depths = || {
+        if let Some(depths) = depths.clone() {
+            shared.depths.give(depths);
+        }
+    };
+    let rebased: Vec<Vertex>;
+    let vertex_data = match &depths {
+        Some(range) => {
+            rebased = meshes
+                .vertices
+                .iter()
+                .map(|vertex| {
+                    let kept = vertex.slot >> SLOT_BITS;
+                    let slot = vertex.slot & ((1 << SLOT_BITS) - 1);
+                    let kept = if kept == 0 { 0 } else { kept + range.start as u32 };
+                    Vertex {
+                        slot: slot | kept << SLOT_BITS,
+                        ..*vertex
+                    }
+                })
+                .collect();
+            &rebased
+        }
+        None => &meshes.vertices,
+    };
+    let vertices = match shared.vertices.put(bytemuck::cast_slice(vertex_data)) {
+        Ok(range) => range,
+        Err(reason) => {
+            give_depths();
+            return Err(reason.into());
+        }
+    };
     let all: Vec<u32> = meshes.water.iter().chain(&meshes.opaque).copied().collect();
     let indices = match shared.indices.put(bytemuck::cast_slice(&all)) {
         Ok(range) => range,
         Err(reason) => {
             shared.vertices.give(vertices);
+            give_depths();
             return Err(reason.into());
         }
     };
@@ -513,12 +619,13 @@ pub fn upload(shared: &Arc<Shared>, meshes: &Meshes) -> Result<Option<TileGpu>, 
         base_vertex: vertices.start as i32,
         opaque: water.end..water.end + meshes.opaque.len() as u32,
         water,
-        bytes: (meshes.vertices.len() * size_of::<Vertex>() + all.len() * 4) as u64,
+        bytes: (meshes.vertices.len() * size_of::<Vertex>() + all.len() * 4 + meshes.depths.len() * 4) as u64,
         arenas: [
-            (meshes.vertices.len() * size_of::<Vertex>()) as u64,
+            (meshes.vertices.len() * size_of::<Vertex>() + meshes.depths.len() * 4) as u64,
             all.len() as u64 * 4,
         ],
         vertices,
         indices,
+        depths,
     }))
 }

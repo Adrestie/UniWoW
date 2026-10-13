@@ -1,6 +1,8 @@
 //! The layer of the liquids, at the stage of the water: the magma and slime of the tiles held drawn
 //! with the opaque, their water in the phase of the water, between what is blended beyond its
-//! surface and what is blended on the eye's side, from over it and from under it.
+//! surface and what is blended on the eye's side, from over it and from under it. The tiles in
+//! sight are drawn by one `multi_draw_indexed_indirect` a phase, their commands written at each
+//! frame, where the device executes indirect draws; otherwise by a draw a tile.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -48,13 +50,30 @@ fn in_sight(view_proj: &Mat4, bounds: &[Vec3; 2]) -> bool {
     })
 }
 
+/// The indirect commands of the tiles `drawn` with something in a range `range` gives, each its
+/// count, one instance, its first index and where its vertices begin.
+pub fn commands(drawn: &[Arc<TileGpu>], range: impl Fn(&TileGpu) -> &std::ops::Range<u32>) -> Vec<[u32; 5]> {
+    drawn
+        .iter()
+        .filter(|tile| !range(tile).is_empty())
+        .map(|tile| {
+            let range = range(tile);
+            [range.end - range.start, 1, range.start, tile.base_vertex as u32, 0]
+        })
+        .collect()
+}
+
 pub struct LiquidsLayer {
     shared: Arc<Shared>,
     scene: Arc<Mutex<Scene>>,
     camera: Option<(wgpu::Buffer, wgpu::BindGroup)>,
-    group: Option<(wgpu::BindGroup, u64)>,
+    group: Option<(wgpu::BindGroup, (u64, u64))>,
     /// The tiles drawn this frame, held until the next.
     drawn: Vec<Arc<TileGpu>>,
+    /// The commands of the water then those of the magma and slime of the tiles drawn, and how many
+    /// of each, when drawn indirectly.
+    commands: Option<wgpu::Buffer>,
+    counts: [u32; 2],
     stats: LayerStats,
 }
 
@@ -66,7 +85,33 @@ impl LiquidsLayer {
             camera: None,
             group: None,
             drawn: Vec::new(),
+            commands: None,
+            counts: [0, 0],
             stats: LayerStats::default(),
+        }
+    }
+
+    /// Writes the commands of the tiles drawn, the buffer made again larger when it no longer holds
+    /// them.
+    fn write_commands(&mut self, gpu: &egui_wgpu::RenderState) {
+        let water = commands(&self.drawn, |tile| &tile.water);
+        let opaque = commands(&self.drawn, |tile| &tile.opaque);
+        self.counts = [water.len() as u32, opaque.len() as u32];
+        let all: Vec<[u32; 5]> = water.into_iter().chain(opaque).collect();
+        let size = (all.len() as u64 * 20).max(20);
+        if self.commands.as_ref().is_none_or(|buffer| buffer.size() < size) {
+            self.commands = Some(self.shared.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("liquids commands"),
+                size: size.next_power_of_two(),
+                usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        if let Some(buffer) = &self.commands
+            && !all.is_empty()
+        {
+            gpu.queue.write_buffer(buffer, 0, bytemuck::cast_slice(&all));
+            journal::uploaded(all.len() as u64 * 20);
         }
     }
 }
@@ -112,7 +157,7 @@ impl Layer for LiquidsLayer {
         });
         gpu.queue
             .write_buffer(camera, 0, bytemuck::cast_slice(&camera_values(view)));
-        let generation = shared.arrays.generation();
+        let generation = shared.generation();
         if self.group.as_ref().is_none_or(|(_, at)| *at != generation) {
             self.group = Some((shared.bind_group(), generation));
         }
@@ -122,11 +167,16 @@ impl Layer for LiquidsLayer {
                 opaque + u64::from(tile.opaque.len() as u32),
             )
         });
-        self.stats = LayerStats {
-            draws: tiles
+        let draws = if shared.indirect {
+            u64::from(water > 0) + u64::from(opaque > 0)
+        } else {
+            tiles
                 .iter()
                 .map(|tile| u64::from(!tile.water.is_empty()) + u64::from(!tile.opaque.is_empty()))
-                .sum(),
+                .sum()
+        };
+        self.stats = LayerStats {
+            draws,
             triangles: (water + opaque) / 3,
             bytes: shared.bytes(),
             items: format!(
@@ -146,6 +196,9 @@ impl Layer for LiquidsLayer {
             steering,
         };
         self.drawn = tiles;
+        if shared.indirect {
+            self.write_commands(gpu);
+        }
     }
 
     fn drawing(&self) -> Drawing {
@@ -182,6 +235,18 @@ impl Layer for LiquidsLayer {
         pass.set_bind_group(1, group, &[]);
         pass.set_vertex_buffer(0, vertices.slice(..));
         pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+        if self.shared.indirect {
+            // The water's commands first, then those of the magma and slime.
+            let (first, count) = if water {
+                (0, self.counts[0])
+            } else {
+                (self.counts[0], self.counts[1])
+            };
+            if let (Some(commands), true) = (&self.commands, count > 0) {
+                pass.multi_draw_indexed_indirect(commands, u64::from(first) * 20, count);
+            }
+            return;
+        }
         for tile in &self.drawn {
             let range = if water { &tile.water } else { &tile.opaque };
             if !range.is_empty() {

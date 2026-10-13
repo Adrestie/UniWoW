@@ -4,7 +4,9 @@
 //! one, a tile read giving the water over it by its place in the world, a tile refused for want of
 //! room put on the GPU once a range is given back, the water drawn over the magma under it, a
 //! blended batch under its surface seen through it and one over it drawn over it, from over the
-//! water and from under it, the water writing no depth, and the water under the light of a map.
+//! water and from under it, the water writing no depth, the water under the light of a map, a layer
+//! of one height whose depths differ drawn by quads as over its vertices, and the tiles drawn by one
+//! indirect draw a phase as by a draw a tile.
 
 use std::future::Future;
 use std::pin::pin;
@@ -190,11 +192,34 @@ fn a_flat_layer_is_a_quad_for_each_rectangle_of_the_cells_it_covers() {
         (shore.vertices.len(), shore.water.len(), shore.surfaces.len()),
         (12, 18, 7)
     );
-    // A depth apart: its 9 × 9 vertices.
+    // Of one height, a depth apart: a quad still, its 9 × 9 depths kept apart, the first, which its
+    // vertices name above the slot of their type.
     let mut deep = layer(2, [100.0, 200.0], -1.0, u64::MAX, 255);
     deep.depths[40] = 10;
-    let deep = mesh::meshes(&[deep], kind);
-    assert_eq!((deep.vertices.len(), deep.water.len()), (81, 384));
+    let kept = mesh::meshes(&[deep.clone(), deep.clone()], kind);
+    assert_eq!((kept.vertices.len(), kept.water.len()), (8, 12));
+    assert_eq!(kept.depths.len(), 2 * mesh::DEPTH_WORDS);
+    assert_eq!(
+        kept.depths[10], 0xFFFF_FF0A,
+        "the depth 40 in the low byte of the word 10"
+    );
+    assert_eq!(kept.depths[mesh::DEPTH_WORDS - 1], 0xFF, "the last word ended by zeros");
+    assert_eq!(kept.vertices[0].slot, 1 << mesh::SLOT_BITS, "the depths kept first");
+    assert_eq!(kept.vertices[4].slot, 2 << mesh::SLOT_BITS, "then the second layer's");
+    assert_eq!(ocean.vertices[0].slot, 0, "a layer of one depth keeps none");
+    // Over its 9 × 9 vertices as before, whose depths they carry.
+    let grids = mesh::meshes_in_grids(&[deep.clone()], kind);
+    assert_eq!(
+        (grids.vertices.len(), grids.water.len(), grids.depths.len()),
+        (81, 384, 0)
+    );
+    // Of two heights: its 9 × 9 vertices.
+    deep.heights[40] = -0.5;
+    let raised = mesh::meshes(&[deep], kind);
+    assert_eq!(
+        (raised.vertices.len(), raised.water.len(), raised.depths.len()),
+        (81, 384, 0)
+    );
 }
 
 #[test]
@@ -541,6 +566,17 @@ fn middle(
     view: &View,
     painted: Option<(&Painter, Phase)>,
 ) -> [u8; 4] {
+    image(gpu, layer, view, painted)[8 * 16 + 8]
+}
+
+/// The 16 × 16 pixels of `layer` drawn in `view` over black, a row after the other, with `painted`
+/// drawn first in its phase.
+fn image(
+    gpu: &egui_wgpu::RenderState,
+    layer: &mut LiquidsLayer,
+    view: &View,
+    painted: Option<(&Painter, Phase)>,
+) -> Vec<[u8; 4]> {
     let size = 16u32;
     layer.prepare(gpu, view);
     let texture = |format, usage| {
@@ -626,8 +662,10 @@ fn middle(
     pixels.slice(..).map_async(wgpu::MapMode::Read, |_| {});
     gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     let data = pixels.slice(..).get_mapped_range().expect("mapped").to_vec();
-    let at = (size / 2 * 256 + size / 2 * 4) as usize;
-    [data[at], data[at + 1], data[at + 2], data[at + 3]]
+    (0..size as usize)
+        .flat_map(|row| (0..size as usize).map(move |column| row * 256 + column * 4))
+        .map(|at| [data[at], data[at + 1], data[at + 2], data[at + 3]])
+        .collect()
 }
 
 /// A procedural water, of the type 5.
@@ -653,6 +691,132 @@ fn bench(gpu: &egui_wgpu::RenderState, water: &LiquidTypeRecord, layers: &[Liqui
         ..Scene::default()
     }));
     (LiquidsLayer::new(shared, scene), surfaces)
+}
+
+/// A layer drawing each of `tiles` as a tile of its own, its layers of the water `water`: those of
+/// one height whose depths differ by quads, or over their 9 × 9 vertices when `grids` says so; the
+/// tiles by one indirect draw a phase where the device takes it and `indirect` says so.
+fn bench_tiles(
+    gpu: &egui_wgpu::RenderState,
+    water: &LiquidTypeRecord,
+    tiles: &[Vec<LiquidLayer>],
+    grids: bool,
+    indirect: bool,
+) -> LiquidsLayer {
+    let mut shared = Shared::new(gpu, &TARGET).expect("the liquids on the device");
+    shared.indirect &= indirect;
+    let shared = Arc::new(shared);
+    let slot = shared.slot(&Liquid, water).expect("a slot");
+    let kind = |liquid: u16| (u32::from(liquid) == water.id).then_some((slot, true));
+    let tiles = tiles
+        .iter()
+        .filter_map(|layers| {
+            let meshes = if grids {
+                mesh::meshes_in_grids(layers, kind)
+            } else {
+                mesh::meshes(layers, kind)
+            };
+            gpu::upload(&shared, &meshes).unwrap().map(Arc::new)
+        })
+        .collect();
+    let scene = Arc::new(Mutex::new(Scene {
+        tiles,
+        ..Scene::default()
+    }));
+    LiquidsLayer::new(shared, scene)
+}
+
+/// The view from over the middle of the chunk whose corner is `corner`, looking down at it whole.
+fn over(corner: [f32; 2]) -> View {
+    let middle = Vec3::new(corner[0] - 4.0 * CELL, corner[1] - 4.0 * CELL, -1.0);
+    view(middle + Vec3::new(0.0, 0.0, 42.0), middle)
+}
+
+#[test]
+fn a_layer_of_one_height_whose_depths_differ_is_drawn_by_quads_as_over_its_vertices() {
+    let Some(gpu) = device() else {
+        eprintln!("skipped: no software adapter for a device");
+        return;
+    };
+    // An ocean deepest along its middle row, by 60 a row of vertices, its depths read by the table
+    // of the oceans, under a light whose ramp of the ocean goes from black to white, the sun
+    // reflecting nothing: a quarter of grey, the black texel's alpha, plus 0.6 of its ramp. Its
+    // corners shallow, so that the depths its quads carry would draw it shallow all over.
+    let mut ocean = record(41, 0, 1, r"XTextures\river\lake_a.blp");
+    ocean.vertex_format = Some(0);
+    ocean.textures[1] = "proceduralOceanDepthTex".to_owned();
+    ocean.depth_table = 1;
+    let mut coast = layer(41, [100.0, 200.0], -1.0, u64::MAX, 0);
+    for (at, depth) in coast.depths.iter_mut().enumerate() {
+        *depth = (4 - (at / LIQUID_SIDE).abs_diff(4)) as u8 * 60;
+    }
+    // Another layer of other depths, put on the GPU before it, out of sight: the depths of the
+    // coast are not the first of their arena.
+    let mut decoy = layer(41, [900.0, 900.0], -1.0, u64::MAX, 0);
+    decoy.depths[0] = 200;
+    let mut view = over(coast.corner);
+    view.sun = Sun {
+        direction: [0.0, 0.6, 0.8],
+        colour: [0.5; 3],
+        ambient: [0.2; 3],
+    };
+    view.water = Some(Water {
+        river: [[0.0; 4], [0.0; 4]],
+        ocean: [[0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]],
+        sun: [0.0; 3],
+    });
+    let tiles = [vec![decoy], vec![coast]];
+    let mut quads = bench_tiles(&gpu, &ocean, &tiles, false, true);
+    let mut grids = bench_tiles(&gpu, &ocean, &tiles, true, true);
+    let by_quads = image(&gpu, &mut quads, &view, None);
+    let by_grids = image(&gpu, &mut grids, &view, None);
+    assert_eq!(
+        (quads.stats().triangles, grids.stats().triangles),
+        (2, 128),
+        "a quad, against two triangles a cell, the decoy out of sight"
+    );
+    for (at, (quad, grid)) in by_quads.iter().zip(&by_grids).enumerate() {
+        assert!(
+            quad.iter().zip(grid).all(|(a, b)| a.abs_diff(*b) <= 3),
+            "pixel {at}: {quad:?} by quads, {grid:?} over the vertices"
+        );
+    }
+    // Its rows along X, across the view: deep in the middle, shallow towards both sides.
+    let [left, middle, right] = [4, 8, 12].map(|column| by_quads[8 * 16 + column]);
+    assert!(
+        middle[0] > left[0] + 60 && middle[0] > right[0] + 60,
+        "{left:?}, {middle:?}, {right:?}"
+    );
+}
+
+#[test]
+fn the_tiles_in_sight_are_drawn_by_one_indirect_draw_a_phase_as_by_a_draw_a_tile() {
+    let Some(gpu) = device() else {
+        eprintln!("skipped: no software adapter for a device");
+        return;
+    };
+    // Two chunks side by side, two tiles, one deeper than the other.
+    let first = layer(5, [100.0, 200.0], -1.0, u64::MAX, 0);
+    let second = layer(5, [100.0 - 8.0 * CELL, 200.0], -1.0, u64::MAX, 255);
+    let tiles = [vec![first], vec![second]];
+    let middle = Vec3::new(100.0 - 8.0 * CELL, 200.0 - 4.0 * CELL, -1.0);
+    let view = view(middle + Vec3::new(0.0, 0.0, 72.0), middle);
+    let water = procedural();
+    let mut indirect = bench_tiles(&gpu, &water, &tiles, false, true);
+    let mut each = bench_tiles(&gpu, &water, &tiles, false, false);
+    let drawn = image(&gpu, &mut indirect, &view, None);
+    assert_eq!(drawn, image(&gpu, &mut each, &view, None));
+    assert!(drawn.iter().filter(|pixel| pixel[3] > 0).count() > 100, "both drawn");
+    assert_ne!(drawn[8 * 16 + 2], drawn[8 * 16 + 13], "each its depth");
+    if indirect.stats().draws == 1 {
+        assert_eq!(
+            each.stats().draws,
+            2,
+            "a draw a tile, against one for the water of both"
+        );
+    } else {
+        eprintln!("the device executes no indirect draw: a draw a tile both times");
+    }
 }
 
 #[test]
@@ -707,7 +871,7 @@ fn a_tile_refused_for_want_of_room_is_put_on_the_gpu_once_a_range_is_given_back(
     };
     let shared = Arc::new(Shared::new(&gpu, &TARGET).expect("the liquids on the device"));
     let mut uneven = layer(5, [100.0, 100.0], 0.0, u64::MAX, 0);
-    uneven.depths[40] = 255;
+    uneven.heights[40] = 0.5;
     let tile = mesh::meshes(&vec![uneven; 12], |_| Some((0, true)));
     let first = gpu::upload(&shared, &tile).unwrap().unwrap();
     let given = shared.given();

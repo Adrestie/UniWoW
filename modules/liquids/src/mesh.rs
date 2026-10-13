@@ -1,9 +1,11 @@
 //! The meshes of the liquids of a tile and the surfaces of its water: each layer's vertices in the
 //! world, those of water apart from those of magma and slime; and the height of the water over each
-//! cell it covers, the mean of its corners. A layer whose vertices are all at one height and one
-//! depth, its coordinates those by default, as are those without vertices, is drawn by a quad for
-//! each rectangle of the cells it covers; another by two triangles a cell over its 9 × 9 vertices.
-//! A liquid another module places is drawn as it gives it.
+//! cell it covers, the mean of its corners. A layer whose vertices are all at one height, its
+//! coordinates those by default, as are those without vertices, is drawn by a quad for each
+//! rectangle of the cells it covers: of one depth, its vertices carry it; otherwise its 9 × 9
+//! depths are kept apart, which the shader reads between at the place in the layer (`Meshes::depths`).
+//! Another layer is drawn by two triangles a cell over its 9 × 9 vertices. A liquid another module
+//! places is drawn as it gives it.
 
 use uniwow_api::formats::{LIQUID_SIDE, LiquidLayer};
 use uniwow_api::glam::Vec3;
@@ -20,8 +22,16 @@ pub fn is_water(kind: u32) -> bool {
     kind != MAGMA && kind != SLIME
 }
 
+/// The words of the depths of a layer kept apart: its 9 × 9 bytes, four a word from the low byte,
+/// the last word ended by zeros.
+pub const DEPTH_WORDS: usize = (LIQUID_SIDE * LIQUID_SIDE).div_ceil(4);
+/// The bits of the slot of a type in `Vertex::slot`; the bits above hold the depths of its layer
+/// kept apart, by their place plus one, 0 where its vertices carry its depth.
+pub const SLOT_BITS: u32 = 8;
+
 /// A vertex of a liquid: its place in the world, its coordinates of texture, its depth from 0 to
-/// 1, and the slot of its type in the table of the shader.
+/// 1, and the slot of its type in the table of the shader, with the place of the depths of its
+/// layer kept apart above `SLOT_BITS`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vertex {
@@ -36,23 +46,37 @@ unsafe impl uniwow_api::bytemuck::Zeroable for Vertex {}
 unsafe impl uniwow_api::bytemuck::Pod for Vertex {}
 
 /// The meshes of the liquids of a tile: their vertices, the indices of the water and those of the
-/// magma and slime into them, and the cells of water with their heights.
+/// magma and slime into them, the depths of the layers kept apart (`DEPTH_WORDS` words each), and
+/// the cells of water with their heights.
 #[derive(Debug, Default, PartialEq)]
 pub struct Meshes {
     pub vertices: Vec<Vertex>,
     pub water: Vec<u32>,
     pub opaque: Vec<u32>,
+    pub depths: Vec<u32>,
     pub surfaces: Vec<([i32; 2], f32)>,
 }
 
-/// Whether every vertex of `layer` is at one height and one depth, its coordinates those by
-/// default.
-fn is_flat(layer: &LiquidLayer) -> bool {
+/// Whether every vertex of `layer` is at one height, its coordinates those by default: drawn by
+/// quads.
+fn is_level(layer: &LiquidLayer) -> bool {
     let same = |values: &[f32]| values.iter().all(|value| *value == values[0]);
-    layer.coordinates.is_empty()
-        && !layer.heights.is_empty()
-        && same(&layer.heights)
-        && layer.depths.iter().all(|depth| Some(depth) == layer.depths.first())
+    layer.coordinates.is_empty() && !layer.heights.is_empty() && same(&layer.heights)
+}
+
+/// Whether every vertex of `layer` is at one depth.
+fn is_one_depth(layer: &LiquidLayer) -> bool {
+    layer.depths.iter().all(|depth| Some(depth) == layer.depths.first())
+}
+
+/// The 9 × 9 depths of `layer` in words, four bytes a word from the low one, 255 where it gives none.
+fn depth_words(layer: &LiquidLayer) -> [u32; DEPTH_WORDS] {
+    let mut words = [0u32; DEPTH_WORDS];
+    for at in 0..LIQUID_SIDE * LIQUID_SIDE {
+        let depth = layer.depths.get(at).copied().unwrap_or(255);
+        words[at / 4] |= u32::from(depth) << ((at % 4) * 8);
+    }
+    words
 }
 
 /// The rectangles of the cells `cells` covers, a bit a cell row by row, each its first row and
@@ -97,6 +121,19 @@ pub fn rectangles(cells: u64) -> Vec<[usize; 4]> {
 /// The meshes of `layers`, each layer's type given its slot in the table and whether it is water
 /// by `kind`; none for a type it does not know.
 pub fn meshes(layers: &[LiquidLayer], kind: impl Fn(u16) -> Option<(u32, bool)>) -> Meshes {
+    build(layers, kind, true)
+}
+
+/// The meshes of `layers` as `meshes` makes them, a layer of one height whose depths differ drawn
+/// over its 9 × 9 vertices as before rather than by quads: what the quads are tested against.
+#[cfg(test)]
+pub fn meshes_in_grids(layers: &[LiquidLayer], kind: impl Fn(u16) -> Option<(u32, bool)>) -> Meshes {
+    build(layers, kind, false)
+}
+
+/// The meshes of `layers`, the layers of one height whose depths differ by quads when `level_quads`
+/// says so.
+fn build(layers: &[LiquidLayer], kind: impl Fn(u16) -> Option<(u32, bool)>, level_quads: bool) -> Meshes {
     let mut meshes = Meshes::default();
     for layer in layers {
         let Some((slot, water)) = kind(layer.liquid) else {
@@ -122,14 +159,26 @@ pub fn meshes(layers: &[LiquidLayer], kind: impl Fn(u16) -> Option<(u32, bool)>)
             }
         };
         let indices = if water { &mut meshes.water } else { &mut meshes.opaque };
-        if is_flat(layer) {
+        let one_depth = is_one_depth(layer);
+        if is_level(layer) && (one_depth || level_quads) {
+            // Its depths kept apart, by their place plus one, where they differ.
+            let kept = if one_depth {
+                0
+            } else {
+                meshes.depths.extend(depth_words(layer));
+                (meshes.depths.len() / DEPTH_WORDS) as u32
+            };
+            let corner = |row: usize, column: usize| Vertex {
+                slot: slot | kept << SLOT_BITS,
+                ..vertex(row, column)
+            };
             for [row, column, rows, columns] in rectangles(layer.tiles) {
                 let base = meshes.vertices.len() as u32;
                 meshes.vertices.extend([
-                    vertex(row, column),
-                    vertex(row, column + columns),
-                    vertex(row + rows, column + columns),
-                    vertex(row + rows, column),
+                    corner(row, column),
+                    corner(row, column + columns),
+                    corner(row + rows, column + columns),
+                    corner(row + rows, column),
                 ]);
                 indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
             }

@@ -6256,6 +6256,38 @@ section.
     order before, a job waiting for one slice at most and a worker called away by a job, replaced
     by those two.
 
+- **The water: one draw a phase, and the coasts by quads** (`liquids`), the two questions of
+  *Step 9.6e1, its review points as built*:
+  - The tiles of liquids in sight are drawn by one `multi_draw_indexed_indirect` a phase, the water
+    in its phase and the magma and slime with the opaque, their commands (a tile's indices, one
+    instance, its first index, where its vertices begin) written at each frame for the tiles in
+    sight and the liquids shown, in a buffer made again larger when they outgrow it. What it needs
+    is the indirect execution of the device (`DownlevelFlags::INDIRECT_EXECUTION`), as the buildings
+    need it, but not the first instance: where the device lacks it, a draw a tile as before
+    (`Shared::indirect`). The statistics count the draws given to the GPU.
+  - A layer of one height whose depths differ, the ocean of the format 2 along the coasts among
+    them, is drawn by quads as the flat layers, a quad for each rectangle of the cells it covers. Its
+    9 × 9 depths are kept apart, 21 words a layer (four bytes a word), in an arena of storage of
+    their own, bound with the arrays, a buffer of one layer bound before any; a vertex names them by
+    their place plus one in the bits of its slot above the 8 of its type (0 where its vertices carry
+    its depth), rebased where the tile's depths land in the arena. The shader reads the depth at
+    each pixel between the four around its place in the layer, which the coordinates by default
+    give (a quarter of a repeat a cell), along the columns then the rows, then its place along the
+    ramp, where the vertices of a layer over its 9 × 9 vertices give theirs to be read between in
+    their triangles. A layer whose heights differ, or whose coordinates are given, keeps its 9 × 9
+    vertices. The triangles such layers took are not counted here (no client at hand): the
+    statistics of the layer say them.
+  - **Tested**: a layer of one height whose depths differ meshed as a quad, its depths kept apart
+    and named by its vertices, a second layer's after the first, a layer of one depth keeping none,
+    one whose heights differ over its 9 × 9 vertices; on the software adapter, an ocean deepest
+    along its middle row, under a ramp from black to white, drawn by a quad as over its 9 × 9
+    vertices within 3 of 255 at every pixel, deep in the middle and shallow at both sides, its
+    depths not the first of their arena; two tiles drawn by one indirect draw as by a draw a tile,
+    each at its depth. 8 changes made on purpose, all caught (the depths of the vertices read, the
+    rows and the columns swapped, the place of the depths not less one, the ramp of the vertices
+    kept, the depths not rebased, the layers of one height whose depths differ over their vertices,
+    the vertices of a command not placed, one command drawn).
+
 **To measure by the user**: the flights of *The frames measured in flight, before any correction*
 (the terrain at 64 tiles, the buildings at 8, the doodads at 4, the models at a reach of 1,000; 300
 then 600 yards a second, from the Howling Fjord to Dalaran by the Grizzly Hills), with the journal
@@ -6276,6 +6308,10 @@ of the frames (`UNIWOW_SLOW_FRAMES`), before this work and after it:
    longer missing while far buildings load).
 5. The thread of the animations: its time a frame on average and at most, in the statistics of
    `models`, during the loads (9 ms at most before), and whether the loads seem slower.
+6. The water at sea (off Booty Bay, the terrain at 64 tiles) and along the coasts of Northrend: the
+   triangles of water in the statistics of `liquids` against those of *Step 9.6e1, its review
+   points as built* (3.18 M in Northrend, 2.44 M at sea), the GPU of the layer (1.2 ms before) and
+   `view: liquids record`; the colours of the coasts, which should look as before.
 
 #### Step 9.7, proposed: the light of the map
 
