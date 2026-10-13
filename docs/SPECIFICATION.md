@@ -6752,8 +6752,9 @@ the user did, and floating windows that can leave the main window.
   something moves:
   - **The times** (`theme::time`): 0.10 s for the pointer coming over a widget or leaving it and
     for a press (`HOVER`); 0.16 s for menus, popups and windows fading in, which egui does with its
-    `animation_time`, for a choice moving and a notice coming in (`OPEN`); 0.25 s for a notice
-    going and a bar of progress following its value (`CLOSE`). The indicators of work under way
+    `animation_time`, and the windows *Settings* and *Hotkey* fading out once closed, for a choice
+    moving and a notice coming in (`OPEN`); 0.25 s for a notice going and a bar of progress
+    following its value (`CLOSE`). The indicators of work under way
     are drawn again 30 times a second (`TICK`) while they show, and a pulsing dot beats every
     1.4 s (`PULSE`).
   - **What animates**: the tabs of the dock, lit by the pointer, the tab shown underlined from its
@@ -6843,7 +6844,8 @@ the user did, and floating windows that can leave the main window.
   out, every panel torn off leaving an empty dock, a size kept within bounds, a window saved without
   a size read with the default one; the place of a floating window read from what the dock saves,
   then from egui. An editor at rest asks for no frame; a job running asks for the frames of its
-  spinner, at 33 ms, and is told in the status bar; at rest again, no frame. The dot of the
+  spinner, at 33 ms, and is told in the status bar; at rest again, no frame. The window *Settings*
+  closed fades out, then is drawn no more, nothing asked for after. The dot of the
   connection of the live world and its notices when it comes and goes. Not tested, without a
   screen: what is seen; the windows of the system themselves, egui embedding them in the main window
   in the tests, and so their place read back, their close button and Undo and Redo from them; the 3D

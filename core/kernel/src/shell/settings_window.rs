@@ -48,9 +48,9 @@ impl Shell {
         categories
     }
 
-    /// Draws the window when it is open.
+    /// Draws the window when it is open, and while it fades out once closed.
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
-        if !self.settings_window.open {
+        if !fading_window(ctx, "uniwow settings shown", self.settings_window.open) {
             return;
         }
         let categories = self.settings_categories();
@@ -62,7 +62,7 @@ impl Shell {
             .or_else(|| categories.first().map(|category| category.title.clone()));
         let mut chosen = None;
         let mut changes: Vec<(String, String, i64)> = Vec::new();
-        let mut open = true;
+        let mut open = self.settings_window.open;
         let host = &self.host;
         egui::Window::new("Settings")
             .open(&mut open)
@@ -118,6 +118,10 @@ impl Shell {
                     });
                 });
             });
+        // A window fading out takes nothing more.
+        if !self.settings_window.open {
+            return;
+        }
         for (module, key, value) in changes {
             self.host.set_setting(&module, &key, serde_json::json!(value));
         }
@@ -128,4 +132,10 @@ impl Shell {
             self.settings_window.open = false;
         }
     }
+}
+
+/// Whether a window of the kernel is drawn: while it is `open`, and for `time::CLOSE` once closed,
+/// while egui fades it out, which it does for a window still shown closed.
+pub(super) fn fading_window(ctx: &egui::Context, id: &str, open: bool) -> bool {
+    ctx.animate_bool_with_time(egui::Id::new(id), open, theme::time::CLOSE) > 0.0 || open
 }

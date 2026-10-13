@@ -2111,3 +2111,19 @@ fn an_idle_editor_asks_for_no_frame_and_a_job_running_for_the_frames_of_its_indi
     let texts = harness.frame_texts(Vec::new());
     assert!(drawn(&texts, "No job running"));
 }
+
+#[test]
+fn the_window_settings_closed_fades_out_then_is_drawn_no_more() {
+    let mut harness = Harness::new(vec![("alpha", Box::new(Configured("Alpha")))]);
+    harness.shell.settings_window.open = true;
+    harness.frame_texts(Vec::new());
+    assert!(drawn(&harness.frame_texts(Vec::new()), "Settings"));
+    harness.shell.settings_window.open = false;
+    assert!(drawn(&harness.frame_texts(Vec::new()), "Settings"), "fading out");
+    for _ in 0..30 {
+        harness.frame_texts(Vec::new());
+    }
+    assert!(!drawn(&harness.frame_texts(Vec::new()), "Settings"), "gone");
+    let idle = harness.frame_output(RawInput::default());
+    assert_eq!(repaint_delay(&idle), Duration::MAX, "and nothing asked for after");
+}

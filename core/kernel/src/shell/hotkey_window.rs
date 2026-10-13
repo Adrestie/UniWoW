@@ -78,10 +78,12 @@ impl Shell {
         hotkey::suspend(ctx, self.hotkey_window.awaiting.is_some());
     }
 
-    /// Draws the window when it is open.
+    /// Draws the window when it is open, and while it fades out once closed.
     pub(super) fn hotkey_window(&mut self, ctx: &egui::Context) {
         if !self.hotkey_window.open {
             self.hotkey_window.awaiting = None;
+        }
+        if !settings_window::fading_window(ctx, "uniwow hotkey shown", self.hotkey_window.open) {
             return;
         }
         let running = self.running_ids();
@@ -97,7 +99,7 @@ impl Shell {
         let awaiting = self.hotkey_window.awaiting.map(|(index, _)| index);
         let mut clicked = None;
         let mut reset = None;
-        let mut open = true;
+        let mut open = self.hotkey_window.open;
         egui::Window::new("Hotkey")
             .open(&mut open)
             .default_width(560.0)
@@ -163,6 +165,10 @@ impl Shell {
                     });
                 });
             });
+        // A window fading out takes nothing more.
+        if !self.hotkey_window.open {
+            return;
+        }
         if let Some(index) = reset {
             let default = self.hotkeys.entries[index].default;
             self.hotkeys.bind(index, default, &mut self.host.settings.hotkeys);
