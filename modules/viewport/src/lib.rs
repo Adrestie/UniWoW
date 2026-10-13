@@ -4,8 +4,8 @@
 //! version stays the same, and a frame signal tells the threads of modules that a frame was
 //! submitted (step 9.2a). The camera flies with its hotkeys, looks with the right or middle drag,
 //! and turns around its target with the drag while its orbit hotkey is held (step 9.2d). Its
-//! statistics, shown over the view from the menu View, time the interface thread and the GPU, and
-//! say what each layer drew (step 9.2e).
+//! statistics, shown in a panel of their own, time the interface thread and the GPU, and say what
+//! each layer drew (step 9.2e).
 
 mod camera;
 mod grid;
@@ -38,7 +38,7 @@ use grid::Grid;
 use pyramid::Builder;
 use stats::{GpuTimer, LayerTiming, Sample, Stats};
 
-/// The setting that shows the statistics over the view.
+/// The panel of the statistics of the view.
 const STATISTICS: &str = "statistics";
 
 const TARGET: Target = Target {
@@ -515,12 +515,10 @@ struct ViewportModule {
     /// The speed of the flight, in yards a second.
     speed: f32,
     stats: Stats,
-    /// The timer of the GPU, when the device has timestamps; when the last frame was drawn; and
-    /// whether the statistics are shown.
+    /// The timer of the GPU, when the device has timestamps; and when the last frame was drawn.
     timer: Option<GpuTimer>,
     pass: PassWatch,
     last_frame: Option<Instant>,
-    show_stats: bool,
     /// The report of the allocator of the device last made, and when: its bytes allocated, those
     /// reserved and its blocks.
     allocator: Option<(Instant, Option<[u64; 3]>)>,
@@ -551,7 +549,6 @@ impl Default for ViewportModule {
             timer: None,
             pass: PassWatch::default(),
             last_frame: None,
-            show_stats: false,
             allocator: None,
             labels: (Mat4::IDENTITY, Vec::new()),
             budget: Arc::default(),
@@ -573,8 +570,12 @@ impl Module for ViewportModule {
             .settings("View", vec![budget_setting(gpu_memory), uploads_setting()])
             .provide(viewport::SERVICE, service)
             .subscribe(MODULE_FAILED_TOPIC)
-            .menu_item("View", "Reset camera", "reset_camera")
-            .menu_item("View", "Statistics", STATISTICS);
+            .menu_item("View", "Reset camera", "reset_camera");
+        // Shown when asked for, from the menu Window, beside the view and not over it.
+        reg.panel(STATISTICS, "Statistics", DockArea::Bottom);
+        if let Some(panel) = reg.panels.last_mut() {
+            panel.open_by_default = false;
+        }
         self.keys = CameraKeys::declare(reg);
 
         // The camera for every language: animatable, and moved by commands.
@@ -634,10 +635,6 @@ impl Module for ViewportModule {
     }
 
     fn init(&mut self, ctx: &mut Context) {
-        self.show_stats = ctx
-            .setting(STATISTICS)
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
         let mut state = budget(&self.budget);
         state.bytes = budget_setting(ctx.gpu_memory()).value(ctx.setting(BUDGET).as_ref()) as u64 * MB;
         state.allow();
@@ -660,7 +657,11 @@ impl Module for ViewportModule {
         uploads::set_budget(uploads_setting().value(ctx.setting(UPLOADS).as_ref()) as u64 * MB);
     }
 
-    fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
+    fn panel_ui(&mut self, panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
+        if panel == STATISTICS {
+            self.statistics_ui(ui, ctx);
+            return;
+        }
         let Some(gpu) = ctx.gpu().cloned() else {
             ui.label("No GPU device is available.");
             return;
@@ -709,30 +710,6 @@ impl Module for ViewportModule {
             );
             painter.galley(at, galley, colour);
         }
-        if self.show_stats {
-            let colour = egui::Color32::from_gray(225);
-            let allowance = budget(&self.budget).allowance;
-            // The report of the allocator lists every allocation: made again once a second.
-            if self
-                .allocator
-                .as_ref()
-                .is_none_or(|(at, _)| at.elapsed() >= Duration::from_secs(1))
-            {
-                let start = Instant::now();
-                let report = ctx.gpu().and_then(|gpu| gpu.device.generate_allocator_report());
-                journal::spent("view: the report of the allocator", start.elapsed());
-                self.allocator = Some((Instant::now(), report.as_ref().map(stats::allocator)));
-            }
-            let allocator = self.allocator.as_ref().and_then(|(_, report)| *report);
-            let text = self
-                .stats
-                .text(self.timer.is_some(), stats::process_memory(), allocator, &allowance);
-            let galley = painter.layout_no_wrap(text, egui::FontId::monospace(11.0), colour);
-            let at = rect.left_top() + egui::vec2(8.0, 8.0);
-            let back = egui::Rect::from_min_size(at, galley.size()).expand(4.0);
-            painter.rect_filled(back, 3.0, egui::Color32::from_black_alpha(170));
-            painter.galley(at, galley, colour);
-        }
         ui.ctx().request_repaint();
     }
 
@@ -744,19 +721,38 @@ impl Module for ViewportModule {
         }
     }
 
-    fn on_menu(&mut self, action: &str, ctx: &mut Context) {
-        match action {
-            "reset_camera" => *camera(&self.camera) = OrbitCamera::default(),
-            STATISTICS => {
-                self.show_stats = !self.show_stats;
-                ctx.set_setting(STATISTICS, json!(self.show_stats));
-            }
-            _ => {}
+    fn on_menu(&mut self, action: &str, _ctx: &mut Context) {
+        if action == "reset_camera" {
+            *camera(&self.camera) = OrbitCamera::default();
         }
     }
 }
 
 impl ViewportModule {
+    /// The panel of the statistics: their text, the last second of the view, in its own panel so
+    /// that it hides nothing of the view.
+    fn statistics_ui(&mut self, ui: &mut egui::Ui, ctx: &mut Context) {
+        let allowance = budget(&self.budget).allowance;
+        // The report of the allocator lists every allocation: made again once a second.
+        if self
+            .allocator
+            .as_ref()
+            .is_none_or(|(at, _)| at.elapsed() >= Duration::from_secs(1))
+        {
+            let start = Instant::now();
+            let report = ctx.gpu().and_then(|gpu| gpu.device.generate_allocator_report());
+            journal::spent("view: the report of the allocator", start.elapsed());
+            self.allocator = Some((Instant::now(), report.as_ref().map(stats::allocator)));
+        }
+        let allocator = self.allocator.as_ref().and_then(|(_, report)| *report);
+        let text = self
+            .stats
+            .text(self.timer.is_some(), stats::process_memory(), allocator, &allowance);
+        egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+            ui.add(egui::Label::new(egui::RichText::new(text).monospace()).extend());
+        });
+    }
+
     /// What the module `id`, failed, gave the view taken back: its layers, what it told the budget,
     /// its light.
     fn failed(&self, id: &str) {
@@ -2093,6 +2089,75 @@ mod tests {
             "{:?}",
             shapes.get(image.wrapping_sub(1))
         );
+    }
+
+    /// The texts drawn by a panel of the view, in a window of 640 by 480 points.
+    fn texts_of_panel(module: &mut ViewportModule, host: &mut SettingsHost, panel: &str) -> Vec<String> {
+        use uniwow_api::{Context, Module};
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 480.0))),
+            ..egui::RawInput::default()
+        };
+        let mut output = egui::Context::default().run_ui(input, |ui| {
+            module.panel_ui(panel, ui, &mut Context::new(host, "viewport"));
+        });
+        output.textures_delta.clear();
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_statistics_are_a_panel_of_their_own_shown_when_asked_and_never_over_the_view() {
+        use uniwow_api::{Context, DockArea, Module, Registrar};
+        let mut module = ViewportModule::default();
+        let mut reg = Registrar::default();
+        module.register(&mut reg);
+        let panels: Vec<_> = reg
+            .panels
+            .iter()
+            .map(|panel| {
+                (
+                    panel.id.as_str(),
+                    panel.title.as_str(),
+                    panel.area,
+                    panel.open_by_default,
+                )
+            })
+            .collect();
+        assert_eq!(
+            panels,
+            [
+                ("view", "3D View", DockArea::Center, true),
+                ("statistics", "Statistics", DockArea::Bottom, false)
+            ],
+            "opened from the menu Window"
+        );
+        assert!(
+            reg.menu_items.iter().all(|item| item.action != "statistics"),
+            "no item of their own in the menu View"
+        );
+        let mut host = SettingsHost::default();
+        module.init(&mut Context::new(&mut host, "viewport"));
+        let texts = texts_of_panel(&mut module, &mut host, "statistics");
+        assert!(texts.iter().any(|text| text.starts_with("0 fps: a frame")), "{texts:?}");
+        let Some(gpu) = gpu() else {
+            eprintln!("skipped, the view: no software adapter for a device");
+            return;
+        };
+        host.gpu = Some(gpu);
+        // Even with the setting of before, which showed them over the view.
+        host.settings.insert("statistics".to_owned(), json!(true));
+        module.init(&mut Context::new(&mut host, "viewport"));
+        let texts = texts_of_panel(&mut module, &mut host, "view");
+        assert!(texts.iter().all(|text| !text.contains("fps")), "{texts:?}");
+        let texts = texts_of_panel(&mut module, &mut host, "statistics");
+        assert!(texts.iter().any(|text| text.contains("fps: a frame")), "{texts:?}");
     }
 
     #[test]

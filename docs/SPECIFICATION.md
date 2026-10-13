@@ -283,7 +283,7 @@ fills it, or *not planned* when no milestone does yet.
 | Splitting work over the cores, `parallel_for` | `uniwow_api::parallel_for` (step 9.2a) | — not planned; compiled modules run threads of their own (T7) | — | — |
 | Picking in the 3D view, the selection shown in 3D | — designed in milestone 9, not built | — | — | — |
 | The terrain of a map shown in the 3D view, with its horizon | The module `terrain` (steps 9.2c, 9.2e, 9.2f) | — not planned yet | — | — |
-| The statistics of the 3D view: the times of the frames, of the interface thread and of the GPU, what each layer drew | `Layer::stats`; shown over the view (step 9.2e) | — not planned yet | — | — |
+| The statistics of the 3D view: the times of the frames, of the interface thread and of the GPU, what each layer drew | `Layer::stats`; shown in their own panel, *Statistics* (step 9.2e) | — not planned yet | — | — |
 | Hotkeys: declared, read, bound to other keys by the user in *Edit > Hotkey* | `Registrar::hotkey`, `Hotkey::pressed`, `held` (step 9.2d) | — not planned yet | — | — |
 | The memory of the GPU the editor draws with | `Context::gpu_memory` (step 9.2d) | — not planned yet | — | — |
 | Editing the world: terrain, painting, objects and creatures placed | — designed in milestone 9, not built | — | — | — |
@@ -8096,6 +8096,23 @@ its uniform), their alpha kept. A choice of the editor, as the flash itself.
   magma. 6 changes made on purpose, all caught.
 - **To check by the user**: a thunderstorm (`.wchange 86 0.8`) by night in Elwynn Forest, looking up
   into the clouds: the clouds, not only the sky between them, lit by each flash.
+
+#### The statistics of the view in their own panel
+
+Asked by the user while trying the integration: the statistics of the view (step 9.2e) hid a large
+part of it. They are no longer written over the view but in a panel of the module `viewport`,
+*Statistics*, in the bottom area, closed by default and opened from the menu *Window*, which can be
+torn off into a window of its own as any panel; the text the same, in the monospace font, scrolled
+both ways. The item *View > Statistics* and the setting `statistics` are gone: the panel open or
+closed is kept with the layout. The report of the allocator is still made once a second, only while
+the panel is drawn.
+
+- **Tested**: the view declaring its panel and the panel of the statistics, closed by default, with
+  no item of the menu *View*; the panel writing the statistics; drawn on the software adapter, the
+  view writing none of them, even with the setting of before. 3 changes made on purpose, all caught.
+- **To check by the user**: *Window > Statistics (viewport)* opens the panel beside the Log; nothing
+  is written over the view; the panel torn off into its own window, the numbers moving as the view
+  draws.
 
 #### Tests
 
