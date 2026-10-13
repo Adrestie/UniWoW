@@ -5,6 +5,7 @@ use std::sync::{Arc, Weak};
 use uniwow_api::curve::{self, CurveEditor};
 use uniwow_api::dopesheet::{self, Dopesheet};
 use uniwow_api::property_grid::{self, PropertyGrid};
+use uniwow_api::theme::Level;
 use uniwow_api::ui::{self, SharedUi};
 use uniwow_api::{CallId, Command, Editor, Event, Host, JobFn, JobId, Priority, egui, egui_wgpu, serde_json};
 
@@ -53,6 +54,8 @@ pub struct KernelHost {
     /// The interface objects of each module that handed them over, whose players the kernel moves
     /// on and whose changes it records.
     pub adopted: Vec<(String, Weak<std::sync::Mutex<ui::Ui>>)>,
+    /// The notices the modules asked for this frame, by module, shown at the next one.
+    pub notices: Vec<(String, Level, String)>,
     next_call: u64,
 }
 
@@ -127,6 +130,7 @@ impl KernelHost {
             modal_shown: false,
             kernel_modals: HashSet::new(),
             adopted: Vec::new(),
+            notices: Vec::new(),
             services: HashMap::new(),
             gpu,
             gpu_memory,
@@ -271,5 +275,9 @@ impl Host for KernelHost {
 
     fn editor(&self, caller: &str) -> Editor {
         Editor::new(self.bridge.clone(), caller)
+    }
+
+    fn notify(&mut self, owner: &str, level: Level, text: &str) {
+        self.notices.push((owner.to_owned(), level, text.to_owned()));
     }
 }

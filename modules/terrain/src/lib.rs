@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use uniwow_api::formats::{self, Formats, Wdt};
 use uniwow_api::glam::Vec3;
+use uniwow_api::theme;
 use uniwow_api::vfs::{self, VfsState};
 use uniwow_api::viewport::{Allowance, Demand, Fog};
 use uniwow_api::{
@@ -705,7 +706,10 @@ impl Module for TerrainModule {
         let mut chosen = None;
         match &self.maps {
             None => {
-                ui.weak("Waiting for the client's files (panel Assets).");
+                ui.horizontal(|ui| {
+                    theme::spinner(ui, 14.0);
+                    ui.weak("Waiting for the client's files (panel Assets).");
+                });
             }
             Some(Err(reason)) => {
                 ui.colored_label(ui.visuals().warn_fg_color, reason);
@@ -748,6 +752,12 @@ impl Module for TerrainModule {
             None => "pipeline being built",
         };
         let allowance = self.view.as_ref().map(|view| view.allowance()).unwrap_or_default();
+        if !self.loading.is_empty() {
+            ui.horizontal(|ui| {
+                theme::spinner(ui, 14.0);
+                ui.label(format!("Loading {} tiles…", self.loading.len()));
+            });
+        }
         ui.label(format!(
             "{} tiles drawn ({full} full, {light} light), {} loading; {:.0} MB on the GPU, the view {:.0} of {} MB; {textures}",
             full + light,

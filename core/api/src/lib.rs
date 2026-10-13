@@ -69,6 +69,7 @@ mod registrar;
 pub mod sequence;
 mod service;
 pub mod texture_arrays;
+pub mod theme;
 pub mod ui;
 pub mod uploads;
 pub mod vfs;

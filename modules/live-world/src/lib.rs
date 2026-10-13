@@ -22,6 +22,7 @@ use std::time::Instant;
 
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::server_link::protocol::{DEAD, Kind, MOVING, State, TEMPORARY};
+use uniwow_api::theme::{self, Level};
 use uniwow_api::{
     Context, DockArea, Editor, JobId, JobOutcome, Module, PropertyValue, Registrar, egui, formats, log, models,
     viewport,
@@ -116,6 +117,33 @@ fn connection_text(status: &link::Status, settings: &Settings) -> (String, bool)
         Connection::Refused(reason) => (format!("Refused by the observer: {reason}."), true),
         Connection::Broken(problem) => (format!("Connection broken: {problem}."), true),
         Connection::Connected => (format!("Connected to {}.", status.server), false),
+    }
+}
+
+/// The colour of the dot telling where the connection stands, and whether it pulses: while the
+/// connection is tried again, as it is in every state but connected and without a token.
+fn connection_dot(connection: &Connection) -> (egui::Color32, bool) {
+    let p = theme::palette();
+    match connection {
+        Connection::Connected => (p.success, false),
+        Connection::Connecting => (p.accent, true),
+        Connection::NoToken => (p.warning, false),
+        Connection::ServerStopped | Connection::ObserverMissing => (p.warning, true),
+        Connection::Refused(_) | Connection::Broken(_) => (p.error, true),
+    }
+}
+
+/// The notice of a change of the connection, from being connected or not (`was`, none at first)
+/// to `now`: connected, or the connection lost.
+fn connection_notice(was: Option<bool>, now: &link::Status) -> Option<(Level, String)> {
+    let connected = now.connection == Connection::Connected;
+    match was {
+        Some(false) if connected => Some((Level::Success, format!("Connected to {}.", now.server))),
+        Some(true) if !connected => Some((
+            Level::Warning,
+            "The connection to the observer was lost; it is tried again.".to_owned(),
+        )),
+        _ => None,
     }
 }
 
@@ -308,6 +336,8 @@ struct LiveWorld {
     models: Option<models::Handle>,
     looks: Arc<Looks>,
     reading: Option<JobId>,
+    /// Whether the connection was up at the last frame, for the notices of its changes.
+    was_connected: Option<bool>,
 }
 
 impl LiveWorld {
@@ -443,11 +473,15 @@ impl Module for LiveWorld {
         let status = shared.status();
         let settings = lock(&self.settings).clone();
         let (message, fault) = connection_text(&status, &settings);
-        if fault {
-            ui.colored_label(ui.visuals().warn_fg_color, message);
-        } else {
-            ui.label(message);
-        }
+        let (colour, pulsing) = connection_dot(&status.connection);
+        ui.horizontal_wrapped(|ui| {
+            theme::status_dot(ui, colour, pulsing);
+            if fault {
+                ui.colored_label(ui.visuals().warn_fg_color, message);
+            } else {
+                ui.label(message);
+            }
+        });
         if let Some(zone) = status.zone {
             let world = shared.world();
             ui.label(format!(
@@ -535,7 +569,13 @@ impl Module for LiveWorld {
     }
 
     fn windows_ui(&mut self, _egui: &egui::Context, ctx: &mut Context) {
-        // Called at every frame: the displays the entities wanted are read here, one job at a time.
+        // Called at every frame: the changes of the connection told, whatever panel is shown.
+        let status = self.shared().status();
+        if let Some((level, text)) = connection_notice(self.was_connected, &status) {
+            ctx.notify(level, &text);
+        }
+        self.was_connected = Some(status.connection == Connection::Connected);
+        // The displays the entities wanted are read here, one job at a time.
         if self.reading.is_some() {
             return;
         }

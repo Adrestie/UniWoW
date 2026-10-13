@@ -662,3 +662,40 @@ fn the_thread_placing_the_entities_stopped_is_said_until_started_again() {
     assert_eq!(live.markers_stopped.as_deref(), Some("broken"));
     assert!(live.animating.is_none());
 }
+
+#[test]
+fn the_connection_shows_a_dot_pulsing_while_it_is_tried_and_tells_when_it_comes_and_goes() {
+    use uniwow_api::theme::{Level, palette};
+    let p = palette();
+    let status = |connection: Connection| link::Status {
+        connection,
+        server: "AzerothCore rev. 1".to_owned(),
+        ..link::Status::default()
+    };
+    assert_eq!(crate::connection_dot(&Connection::Connected), (p.success, false));
+    assert_eq!(crate::connection_dot(&Connection::Connecting), (p.accent, true));
+    assert_eq!(
+        crate::connection_dot(&Connection::NoToken),
+        (p.warning, false),
+        "waits for the user"
+    );
+    assert_eq!(crate::connection_dot(&Connection::ServerStopped), (p.warning, true));
+    assert_eq!(
+        crate::connection_dot(&Connection::Broken("reset".to_owned())),
+        (p.error, true)
+    );
+    // Told once it comes, and once it goes; nothing at first, nor while it stays as it was.
+    let notice = |was, connection| crate::connection_notice(was, &status(connection));
+    assert_eq!(notice(None, Connection::Connected), None);
+    assert_eq!(notice(None, Connection::Connecting), None);
+    assert_eq!(
+        notice(Some(false), Connection::Connected),
+        Some((Level::Success, "Connected to AzerothCore rev. 1.".to_owned()))
+    );
+    assert_eq!(notice(Some(true), Connection::Connected), None);
+    assert!(matches!(
+        notice(Some(true), Connection::Connecting),
+        Some((Level::Warning, _))
+    ));
+    assert_eq!(notice(Some(false), Connection::ServerStopped), None);
+}

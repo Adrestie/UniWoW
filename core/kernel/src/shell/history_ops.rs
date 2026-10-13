@@ -75,20 +75,20 @@ impl Shell {
     /// first, so that the changes they make reach the history before it; what they start, work on a
     /// compiled module's thread or a first change in a group, blocks it again.
     fn may_replay(&mut self, verb: &str) -> bool {
-        if let Some(reason) = self.blocking_undo() {
-            log::warn!("{verb} ignored: {reason}");
-            return false;
-        }
-        if self.serve_calls(CALL_BUDGET) {
-            log::warn!("{verb} ignored: calls are still waiting");
-            return false;
-        }
-        self.apply_pending();
-        if let Some(reason) = self.blocking_undo() {
-            log::warn!("{verb} ignored: {reason}");
-            return false;
-        }
-        true
+        let refused = if let Some(reason) = self.blocking_undo() {
+            reason
+        } else if self.serve_calls(CALL_BUDGET) {
+            "calls are still waiting".to_owned()
+        } else {
+            self.apply_pending();
+            match self.blocking_undo() {
+                Some(reason) => reason,
+                None => return true,
+            }
+        };
+        log::warn!("{verb} ignored: {refused}");
+        self.notify("history", Level::Warning, &format!("{verb} refused"), &refused);
+        false
     }
 
     /// Reverts the last entry, its commands in reverse order. A command whose revert fails makes
@@ -105,6 +105,7 @@ impl Shell {
         let parts = self.replay(entry.parts.into_iter().rev().collect(), true);
         let parts: Vec<history::Part> = parts.into_iter().rev().collect();
         if !parts.is_empty() {
+            self.notify("history", Level::Info, "Undone", &entry.label);
             self.history.undone.push(history::Entry {
                 label: entry.label,
                 parts,
@@ -122,6 +123,7 @@ impl Shell {
         };
         let parts = self.replay(entry.parts, false);
         if !parts.is_empty() {
+            self.notify("history", Level::Info, "Redone", &entry.label);
             self.history.done.push(history::Entry {
                 label: entry.label,
                 parts,

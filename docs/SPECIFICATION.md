@@ -286,12 +286,14 @@ fills it, or *not planned* when no milestone does yet.
 | The memory of the GPU the editor draws with | `Context::gpu_memory` (step 9.2d) | — not planned yet | — | — |
 | Editing the world: terrain, painting, objects and creatures placed | — designed in milestone 9, not built | — | — | — |
 | Unsaved changes, asked about when the editor closes | `Module::unsaved`, `save_unsaved` | — not planned | — | — |
+| Notices over the window (the outcome of what the user asked, a problem) | `Context::notify`; the errors logged become notices for every language | — not planned yet; the errors logged (`log`) show as notices | The same, through the log | The same, through the log |
+| The theme: its palette, its sizes, the widgets showing work under way | `uniwow_api::theme` (the interface redesigned) | — not planned yet; the interface objects are drawn with it | — | — |
 | Menu items | `Registrar::menu_item`, `Module::on_menu` | — not planned | — | — |
 | Jobs of the kernel's pool, with progress and *Cancel* in the Jobs panel | `Context::spawn`, `spawn_thread` | — not planned; compiled modules run threads of their own (T7) | — | Scripts run on threads of their own (T6) |
 | Reporting another module as the culprit of a failure (F5) | `Context::report_failure` | — not planned | — | — |
 | Services between modules | `Registrar::provide`, `Context::service` | Commands, events and the objects are their form for every language (S1) | | |
 
-The six gaps *not planned* and the five *not planned yet* are for the review to place in a
+The six gaps *not planned* and the seven *not planned yet* are for the review to place in a
 milestone.
 
 ---
@@ -396,7 +398,7 @@ the same runtime.
 
 | Service | Role |
 |---|---|
-| Shell | Main window, menus, dockable layout (egui_dock), layouts saved per user. Panels of absent modules leave the layout; a returning panel rejoins its area, or the default layout is rebuilt when its whole area had disappeared |
+| Shell | Main window, menus, dockable layout (egui_dock), layouts saved per user. Panels of absent modules leave the layout; a returning panel rejoins its area, or the default layout is rebuilt when its whole area had disappeared. Panels torn off into windows of their own, saved with the layout; notices over the window; the theme (the interface redesigned, milestone 9) |
 | Module loader | Section 4 |
 | Modules panel | Lists the modules, their kind, version, state, refusal or failure reason, and their commands; enable or disable |
 | Commands and history | Undo, redo, unsaved-changes tracking. When a module fails, all its entries leave the history, done and undone, with a warning in the log; the others stay valid since a command only changes its own module's state (F3). A document closed without saving takes its changes out of the history (`Context::forget_document`) |
@@ -7326,6 +7328,164 @@ observer's part written against the headers of AzerothCore and not built; each c
   4. The weather chosen in the panel, the server stopped: the fog at 1 (a quarter of the fog
      distance), the rain in the inn of Goldshire (none inside) and on the road before it, over the
      canals of Stormwind (none under their surface), the eye going under the water (none).
+
+#### The interface redesigned, as built
+
+Asked by the user: an interface that is modern, dark, with animations of what happens and of what
+the user did, and floating windows that can leave the main window.
+
+- **The theme** (`uniwow_api::theme`, `core/api/src/theme.rs`), defined once, in the runtime so
+  that the modules draw with it too:
+  - **The palette** (`Palette::DARK`): cool greys on five levels, from the lowest behind to the
+    highest above, `base` (14, 16, 20: the window, the menu bar, the status bar, the tab bars),
+    `panel` (22, 25, 31: the panels, the bodies of the tabs), `raised` (37, 41, 50: buttons, boxes
+    to tick, the handles of sliders), `overlay` (29, 33, 41: windows, menus, popups, notices) and
+    `sunken` (11, 13, 17: the fields where text is typed, the tracks of the bars); `border`
+    (45, 50, 61); the texts `text` (204, 209, 219, at 11:1 on the panels), `text_strong`
+    (243, 245, 249: headings, what is hovered or chosen) and `text_weak` (136, 144, 160, at 5:1);
+    one accent, a blue (82, 142, 245), for what is chosen, focused or under way; `success`,
+    `warning` and `error`; the colour of the shadows. The states of the widgets are made from them
+    by `Palette::mix` and `Palette::alpha` in named functions (`hovered`, `pressed`, `selection`,
+    `accent_text`, `stripe`…): a colour changed in the palette changes everywhere.
+  - **The sizes** (`Metrics::DEFAULT`): corners of 4 points (small widgets), 6 (buttons, fields,
+    frames, tabs) and 10 (windows, menus, notices); widgets 22 points high, items 8 by 6 apart,
+    buttons padded by 10 by 3, windows by 12; tab bars 30 points high; texts of 13 points, 11 for
+    the small ones, 12.5 for the monospace, headings of 17.
+  - **The styles**: `Theme::visuals` and `Theme::style` make egui's (the five states of the
+    widgets, the selection in the accent, the windows on `overlay` with their border and a soft
+    shadow, the popups with a lighter one, the cursor of text in the accent, round handles of
+    sliders filled up to them), `Theme::dock_style` the dock's (the tab bars on `base`, the tab
+    shown on the level of its panel, the others in the weak text, the lines and the overlay of a
+    tab dragged in the accent). The kernel applies them when it starts (`Theme::apply`), whatever
+    theme the system uses, and asks the system for dark frames of its windows; the menu bar and the
+    status bar are drawn on `base`, as the dock's surroundings.
+  - **The fonts and the icons**: Inter 4.001 (SIL Open Font License 1.1), one variable font, at
+    weight 400 for the texts and 600 for the headings; Hack for the monospace texts, as before; the
+    icons of Phosphor 2.1, regular (MIT), characters of the private use area that `theme::icon`
+    names, written in any text (`format!("{} Settings", icon::GEAR)`); egui's own fonts after them
+    for the characters they lack. The files and their licences are in `core/api/fonts/`, compiled
+    into the runtime (1.3 MB).
+- **The animations and the feedback**, all short, none in the way, and frames asked for only while
+  something moves:
+  - **The times** (`theme::time`): 0.10 s for the pointer coming over a widget or leaving it and
+    for a press (`HOVER`); 0.16 s for menus, popups and windows fading in, which egui does with its
+    `animation_time`, and the windows *Settings* and *Hotkey* fading out once closed, for a choice
+    moving and a notice coming in (`OPEN`); 0.25 s for a notice going and a bar of progress
+    following its value (`CLOSE`). The indicators of work under way
+    are drawn again 30 times a second (`TICK`) while they show, and a pulsing dot beats every
+    1.4 s (`PULSE`).
+  - **What animates**: the tabs of the dock, lit by the pointer, the tab shown underlined from its
+    middle, in the accent in the part of the dock focused and paler in the others (drawn by the
+    kernel over the dock's own tab, `TabViewer::on_tab_button`);
+    the widgets of the theme (`theme::icon_button`, the switch `theme::Toggle`, the entries of a
+    list `theme::choice`, used by the categories of the window *Settings*); a spinner
+    (`theme::spinner`), a dot pulsing (`theme::status_dot`) and a bar of progress sliding while
+    the share done is not told (`theme::progress_bar`). egui's own widgets change their colours at
+    once, as egui draws them: only their colours come from the theme. The colours of what the
+    modules show, such as the curves, the playhead or the texts over the 3D view, stay theirs.
+  - **Where the editor works in the background**: the status bar shows the jobs running, their
+    count with a spinner and the bar of their mean progress, each told on hover, or *No job
+    running*; the Jobs panel a spinner and a bar for each; the Modules panel a dot for each state,
+    pulsing for a module not responding, and a switch to enable a module; the panel of the
+    terrain a spinner while it waits for the client's files and while tiles load; the panel of the
+    live world a dot for its connection, green when connected, pulsing in the accent while it
+    connects, in amber while the server or its observer is missing, in red while it is refused or
+    broken, the connection being tried again in each.
+  - **Repaints**: the editor asks for no frame at rest. While a job runs, the spinner asks for a frame every
+    33 ms; while a notice comes or goes, at each frame, then once when the next one is to go; an
+    animation of egui asks for frames while it moves. The test below checks that an editor at rest
+    asks for none.
+- **The notices** (`core/kernel/src/shell/toasts.rs`): at the bottom right of the main window,
+  above the status bar, the newest lowest, 340 points wide, on `overlay` with a bar of the colour
+  of their level along their left edge. Each comes in from the right in 0.16 s, stays 4 s (an
+  information, a success), 6 s (a warning) or 9 s (an error), and goes in 0.25 s; the pointer
+  over one keeps it a second longer than itself, its cross sends it away; five show at most, the
+  oldest going first, the errors last. A notice about the same thing as one shown takes its place
+  and stays its time again, the times counted (×3) when it says the same. They tell: Undo and Redo
+  done, with the label of the change, or refused, with the reason; a module failed, with its name
+  and why, the errors it logged just before taking that notice; any error logged, by the module or
+  library that logged it, one notice for each; the layout reset; a hotkey bound; a module enabled or
+  disabled, to be applied at the next start; the connection of the live world made or lost. A
+  module shows one with `Context::notify(level, text)`, under its name (section 3, capabilities).
+  An error logged from another thread wakes the window, so that its notice shows at once.
+- **The windows torn off** (`core/kernel/src/shell/windows.rs`): a panel goes into a window of the
+  system of its own, which the user moves to another screen, in three ways: its tab dragged and
+  dropped outside the main window, the window opening under the pointer; its tab dropped where the
+  dock makes it a floating window, which opens as a window of the system at the same place; or
+  *Tear off into its own window* in the menu of its tab. The window shows the panel as the dock
+  does, under a bar with its title and the button *Dock back*; closing the window, or that button,
+  or *Window > Dock every window back*, puts the panel back in the dock beside the panels of its
+  area. The *Window* menu marks a panel torn off; unticking it closes the panel with its window.
+  Undo and Redo act from a window torn off as from the main window.
+  - **How**: each window is an immediate viewport of egui (`show_viewport_immediate`), drawn in the
+    frame of the main window, so that the modules' panels are drawn on the interface thread as
+    before; eframe draws all of them with one renderer of egui on one device, so the image of the
+    3D view, a texture of wgpu the renderer holds, shows in a window torn off as in the dock, and
+    the 3D view can be torn off like any panel. The cost: the main window and every window torn off
+    are drawn together whenever one of them needs a frame. The window keeps the place and size it
+    opened with; where the user puts it is read at each frame and saved.
+  - **Saved**: in the settings, beside the dock (`windows`: each panel torn off, the top left corner
+    of its window on the screens in pixels, as points differ between screens of different scales,
+    and the size of its content in points), when the editor closes, as the dock. At start, a panel
+    torn off comes back in its window, where it was, and not in the dock; the window of a panel
+    absent or closed is left out, the same panel kept once. A window opens at its corner turned into
+    the points of the main window: where the system creates it on a screen of another scale than
+    the main window's, it may open elsewhere (to check); *Dock every window back* brings back a panel
+    whose window is out of sight.
+  - **Limits**: a tab cannot be dragged from a window torn off back into the dock (the dock of egui
+    does not drag between windows of the system): *Dock back* or closing it does it; a window holds
+    one panel; a window torn off is a window of its own beside the main one, which goes over it
+    when clicked; the hotkeys of the modules act in the main window, the keys of a panel torn off reach
+    that panel; the notices and the modal windows show in the main window, a modal window not keeping
+    the windows torn off from being used. Where egui cannot open windows of the system, the floating
+    windows of the dock stay inside the main window, as before.
+- **Tested**: the theme: every colour of egui's style and of the dock's made from the palette (two
+  palettes give no colour in common but those that show nothing), the levels and the widgets
+  taking the colours they name, the sizes and the times those of the metrics, a mix and an alpha,
+  the fonts holding Inter, its weight of the headings and every icon named, egui told the dark
+  theme whatever the system's. The notices: one coming in, staying its time by its level, going,
+  then forgotten; the errors staying longest; one of the same key taking the place of the one shown,
+  the times counted when it says the same, its time again, one going not taken back; past five,
+  the oldest going, the errors last; the pointer keeping one, its cross sending it away, one going
+  not held back; frames asked for while one moves and once when it is to go, none without any; a
+  long text cut; the errors logged waiting for the notices, but those the kernel shows itself; in
+  the shell, Undo and Redo told in one notice, a module failing told with its name and why and
+  drawn over the window, the errors logged one notice by source, counted, a module telling under
+  its name, counted. The windows torn off: a panel torn off drawn in its window, saved with the
+  layout, restored in its window where it was and not in the dock, put back in the dock by its
+  button, closed with its window from the *Window* menu and opened again docked; a floating window
+  of the dock made a window of its own at the same place on the screens and of its size, its place
+  in pixels at two pixels a point, through a frame too, and left as it is without windows of the
+  system; a tab dragged and dropped outside the main window torn off under the pointer, not while it
+  is dragged; the windows restored, those of absent or closed panels and the same panel twice left
+  out, every panel torn off leaving an empty dock, a size kept within bounds, a window saved without
+  a size read with the default one; the place of a floating window read from what the dock saves,
+  then from egui. An editor at rest asks for no frame; a job running asks for the frames of its
+  spinner, at 33 ms, and is told in the status bar; at rest again, no frame. The window *Settings*
+  closed fades out, then is drawn no more, nothing asked for after. The dot of the
+  connection of the live world and its notices when it comes and goes. Not tested, without a
+  screen: what is seen; the windows of the system themselves, egui embedding them in the main window
+  in the tests, and so their place read back, their close button and Undo and Redo from them; the 3D
+  view in a window torn off; the spinners of the terrain.
+- **To check by the user**, on Windows (none of it could be seen here, without a screen):
+  - On one screen: the look of every part, the menu bar, the tabs, the panels, the Modules, Log,
+    Jobs and Commands panels, the windows *Settings* and *Hotkey*, the menus, the tooltips, the
+    dialogs of the modules (*Unsaved changes* when closing with changes), the panels of the compiled
+    modules (`sample-scene`, `sample-csharp`); the texts readable, the icons the size of the text and
+    on its line; the frame of the window dark. Whatever looks wrong is a value of `Palette::DARK`,
+    `Metrics::DEFAULT` or `theme::time` to change.
+  - The animations: a tab hovered and chosen, the switches of the Modules panel, the categories of
+    *Settings*, a menu opening; a map loading (the spinner and bar of the status bar, the Jobs
+    panel, the panel of the terrain); the live world with the server stopped then started (the dot,
+    the notices); a module failing (`sample-faulty`, *Panic while drawing*), Ctrl+Z and Ctrl+Y (the
+    notices). Task Manager with the editor at rest, the 3D view closed: no work of the processor.
+  - The windows torn off, on two screens: a tab dragged out of the main window opens under the
+    pointer; *Tear off into its own window*; a tab dropped over the main window outside the dock;
+    the window moved to the other screen, resized, then the editor closed and started again (it
+    comes back there); *Dock back*, closing the window, *Window > Dock every window back*; the 3D
+    view torn off to the other screen, flown in, of the right sharpness on a screen of another scale,
+    and Ctrl+Z from it; the editor minimised while a window torn off shows on the other screen (the
+    window stays drawn).
 
 #### Tests
 

@@ -48,9 +48,9 @@ impl Shell {
         categories
     }
 
-    /// Draws the window when it is open.
+    /// Draws the window when it is open, and while it fades out once closed.
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
-        if !self.settings_window.open {
+        if !fading_window(ctx, "uniwow settings shown", self.settings_window.open) {
             return;
         }
         let categories = self.settings_categories();
@@ -62,7 +62,7 @@ impl Shell {
             .or_else(|| categories.first().map(|category| category.title.clone()));
         let mut chosen = None;
         let mut changes: Vec<(String, String, i64)> = Vec::new();
-        let mut open = true;
+        let mut open = self.settings_window.open;
         let host = &self.host;
         egui::Window::new("Settings")
             .open(&mut open)
@@ -74,11 +74,10 @@ impl Shell {
                 }
                 ui.horizontal_top(|ui| {
                     ui.vertical(|ui| {
+                        ui.set_width(150.0);
+                        ui.spacing_mut().item_spacing.y = 2.0;
                         for category in &categories {
-                            if ui
-                                .selectable_label(shown.as_ref() == Some(&category.title), &category.title)
-                                .clicked()
-                            {
+                            if theme::choice(ui, shown.as_ref() == Some(&category.title), &category.title).clicked() {
                                 chosen = Some(category.title.clone());
                             }
                         }
@@ -92,29 +91,37 @@ impl Shell {
                             return;
                         };
                         ui.heading(&category.title);
-                        egui::Grid::new("settings").num_columns(3).show(ui, |ui| {
-                            for (module, spec) in &category.settings {
-                                let mut value = spec.value(host.setting(module, &spec.key).as_ref());
-                                ui.label(&spec.label);
-                                if ui
-                                    .add(egui::Slider::new(&mut value, spec.range[0]..=spec.range[1]))
-                                    .changed()
-                                {
-                                    changes.push((module.clone(), spec.key.clone(), value));
+                        ui.add_space(4.0);
+                        egui::Grid::new("settings")
+                            .num_columns(3)
+                            .spacing([12.0, 8.0])
+                            .show(ui, |ui| {
+                                for (module, spec) in &category.settings {
+                                    let mut value = spec.value(host.setting(module, &spec.key).as_ref());
+                                    ui.label(&spec.label);
+                                    if ui
+                                        .add(egui::Slider::new(&mut value, spec.range[0]..=spec.range[1]))
+                                        .changed()
+                                    {
+                                        changes.push((module.clone(), spec.key.clone(), value));
+                                    }
+                                    if ui
+                                        .add_enabled(value != spec.default, egui::Button::new("Default"))
+                                        .on_hover_text(spec.default.to_string())
+                                        .clicked()
+                                    {
+                                        changes.push((module.clone(), spec.key.clone(), spec.default));
+                                    }
+                                    ui.end_row();
                                 }
-                                if ui
-                                    .add_enabled(value != spec.default, egui::Button::new("Default"))
-                                    .on_hover_text(spec.default.to_string())
-                                    .clicked()
-                                {
-                                    changes.push((module.clone(), spec.key.clone(), spec.default));
-                                }
-                                ui.end_row();
-                            }
-                        });
+                            });
                     });
                 });
             });
+        // A window fading out takes nothing more.
+        if !self.settings_window.open {
+            return;
+        }
         for (module, key, value) in changes {
             self.host.set_setting(&module, &key, serde_json::json!(value));
         }
@@ -125,4 +132,10 @@ impl Shell {
             self.settings_window.open = false;
         }
     }
+}
+
+/// Whether a window of the kernel is drawn: while it is `open`, and for `time::CLOSE` once closed,
+/// while egui fades it out, which it does for a window still shown closed.
+pub(super) fn fading_window(ctx: &egui::Context, id: &str, open: bool) -> bool {
+    ctx.animate_bool_with_time(egui::Id::new(id), open, theme::time::CLOSE) > 0.0 || open
 }
