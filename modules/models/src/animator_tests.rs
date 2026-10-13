@@ -12,7 +12,7 @@ use uniwow_api::glam::{Mat4, Quat, Vec3};
 use uniwow_api::models::{Geosets, Instance, Look, LookId, Models, Motion};
 use uniwow_api::{JobOutcome, bytemuck};
 
-use crate::animator::{Animator, Playing, advance, choose, facing, scaled, start, wanted};
+use crate::animator::{Animator, BLOCK, Playing, advance, choose, facing, fill, scaled, start, wanted};
 use crate::gpu::{Vertex, moving_radius};
 use crate::lock;
 use crate::pool;
@@ -847,4 +847,32 @@ fn an_alpha_keyed_batch_of_its_own_unseen_at_rest_is_drawn_once_its_alpha_rises(
     );
     step(&pooled, &mut animator, 0.0);
     assert!(only(at(&render(&mut pooled.bench, FRONT, AIM)), 0), "red");
+}
+
+#[test]
+fn the_bones_are_written_by_blocks_as_they_were_written_whole() {
+    let tables: Vec<u32> = (1..=1000).collect();
+    let bones_at = 1024;
+    let posed: Vec<[f32; 4]> = (0..10_000).map(|at| [at as f32, 1.0, 2.0, 3.0]).collect();
+    let written = bones_at * 4 + posed.len() * 16;
+    // Within a block, over several with a tail, exactly two, and with zeros after the bones.
+    for size in [
+        written,
+        3 * BLOCK + 100,
+        2 * BLOCK.max(written / 2 + 1),
+        written + BLOCK + 7,
+    ] {
+        let size = size.max(written);
+        let mut expected = vec![0u8; size];
+        expected[..4000].copy_from_slice(bytemuck::cast_slice(&tables));
+        expected[bones_at * 4..written].copy_from_slice(bytemuck::cast_slice(&posed));
+        let mut out = vec![0xAB_u8; size];
+        fill(
+            uniwow_api::wgpu::WriteOnly::from_mut(&mut out[..]),
+            &tables,
+            bones_at,
+            &posed,
+        );
+        assert!(out == expected, "{size} bytes: written as they were whole");
+    }
 }

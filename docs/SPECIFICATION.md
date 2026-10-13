@@ -6317,6 +6317,21 @@ section.
     buildings the same, `Revealed` not drawn). Not tested: an opaque batch drawn again by the
     second phase, which the image does not show.
 
+- **The bones written in parallel** (`models/src/animator.rs`, `fill`): the thread of the
+  animations copied the bones it keeps into the view of `Queue::write_buffer_with` in one piece,
+  about 40 % of its time (*Step 9.4e3, after its review*). The view is now cut into blocks of 64 KB,
+  each a `WriteOnly<[u8; 65536]>`, which is `Send` where `WriteOnly<[u8]>` is not (wgpu 30 makes a
+  `WriteOnly<T>` `Send` for a `T` of known size), handed to the slices of a `parallel_for` through a
+  lock each, each slice writing its blocks (the tables, zeros, the slots and the bones, zeros, as
+  they fall in the block), the bytes after the last block on the calling thread. Without `unsafe`.
+  The bones are still computed into the vectors kept from a frame to the next, then copied: the
+  copy is spread over the workers, not saved; writing them straight from the computing would cut
+  the instances' parts across the blocks, each slice then locking the blocks it touches.
+  - **Tested**: the bytes written by blocks the same as written whole, within one block, over three
+    and a tail, over exactly two, and with zeros after the bones, over a buffer first filled with
+    another byte. 4 changes made on purpose, all caught (the tail left, a block written at the place
+    of its number, the zeros before the bones left, those after left).
+
 **To measure by the user**: the flights of *The frames measured in flight, before any correction*
 (the terrain at 64 tiles, the buildings at 8, the doodads at 4, the models at a reach of 1,000; 300
 then 600 yards a second, from the Howling Fjord to Dalaran by the Grizzly Hills), with the journal
@@ -6336,7 +6351,8 @@ of the frames (`UNIWOW_SLOW_FRAMES`), before this work and after it:
    and models near it, now come first after a fast flight stops (the ground under the camera no
    longer missing while far buildings load).
 5. The thread of the animations: its time a frame on average and at most, in the statistics of
-   `models`, during the loads (9 ms at most before), and whether the loads seem slower.
+   `models`, during the loads (9 ms at most before), and whether the loads seem slower; then in
+   Orgrimmar held still, where the writing of its bones took 0.35 to 0.54 ms.
 6. The water at sea (off Booty Bay, the terrain at 64 tiles) and along the coasts of Northrend: the
    triangles of water in the statistics of `liquids` against those of *Step 9.6e1, its review
    points as built* (3.18 M in Northrend, 2.44 M at sea), the GPU of the layer (1.2 ms before) and
