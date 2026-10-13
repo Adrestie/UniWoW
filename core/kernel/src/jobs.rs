@@ -2,13 +2,14 @@
 //! their `parallel_for`: a worker takes the slices left of a `parallel_for` before any job, since
 //! their caller waits for them, often with a deadline each frame, as the thread of the animations
 //! does; then the jobs, and the kernel's own work, the lowest priority first, those of one
-//! priority in the order they came.
+//! priority in the order they came. A job given a distance counts nearer as it waits
+//! (`YARD_EVERY_MS`), so that none waits for ever behind the nearer ones queued after it.
 
 use std::cmp::Ordering as Order;
 use std::collections::{BinaryHeap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use uniwow_api::parallel::{Helper, Workers};
 use uniwow_api::{Editor, JobContext, JobFn, JobId, JobOutcome, Priority, egui};
@@ -48,16 +49,34 @@ pub struct Finished {
 /// A helper of slices, with the module that called `parallel_for`, on whose behalf it runs.
 type Helping = (Option<String>, Helper);
 
-/// A job or the kernel's work waiting, with its priority and its place in the order they came.
+/// A job given a distance counts a yard nearer for each of these milliseconds it waits: 500 yards
+/// a second, about the speed of the fastest flights measured (300 to 600 yards a second), so that a
+/// tile queued far ahead of a camera flying to it comes about when the camera is over it, rather
+/// than after every job nearer the camera queued meanwhile, and a far job waits behind newer ones
+/// for a time bounded by its distance. The jobs at `Priority::FIRST` stay before them all.
+const YARD_EVERY_MS: u128 = 2;
+
+/// Where a job at `priority` queued at `at` from the start of the pool comes among those waiting,
+/// the lowest first: those at `Priority::FIRST` before all, then the others by their distance less
+/// what their wait is worth since the start of the pool, the same for all of them.
+fn rank(priority: Priority, at: Duration) -> (bool, u64) {
+    if priority == Priority::FIRST {
+        return (false, 0);
+    }
+    let aged = u64::try_from(at.as_millis() / YARD_EVERY_MS).unwrap_or(u64::MAX);
+    (true, u64::from(priority.0).saturating_add(aged))
+}
+
+/// A job or the kernel's work waiting, with its rank and its place in the order they came.
 struct Queued {
-    priority: Priority,
+    rank: (bool, u64),
     order: u64,
     task: Task,
 }
 
 impl PartialEq for Queued {
     fn eq(&self, other: &Self) -> bool {
-        (self.priority, self.order) == (other.priority, other.order)
+        (self.rank, self.order) == (other.rank, other.order)
     }
 }
 
@@ -70,22 +89,35 @@ impl PartialOrd for Queued {
 }
 
 impl Ord for Queued {
-    /// The greatest is taken first from the heap: the lowest priority, then the first come.
+    /// The greatest is taken first from the heap: the lowest rank, then the first come.
     fn cmp(&self, other: &Self) -> Order {
-        (other.priority, other.order).cmp(&(self.priority, self.order))
+        (other.rank, other.order).cmp(&(self.rank, self.order))
     }
 }
 
 /// What the workers take: the helpers of the slices first, then the jobs and the kernel's own work
-/// by their priority.
-#[derive(Default)]
+/// by their rank.
 struct Waiting {
+    /// When the pool started, from which the wait of the jobs is counted.
+    start: Instant,
     jobs: BinaryHeap<Queued>,
     /// Counts the jobs queued, for their order among those of one priority.
     queued: u64,
     helpers: VecDeque<Helping>,
     /// Set when the pool is dropped: the workers end once nothing waits.
     closed: bool,
+}
+
+impl Default for Waiting {
+    fn default() -> Self {
+        Self {
+            start: Instant::now(),
+            jobs: BinaryHeap::new(),
+            queued: 0,
+            helpers: VecDeque::new(),
+            closed: false,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -107,7 +139,8 @@ impl Queue {
         }
         let order = waiting.queued;
         waiting.queued += 1;
-        waiting.jobs.push(Queued { priority, order, task });
+        let rank = rank(priority, waiting.start.elapsed());
+        waiting.jobs.push(Queued { rank, order, task });
         self.ready.notify_one();
         true
     }
@@ -396,7 +429,7 @@ mod tests {
 
     use uniwow_api::{CommandInfo, Editor, EditorBackend, JobOutcome, Priority, serde_json::Value};
 
-    use super::{Finished, Pool};
+    use super::{Finished, Pool, rank};
 
     struct NoEditor;
 
@@ -724,12 +757,14 @@ mod tests {
             editor(),
         );
         let order = Arc::new(Mutex::new(Vec::new()));
+        // Far enough apart that the time between two queued, worth a yard every 2 ms, cannot change
+        // their order.
         let priorities = [
-            ("far", Priority(30)),
-            ("near", Priority(10)),
+            ("far", Priority(30_000)),
+            ("near", Priority(10_000)),
             ("first", Priority::FIRST),
-            ("near again", Priority(10)),
-            ("middle", Priority(20)),
+            ("near again", Priority(10_000)),
+            ("middle", Priority(20_000)),
         ];
         for (name, priority) in priorities {
             let order = order.clone();
@@ -747,6 +782,26 @@ mod tests {
         gate.wait();
         wait_for(&mut pool, 6);
         assert_eq!(*order.lock().unwrap(), ["first", "near", "near again", "middle", "far"]);
+    }
+
+    #[test]
+    fn a_job_given_a_distance_counts_nearer_as_it_waits_never_before_those_tied_to_no_place() {
+        let at = Duration::from_millis;
+        // A tile queued 2,000 yards ahead, then 3 s later one 600 yards from the camera flying to
+        // the first: the first, now about as near, comes first.
+        assert!(rank(Priority::distance(2_000.0), at(0)) < rank(Priority::distance(600.0), at(3_000)));
+        // Queued at once, the nearer first.
+        assert!(rank(Priority::distance(600.0), at(10)) < rank(Priority::distance(2_000.0), at(10)));
+        // A yard every 2 ms: 1,000 yards farther and 2 s sooner, tied.
+        assert_eq!(
+            rank(Priority::distance(1_999.0), at(0)),
+            rank(Priority::distance(999.0), at(2_000))
+        );
+        // Whatever the wait, after those tied to no place, which keep the order they came in.
+        assert!(rank(Priority::FIRST, at(1_000_000)) < rank(Priority::distance(0.0), at(0)));
+        assert_eq!(rank(Priority::FIRST, at(0)), rank(Priority::FIRST, at(5_000)));
+        // Saturating, never wrapping round.
+        assert_eq!(rank(Priority(u32::MAX), Duration::MAX).1, u64::MAX);
     }
 
     #[test]

@@ -308,6 +308,38 @@ fn from_outside_the_groups_seen_are_those_outside_and_those_their_portals_lead_t
 }
 
 #[test]
+fn in_a_room_the_camera_cannot_be_told_in_its_room_is_seen_with_what_its_portals_lead_to() {
+    // The middle room without its ceiling, as under a hole in its roof, its bounds reaching below
+    // its floor.
+    let mut wmo = row([-1.0, 1.0]);
+    let middle = &mut wmo.groups[1];
+    middle.bsp = vec![leaf(0, 2)];
+    middle.bsp_faces = vec![0, 1];
+    middle.bounds[0][2] = -10.0;
+    let cells = Cells::new(&wmo);
+    let eye = Vec3::new(15.0, 0.0, 2.0);
+    assert_eq!(cells.holding(eye), None, "no ceiling over the eye");
+    // Looking at the first room: the middle one, the first through its door, and the group outside.
+    assert_eq!(
+        cells.seen_outside(eye, &sides(eye, Vec3::new(-100.0, 0.0, 2.0))),
+        Some(vec![true, true, false, true])
+    );
+    // Under its floor, within its bounds: not in it.
+    let under = Vec3::new(15.0, 0.0, -5.0);
+    assert_eq!(
+        cells.seen_outside(under, &sides(under, Vec3::new(-100.0, 0.0, -5.0))),
+        Some(vec![false, false, false, true])
+    );
+    // A room without a tree holding the eye: seen.
+    wmo.groups[1].bsp.clear();
+    let treeless = Cells::new(&wmo);
+    assert_eq!(
+        treeless.seen_outside(eye, &sides(eye, Vec3::new(-100.0, 0.0, 2.0))),
+        Some(vec![true, true, false, true])
+    );
+}
+
+#[test]
 fn a_building_the_camera_is_inside_of_draws_and_shows_the_doodads_and_liquids_of_the_groups_its_portals_let_it_see() {
     let Some(gpu) = device() else {
         return;

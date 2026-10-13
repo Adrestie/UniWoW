@@ -6168,7 +6168,10 @@ section.
     job must never wait for the budget holding a lock the interface thread waits for: the budget is
     given again only once that thread draws its frame, the time apart. For the same reason the
     panel of the buildings no longer waits for the lock of the doodads placed, the count of the
-    frame before shown while a job holds it.
+    frame before shown while a job holds it. A range an arena cannot hold, even grown as large as
+    the device takes, is refused before the copy of its growth passes the budget: refused items
+    are tried again at each move of the camera, and each would otherwise hold back the uploads of
+    every module by the bytes of a whole arena never copied (found by the review of the branch).
   - The journal of the frames says, in a column of its own, how many jobs the budget held back in
     a frame and how long they waited in all.
   - **Tested**: nothing held back before the first frame, then the budget of each frame given
@@ -6189,17 +6192,19 @@ section.
     as running until then; a module taking 10 ms to take each of six jobs back is given one at each
     pass of the kernel (egui may make two of a frame), the others still listed, each once; one
     taking them back at once is given twenty in a frame.
-- **The tiles of the terrain by blocks, each a bundle kept** (`terrain/src/layer.rs`): the bundle
-  of the terrain was recorded again whole once the tiles in sight or their levels changed, that is
-  at nearly every frame of a flight (3.9 ms of the interface thread in a slow frame). The layer now
-  draws in the pass: the tiles in sight are gathered by blocks of 4 × 4 tiles of the map, each
-  block a render bundle of its own, kept from a frame to the next while the tiles of the block in
-  sight, their levels and the generation of the arrays of textures stay the same, and recorded
-  again alone, in `prepare`, once one of them changes; a tile loaded again is another, told by the
-  place of its resources. The pass runs the bundles of the blocks in sight, then draws the horizon,
-  and the sky in `Beyond`, as before. A block holding a tile the scene no longer has is let go with
-  it, in sight or not, so that no bundle keeps the resources of a tile released. The statistics
-  say the blocks in sight and those recorded again at the frame.
+- **The tiles of the terrain by blocks, each a bundle kept** (`terrain/src/layer.rs`): the bundle of
+  the terrain was recorded again whole once the tiles in sight or their levels changed, that is at
+  nearly every frame of a flight (3.9 ms of the interface thread in a slow frame). The layer now
+  draws in the pass: the tiles in sight are gathered by blocks of 4 × 4 tiles of the map, each block
+  a render bundle of its own, kept from a frame to the next while the tiles of the block in sight,
+  their levels and the generation of the arrays of textures stay the same, and recorded again alone,
+  in `prepare`, once one of them changes; a tile loaded again is another, told by the place of its
+  resources. A block out of sight recorded with arrays of textures before the current ones is let
+  go, so that its bundle keeps no array grown or purged on the GPU (found by the review of the
+  branch). The pass runs the bundles of the blocks in sight, then draws the horizon, and the sky in
+  `Beyond`, as before. A block holding a tile the scene no longer has is let go with it, in sight or
+  not, so that no bundle keeps the resources of a tile released. The statistics say the blocks in
+  sight and those recorded again at the frame.
   - **Why blocks rather than a bundle a tile and a level**, as proposed: a probe of wgpu-core 30
     alone, on its backend that draws nothing (`noop`), on the Linux machine this was built on and
     not on the user's, drawing 500 tiles as the terrain does (a pipeline, the camera, twelve arrays,
@@ -6218,13 +6223,13 @@ section.
     the same level, recorded again farther at a coarser level, again once its tile is loaded again;
     a tile of another block in sight recording that block alone, both drawn, both kept at the next
     frame; both recorded again once the arrays change; the block of a tile let go dropped; a block
-    out of sight kept, then let go once a tile it holds is released. The tests of the drawing of the
-    terrain (the textures, the horizon, the sky, the fog, the light) draw it in the pass now, as the
-    view does. 7 changes made on purpose, 6 caught (every block recorded at each frame, the levels
-    left out, the arrays left out, a block kept while one of its tiles is, one block for the whole
-    map, a bundle not run); the seventh, the tiles told by their place in the map rather than by
-    their resources, is covered by the blocks let go with a tile the scene no longer has, a tile
-    loaded again changing the scene.
+    out of sight kept, then let go once a tile it holds is released, or once the arrays change. The
+    tests of the drawing of the terrain (the textures, the horizon, the sky, the fog, the light)
+    draw it in the pass now, as the view does. 7 changes made on purpose, 6 caught (every block
+    recorded at each frame, the levels left out, the arrays left out, a block kept while one of its
+    tiles is, one block for the whole map, a bundle not run); the seventh, the tiles told by their
+    place in the map rather than by their resources, is covered by the blocks let go with a tile the
+    scene no longer has, a tile loaded again changing the scene.
 
 - **The jobs by their priority** (`core/api/src/job.rs`, `kernel/src/jobs.rs`): the queue of the
   pool kept the jobs in the order they came, so that a burst of one module, fifteen files of
@@ -6239,22 +6244,30 @@ section.
   liquids placed by the nearest of their vertices), of the buildings (their tiles, a file by its
   nearest building, the doodads of a building by its ground), and by the looks of `models` (their
   nearest instance). A job keeps the priority it was queued with while the camera moves; the
-  kernel's own work, the sorts of the large tables of the interface objects, is queued at `FIRST`.
+  kernel's own work, the sorts of the large tables of the interface objects, is queued at `FIRST`. A
+  job given a distance counts a yard nearer for each 2 ms it waits (500 yards a second, about the
+  speed of the fastest flights measured): without it, a tile queued 2,000 yards ahead of a flight
+  kept that rank once the camera was over it and waited behind every nearer job queued meanwhile,
+  the models' within 1,000 yards among them (found by the review of the branch). Every job gaining
+  at the same pace, the heap keeps them by their distance plus half the milliseconds from the start
+  of the pool at which they were queued; those at `FIRST` stay before them all.
   - **Tested**: the jobs waiting run the lowest priority first, those of one priority in the order
     they came; `Priority::distance` by whole yards, after `FIRST`, a distance below zero or not a
     number as none; the nearest point of a tile, none within it, half a tile past its side, half a
     diagonal past its corner, as the terrain gives it to a load. Not tested: each module giving its
-    distance, in the steering of the modules, which no test drives.
+    distance, in the steering of the modules, which no test drives. The rank of the wait: a tile
+    queued 2,000 yards ahead coming before one 600 yards away queued 3 s later, the nearer first
+    when queued at once, a yard every 2 ms, those at `FIRST` first whatever the wait, saturating.
 
-- **The slices of `parallel_for` before the jobs** (`kernel/src/jobs.rs`, `core/api/src/parallel.rs`):
-  a worker took a job before any slice, and one helping with slices went back to the jobs between
-  two of them, so that a job waited for one slice at most. The thread of the animations, which
-  splits its bones with `parallel_for` and must end before the frame it is for, rose to 9 ms while
-  the loads kept the workers. A worker now takes the slices left before any job, and helps until
-  none is left: the caller of `parallel_for` waits for no job but those already running, and a job
-  waits for the slices taken meanwhile, short by the rule of `parallel_for` (under a millisecond
-  each). The jobs of a module calling `parallel_for` (the chunks of a tile of the terrain built)
-  finish sooner the same way.
+- **The slices of `parallel_for` before the jobs** (`kernel/src/jobs.rs`,
+  `core/api/src/parallel.rs`): a worker took a job before any slice, and one helping with slices
+  went back to the jobs between two of them, so that a job waited for one slice at most. The thread
+  of the animations, which splits its bones with `parallel_for` and must end before the frame it is
+  for, rose to 9 ms while the loads kept the workers. A worker now takes the slices left before any
+  job, and helps until none is left: the caller of `parallel_for` waits for no job but those already
+  running, and a job waits for the slices taken meanwhile, short by the rule of `parallel_for`
+  (under a millisecond each). The jobs of a module calling `parallel_for` (the chunks of a tile of
+  the terrain built) finish sooner the same way.
   - **Tested**: a job started while every worker runs slices runs once the slices are all taken (99
     of 100 at least, the last of its caller running); a worker helping takes a job queued
     meanwhile only once no slice is left; the slices as before (every index once, nested, a panic
@@ -6272,15 +6285,15 @@ section.
     need it, but not the first instance: where the device lacks it, a draw a tile as before
     (`Shared::indirect`). The statistics count the draws given to the GPU.
   - A layer of one height whose depths differ, the ocean of the format 2 along the coasts among
-    them, is drawn by quads as the flat layers, a quad for each rectangle of the cells it covers. Its
-    9 × 9 depths are kept apart, 21 words a layer (four bytes a word), in an arena of storage of
+    them, is drawn by quads as the flat layers, a quad for each rectangle of the cells it covers.
+    Its 9 × 9 depths are kept apart, 21 words a layer (four bytes a word), in an arena of storage of
     their own, bound with the arrays, a buffer of one layer bound before any; a vertex names them by
     their place plus one in the bits of its slot above the 8 of its type (0 where its vertices carry
     its depth), rebased where the tile's depths land in the arena. The shader reads the depth at
-    each pixel between the four around its place in the layer, which the coordinates by default
-    give (a quarter of a repeat a cell), along the columns then the rows, then its place along the
-    ramp, where the vertices of a layer over its 9 × 9 vertices give theirs to be read between in
-    their triangles. A layer whose heights differ, or whose coordinates are given, keeps its 9 × 9
+    each pixel between the four around its place in the layer, which the coordinates by default give
+    (a quarter of a repeat a cell), along the columns then the rows, then its place along the ramp,
+    where the vertices of a layer over its 9 × 9 vertices give theirs to be read between in their
+    triangles. A layer whose heights differ, or whose coordinates are given, keeps its 9 × 9
     vertices. The triangles such layers took are not counted here (no client at hand): the
     statistics of the layer say them.
   - **Tested**: a layer of one height whose depths differ meshed as a quad, its depths kept apart
@@ -6381,17 +6394,22 @@ section.
   building drew every group in sight by its bounds, so that from under Dalaran its sewers showed
   through the faces turned away. Now, as the client draws it, a building the camera is in no group
   inside of draws its groups outside and the groups inside their portals let the camera see, passed
-  as from inside (from the side of the group listing the portal, clipped by the view and the
-  portals before, eight at most one after the other). A building without a group outside, as a
-  dungeon, is drawn by the bounds of its groups as before. The doodads and the liquids of its
-  groups follow what is seen, as from inside: those of a group inside not seen hidden. The groups
-  then drawn are fewer; the portals of the groups outside are passed for each building in sight at
-  each frame, which the listing did not do from outside before.
+  as from inside (from the side of the group listing the portal, clipped by the view and the portals
+  before, eight at most one after the other). A building without a group outside, as a dungeon, is
+  drawn by the bounds of its groups as before. The doodads and the liquids of its groups follow what
+  is seen, as from inside: those of a group inside not seen hidden. A group inside whose bounds hold
+  the camera with a floor under it, or without a tree, is seen too, its portals passed: where no
+  triangle over the camera faces down, as under a hole in a roof, the group the camera is in cannot
+  be told, and the room around it would have been lost (found by the review of the branch). The
+  groups then drawn are fewer; the portals of the groups outside are passed for each building in
+  sight at each frame, which the listing did not do from outside before.
   - **Tested**: past the group outside, looking in through the door, every room one after the
     other; looking away, or from the other end behind the walls, the group outside alone; the
     second door aside, the first room only; a building without a group outside, by its bounds; the
     layer listing from the other end the group outside alone, the doodads and the liquid of the
-    rooms hidden, and from the far end every group. 3 changes made on purpose, all caught (the
+    rooms hidden, and from the far end every group; in a room without a ceiling, the room and the
+    one its door leads to seen with the group outside, not from under its floor, and a room
+    without a tree seen. 3 changes made on purpose, all caught (the
     groups seen from outside not asked, the portals of the groups outside not passed, a building
     without a group outside passed as one with).
 

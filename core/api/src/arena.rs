@@ -266,6 +266,10 @@ impl Arena {
             }
             let copied = self.held.load(Ordering::Acquire);
             if self.held_back && !copy_passed && copied > 0 {
+                // Refused before its copy passes the budget, where no growth can hold it: a refused
+                // put retried at each move of the camera would otherwise hold back the uploads of
+                // every module by a copy never made.
+                self.room(&holes, length)?;
                 // Another job may grow it meanwhile: its holes are looked at again.
                 drop(holes);
                 self.pass(copied);
@@ -287,9 +291,9 @@ impl Arena {
         Ok(range)
     }
 
-    /// A buffer holding `length` more units at least: twice as large, or as large as the device
-    /// takes, the one before copied into it; refused when even that does not hold them.
-    fn grow(&self, holes: &mut Holes, length: u64) -> Result<(), NoRoom> {
+    /// The units a buffer holding `length` more needs, the free units at its end used; refused when
+    /// that is more than the device takes.
+    fn room(&self, holes: &Holes, length: u64) -> Result<u64, NoRoom> {
         let needed = holes.capacity() + length - holes.tail();
         if needed > self.most {
             return Err(NoRoom {
@@ -298,6 +302,13 @@ impl Arena {
                 most: self.most * self.unit,
             });
         }
+        Ok(needed)
+    }
+
+    /// A buffer holding `length` more units at least: twice as large, or as large as the device
+    /// takes, the one before copied into it; refused when even that does not hold them.
+    fn grow(&self, holes: &mut Holes, length: u64) -> Result<(), NoRoom> {
+        let needed = self.room(holes, length)?;
         let capacity = (holes.capacity() * 2).max(needed).max(self.least).min(self.most);
         let size = capacity * self.unit;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {

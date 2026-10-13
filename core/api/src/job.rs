@@ -12,7 +12,9 @@ pub struct JobId(pub u64);
 /// order they were started. `Context::spawn` gives `Priority::FIRST`, for the short jobs that are
 /// tied to no place, such as building a pipeline or freeing what was let go; a job reading or
 /// putting on the GPU what lies somewhere gives the distance of that place from the camera
-/// (`Priority::distance`), so that the nearest is loaded first, whatever its module.
+/// (`Priority::distance`), so that the nearest is loaded first, whatever its module. The pool counts
+/// such a job nearer as it waits, half a yard a millisecond, so that none waits for ever behind the
+/// nearer ones queued after it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Priority(pub u32);
 

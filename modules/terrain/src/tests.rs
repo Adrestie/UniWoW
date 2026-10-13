@@ -1623,6 +1623,23 @@ fn the_bundle_of_a_block_of_tiles_is_kept_across_frames_and_recorded_again_alone
         scene.generation += 1;
     }
     assert_eq!(away(&mut layer), (7, 0), "let go with a tile it held");
+    // A block out of sight once the arrays of textures change: let go, so that its bundle keeps
+    // no array the arrays let go.
+    {
+        let mut scene = scene.lock().unwrap();
+        scene.tiles.push(build(id(37, 32)));
+        scene.generation += 1;
+    }
+    assert_eq!(frame(&mut layer, 10.0 * TILE).0, (8, 1));
+    assert_eq!(away(&mut layer), (8, 1), "out of sight, kept");
+    let generation = shared.textures.generation();
+    shared.textures.place(&plain(32, [7, 7, 7, 255])).unwrap();
+    assert_ne!(shared.textures.generation(), generation, "the arrays changed");
+    assert_eq!(
+        away(&mut layer),
+        (8, 0),
+        "out of sight, recorded with the arrays before: let go"
+    );
 }
 
 #[test]

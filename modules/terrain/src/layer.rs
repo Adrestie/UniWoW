@@ -228,7 +228,8 @@ impl TerrainLayer {
     }
 
     /// The bundles of the blocks of the tiles in sight, those recorded again first, where a tile in
-    /// sight, its level or the arrays of textures changed.
+    /// sight, its level or the arrays of textures changed; those out of sight recorded with other
+    /// arrays let go.
     fn record_blocks(&mut self, shared: &Shared) {
         let (Some((_, camera)), Some((arrays, arrays_group))) = (&self.camera, &self.arrays) else {
             return;
@@ -260,6 +261,10 @@ impl TerrainLayer {
             }
             self.shown.push(key);
         }
+        // The blocks out of sight recorded with the arrays of textures before let go: their
+        // bundles would keep those arrays on the GPU once grown or purged.
+        let arrays = *arrays;
+        self.blocks.retain(|_, block| block.recorded.1 == arrays);
     }
 
     /// A uniform buffer of `size` bytes and its bind group of `layout`.
