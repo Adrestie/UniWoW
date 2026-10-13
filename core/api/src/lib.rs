@@ -72,6 +72,7 @@ pub mod texture_arrays;
 pub mod ui;
 pub mod vfs;
 pub mod viewport;
+pub mod weather;
 
 pub use command::{AppliedChange, Command};
 pub use commands::{CallId, CommandHandler, CommandInfo, CommandSpec, RunsOn, decode_arguments};

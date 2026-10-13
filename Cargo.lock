@@ -3608,6 +3608,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "uniwow-module-weather"
+version = "0.1.0"
+dependencies = [
+ "uniwow-api",
+]
+
+[[package]]
 name = "uniwow-server-link"
 version = "0.1.0"
 
