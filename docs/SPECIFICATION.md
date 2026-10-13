@@ -535,6 +535,7 @@ added through section 4 without touching the core.
 | liquids | Draws and edits water, lava, slime: create, heights, types |
 | placement | Draws M2 doodads and WMOs in tiles; place, move, rotate, scale, with gizmos and snapping |
 | lighting | Light and sky of the maps (Light tables, skyboxes), from step 9.7 |
+| weather | The weather in the viewport: the server's in the zone of the camera, through the live world and its observer, or one chosen in the editor alone; falling around the eye (rain, snow, sand) and given through the service `weather` to the light of the map, which mixes in the params of storm and brings its fog nearer (step 9.7, *The weather, as built*) |
 | environment | Zone music and ambience |
 | spawns | Server creatures and game objects placed in the viewport, waypoints, formations |
 | server-map-data | Regenerate .map, vmaps and mmaps for changed tiles (AzerothCore extractors), in the background |
@@ -6919,6 +6920,101 @@ listed at the end.
      against the game's.
   4. The hour of the server: with a character logged in at the same moment, the setting on, the
      light of the editor and the game's at once.
+
+#### The weather, as built: the server's or one chosen, falling and in the light
+
+Built as 9.7d and 9.7e were, the user away, without captures nor a server running here: the
+observer's part written against the headers of AzerothCore and not built; each choice said.
+
+- **The observer** (`mod-uniwow-observer`) records each change of the weather of a zone the server
+  sends its players, through the hook `OnWeatherChange` of an `ALEScript`, which
+  `Weather::UpdateWeather` calls only once it has sent the weather to a player of the zone: on the
+  thread of the map, under a lock of its own. To an editor that asks for it (WATCH_WORLD), it sends
+  the world (WORLD): the hour of the clock of the server in its local time, and the last weather of
+  each zone, its state (`WeatherState`), its grade and its age in seconds; at once, again at each
+  change, and once a minute at least. AzerothCore keeps the weather of a zone only while a player is
+  in it, so that **without a player there is no weather**: none of a zone no player entered since
+  the worldserver started; that of a zone the last player left stays the last it had, its age
+  saying how old. A weather a script sets over the zone's (`Map::SetZoneWeather`) does not pass the
+  hook and is not sent; AzerothCore makes neither the fog (1) nor the black snow (106) of itself
+  (`Weather::GetWeatherState`).
+- **The protocol** keeps its version 1, extended so that either side may be the older: an observer
+  tells the world by a capability (bit 1), the editor asks for it (kind 5) only then, and an editor
+  that does not know it never asks; WORLD is the kind 106 (`PROTOCOL.md`). The client of
+  `server-link`, its fake observer (its capabilities set by the test) and their tests know it;
+  `tools/probe.py world` prints it.
+- **The live world** asks for the world of an observer that tells it, keeps the last WORLD, and
+  gives through two commands what it holds: `live-world.weather` (the weather of a zone, its age
+  counted on, or `known: false` with the reason: no connection, an observer not built again, nothing
+  sent yet, none of that zone) and `live-world.time` (the hour, counted on from the last received);
+  its panel says the hour of the server and of how many zones it has a weather, or why none.
+- **The terrain** answers `terrain.area`: the area of `AreaTable.dbc` of the chunk under a place, of
+  the tiles loaded in full around the camera.
+- **The service `weather`** (`core/api/src/weather.rs`): the weather applied (`Effect`, its kind and
+  its intensity from 0 to 1); the kinds of 3.3.5a, which fall (all but the fog), bring the params of
+  storm (those that fall) or thicken the fog (the fog and the sandstorm); the states of AzerothCore
+  read as a kind, their grade as the intensity (`Effect::of_state`).
+- **The module `weather`** (World; `modules/weather`): the zone of the camera, that of the area of
+  the chunk under it (`terrain.area`) by the parents of `AreaTable.dbc`, read by a job once the
+  client's archives are open; the weather of the server in that zone, asked of the live world twice
+  a second at most, unknown with the reason without a server, a live world or a player there; the
+  weather applied as the settings of the category *Weather* say: none, the server's (the default:
+  nothing without a server), or the one chosen in the panel by its kind and intensity; in the editor
+  alone, nothing sent to the server. It gives it through the service and draws it.
+- **What falls** (`fall.rs`, `fall.wgsl`): one instanced draw of quads, without a vertex buffer, each
+  particle placed and moved by the vertex shader from its number and the time: its place a hash of
+  its number in a box of 50 × 50 × 30 yards around the eye, falling at its own speed, carried by the
+  wind, swaying; wrapped in the box, so that the particles stay where they are in the world as the
+  eye moves, and fading towards its sides. The CPU writes one uniform of 256 bytes a frame,
+  whatever their count. The rain and the thunderstorm in streaks along their fall turned to the eye,
+  the snow and the sand in flakes facing it; at full intensity 8,000 drops of rain (10,000 in a
+  thunderstorm), 6,000 flakes of snow or grains of sand, as many as the intensity says of them;
+  their colours, sizes, speeds and winds the editor's (`fall::fall`), no public description of the
+  particles of the client being found. Lit by the light of the view from above, fogged by its fog;
+  blended on the eye's side of the water after it (`Phase::Near`), tested against the depth, writing
+  none. Nothing falls while the eye is under the water, in a room of a building (a group inside, not
+  lit as outside) or in a liquid of a building, nor under the surface of the water under the eye.
+  Neither the lightning of the thunderstorm nor the sounds are made.
+- **In the light** (`lighting`, through the service): a weather that falls mixes in the params of
+  storm of the lights by its intensity (their third slot, the fourth under the water: `Light.dbc`
+  gives each light clear, clear under the water, storm and storm under the water params), its values
+  and its fog of the game alike, but in a liquid lit by its own light; the fog and the sandstorm bring
+  the fog of the game nearer, a quarter as far at full intensity, a choice of the editor, the
+  client's not found; the panel of *Lighting* says both. Each works without the other: without
+  `weather`, the light is clear; without `lighting`, the weather falls.
+- **Tested** (the GPU tests on the software adapter, llvmpipe here): WATCH_WORLD and WORLD written
+  and read back, a WORLD cut anywhere or counting more than it holds an error; asked of an observer
+  that tells the world and read back, an observer of before told apart; the live world asking it
+  only of such an observer, the hour counted on past midnight, the weather of a zone and its age, none
+  of another, the reasons, unknown again once the connection is lost; the area of a chunk at a place
+  and none off the tiles held; the zone of an area through its parents; the weather of the server
+  read from the live world's answer or why not, fine weather none; the weather applied by the
+  settings, the server's in the zone of the camera, the one chosen, none, given by the service, said
+  in the panel, asked twice a second at most, nothing without a zone, nothing once stopped; as many
+  particles as the intensity asks, none for the fog, none under the water, in a room or in a liquid
+  of a building, all in a street lit as outside; drawn in one draw of two triangles a particle, rain,
+  snow and sand, the same image at the same moment and another a moment later, half of them at half
+  the intensity, nothing under the water, fewer over a surface at the eye's feet, nothing in a room;
+  the params of storm mixed in by the intensity, values and fog, a quarter as far in the fog, both in
+  a sandstorm, the clear light without the service.
+- **To check by the user**:
+  1. AzerothCore built again with the observer of this step (the README: `cmake .`, then the targets
+     `modules` and `worldserver`, the worldserver stopped), started: the panel of the live world says
+     *Hour of the server* and of how many zones it has a weather. With the observer of before, it says
+     that the observer sends neither.
+  2. A character in Elwynn Forest, a zone of `game_weather`, and the GM command `.wchange 1 0.8`
+     there (rain at 0.8; `.wchange 0 0` fine weather): `python tools/probe.py world --token <token>`
+     prints the change at once; in the editor, the camera over Elwynn Forest and the weather the
+     server's, the panel *Weather* says *heavy rain, 0.80*, the rain falls and the light darkens by
+     the params of storm. Against the game at the same place and hour: the density, size, speed and
+     colour of the drops; the light and the fog under the rain; the character gone (`.wchange` then
+     logging out), the weather still the last sent, its age growing.
+  3. Snow in Dun Morogh (`.wchange 2 0.8`), a sandstorm in Tanaris (`.wchange 3 0.9`), a
+     thunderstorm (`.wchange 86 0.8`) and the black rain (`.wchange 90 0.8`) where a zone has
+     weather: what falls and the light, against the game.
+  4. The weather chosen in the panel, the server stopped: the fog at 1 (a quarter of the fog
+     distance), the rain in the inn of Goldshire (none inside) and on the road before it, over the
+     canals of Stormwind (none under their surface), the eye going under the water (none).
 
 #### Tests
 

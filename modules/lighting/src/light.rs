@@ -503,6 +503,20 @@ impl Tables {
         time: f32,
         far: f32,
     ) -> Option<[f32; 3]> {
+        self.fog_of_the_game_in(mixed, map, immersion, slot(immersion), time, far)
+    }
+
+    /// The same, of the params of the slot `slot` of each light, as those of storm
+    /// (`storm_slot`).
+    pub fn fog_of_the_game_in(
+        &self,
+        mixed: &Mixed,
+        map: u32,
+        immersion: Immersion,
+        slot: usize,
+        time: f32,
+        far: f32,
+    ) -> Option<[f32; 3]> {
         let prepared = |params: u32, weight: f32| {
             let values = self.values(params, time)?;
             let [end, share] = [
@@ -516,7 +530,7 @@ impl Tables {
             _ => mixed
                 .used
                 .iter()
-                .filter_map(|(id, weight)| prepared(params_of(self.by_id.get(id)?, slot(immersion)), *weight))
+                .filter_map(|(id, weight)| prepared(params_of(self.by_id.get(id)?, slot), *weight))
                 .collect(),
         };
         let (first, _) = *lights.first()?;
@@ -731,6 +745,53 @@ pub fn with_building_fog(given: MapLight, fog: FogBand, weight: f32, map: u32, i
 /// second (0x7F33AD); the first otherwise.
 fn slot(immersion: Immersion) -> usize {
     usize::from(immersion == Immersion::Under)
+}
+
+/// The slot of the params of storm of each light, mixed in by the intensity of a weather that brings
+/// a storm: the third, the fourth under the water (`Light.dbc`: clear, clear under the water, storm,
+/// storm under the water).
+pub fn storm_slot(immersion: Immersion) -> usize {
+    2 + slot(immersion)
+}
+
+/// The values `clear` with `storm` mixed in by `share`, from 0 to 1, as the light of a weather of
+/// that intensity: each colour, number and alpha between the two, where both have it; that of the
+/// one that has it otherwise.
+pub fn mix_values(clear: &Values, storm: &Values, share: f32) -> Values {
+    let share = share.clamp(0.0, 1.0);
+    let mut values = clear.clone();
+    for (kept, given) in values.colours.iter_mut().zip(storm.colours) {
+        *kept = match (*kept, given) {
+            (Some(kept), Some(given)) => Some(mix_colour(kept, given, share)),
+            (kept, given) => kept.or(given),
+        };
+    }
+    for (kept, given) in values.numbers.iter_mut().zip(storm.numbers) {
+        *kept = match (*kept, given) {
+            (Some(kept), Some(given)) => Some(mix(kept, given, share)),
+            (kept, given) => kept.or(given),
+        };
+    }
+    for (kept, given) in values
+        .river_alphas
+        .iter_mut()
+        .chain(&mut values.ocean_alphas)
+        .zip(storm.river_alphas.iter().chain(&storm.ocean_alphas))
+    {
+        *kept = mix(*kept, *given, share);
+    }
+    values.glow = mix(values.glow, storm.glow, share);
+    values
+}
+
+/// How much nearer the fog of the game comes in the thickest fog or sandstorm: a quarter as far.
+pub const THICKEST: f32 = 0.75;
+
+/// The share of its distances the fog of the game keeps in a weather of fog or sand of `intensity`:
+/// from all of them to a quarter, a choice of the editor, the client's not being found in any
+/// public source.
+pub fn fog_share(intensity: f32) -> f32 {
+    1.0 - THICKEST * intensity.clamp(0.0, 1.0)
 }
 
 /// The params of the slot `slot` of `light`, or those of its first slot where it has none there (a

@@ -16,14 +16,15 @@ use uniwow_api::models::{self, Geosets, Instance, Look, LookId, LookState, Model
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::vfs::{Vfs, VfsState};
 use uniwow_api::viewport::{self, MapLight, Sun};
+use uniwow_api::weather::{Effect, Kind, Weather};
 use uniwow_api::{
     CallId, CommandInfo, Context, Editor, EditorBackend, Event, JobContext, JobFn, JobId, JobOutcome, Module,
     PropertyValue, Registrar, egui, egui_wgpu,
 };
 
 use crate::light::{
-    Immersion, Skybox, Tables, colour_at, map_light, night_glow, number_at, prepared_fog, sun_direction,
-    with_building_fog,
+    Immersion, Skybox, Tables, colour_at, fog_share, map_light, mix_values, night_glow, number_at, prepared_fog,
+    storm_slot, sun_direction, with_building_fog,
 };
 
 /// A band of numbers of `keys`.
@@ -880,6 +881,36 @@ fn the_models_of_the_sky_of_the_lights_are_collected_by_their_weights_as_the_cli
 }
 
 #[test]
+fn the_params_of_storm_are_mixed_in_by_the_intensity_and_the_fog_brought_nearer() {
+    let tables = tables();
+    let clear = tables.light_at(0, [-5_000.0, 0.0], 0.0, 0, true).unwrap().values;
+    let mut storm = clear.clone();
+    storm.colours[0] = Some([1.0; 3]);
+    storm.colours[1] = None;
+    storm.numbers[0] = Some(9_000.0);
+    storm.river_alphas = [1.0, 0.0];
+    storm.glow = 1.0;
+    let half = mix_values(&clear, &storm, 0.5);
+    // Halfway in gamma where both have it, the clear one's where the storm has none.
+    let diffuse = clear.colours[0].unwrap()[0];
+    assert!((half.colours[0].unwrap()[0] - (diffuse + 1.0) / 2.0).abs() < 1e-6);
+    assert_eq!(half.colours[1], clear.colours[1]);
+    assert_eq!(half.numbers[0], Some((18_000.0 + 9_000.0) / 2.0));
+    assert_eq!(half.river_alphas, [0.55, 0.5]);
+    assert_eq!(half.glow, 0.55);
+    // None: the clear light; whole: the storm's, within 0 and 1.
+    assert_eq!(mix_values(&clear, &storm, 0.0), clear);
+    assert_eq!(mix_values(&clear, &storm, 2.0).numbers[0], Some(9_000.0));
+    // The slots of storm, the fourth under the water.
+    assert_eq!((storm_slot(Immersion::Dry), storm_slot(Immersion::Under)), (2, 3));
+    // The fog of the game a quarter as far in the thickest fog, all of it without.
+    assert_eq!(
+        (fog_share(0.0), fog_share(0.5), fog_share(1.0), fog_share(3.0)),
+        (1.0, 0.625, 0.25, 0.25)
+    );
+}
+
+#[test]
 fn the_hour_set_turns_at_its_speed_past_midnight() {
     assert_eq!(crate::half_minutes(720.0, 0, 100.0), 1440.0, "still");
     assert_eq!(crate::half_minutes(720.0, 60, 2.0), 1680.0, "two hours in two seconds");
@@ -1175,6 +1206,16 @@ impl Models for Sky {
     }
 }
 
+/// The weather the test sets.
+#[derive(Default)]
+struct Sent(Mutex<Option<Effect>>);
+
+impl Weather for Sent {
+    fn current(&self) -> Option<Effect> {
+        *self.0.lock().unwrap()
+    }
+}
+
 /// Buildings where the eye stands as the test sets it.
 #[derive(Default)]
 struct Rooms(Mutex<uniwow_api::buildings::Eye>);
@@ -1185,7 +1226,7 @@ impl uniwow_api::buildings::Buildings for Rooms {
     }
 }
 
-/// A host offering `formats`, `vfs`, `viewport`, `liquids`, `buildings` and `models`, counting the jobs
+/// A host offering `formats`, `vfs`, `viewport`, `liquids`, `buildings`, `models` and `weather`, counting the jobs
 /// started, kept unrun for the test to run them, and those cancelled, its editor `editor`.
 struct Host {
     formats: Arc<dyn Formats>,
@@ -1196,6 +1237,8 @@ struct Host {
     buildings: uniwow_api::buildings::Handle,
     sky: Arc<Sky>,
     models: models::Handle,
+    sent: Arc<Sent>,
+    weather: Option<uniwow_api::weather::Handle>,
     view: viewport::Handle,
     seen: Arc<View>,
     started: Vec<String>,
@@ -1210,7 +1253,10 @@ fn host(files: Arc<Files>) -> Host {
     let pond = Arc::new(Pond::default());
     let rooms = Arc::new(Rooms::default());
     let sky = Arc::new(Sky::default());
+    let sent = Arc::new(Sent::default());
     Host {
+        weather: Some(sent.clone()),
+        sent,
         liquids: pond.clone(),
         pond,
         buildings: rooms.clone(),
@@ -1248,6 +1294,7 @@ impl uniwow_api::Host for Host {
             "liquids" => Some(&self.liquids),
             "buildings" => Some(&self.buildings),
             "models" => Some(&self.models),
+            "weather" => self.weather.as_ref().map(|weather| weather as &(dyn Any + Send + Sync)),
             _ => None,
         }
     }
@@ -1712,6 +1759,78 @@ fn the_hour_of_the_server_is_taken_through_the_live_world_when_asked_for_and_kno
         module.shown.as_ref().unwrap().server_hour,
         Some(Err("no live world (unknown)".to_owned()))
     );
+}
+
+#[test]
+fn the_weather_given_mixes_in_the_params_of_storm_and_brings_the_fog_nearer() {
+    // The global light's params of storm, 5: a diffuse of 200, the fog to 250 yards from a quarter.
+    let (mut lights, mut records, mut colours, mut fog) = parts();
+    lights[0].params[2] = 5;
+    records.push(params(5, 0.2));
+    colours.push(greys(73, &[(0, 200)]));
+    fog.extend([numbers(25, &[(0, 9_000.0)]), numbers(26, &[(0, 0.25)])]);
+    let files = Arc::new(Files(Mutex::new(VfsState::Ready { archives: 1, files: 1 })));
+    let mut host = host(files);
+    let mut module = crate::LightingModule {
+        client: Some((1, 1)),
+        tables: Some(Ok(Arc::new(Tables::new(&lights, &records, &colours, &fog, &[])))),
+        ..Default::default()
+    };
+    let egui = egui::Context::default();
+    *host.editor.map.lock().unwrap() = json!({ "id": 0, "name": "Azeroth" });
+    *host.editor.camera.lock().unwrap() = Some([-5_000.0, 0.0, 600.0]);
+    let seen = |module: &mut crate::LightingModule, host: &mut Host| {
+        module.windows_ui(&egui, &mut Context::new(host, "lighting"));
+        let shown = module.shown.as_ref().unwrap();
+        (
+            diffuse(shown.light.as_ref().unwrap()),
+            host.seen.0.lock().unwrap().unwrap().fog.unwrap(),
+        )
+    };
+    // Fine weather: the clear params, the fog from a quarter of 500 yards.
+    assert_eq!(seen(&mut module, &mut host), (100.0, [125.0, 500.0, 1.0]));
+    // Rain at 0.5: halfway to the params of storm, their fog too.
+    *host.sent.0.lock().unwrap() = Some(Effect {
+        kind: Kind::Rain,
+        intensity: 0.5,
+    });
+    let (lit, fogged) = seen(&mut module, &mut host);
+    assert!((lit - 150.0).abs() < 1e-3, "{lit}");
+    assert!(
+        fogged
+            .iter()
+            .zip([93.75, 375.0, 1.0])
+            .all(|(a, b)| (a - b).abs() < 1e-3),
+        "{fogged:?}"
+    );
+    assert!(
+        panel(&mut module, &mut host)
+            .contains(&"Weather: rain at 0.50; the params of storm mixed in by 0.50.".to_owned())
+    );
+    // The fog at 1: the clear params, the fog a quarter as far.
+    *host.sent.0.lock().unwrap() = Some(Effect {
+        kind: Kind::Fog,
+        intensity: 1.0,
+    });
+    assert_eq!(seen(&mut module, &mut host), (100.0, [31.25, 125.0, 1.0]));
+    assert!(
+        panel(&mut module, &mut host)
+            .contains(&"Weather: fog at 1.00; the fog of the game 0.25 times as far.".to_owned())
+    );
+    // A sandstorm both.
+    *host.sent.0.lock().unwrap() = Some(Effect {
+        kind: Kind::Sandstorm,
+        intensity: 1.0,
+    });
+    let (lit, fogged) = seen(&mut module, &mut host);
+    assert!(
+        (lit - 200.0).abs() < 1e-3 && (fogged[1] - 62.5).abs() < 1e-3,
+        "{lit} {fogged:?}"
+    );
+    // Without the service: the clear light.
+    host.weather = None;
+    assert_eq!(seen(&mut module, &mut host), (100.0, [125.0, 500.0, 1.0]));
+    assert!(module.shown.as_ref().unwrap().weather.is_none());
 }
 
 /// The texts the panel of `module` draws.

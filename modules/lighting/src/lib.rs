@@ -4,7 +4,8 @@
 //! to the view (`Viewport::set_light`) and said in the panel; taken back when the module stops.
 //! They are read by a job once the client's archives are open, and again whenever they change. The
 //! models of the sky the lights name, and that of the building whose group the eye is in, are
-//! placed at the eye through the service `models`, which draws them around it.
+//! placed at the eye through the service `models`, which draws them around it. The weather the
+//! service `weather` gives mixes in the params of storm of the lights and brings the fog nearer.
 
 mod light;
 #[cfg(test)]
@@ -19,6 +20,7 @@ use uniwow_api::models::{self, Geosets, Instance, Look, LookState, Motion};
 use uniwow_api::serde_json::json;
 use uniwow_api::vfs::{self, VfsState};
 use uniwow_api::viewport::{self, MapLight};
+use uniwow_api::weather::{self, Effect};
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, PropertyValue, Registrar, SettingSpec, egui, log};
 use uniwow_api::{buildings, formats, liquids};
 
@@ -176,6 +178,9 @@ struct Shown {
     immersion: Immersion,
     /// The hour of the server, when asked for: none when it was taken, why not otherwise.
     server_hour: Option<Result<(), String>>,
+    /// The weather applied, whether the params of storm were mixed in by its intensity, and the
+    /// share of its distances the fog of the game kept.
+    weather: Option<(Effect, bool, Option<f32>)>,
     building_fog: Option<f32>,
     light: Option<Mixed>,
     given: Option<MapLight>,
@@ -342,11 +347,45 @@ impl LightingModule {
                 .and_then(|liquids| liquids.liquid_at([x as f32, y as f32, z as f32])),
         };
         let immersion = tables.immersion(liquid);
-        let light = tables.light_in(map, place, time, local == 1, immersion);
+        let mut light = tables.light_in(map, place, time, local == 1, immersion);
+        // The weather the module `weather` applies: one that brings a storm mixes in the params of
+        // storm of the lights by its intensity (their third slot, the fourth under the water), but
+        // in a liquid lit by its own light; the fog or a sandstorm brings the fog of the game nearer.
+        let effect = ctx.service(weather::SERVICE).and_then(|weather| weather.current());
+        let storm = effect
+            .filter(|effect| effect.kind.stormy() && effect.intensity > 0.0)
+            .filter(|_| !matches!(immersion, Immersion::Lit(_)))
+            .and_then(|effect| {
+                let storm = tables.light_at(map, place, time, light::storm_slot(immersion), local == 1)?;
+                Some((effect.intensity, storm))
+            });
+        if let (Some(clear), Some((share, storm))) = (&mut light, &storm) {
+            clear.values = light::mix_values(&clear.values, &storm.values, *share);
+        }
+        let thinned = effect
+            .filter(|effect| effect.kind.foggy() && effect.intensity > 0.0)
+            .map(|effect| light::fog_share(effect.intensity));
         let mut given = light.as_ref().map(|light| {
-            let game_fog = (fog == 1).then(|| tables.fog_of_the_game(light, map, immersion, time, far as f32));
+            let game_fog = (fog == 1).then(|| {
+                let clear = tables.fog_of_the_game(light, map, immersion, time, far as f32)?;
+                let fog = match &storm {
+                    Some((share, storm)) => {
+                        let slot = light::storm_slot(immersion);
+                        match tables.fog_of_the_game_in(storm, map, immersion, slot, time, far as f32) {
+                            Some(stormy) => std::array::from_fn(|at| clear[at] + (stormy[at] - clear[at]) * share),
+                            None => clear,
+                        }
+                    }
+                    None => clear,
+                };
+                Some(match thinned {
+                    Some(kept) => [fog[0] * kept, fog[1] * kept, fog[2]],
+                    None => fog,
+                })
+            });
             light::map_light(&light.values, time, game_fog.flatten(), immersion != Immersion::Dry)
         });
+        let weather = effect.map(|effect| (effect, storm.is_some(), thinned.filter(|_| fog == 1)));
         // In a room of a building, the fog of the building weighing by how far the eye is from its
         // portals, whole 25 yards in; under the water, its fog under the water; in a liquid with a
         // light of its own, the light of the liquid alone (WebWowViewerCpp leaves the fog of the
@@ -406,6 +445,7 @@ impl LightingModule {
             liquid,
             immersion,
             server_hour: server_hour.map(|hour| hour.map(|_| ())),
+            weather,
             building_fog,
             light,
             given,
@@ -537,6 +577,16 @@ impl Module for LightingModule {
                 );
             }
             None => {}
+        }
+        if let Some((effect, stormy, thinned)) = &shown.weather {
+            let mut said = vec![format!("{} at {:.2}", effect.kind.name(), effect.intensity)];
+            if *stormy {
+                said.push(format!("the params of storm mixed in by {:.2}", effect.intensity));
+            }
+            if let Some(kept) = thinned {
+                said.push(format!("the fog of the game {kept:.2} times as far"));
+            }
+            ui.label(format!("Weather: {}.", said.join("; ")));
         }
         if let Some(weight) = shown.building_fog {
             ui.label(format!(
