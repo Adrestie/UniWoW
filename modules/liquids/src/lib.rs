@@ -28,7 +28,9 @@ use uniwow_api::journal;
 use uniwow_api::liquids::{self, Grid, Liquids, Placed, Surfaces};
 use uniwow_api::serde_json::json;
 use uniwow_api::viewport::Demand;
-use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, PropertyValue, Registrar, egui, log, viewport};
+use uniwow_api::{
+    Context, DockArea, JobId, JobOutcome, Module, Priority, PropertyValue, Registrar, egui, log, viewport,
+};
 
 use gpu::{Shared, TileGpu};
 use layer::{LiquidsLayer, Poured, Scene};
@@ -50,6 +52,16 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// The liquids an owner placed, each with its flag.
 type Pouring = Vec<(Placed, Arc<AtomicBool>)>;
 type Pour = Arc<Pouring>;
+
+/// How far from `eye` the nearest vertex of the liquids `poured` lies, on the ground, in yards: the
+/// priority of the job putting them on the GPU.
+fn nearest(poured: &Pouring, eye: [f32; 2]) -> f32 {
+    poured
+        .iter()
+        .flat_map(|(placed, _)| placed.positions.iter())
+        .map(|position| (position[0] - eye[0]).hypot(position[1] - eye[1]))
+        .fold(f32::INFINITY, f32::min)
+}
 
 /// The layers of the tiles held, by tile as `Surfaces` keeps them.
 type Layers = HashMap<[i32; 2], Arc<Vec<LiquidLayer>>>;
@@ -448,8 +460,9 @@ impl LiquidsModule {
         }
         for tile in to_read {
             let (formats, shared, directory) = (formats.clone(), shared.clone(), directory.clone());
-            let job = ctx.spawn(
+            let job = ctx.spawn_with_priority(
                 &format!("Read the liquids of the tile {} {} of {directory}", tile.x, tile.y),
+                Priority::distance(tile.nearest(eye)),
                 move |job| -> Option<Read> {
                     if job.is_cancelled() {
                         return None;
@@ -506,8 +519,9 @@ impl LiquidsModule {
                 continue;
             };
             let (formats, shared, poured) = (formats.clone(), shared.clone(), liquids.clone());
-            let job = ctx.spawn(
+            let job = ctx.spawn_with_priority(
                 &format!("Put the liquids of {owner} on the GPU"),
+                Priority::distance(nearest(&liquids, eye)),
                 move |job| -> Option<Result<PouredOwner, Refusal>> {
                     if job.is_cancelled() {
                         return None;

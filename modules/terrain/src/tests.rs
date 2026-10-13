@@ -288,6 +288,10 @@ fn the_tiles_wanted_are_those_around_the_camera_the_nearest_first() {
     assert!((wanted[1].1 - 1.0).abs() < 1e-4, "a tile away");
     assert_eq!(wanted.len(), 8, "and the four corners");
     assert!(loading::wanted(&tiles(&all), [ORIGIN * 4.0, 0.0], 3).is_empty());
+    // The priority of its load: the nearest point of the tile, none under the camera.
+    assert_eq!(loading::nearest(id(32, 32), eye), 0.0);
+    assert!((loading::nearest(id(31, 32), eye) - TILE / 2.0).abs() < 1e-2);
+    assert!((loading::nearest(id(30, 32), eye) - TILE * 1.5).abs() < 1e-2);
 }
 
 #[test]

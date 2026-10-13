@@ -6,7 +6,7 @@ use uniwow_api::curve::{self, CurveEditor};
 use uniwow_api::dopesheet::{self, Dopesheet};
 use uniwow_api::property_grid::{self, PropertyGrid};
 use uniwow_api::ui::{self, SharedUi};
-use uniwow_api::{CallId, Command, Editor, Event, Host, JobFn, JobId, egui, egui_wgpu, serde_json};
+use uniwow_api::{CallId, Command, Editor, Event, Host, JobFn, JobId, Priority, egui, egui_wgpu, serde_json};
 
 use crate::draw::PanelView;
 use crate::jobs::Pool;
@@ -240,6 +240,11 @@ impl Host for KernelHost {
     fn spawn(&mut self, owner: &str, label: &str, job: JobFn) -> JobId {
         let editor = self.editor(owner);
         self.pool.spawn(owner, label, job, editor)
+    }
+
+    fn spawn_with_priority(&mut self, owner: &str, label: &str, priority: Priority, job: JobFn) -> JobId {
+        let editor = self.editor(owner);
+        self.pool.spawn_with_priority(owner, label, priority, job, editor)
     }
 
     fn spawn_thread(&mut self, owner: &str, label: &str, job: JobFn) -> JobId {

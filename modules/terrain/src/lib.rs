@@ -24,7 +24,8 @@ use uniwow_api::glam::Vec3;
 use uniwow_api::vfs::{self, VfsState};
 use uniwow_api::viewport::{Allowance, Demand, Fog};
 use uniwow_api::{
-    Context, DockArea, JobContext, JobId, JobOutcome, Module, PropertyValue, Registrar, egui, log, serde_json, viewport,
+    Context, DockArea, JobContext, JobId, JobOutcome, Module, Priority, PropertyValue, Registrar, egui, log,
+    serde_json, viewport,
 };
 
 use gpu::{Shared, TileGpu};
@@ -546,7 +547,11 @@ impl TerrainModule {
                 Kind::Full => format!("Load the tile {} {} of {directory}", tile.x, tile.y),
                 Kind::Light => format!("Load the tile {} {} of {directory}, light", tile.x, tile.y),
             };
-            let job = ctx.spawn(&label, move |job| load(&*formats, &shared, &directory, tile, kind, job));
+            // The nearest first, among the loads of every module.
+            let priority = Priority::distance(loading::nearest(tile, eye));
+            let job = ctx.spawn_with_priority(&label, priority, move |job| {
+                load(&*formats, &shared, &directory, tile, kind, job)
+            });
             self.loading.insert(tile, (job, kind));
             self.jobs.insert(job, (self.showing, tile, kind));
         }

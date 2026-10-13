@@ -418,7 +418,7 @@ Threads:
 | Id | Rule |
 |---|---|
 | T1 | The interface thread draws, applies the undoable commands and owns the state of each module. It never waits for slow work. |
-| T2 | The kernel keeps a pool of worker threads, one per processor core, for computations, below the normal priority, so that the interface thread is never kept waiting for a core while every worker computes. `Context::spawn` runs a job there, with progress and cancel; its result comes back to the module on the interface thread. Work that waits, such as a script, runs with `Context::spawn_thread` on a thread of its own, so that waiting never holds a thread of the pool; it is otherwise a job like the others. A job of the pool never waits without a time limit, for instance in `next_event` without a timeout; waiting in `parallel_for` for its slices, which the workers of the pool share with it, is not waiting without a limit. A Jobs panel lists the jobs running. |
+| T2 | The kernel keeps a pool of worker threads, one per processor core, for computations, below the normal priority, so that the interface thread is never kept waiting for a core while every worker computes. `Context::spawn` runs a job there, with progress and cancel; its result comes back to the module on the interface thread. The jobs waiting run the lowest priority first, whatever their module: `Context::spawn_with_priority` gives a job reading what lies somewhere its distance from the camera (`Priority::distance`), so that the nearest is loaded first; `Context::spawn` gives the first (`Priority::FIRST`), for the short jobs tied to no place. Work that waits, such as a script, runs with `Context::spawn_thread` on a thread of its own, so that waiting never holds a thread of the pool; it is otherwise a job like the others. A job of the pool never waits without a time limit, for instance in `next_event` without a timeout; waiting in `parallel_for` for its slices, which the workers of the pool share with it, is not waiting without a limit. A Jobs panel lists the jobs running. |
 | T3 | Service interfaces are shared between threads (`Send + Sync`, held in an `Arc`), so that jobs, scripts and compiled modules call them directly. An interface tied to the interface thread says so explicitly. |
 | T4 | Each named command declares where it runs: on the interface thread when it changes a module's state (through an undoable command), or on the calling thread when it only reads or synchronises itself. The second kind answers at once, without waiting for a frame; called from the interface thread, a compiled module's command runs on the module's own thread and answers later. |
 | T5 | The GPU device and queue can be used from any thread: jobs create and upload buffers and textures; only drawing happens on the interface thread. |
@@ -6220,6 +6220,26 @@ section.
     their resources, is covered by the blocks let go with a tile the scene no longer has, a tile
     loaded again changing the scene.
 
+- **The jobs by their priority** (`core/api/src/job.rs`, `kernel/src/jobs.rs`): the queue of the
+  pool kept the jobs in the order they came, so that a burst of one module, fifteen files of
+  buildings, waited before the tile of terrain under the camera. A job has a priority now, the
+  lowest run first, those of one priority in the order they came (a heap):
+  `Context::spawn_with_priority(label, priority, job)`. `Context::spawn` gives `Priority::FIRST`,
+  before every job given a distance: the jobs tied to no place (a pipeline built, what was let go
+  freed, a WDT read, the distances of the models walked, the tables of their choice) are short and
+  few, and a frame often waits for them. `Priority::distance(yards)`, for what lies somewhere, by
+  whole yards from the camera, after `FIRST`. Given by the loads of the terrain (the nearest point
+  of the tile, none under the camera), of the doodads and of the liquids (their tiles, and the
+  liquids placed by the nearest of their vertices), of the buildings (their tiles, a file by its
+  nearest building, the doodads of a building by its ground), and by the looks of `models` (their
+  nearest instance). A job keeps the priority it was queued with while the camera moves; the
+  kernel's own work, the sorts of the large tables of the interface objects, is queued at `FIRST`.
+  - **Tested**: the jobs waiting run the lowest priority first, those of one priority in the order
+    they came; `Priority::distance` by whole yards, after `FIRST`, a distance below zero or not a
+    number as none; the nearest point of a tile, none within it, half a tile past its side, half a
+    diagonal past its corner, as the terrain gives it to a load. Not tested: each module giving its
+    distance, in the steering of the modules, which no test drives.
+
 **To measure by the user**: the flights of *The frames measured in flight, before any correction*
 (the terrain at 64 tiles, the buildings at 8, the doodads at 4, the models at a reach of 1,000; 300
 then 600 yards a second, from the Howling Fjord to Dalaran by the Grizzly Hills), with the journal
@@ -6235,6 +6255,9 @@ of the frames (`UNIWOW_SLOW_FRAMES`), before this work and after it:
    terrain prepare` (the blocks recorded again), `view: terrain record` (the bundles run) and `view:
    submit` (wgpu-core validating the pass, bundles included); the blocks recorded again a frame, in
    the statistics of the layer, flying straight and turning.
+4. The jobs started not yet handed back and whether the tile under the camera, and the buildings
+   and models near it, now come first after a fast flight stops (the ground under the camera no
+   longer missing while far buildings load).
 
 #### Step 9.7, proposed: the light of the map
 

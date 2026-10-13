@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 
 use uniwow_api::formats::{self, TileId, Wdt};
 use uniwow_api::serde_json::json;
-use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, PropertyValue, Registrar, egui, log, models, viewport};
+use uniwow_api::{
+    Context, DockArea, JobId, JobOutcome, Module, Priority, PropertyValue, Registrar, egui, log, models, viewport,
+};
 
 use placing::Placing;
 
@@ -180,7 +182,8 @@ impl DoodadsModule {
                 (formats.clone(), models.clone(), self.placing.clone(), directory.clone());
             let tile = *tile;
             let label = format!("Place the doodads of the tile {} {} of {directory}", tile.x, tile.y);
-            let job = ctx.spawn(&label, move |job| -> Read {
+            let priority = Priority::distance(tile.nearest(eye));
+            let job = ctx.spawn_with_priority(&label, priority, move |job| -> Read {
                 let read = formats
                     .placements(&directory, tile.x, tile.y)?
                     .ok_or("named by its WDT, but not read")?;

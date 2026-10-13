@@ -8,6 +8,26 @@ use crate::Editor;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct JobId(pub u64);
 
+/// When a job of the pool runs among those waiting: the lowest first, those of one priority in the
+/// order they were started. `Context::spawn` gives `Priority::FIRST`, for the short jobs that are
+/// tied to no place, such as building a pipeline or freeing what was let go; a job reading or
+/// putting on the GPU what lies somewhere gives the distance of that place from the camera
+/// (`Priority::distance`), so that the nearest is loaded first, whatever its module.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Priority(pub u32);
+
+impl Priority {
+    /// Before every job given a distance.
+    pub const FIRST: Priority = Priority(0);
+
+    /// For what lies `yards` from the camera, by whole yards, after `FIRST`; a distance that is not
+    /// a number counts as none.
+    pub fn distance(yards: f32) -> Priority {
+        let yards = if yards.is_nan() { 0.0 } else { yards.max(0.0) };
+        Priority((yards as u32).saturating_add(1))
+    }
+}
+
 /// What a job sees while it runs on a worker thread.
 pub struct JobContext {
     progress: Arc<AtomicU32>,
@@ -69,3 +89,18 @@ impl JobOutcome {
 
 /// The work of a job, as the kernel receives it.
 pub type JobFn = Box<dyn FnOnce(&JobContext) -> Box<dyn Any + Send> + Send>;
+
+#[cfg(test)]
+mod tests {
+    use super::Priority;
+
+    #[test]
+    fn the_jobs_tied_to_no_place_come_first_then_the_nearest() {
+        assert!(Priority::FIRST < Priority::distance(0.0));
+        assert!(Priority::distance(10.4) < Priority::distance(11.0));
+        assert_eq!(Priority::distance(10.4), Priority::distance(10.9), "by whole yards");
+        assert_eq!(Priority::distance(-5.0), Priority::distance(0.0));
+        assert_eq!(Priority::distance(f32::NAN), Priority::distance(0.0));
+        assert_eq!(Priority::distance(f32::INFINITY), Priority(u32::MAX));
+    }
+}
