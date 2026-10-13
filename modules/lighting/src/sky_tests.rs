@@ -772,9 +772,13 @@ fn the_glare_follows_the_share_of_its_body_in_sight_rising_and_falling_at_their_
     see(&gpu, &mut layer, &view_towards(towards, 0.1), &clear, 1);
     let [sun, moon] = sky::envelopes(&gpu, &resources);
     assert!((sun - 0.4).abs() < 1e-4 && moon == 0.0, "{sun} {moon}");
-    // Half in sight: up to a half, rising by 0.4 at most.
+    // Half in sight: up to a half, rising by 0.4 at most; its glare drawn half as strong: a half of
+    // the colour of the sun times the grey of its image, made linear.
     see(&gpu, &mut layer, &view_towards(towards, 0.2), &half, 2);
     assert!((sky::envelopes(&gpu, &resources)[0] - 0.5).abs() < 1e-4);
+    let pixels = render(&gpu, &mut layer, &view_towards(towards, 0.2), 0.0);
+    let middle = pixel(&pixels, SIZE / 2, SIZE / 2);
+    assert!(near(middle[0], 93, 3) && near(middle[1], 44, 3), "{middle:?}");
     // Hidden: falling by 50/33 a second, a quarter of a second at most.
     see(&gpu, &mut layer, &view_towards(towards, 0.3), &all, 3);
     let fallen = 0.5 - 50.0 / 33.0 * 0.1;
@@ -803,6 +807,12 @@ fn the_glare_follows_the_share_of_its_body_in_sight_rising_and_falling_at_their_
     see(&gpu, &mut layer, &view_towards(towards, 5.6), &clear, 1);
     let fallen = 1.0 - 50.0 / 33.0 * 0.1;
     assert!((sky::envelopes(&gpu, &resources)[0] - fallen).abs() < 1e-4);
+    // A body ahead but under the horizon is not in sight, whatever the depth says.
+    let mut under = given;
+    under.moon.towards = Vec3::new(1.0, 0.0, -0.27).normalize().to_array();
+    sky::lock(&drawn).heavens = Some(under);
+    see(&gpu, &mut layer, &view_towards(Vec3::X, 5.7), &clear, 1);
+    assert_eq!(sky::envelopes(&gpu, &resources)[1], 0.0);
 }
 
 #[test]

@@ -7487,6 +7487,177 @@ the user did, and floating windows that can leave the main window.
     and Ctrl+Z from it; the editor minimised while a window torn off shows on the other screen (the
     window stays drawn).
 
+#### Step 9.7f, as built: the sun, the moon, the stars and the clouds
+
+Asked by the user (*finish the light and the weather*), built as 9.7d and 9.7e were, the user away,
+without a client here nor captures of the game: what the client does is taken from public sources,
+read for their facts only and never copied, each choice said where it is made, and what the captures
+are to tell listed at the end. The sources: *benilla* (MIT or Apache 2.0), a reading of the client
+1.12.1 with the addresses of its code and tables; *coa-vfog* (GPL 3), a module of a client 12340
+whose notes give the addresses where that client keeps its sun and its moon and draws its glare, and
+whose tests hold places of the sun it logged there; the issue 31 of *wow-launcher*, on where a 12340
+spends its time; *WebWowViewerCpp* and *Noggit Red*, as before; the community listfile of the files
+of the client, for the names of the images (their FileDataIDs under 400,000, those of the first
+clients).
+
+- **Read in the sources**:
+  - **Two suns.** The sun that lights is not the sun that is seen. The light's direction is the
+    table of `DayNight::SetDirection` (*benilla*), never setting (9.7a2: the same table in Noggit
+    and in WebWowViewerCpp's `directionalLightPhiTable`); a 12340 keeps a near-constant direction of
+    the light of its models (`0xD38C9C`) apart from the places of its visible sun and moon
+    (`0xD38E28`, `0xD38E48`, from the centre of its sky `0xD38B18`), the moon taking the sun's part
+    outside a window of the day (`0xA41CA4` to `0xA41CA0`) (*coa-vfog*).
+  - **The bodies** (*benilla*, `0x6d3b80`, `0x6d1ba0`): the visible sun 10° under the horizon at 5 h
+    30, 5° from the top from 11 h 55 to 12 h 05, under the horizon again at 21 h 30 (`0xce8d64`),
+    the white moon (`Moon.blp`) 35° from the top from 23 h 55 to 0 h 05, under the horizon from 4 h
+    to 22 h (`0xce8d24`), both on a bearing of 45°, to the north-west, the bearing of the light's
+    sun; each a quad facing the eye 12 yards from it (`[0x80c4e8]`), of side 1 for 4.77° of the
+    view; the sun's twice as large at 6 h and 21 h as from 6 h 45 to 20 h 15 (`0xce8cac`), the
+    moon's 1.75 times a curve from 1 at 1 h to 1.5 at 4 h and 22 h (`0xce8c8c`); blended, tinted by
+    the band 9 of the light, clipped at the horizon and faded over the 1.9° above it, its own alpha
+    above (`0x6d1960`). In a 12340 too, the band 9 colours the sun and the moon alone (`0x7F36F6`,
+    *coa-vfog*). A third body, `Moon02.blp`, is drawn black, its colour written by nothing; a 12340
+    draws a single moon (*coa-vfog*: the `Extensions.dll` of a custom server draws a second).
+    WebWowViewerCpp's tables, of later clients, differ (the sun setting at 19 h, the moon rising at
+    21 h 30, the stars at 20 h). Three places of the sun *coa-vfog* logged in a 12340, at 18 h 01,
+    18 h 43 and 20 h 00, 25.0°, 17.9° and 4.9° high, fall on the table of 1.12.1 within 0.15°, and
+    7° to 18° from that of the later clients: 1.12.1's tables are taken. A fourth place, of the moon
+    over Hyjal at "midnight", 27° high where the table says 55°, falls on neither; the hour of its
+    log is not sure.
+  - **The stars** (Noggit, WebWowViewerCpp, *benilla*): the client's model
+    `Environments\Stars\Stars.m2`, drawn as the sky, faded by a curve (`0xce9a98`): whole from 0 h
+    to 3 h, gone by 4 h 30, coming from 22 h 30; given to the model as a byte, `trunc(254 c + 1)`,
+    none under 2 (`0x6d1b50`).
+  - **The order** (*benilla*, `CSky::Render`, `0x6d4940`): the stars, the sun, the white moon, the
+    third body, a strip of the dome's colours, then the dome of the clouds, writing no depth, behind
+    the world; all of it left out under a model of the sky weighing more than 0.99 (`0x6d49fb`),
+    drawn under it while it fades in; nothing under the water (`0x6812a4`). The glare of the sun or
+    the moon is the last thing of the frame (`0x483740`), over the clouds and the rain, at the far
+    depth, so over the sky only. A 12340 alike (*coa-vfog*): its glare drawn by `0x7F0870`, called
+    at `0x4F9213` after the world, the liquids, the weather and the lightning, before the names; its
+    quads added (`D3DBLEND_SRCALPHA`, `D3DBLEND_ONE`) at the depth 0.999 to 1, after an occlusion
+    query against the depth of the world (`0x9AC3C0`, `0x9ABE00`).
+  - **The glare** (*benilla*, `0x6cf490`): the sun's (`SunGlare.blp`) a quad of 3 to 20 yards at 12,
+    its alpha from a half to 1, as the view turns onto the sun, the cosine between them from 0.7 to
+    1; the moon's (`MoonGlare.blp`) twice the moon's curve, its alpha from a tenth to 1; tinted by
+    the band 9; times an envelope rising by 4 a second for the sun, 100/33 for the moon, falling by
+    50/33 (`0x6cf5ea`), towards its curve of the day (the sun's none until 6 h 30, whole from 7 h 30
+    to 19 h 30, none from 21 h; the moon's whole until 2 h, none from 3 h 15 to 22 h 45) times the
+    clouds at the body (for the sun 1 less their cover, for the moon a tent, 1 − |2 c − 1|, blooming
+    in thin clouds only) times the share of the quad of the body an occlusion query finds drawn
+    (`0x7e5220`), none in a room. The issue 31 of *wow-launcher* names the loops of a 12340 that
+    update its sky and clouds (`0x7efd00`) and its glare (`0x7ee0d0`).
+  - **The clouds** (*benilla*, `0x6cffc0`, `0x6cfb00`, `0x6d0530`; a 12340 makes its own by code
+    too, its setting `SkyCloudLOD`): a tile of 128 texels a side of value noise of four octaves, of
+    8, 16, 32 and 64 cells across it, each half as strong as the one before; made again 32 rows each
+    tenth of a second, and once whole a step on in time, the noise morphing between two slices of
+    its lattice and drifting by a 256th of a cell; its sum thresholded by `(1 − density) × 255`, the
+    density the number 3 of the light, and shaped by `255 − 255 × 0.96^(0.6015625 i)`; a covered
+    texel coloured by the band 11 times its thinness, `((255 − c) >> 1 + 64) / 255`, plus the band
+    12, plus the band 10 times the cosine between the slope of its first three octaves and the way
+    to the place of the glowing body on the tile, lifted by `64 + 192 s` under a storm `s`, times an
+    envelope of the day (`0xce9ab8`, out at 4 h 40 and 22 h 10) and `1 − 0.75 s`; the sun glowing
+    from 4 h 50 to 22 h 10, the moon otherwise; laid on a dome of 12 rings from its top to 45° off
+    it, lowered by cos 45° so that its edge stands at the horizon, the radius of the tile at a ring
+    a 24th of its number, its alpha whole to the ninth ring, a half at the tenth, none at the edge.
+    The type of cloud of `LightParams.dbc` is 0 in every row of 3.3.5a (Noggit; WoWDBDefs gives no
+    such column for 3.3.5a): no image of clouds is named, the client makes them.
+  - **The storm** (*benilla*, `0x6d4500`, `0x6d2c74`): the params of storm weigh `min(1, 4 d)` of
+    the density `d` of the weather, and the alphas of the bodies and their glares are `floor(255 (1
+    − w)) / 255` under a storm of weight `w`.
+- **The view** (`core/api`): two stages, `Stage::Celestial`, after the models of the sky and before
+  the water, and `Stage::Glare`, after the scene.
+- **The module `lighting`**:
+  - `heavens.rs`, pure: the tables above read as the client reads them (`day_table`, as
+    `DayNight::InterpTable`: from the first key not before the hour in the order stored, back to the
+    one before, wrapping over midnight, keys stored out of order never reached); the places, sizes,
+    curves and envelopes; the weight of a storm and the alpha it leaves; how much of the sky the
+    bodies are drawn over (`share`): what the strongest model of the sky of the lights without the
+    flag 0x2 of `LightSkybox.dbc` leaves (Noggit: "combine procedural and skybox"), nothing past
+    0.99, nothing under a building's own sky nor in a liquid.
+  - `clouds.rs`, pure: the clouds made as above at each frame as the time passes, their texels and
+    the cover towards a direction, through the same dome.
+  - `sky.rs` and `sky.wgsl`: two layers. One (`Stage::Celestial`, the first blended phase) draws in
+    a triangle over the view, where the depth is still that of the clearing, writing none: the sun,
+    the moon over it and the clouds over both, mixed among themselves in gamma, faded by the share
+    of the sky, then blended over what is drawn. The other (`Stage::Glare`, the phase on the eye's
+    side of the water) adds the two glares, where the depth is that of the sky; between the two
+    passes it moves their envelopes on the GPU, without a read back: 8 × 8 points of the quad of
+    each body tested against the depth of the first pass, a point in sight on the screen, over the
+    horizon and at infinity. Their pipelines are built by a job; the images of the bodies
+    (`Textures\SunCenter.blp`, `SunGlare.blp`, `Moon.blp`, `MoonGlare.blp`) read by another once the
+    client's archives are open, sent by a copy the job submits after passing the budget of the
+    uploads; the texels of the clouds written by the interface thread when they change.
+  - At each frame: the stars placed first among the models of the sky, faded by the hour and by the
+    share; the sun, the moon, the glares and the clouds given to the layers (none without the light
+    of a map, the glares then fading), the glares none in a room or a liquid and faded by the share.
+    The panel says the height of the sun and of the moon, the share, the density of the clouds, what
+    each glare goes towards, and the images not read. The params of storm now weigh `min(1, 4 d)`,
+    where the weather of 9.7 mixed them by the intensity itself; the panel says their weight.
+- **Choices of the editor**: the tables of 1.12.1 for 3.3.5a, the client's own not read; the quads
+  facing the camera, as WebWowViewerCpp and *benilla* draw them; the fade at the horizon by the
+  height of each pixel, the client's by that of each vertex; the bodies and the clouds mixed in
+  gamma among themselves but over what is drawn in the linear space of the view, the glare added in
+  linear, the client adding bytes in gamma; the sun, the moon and the clouds drawn over the models
+  of the sky that let them be (the client draws them under), faded by what those hiding them leave
+  rather than drawn under them as they fade in; the glare hidden with them, which *benilla* leaves
+  to its occlusion alone; the share of a body in sight measured against the opaque of the first pass
+  (that seen at the frame before, the opaque found anew in the second pass left out), over its whole
+  quad, not the pixels its image draws, a point off the screen hidden; the glare none under any
+  liquid, which 1.12.1 fades over 10 yards under the surface; the tables of the noise the editor's
+  own, the client's not copied; the tile made whole the first time; the glow on the clouds by the
+  exact cosine, the client's by an inverse square root without its step of Newton; the cover at a
+  body read through the same dome as the clouds are drawn on, the client having a sampler of its own
+  (`0x6cfa90`).
+- **Not done**: the third body (none in a 12340); phases of the moon (none found); the strip of the
+  dome's colours and its warp at dawn and dusk (`highlight_sky`, `0x6d0f50` in 1.12.1): the dome
+  stays Noggit's of 9.7b; the number 2 of the light ("glow through the clouds", used by no source
+  found); `SkyCloudLOD` above 0; the moon's place outside 1.12.1's table, should the logged place
+  over Hyjal be right.
+- **Tested** (the GPU tests on the software adapter, llvmpipe here, that of Windows in the CI): the
+  tables of the day between their keys, over midnight, keys out of order; the sun 85° high at noon,
+  10° under the horizon at 5 h 30, 21 h 30 and all night, halfway down halfway to its setting, the
+  three places logged in a 12340 within 0.2°, to the north-west; the moon 55° high at midnight and
+  23 h 56, under the horizon at 4 h, 12 h and 22 h, halfway risen halfway; the sizes of both at
+  their hours; the stars whole, gone, half by bytes, none under the byte 2; the glares' curves; the
+  glow on the clouds and its body; the weight of a storm, whole from a quarter, and the alpha it
+  leaves; the view turning onto a body; the share under models of the sky hiding them or not, past
+  0.99, a building's sky, a liquid; the dome of the clouds, its top in the middle of the tile, its
+  edge on the horizon, its rings and their alphas, the west along the rows; the clouds none without
+  density, all at full density, more the denser, the curve; a band each tenth of a second, a step on
+  after four; the colour of a covered texel by its thinness, its glow nearer the body, none without
+  its envelope, a texel not covered of no alpha; the cover towards a direction. Drawn: the sun where
+  it stands, tinted, 18.9° wide, not where something is drawn, nor without its image, half over half
+  the sky, nothing over none or without heavens; clipped under the horizon and faded just over it;
+  the moon over the sun, the clouds over both mixed in gamma, alone over the black; the glare's
+  envelope rising by 0.4 in a tenth of a second, to a half with half the quad in sight, drawn half
+  as strong, falling at its pace, none looking away, whole again, added over the sky in the colour
+  of the sun times its image, not over what is drawn, falling without heavens, a body ahead under
+  the horizon not in sight; its width and alpha as the view turns onto its body. The module: the
+  stars first at midnight, by bytes at 3 h 45, under a model of the sky letting them be drawn, none
+  under one hiding them, by day or under the water; the heavens given to the layers only once they
+  are added, the sun and the moon of the hour in the colour of the band 9, the glares, the clouds
+  made, said in the panel; no glare in a room, again in a street open to the sky, the bodies faded
+  under a storm; none under a model of the sky hiding them nor under the water; nothing once
+  stopped; the params of storm four times the intensity of the weather, whole at a half. 39 changes
+  made on purpose: 37 caught at once, the two others once the glare was drawn at half its envelope
+  and a body ahead of the eye tested under the horizon.
+- **To check by the user**, with captures of the game (`jeu.ps1`) at the places and hours noted, the
+  editor at the same place and hour (the setting *Hour*, the speed 0, or the hour of the server):
+  1. The sun in Elwynn Forest, the camera looking to the north-west, at 6 h, 7 h, 12 h, 18 h, 20 h
+     and 21 h: its height (the panel says it), its size, its colour, how it sets at the horizon;
+     against the game, whether 3.3.5a's table is that of 1.12.1 (setting at 21 h 30) or of the later
+     clients (at 19 h).
+  2. The moon over Elwynn and over Mount Hyjal at 22 h 30, 0 h and 3 h: its height (55° at midnight
+     here), its size, its colour; a single moon.
+  3. The stars at 0 h, 3 h 45 (half) and 4 h 30 (gone), and under the sky of Netherstorm or of
+     Icecrown, whose models of the sky may hide them.
+  4. The clouds in Elwynn at 12 h and 20 h, with the panel's density: their cover, size, colour,
+     glow towards the sun, how fast they change; under a storm (`.wchange 1 0.8`).
+  5. The glare: looking straight at the sun at noon in Elwynn, then turning 45° away; the sun behind
+     a tree and a building; at 20 h 30 (it is gone by 21 h); the moon's glare at midnight in thin
+     clouds.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around
