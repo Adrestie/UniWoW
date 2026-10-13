@@ -7658,6 +7658,81 @@ clients).
      a tree and a building; at 20 h 30 (it is gone by 21 h); the moon's glare at midnight in thin
      clouds.
 
+#### Step 9.7g, as built: the lights of the buildings
+
+Left out by 9.7d (*WebWowViewerCpp* applies them only to doodads, under flags of later clients),
+looked at again as 9.7f was, the user away: what the client does with the lights of a building
+(`MOLT`) and those its groups name (`MOLR`), from public sources read for their facts only.
+
+- **Read in the sources**:
+  - *benilla*, of the client 1.12.1: the client gives the scene, at each frame, the lights of each
+    building in sight as lights of points (`0x695c00`, `0x71b650`), of their colour times their
+    intensity; the lights a group names are those its doodads take (`0x695c00`), a group naming none
+    giving its doodads none; the faces of the building take none, their light baked in their vertex
+    colours. A doodad of a room is lit by its colour (`MODD`) as 9.7d lights it, from the light of
+    the insides, and by each point its groups name, from the light towards the doodad, weighing
+    whole within the first distance of the light, nothing past its second, linearly between
+    (`0x69e1c0`), measured from the centre of the doodad; the particles of such a doodad by the
+    three nearest, falling off as `1 / (0.7 d + 0.03 d²)` (`0x71c730`). The models outside the rooms
+    take the three points of the scene nearest them, the lights of the buildings among them, the
+    lights of the models too.
+  - *WebWowViewerCpp*, of later clients: a doodad whose flags of `MODD` say so takes the light the
+    alpha of its colour names, its colour and its direction from it (`applyColorFromMOLT`); 3.3.5a
+    has neither those flags nor `MDDI` (9.7d). Never the faces of a building.
+  - A note of the wowdev wiki, as a search of the web gives it (the wiki itself unreachable from
+    here): the vertex colours of a building visibly brighter under its lamps, their light baked in
+    them, its lights perhaps not drawn by the client.
+  - *coa-vfog*: a 12340 gives the lights of its scene to the models as lights of points with a
+    constant, a linear and a quadratic fall (`0x834C70`, `0x835539`); whether the lights of the
+    buildings are among them is not established.
+  - Noggit reads them and draws nothing by them. The client 3.3.5a is not read; the lights of its
+    buildings and the lights its groups name are in its files (the flag 0x200 of a group): 1.12.1's
+    use of them is taken, on the doodads of the rooms.
+- **`formats`** (`core/api`): `WmoGroup::light_refs`, the lights a group names, read by `assets`
+  from `MOLR`, those past the lights of the building left out and said. `models::Interior::towards`:
+  the direction of the light of a doodad of the rooms, none for the light of the insides of the
+  client.
+- **The module `buildings`**, as it reads a building (`doodads::lamps`): for each doodad, the points
+  of the lights the groups holding it name, each once, weighing as above from the place of the
+  doodad, their colour times their intensity times that weight, towards them from that place; kept
+  with the file. As it places a doodad of the rooms (`doodads::lit_by`): those lights turned with
+  the building and folded with its diffuse into one light, from the mean of the direction of each
+  and of the light of the insides weighed by their brightness, of the sum of each colour by how much
+  it faces that mean, each channel at most 1; its light everywhere as before, turned towards that
+  light.
+- **The module `models`** carries the direction in the last float of the instance, which said 1 for
+  a doodad of the rooms: 1 still for the light of the insides, otherwise the direction folded on an
+  octahedron, its two coordinates in 2,048 steps each, plus 2, under 2^24 which a float holds whole;
+  the shaders of both paths read it back (`towards_inside`).
+- **Choices of the editor**: the lights folded into one, a model of the editor taking a single light
+  where the client takes them all (a probe of them in *benilla*); measured from the place of the
+  doodad, the centre of its model not known to the buildings; whatever the flag of fading of a
+  light, as *benilla* reads it; the light everywhere turned towards the light folded rather than
+  towards the light of the insides alone.
+- **Not done**: the lights of spots, directed or everywhere (no source has them light anything); the
+  models outside the rooms lit by the points of the scene nearest them, with the lights of the
+  models (`Not in 9.7`), left for them; the particles of the doodads, which the editor does not
+  draw.
+- **Tested**: the lights a group names read, those past the building's left out and said; for a
+  doodad, the points its groups name, each once, whole within the first distance, by half halfway,
+  none past the second, a spot none, those of no group holding it none; folded with its diffuse from
+  the mean of their directions by their brightness, each by how much it faces it, bounded to 1, a
+  light behind that mean adding nothing, turned with the building, as it is without lights; given to
+  its instance, a doodad of the rooms without lights as before, one outside none; its direction
+  folded, straight up in the middle of both coordinates, straight down in a corner, whole numbers
+  under 2^24, the light of the insides still 1. Drawn on the software adapter, on both paths: an
+  instance inside lit from its own direction, from +X whole and its light everywhere 1.1 times, from
+  −X not at all, from under the horizon by the cosine; that of the insides as before. 17 changes
+  made on purpose: all caught, one once the folding was tested on its own.
+- **To check by the user**, with captures of the game at the places noted, the editor at the same
+  place and hour:
+  1. The hall of the inn of Goldshire at 00:00: the tables, chairs and barrels next to the fire and
+     under the lamps, and those far from them: warmer and brighter by the lamps, as in the game, or
+     too bright (each channel bounded to 1 here).
+  2. The library of the cathedral of Stormwind, a hall of Dalaran: the doodads by the candles and
+     braziers.
+  3. A room without lights named (most rooms): no change since 9.7d.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

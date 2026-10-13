@@ -346,6 +346,36 @@ fn an_instance_inside_a_building_is_lit_by_its_own_light_turned_to_the_light_of_
     }
 }
 
+#[test]
+fn the_direction_of_the_light_of_an_instance_inside_is_folded_on_an_octahedron_in_one_float() {
+    // Straight up: the middle of both coordinates, 1024 of 2047, plus 2; straight down, folded to a
+    // corner; whole numbers under 2^24, which a float holds exactly.
+    let up = crate::groups::towards([0.0, 0.0, 1.0]);
+    assert_eq!(up, (2 + (1024 | 1024 << 11)) as f32);
+    let down = crate::groups::towards([0.0, 0.0, -1.0]);
+    assert_eq!(down, (2 + (2047 | 2047 << 11)) as f32);
+    let east = crate::groups::towards([1.0, 0.0, 0.0]);
+    assert_eq!(east, (2 + (2047 | 1024 << 11)) as f32);
+    for value in [up, down, east] {
+        assert!(value >= 2.0 && value < (1 << 24) as f32 && value.fract() == 0.0);
+    }
+    // The light of the insides of the client stays 1.
+    let instance = |towards| Instance {
+        id: 0,
+        look: uniwow_api::models::LookId(0),
+        transform: Mat4::IDENTITY,
+        alpha: 1.0,
+        motion: Motion::Standing,
+        interior: Some(Interior {
+            ambient: [0.0; 3],
+            diffuse: [0.0; 3],
+            towards,
+        }),
+    };
+    assert_eq!(crate::groups::as_gpu(&instance(None)).extra[3], 1.0);
+    assert_eq!(crate::groups::as_gpu(&instance(Some([0.0, 0.0, -1.0]))).extra[3], down);
+}
+
 /// Whether each colour of `pixel` is within `margin` of `wanted`.
 fn near(pixel: [u8; 4], wanted: [f32; 3], margin: f32) -> bool {
     pixel
