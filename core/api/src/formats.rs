@@ -126,6 +126,54 @@ pub struct AreaRecord {
     pub name: String,
 }
 
+/// A weather of `Weather.dbc`, whose id is the state the server sends (`WeatherState` of
+/// AzerothCore): its sound (`AmbienceID`, a row of `SoundEntries.dbc`, 0 for none), what falls (0
+/// nothing, 1 rain, 2 snow, 3 sand), its `TransitionSkyBox`, its colour and its texture, empty for
+/// that of its kind.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WeatherRecord {
+    pub id: u32,
+    pub sound: u32,
+    pub effect: u32,
+    pub transition_sky: f32,
+    pub colour: [f32; 3],
+    pub texture: String,
+}
+
+/// A sound of `SoundEntries.dbc`: its type (50 an ambience, 28 a music…), its name, its files below
+/// its folder each with its weight among them (a file is chosen by these weights), its volume from
+/// 0 to 1, its flags, and the distances it is heard whole within and not beyond, in yards.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SoundEntryRecord {
+    pub id: u32,
+    pub kind: u32,
+    pub name: String,
+    pub files: Vec<(String, u32)>,
+    pub directory: String,
+    pub volume: f32,
+    pub flags: u32,
+    pub distances: [f32; 2],
+}
+
+impl SoundEntryRecord {
+    /// The path of its file chosen by `pick`, a number drawn among all of them, by the weights of
+    /// its files (a weight of 0 counted as 1); none without a file.
+    pub fn path(&self, pick: u32) -> Option<String> {
+        let weight = |weight: u32| u64::from(weight.max(1));
+        let total: u64 = self.files.iter().map(|(_, at)| weight(*at)).sum();
+        let mut left = u64::from(pick) % total.max(1);
+        let (file, _) = self.files.iter().find(|(_, at)| {
+            let found = left < weight(*at);
+            left = left.saturating_sub(weight(*at));
+            found
+        })?;
+        Some(match self.directory.trim_end_matches('\\') {
+            "" => file.clone(),
+            directory => format!("{directory}\\{file}"),
+        })
+    }
+}
+
 /// What a creature looks like, `CreatureDisplayInfo.dbc`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CreatureDisplay {
@@ -947,6 +995,14 @@ pub trait Formats: Send + Sync {
     fn char_sections(&self) -> Result<Arc<Vec<CharSection>>, String>;
     /// The animations, by increasing id.
     fn animations(&self) -> Result<Arc<Vec<AnimationRecord>>, String>;
+    /// The weathers, by increasing id. None by default.
+    fn weathers(&self) -> Result<Arc<Vec<WeatherRecord>>, String> {
+        Err("the weathers are not read".to_owned())
+    }
+    /// The sounds, by increasing id. None by default.
+    fn sound_entries(&self) -> Result<Arc<Vec<SoundEntryRecord>>, String> {
+        Err("the sounds are not read".to_owned())
+    }
     /// The types of liquid, by increasing id. None by default.
     fn liquid_types(&self) -> Result<Arc<Vec<LiquidTypeRecord>>, String> {
         Err("the types of liquid are not read".to_owned())
@@ -1182,5 +1238,47 @@ mod tests {
     fn a_model_left_alone_shows_its_first_variants() {
         let ids = [0, 1, 101, 102, 201, 1701, 1702, 3201, 3205, 3501];
         assert_eq!(shown(&ids, &default_geosets(&ids)), [0, 101, 201, 3201, 3205]);
+    }
+
+    #[test]
+    fn the_file_of_a_sound_is_chosen_by_the_weights_of_its_files_below_its_folder() {
+        let sound = SoundEntryRecord {
+            id: 13_021,
+            kind: 25,
+            name: "StormPeaksLightning".to_owned(),
+            files: vec![
+                ("A.wav".to_owned(), 1),
+                ("B.wav".to_owned(), 2),
+                ("C.wav".to_owned(), 0),
+            ],
+            directory: "Sound\\Doodad\\".to_owned(),
+            volume: 0.8,
+            flags: 0,
+            distances: [8.0, 45.0],
+        };
+        // Four in all, the weight of 0 counted as 1: A, B, B, C, again and again.
+        let picked: Vec<String> = (0..6).map(|pick| sound.path(pick).unwrap()).collect();
+        assert_eq!(
+            picked,
+            [
+                "Sound\\Doodad\\A.wav",
+                "Sound\\Doodad\\B.wav",
+                "Sound\\Doodad\\B.wav",
+                "Sound\\Doodad\\C.wav",
+                "Sound\\Doodad\\A.wav",
+                "Sound\\Doodad\\B.wav"
+            ]
+        );
+        assert_eq!(sound.path(u32::MAX).as_deref(), Some("Sound\\Doodad\\C.wav"));
+        let bare = SoundEntryRecord {
+            directory: String::new(),
+            ..sound.clone()
+        };
+        assert_eq!(bare.path(0).as_deref(), Some("A.wav"));
+        let none = SoundEntryRecord {
+            files: Vec::new(),
+            ..sound
+        };
+        assert_eq!(none.path(3), None);
     }
 }

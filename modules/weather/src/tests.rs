@@ -10,10 +10,12 @@ use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
 use std::time::Duration;
 
+use uniwow_api::audio::{Audio, Sound, SoundId, State};
 use uniwow_api::buildings::{Buildings, Eye, EyeGroup};
 use uniwow_api::formats::{
     AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef,
-    Formats, GameObjectDisplay, HairGeoset, MapRecord, Model, Texture, Tile, Wdl, Wdt, Wmo,
+    Formats, GameObjectDisplay, HairGeoset, MapRecord, Model, SoundEntryRecord, Texture, Tile, Wdl, Wdt, WeatherRecord,
+    Wmo,
 };
 use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::liquids::{Liquids, Surfaces};
@@ -210,6 +212,12 @@ impl Formats for Areas {
     fn animations(&self) -> Result<Arc<Vec<AnimationRecord>>, String> {
         Err("none".to_owned())
     }
+    fn weathers(&self) -> Result<Arc<Vec<WeatherRecord>>, String> {
+        Ok(Arc::new(weathers()))
+    }
+    fn sound_entries(&self) -> Result<Arc<Vec<SoundEntryRecord>>, String> {
+        Ok(Arc::new(sound_entries()))
+    }
     fn model(&self, _file: &FileRef) -> Result<Model, String> {
         Err("none".to_owned())
     }
@@ -233,12 +241,98 @@ impl Formats for Areas {
     }
 }
 
-/// The client's files, open.
+/// The weathers of the tests, as the client's: the rains 3 and 5, the snow 6, the thunders 86 with
+/// the sound of the Dark Portal, the black rain 90 and the fog 1 without one.
+fn weathers() -> Vec<WeatherRecord> {
+    let weather = |id, sound, effect| WeatherRecord {
+        id,
+        sound,
+        effect,
+        transition_sky: 1.0,
+        colour: [1.0; 3],
+        texture: String::new(),
+    };
+    vec![
+        weather(1, 0, 0),
+        weather(3, 8_533, 1),
+        weather(5, 8_535, 1),
+        weather(6, 8_536, 2),
+        weather(86, 4_994, 1),
+        weather(90, 0, 1),
+    ]
+}
+
+/// The sounds of the tests, as the client's, and the thunder chosen, of three files.
+fn sound_entries() -> Vec<SoundEntryRecord> {
+    let sound = |id, name: &str, files: &[&str], directory: &str, volume| SoundEntryRecord {
+        id,
+        kind: 50,
+        name: name.to_owned(),
+        files: files.iter().map(|file| ((*file).to_owned(), 1)).collect(),
+        directory: directory.to_owned(),
+        volume,
+        flags: 0,
+        distances: [7.0, 30.0],
+    };
+    let weather = "Sound\\Ambience\\Weather";
+    vec![
+        sound(
+            4_994,
+            "DarkPortal",
+            &["DarkPortal.wav"],
+            "Sound\\Ambience\\ZoneAmbience",
+            1.0,
+        ),
+        sound(8_533, "Weather - RainLight", &["RainLightLoop.wav"], weather, 0.69),
+        sound(8_535, "Weather - RainHeavy", &["RainHeavyLoop.wav"], weather, 0.69),
+        sound(8_536, "Weather - SnowLight", &["SnowLight.wav"], weather, 0.69),
+        sound(
+            13_021,
+            "StormPeaksLightning",
+            &["Bolt1.wav", "Bolt2.wav", "Bolt3.wav"],
+            "Sound\\Doodad",
+            0.8,
+        ),
+    ]
+}
+
+/// The files of the client's sounds, each a WAV whose count of samples tells which it is.
+fn sound_files() -> HashMap<&'static str, usize> {
+    HashMap::from([
+        ("Sound\\Ambience\\Weather\\RainLightLoop.wav", 10),
+        ("Sound\\Ambience\\Weather\\RainHeavyLoop.wav", 20),
+        ("Sound\\Ambience\\ZoneAmbience\\DarkPortal.wav", 40),
+        ("Sound\\Doodad\\Bolt1.wav", 51),
+        ("Sound\\Doodad\\Bolt2.wav", 52),
+        ("Sound\\Doodad\\Bolt3.wav", 53),
+        ("Sound\\Ambience\\Weather\\SnowLight.wav", 0),
+    ])
+}
+
+/// A WAV of 16-bit PCM of one channel, `count` samples of a quarter.
+fn wav(count: usize) -> Vec<u8> {
+    let data = (count * 2) as u32;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    for value in [16u32, 1 | (1 << 16), 22_050, 44_100, 2 | (16 << 16)] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data.to_le_bytes());
+    for _ in 0..count {
+        bytes.extend_from_slice(&8_192i16.to_le_bytes());
+    }
+    bytes
+}
+
+/// The client's files, open: the sounds of `sound_files`, nothing else.
 struct Files;
 
 impl Vfs for Files {
-    fn read(&self, _path: &str) -> Result<Option<Vec<u8>>, String> {
-        Ok(None)
+    fn read(&self, path: &str) -> Result<Option<Vec<u8>>, String> {
+        Ok(sound_files().get(path).map(|count| wav(*count)))
     }
     fn exists(&self, _path: &str) -> bool {
         false
@@ -314,7 +408,9 @@ struct Host {
     formats: Arc<dyn Formats>,
     files: Arc<dyn Vfs>,
     buildings: Option<uniwow_api::buildings::Handle>,
-    jobs: Vec<JobFn>,
+    jobs: Vec<(JobId, JobFn)>,
+    spawned: u64,
+    audio: Option<uniwow_api::audio::Handle>,
     settings: HashMap<String, Value>,
     editor: Arc<Shown>,
 }
@@ -325,6 +421,8 @@ fn host() -> Host {
         files: Arc::new(Files),
         buildings: None,
         jobs: Vec::new(),
+        spawned: 0,
+        audio: None,
         settings: HashMap::new(),
         editor: Arc::new(Shown {
             map: Mutex::new(json!({ "id": 0, "name": "Azeroth" })),
@@ -343,6 +441,7 @@ impl uniwow_api::Host for Host {
         match id {
             "formats" => Some(&self.formats),
             "vfs" => Some(&self.files),
+            "audio" => self.audio.as_ref().map(|audio| audio as &(dyn Any + Send + Sync)),
             "buildings" => self
                 .buildings
                 .as_ref()
@@ -370,8 +469,9 @@ impl uniwow_api::Host for Host {
     }
     fn report_failure(&mut self, _reporter: &str, _culprit: &str, _message: &str) {}
     fn spawn(&mut self, _owner: &str, _label: &str, job: JobFn) -> JobId {
-        self.jobs.push(job);
-        JobId(self.jobs.len() as u64)
+        self.spawned += 1;
+        self.jobs.push((JobId(self.spawned), job));
+        JobId(self.spawned)
     }
     fn spawn_thread(&mut self, owner: &str, label: &str, job: JobFn) -> JobId {
         self.spawn(owner, label, job)
@@ -414,17 +514,13 @@ fn the_weather_of_the_server_in_the_zone_of_the_camera_is_applied_or_the_one_cho
     // The areas read by a job once the client's archives are open.
     module.windows_ui(&egui, &mut Context::new(&mut host, "weather"));
     assert_eq!(host.jobs.len(), 1, "the areas asked for");
-    let job = host.jobs.remove(0);
+    let (id, job) = host.jobs.remove(0);
     let read = job(&JobContext::new(
         Arc::default(),
         Arc::default(),
         Editor::new(host.editor.clone(), "weather"),
     ));
-    module.on_job(
-        JobId(1),
-        JobOutcome::Done(read),
-        &mut Context::new(&mut host, "weather"),
-    );
+    module.on_job(id, JobOutcome::Done(read), &mut Context::new(&mut host, "weather"));
     // Goldshire under the camera, in Elwynn Forest; no live world: nothing applied, why said.
     module.windows_ui(&egui, &mut Context::new(&mut host, "weather"));
     assert_eq!(current(), None);
@@ -897,4 +993,252 @@ fn the_flashes_of_a_thunderstorm_are_given_but_where_nothing_falls_or_when_the_s
     host.settings.insert("kind".to_owned(), json!(3));
     module.shutdown();
     assert_eq!(applied.flash(), 0.0);
+}
+
+/// What the test hears: each sound played, by its number, with the count of samples of its clip,
+/// its volume, its looping and its fade; the volumes and the stops asked.
+#[derive(Default)]
+struct Ears {
+    log: Mutex<Vec<String>>,
+    played: Mutex<u64>,
+    stopped: Mutex<Vec<u64>>,
+    /// Why there is no device, if so.
+    silent: Mutex<Option<String>>,
+}
+
+impl Ears {
+    /// What was heard since `from`, the number of entries before.
+    fn since(&self, from: usize) -> Vec<String> {
+        self.log.lock().unwrap()[from..].to_vec()
+    }
+    fn heard(&self) -> usize {
+        self.log.lock().unwrap().len()
+    }
+}
+
+impl Audio for Ears {
+    fn play(&self, sound: Sound) -> SoundId {
+        let mut played = self.played.lock().unwrap();
+        *played += 1;
+        let looping = if sound.looped { "looped" } else { "once" };
+        self.log.lock().unwrap().push(format!(
+            "play {}: {} samples at {:.2}, {looping}, faded in over {} s",
+            *played,
+            sound.clip.samples().len(),
+            sound.volume,
+            sound.fade.as_secs()
+        ));
+        SoundId(*played)
+    }
+    fn set_volume(&self, sound: SoundId, volume: f32, fade: Duration) {
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("volume {}: {volume:.2} over {} s", sound.0, fade.as_secs()));
+    }
+    fn stop(&self, sound: SoundId, fade: Duration) {
+        self.stopped.lock().unwrap().push(sound.0);
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("stop {} over {} s", sound.0, fade.as_secs()));
+    }
+    fn playing(&self, sound: SoundId) -> bool {
+        sound.0 <= *self.played.lock().unwrap() && !self.stopped.lock().unwrap().contains(&sound.0)
+    }
+    fn state(&self) -> State {
+        match self.silent.lock().unwrap().clone() {
+            Some(why) => State::Silent(why),
+            None => State::Playing("the test's".to_owned()),
+        }
+    }
+}
+
+/// Runs the jobs the module started, handing it their outcomes; how many.
+fn run_jobs(module: &mut WeatherModule, host: &mut Host) -> usize {
+    let mut ran = 0;
+    while !host.jobs.is_empty() {
+        let (id, job) = host.jobs.remove(0);
+        let outcome = job(&JobContext::new(
+            Arc::default(),
+            Arc::default(),
+            Editor::new(host.editor.clone(), "weather"),
+        ));
+        module.on_job(id, JobOutcome::Done(outcome), &mut Context::new(host, "weather"));
+        ran += 1;
+    }
+    ran
+}
+
+/// A frame of the module `now` seconds after it started.
+fn frame(module: &mut WeatherModule, host: &mut Host, now: f64) {
+    module.steer_at(&mut Context::new(host, "weather"), now);
+}
+
+/// The server sends `state` of `grade` in the zone of the camera, asked again at the next frame.
+fn server_sends(module: &mut WeatherModule, host: &mut Host, state: u32, grade: f32) {
+    *host.editor.server.lock().unwrap() =
+        Some(json!({ "zone": 12, "known": true, "state": state, "grade": grade, "age": 1 }));
+    module.server = None;
+}
+
+#[test]
+fn the_weather_is_heard_its_loop_faded_in_and_out_silent_where_sheltered_its_thunders_after_the_flashes() {
+    let mut host = host();
+    let ears = Arc::new(Ears::default());
+    host.audio = Some(ears.clone());
+    let mut module = WeatherModule::default();
+    let mut reg = Registrar::default();
+    module.register(&mut reg);
+    // The areas read; fine weather: nothing heard, nothing read.
+    frame(&mut module, &mut host, 0.0);
+    assert_eq!(run_jobs(&mut module, &mut host), 1);
+    frame(&mut module, &mut host, 0.1);
+    assert_eq!((ears.heard(), host.jobs.len()), (0, 0));
+    // The heavy rain of the server: the tables read, then its file, then its loop faded in.
+    server_sends(&mut module, &mut host, 5, 0.85);
+    frame(&mut module, &mut host, 0.2);
+    assert!(panel(&mut module, &mut host).contains(&"Nothing heard: reading the sounds of the client.".to_owned()));
+    assert_eq!(run_jobs(&mut module, &mut host), 1);
+    frame(&mut module, &mut host, 0.3);
+    assert!(
+        panel(&mut module, &mut host)
+            .contains(&"Reading Weather - RainHeavy, Sound\\Ambience\\Weather\\RainHeavyLoop.wav…".to_owned())
+    );
+    assert_eq!(run_jobs(&mut module, &mut host), 1);
+    frame(&mut module, &mut host, 0.4);
+    assert_eq!(ears.since(0), ["play 1: 20 samples at 0.69, looped, faded in over 3 s"]);
+    assert!(
+        panel(&mut module, &mut host)
+            .contains(&"Heard: Weather - RainHeavy, Sound\\Ambience\\Weather\\RainHeavyLoop.wav.".to_owned())
+    );
+    frame(&mut module, &mut host, 0.5);
+    assert_eq!(ears.heard(), 1, "played once");
+    // A lighter rain: the loop before faded out, the other faded in once read; the sound of the
+    // state the server sent, whatever its grade says.
+    server_sends(&mut module, &mut host, 3, 0.5);
+    frame(&mut module, &mut host, 0.6);
+    assert_eq!(ears.since(1), ["stop 1 over 3 s"]);
+    run_jobs(&mut module, &mut host);
+    frame(&mut module, &mut host, 0.7);
+    assert_eq!(ears.since(2), ["play 2: 10 samples at 0.69, looped, faded in over 3 s"]);
+    // In a room of a building: faded out; out of it, back.
+    let rooms = Arc::new(Rooms::default());
+    rooms.0.lock().unwrap().group = Some(group(0x2000));
+    host.buildings = Some(rooms.clone());
+    frame(&mut module, &mut host, 0.8);
+    host.buildings = None;
+    frame(&mut module, &mut host, 0.9);
+    assert_eq!(ears.since(3), ["volume 2: 0.00 over 1 s", "volume 2: 0.69 over 1 s"]);
+    // The snow, whose file is no sound: said, not read again.
+    server_sends(&mut module, &mut host, 6, 0.3);
+    frame(&mut module, &mut host, 1.0);
+    run_jobs(&mut module, &mut host);
+    frame(&mut module, &mut host, 1.1);
+    frame(&mut module, &mut host, 1.2);
+    assert_eq!(
+        (ears.since(5), host.jobs.len()),
+        (vec!["stop 2 over 3 s".to_owned()], 0)
+    );
+    let said = panel(&mut module, &mut host);
+    assert!(
+        said.iter()
+            .any(|text| text.starts_with("Nothing heard: Sound\\Ambience\\Weather\\SnowLight.wav: ")),
+        "{said:?}"
+    );
+    // A thunderstorm chosen: the loop of the Dark Portal, as the client's tables say; then a thunder
+    // after each strike, as loud as the strike is near, missed while its file is read.
+    host.settings.insert("mode".to_owned(), json!(2));
+    host.settings.insert("kind".to_owned(), json!(3));
+    host.settings.insert("intensity".to_owned(), json!(100));
+    frame(&mut module, &mut host, 1.3);
+    run_jobs(&mut module, &mut host);
+    frame(&mut module, &mut host, 1.4);
+    assert_eq!(ears.since(6), ["play 3: 40 samples at 1.00, looped, faded in over 3 s"]);
+    let mut copy = module.storm.clone();
+    let (mut thunders, mut heard, mut now) = (0, 0, 1.4);
+    while now < 120.0 {
+        now += 0.01;
+        let thunder = copy.step(now, Some(1.0)).1;
+        let before = ears.heard();
+        frame(&mut module, &mut host, now);
+        run_jobs(&mut module, &mut host);
+        let said = ears.since(before);
+        let Some(thunder) = thunder else {
+            assert!(said.is_empty(), "{said:?}");
+            continue;
+        };
+        thunders += 1;
+        let [said] = &said[..] else {
+            assert!(said.is_empty(), "{said:?}");
+            continue;
+        };
+        heard += 1;
+        let samples = said.split(": ").nth(1).unwrap().split(' ').next().unwrap();
+        assert!(["51", "52", "53"].contains(&samples), "{said}");
+        assert!(
+            said.ends_with(&format!(" at {:.2}, once, faded in over 0 s", 0.8 * thunder.loudness)),
+            "{said} {thunder:?}"
+        );
+    }
+    assert!(thunders >= 10 && heard + 3 >= thunders, "{heard} of {thunders}");
+    assert!(panel(&mut module, &mut host).contains(&"Thunder: StormPeaksLightning.".to_owned()));
+    // In a room: the loop faded out, no thunder heard.
+    host.buildings = Some(rooms);
+    let before = ears.heard();
+    for _ in 0..3_000 {
+        now += 0.01;
+        frame(&mut module, &mut host, now);
+    }
+    assert_eq!(ears.since(before), ["volume 3: 0.00 over 1 s"]);
+    host.buildings = None;
+    // The lightning off: the loop back, no thunder.
+    host.settings.insert("lightning".to_owned(), json!(0));
+    let before = ears.heard();
+    for _ in 0..3_000 {
+        now += 0.01;
+        frame(&mut module, &mut host, now);
+    }
+    assert_eq!(ears.since(before), ["volume 3: 1.00 over 1 s"]);
+    // The black rain, which the client plays nothing for: the loop faded out, nothing heard.
+    host.settings.insert("kind".to_owned(), json!(4));
+    frame(&mut module, &mut host, now + 0.01);
+    assert_eq!(ears.since(before + 1), ["stop 3 over 3 s"]);
+    assert!(
+        !panel(&mut module, &mut host)
+            .iter()
+            .any(|text| text.starts_with("Heard"))
+    );
+    // The rain again.
+    host.settings.insert("kind".to_owned(), json!(0));
+    frame(&mut module, &mut host, now + 0.02);
+    run_jobs(&mut module, &mut host);
+    frame(&mut module, &mut host, now + 0.03);
+    // The heavy rain the chosen intensity of 1 gives, then the module stopped: its loop stopped
+    // at once.
+    let before = ears.heard();
+    module.shutdown();
+    let last = *ears.played.lock().unwrap();
+    assert_eq!(
+        ears.since(before - 1),
+        [
+            format!("play {last}: 20 samples at 0.69, looped, faded in over 3 s"),
+            format!("stop {last} over 0 s")
+        ]
+    );
+    // Without a device: nothing heard, why said.
+    *ears.silent.lock().unwrap() = Some("no device here".to_owned());
+    frame(&mut module, &mut host, now + 0.04);
+    assert!(panel(&mut module, &mut host).contains(&"Nothing heard: no device here.".to_owned()));
+    // Without the service: nothing heard, said; in fine weather, nothing said.
+    host.audio = None;
+    frame(&mut module, &mut host, now + 0.04);
+    assert!(panel(&mut module, &mut host).contains(&"Nothing heard: no service audio.".to_owned()));
+    host.settings.insert("mode".to_owned(), json!(0));
+    frame(&mut module, &mut host, now + 0.05);
+    assert!(
+        !panel(&mut module, &mut host)
+            .iter()
+            .any(|text| text.starts_with("Nothing heard"))
+    );
 }

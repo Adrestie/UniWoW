@@ -539,7 +539,7 @@ added through section 4 without touching the core.
 | liquids | Draws and edits water, lava, slime: create, heights, types |
 | placement | Draws M2 doodads and WMOs in tiles; place, move, rotate, scale, with gizmos and snapping |
 | lighting | Light and sky of the maps (Light tables, skyboxes), from step 9.7 |
-| weather | The weather in the viewport: the server's in the zone of the camera, through the live world and its observer, or one chosen in the editor alone; falling around the eye (rain, snow, sand) and given through the service `weather` to the light of the map, which mixes in the params of storm and brings its fog nearer; in a thunderstorm, its lightning, whose flashes light the scene (step 9.7, *The weather, as built*; *The lightning and the sounds of the weather, as built*) |
+| weather | The weather in the viewport: the server's in the zone of the camera, through the live world and its observer, or one chosen in the editor alone; falling around the eye (rain, snow, sand) and given through the service `weather` to the light of the map, which mixes in the params of storm and brings its fog nearer; in a thunderstorm, its lightning, whose flashes light the scene; heard through the service `audio`, the loop the client's `Weather.dbc` names for it and the thunder of each strike (step 9.7, *The weather, as built*; *The lightning and the sounds of the weather, as built*) |
 | environment | Zone music and ambience |
 | spawns | Server creatures and game objects placed in the viewport, waypoints, formations |
 | server-map-data | Regenerate .map, vmaps and mmaps for changed tiles (AzerothCore extractors), in the background |
@@ -7550,21 +7550,6 @@ said where it is made, and what the game is to tell listed at the end.
   it by 0.7 of itself, their alphas kept; nothing in a liquid lit by its own light. The panel of
   *Lighting* says it. Its colour and shares are the editor's; no bolt is drawn, the tables of
   3.3.5a telling of none.
-- **Tested** (the GPU tests on the software adapter, llvmpipe here): the lightning seeded, the same
-  seed giving the same strikes and thunders, another other strikes; at full intensity a strike
-  every 4.5 to 7.5 s on average over ten minutes, each interval between 3 and 9 s, the first after
-  one interval; at the lowest every 18 to 30 s; one to three flashes, one thunder each, as late as
-  its strike is far and as loud as it is near, heard at the step it is due; a strike lit at once
-  then fading, each flash dimmer than the one before, dark once out; nothing without a storm or at
-  an intensity of 0, the thunders waiting forgotten when it ends, the first strike of a storm come
-  back one interval on; the module giving through the service the flash of its storm at each
-  moment, none in a room (said in the panel), none with the setting off, none in the rain, none once
-  stopped; the panel saying how often it strikes. The light lit by a flash: its ambient light
-  bounded, its sun kept, its sky, its fog in gamma and its water turned to it, their alphas, the
-  distances of the fog and the glow at night kept, half a flash halfway; given to the view by the
-  module and said in its panel, none in the magma, none without the service. 10 changes made on
-  purpose, all caught, one once the test listened for the thunders of the storm before from its
-  first step on.
 - **The sounds of the runtime** (`libs/audio`, the crate `uniwow-audio`, a normal dependency of
   `uniwow-api` as every library): **rodio** 0.22 (RustAudio, MIT or Apache 2.0), chosen for its
   output through cpal (WASAPI on Windows, ALSA on Linux) and its mixer, which converts the rate and
@@ -7599,28 +7584,90 @@ said where it is made, and what the game is to tell listed at the end.
   file of the client's archives, decoded on the calling thread, its category, volume, looping and
   fade), `audio.volume`, `audio.stop`, `audio.state`. Its panel, closed by default (*Window*), says
   the device or why there is none, the sounds playing, and the silence while minimised.
-- **Tested** (no sound heard here: the tests play into a mixer they read as the device would, at
-  one channel and 1,000 frames a second): a WAV of one channel and of two decoded to its values,
-  interleaved; an MP3 of silent frames the tests write decoded; what is not a sound, a WAV without a
-  sample and a frame cut short refused; a sound at its volume times its category and the master
-  volume, a category or the master changed moving there over one block by a straight line, another
-  category left as it was, muted and heard again, the volumes held within 0 and 1; faded in, then
-  to another volume, then stopped over its fade and gone, a sound unknown asked nothing; a clip
-  ended or looped, two sounds added; played before the device opens and heard once it is, one
-  stopped meanwhile never heard; without a device the reason said, nothing playing, nothing waited
-  for; shut down, every sound stopped and nothing played after. The module: the service, the
-  category and its defaults, its panel closed by default; the volumes of the settings taken at the
-  next frame, silent while minimised and heard again, not when the setting says otherwise; the
-  commands playing a file of the client's archives looped in the ambience at its volume, its volume
-  changed, stopped, once and faded in, the state said, a file absent, one not a sound, a category
-  unknown and no file refused with the reason, nothing without the service `vfs`; its panel saying
-  the device, the sounds playing, the module stopped and why there is no device. 9 changes made on
-  purpose, all caught.
-- **Not done**: the lightning drawn as a bolt in the sky (a model, or a line of light); the clouds lit
-  apart from the ground, the clouds not being drawn yet; lightning in any weather but the
-  thunderstorm. The choice of the audio device in the settings (the default one of the system, as
-  it is when the editor starts: a device plugged in later is not taken); the sounds placed in the
-  world (distances, left and right): none of the weather needs them.
+- **The tables of the sounds** (`assets`, `Formats::weathers`, `Formats::sound_entries`):
+  `Weather.dbc`, of 8 columns (its sound, the kind of what falls, `TransitionSkyBox`, its colour,
+  its texture), and `SoundEntries.dbc`, of 30 (its type, its name, ten files and their weights, its
+  folder, its volume, its flags, two distances), as WoWDBDefs places them for 12340, each read once
+  by the first thread asking for it; `SoundEntryRecord::path`, the file of a sound chosen by a number
+  drawn, by the weights of its files (a weight of 0 counted as 1), below its folder.
+  `Effect::state`: the state AzerothCore would send for a kind and an intensity, as
+  `Weather::GetWeatherState` cuts the grade, for the weather chosen in the editor; below 0.27, where
+  AzerothCore sends fine weather, the lightest, the weather chosen falling all the same.
+- **The sounds of the weather** (the module `weather`, `sound.rs`, using `audio`): the row of
+  `Weather.dbc` of the weather applied, the state the server sent whatever its grade says, or the
+  one it would send for the weather chosen; its sound (`AmbienceID`), its first file, looped in the
+  ambience at the volume of its row of `SoundEntries.dbc` (0.69 for those of the weather), not by the
+  intensity within a state, the states stepping already from light to heavy (a choice: how the
+  client sets its volume is not known); faded in over 3 seconds, the one before faded out over 3
+  seconds as the weather changes or ends (a choice, the client's times not found); faded to
+  silence over a second where nothing falls on the eye (under the water, in a room or in a liquid of
+  a building) and back once out (a choice: whether the client silences its weather inside is to
+  check). The tables and the files read and decoded by jobs once the client's archives are open,
+  again once they change; a file that cannot be read, or is no sound, said in the panel and not read
+  again. The thunder of each strike heard at its time, once, but where nothing falls on the eye: a
+  file of the row the setting *Thunder after a flash* of *Weather* names, by default 13,021
+  (`StormPeaksLightning`, three bolts of `Sound\Doodad`: of the rows of the client, the nearest by
+  its name to the thunder of a storm; a choice, the client naming none for its weathers), chosen by
+  the number drawn with the strike, at the volume of its row times the loudness of the strike; a
+  thunder whose file is still being read is missed. As the client's table says, the fog and the
+  black rain play nothing, and the thunderstorm the ambience of the Dark Portal. The panel of
+  *Weather* says what is heard, being read, or why nothing is (no service `audio`, no device, the
+  tables or a file not read), and the thunder. Nothing is sent to the server.
+- **Tested** (the GPU tests on the software adapter, llvmpipe here; no sound heard: the engine plays
+  into a mixer the tests read as the device would, at one channel and 1,000 frames a second, the
+  weather into a service of the tests that writes what it is asked). The lightning: the lightning
+  seeded, the same seed giving the same strikes and thunders, another other strikes; at full
+  intensity a strike every 4.5 to 7.5 s on average over ten minutes, each interval between 3 and 9
+  s, the first after one interval; at the lowest every 18 to 30 s; one to three flashes, one thunder
+  each, as late as its strike is far and as loud as it is near, heard at the step it is due; a
+  strike lit at once then fading, each flash dimmer than the one before, dark once out; nothing
+  without a storm or at an intensity of 0, the thunders waiting forgotten when it ends, the first
+  strike of a storm come back one interval on; the module giving through the service the flash of
+  its storm at each moment, none in a room (said in the panel), none with the setting off, none in
+  the rain, none once stopped; the panel saying how often it strikes. The light lit by a flash: its
+  ambient light bounded, its sun kept, its sky, its fog in gamma and its water turned to it, their
+  alphas, the distances of the fog and the glow at night kept, half a flash halfway; given to the
+  view by the module and said in its panel, none in the magma, none without the service. The sounds
+  of the runtime: a WAV of one channel and of two decoded to its values, interleaved; an MP3 of
+  silent frames the tests write decoded; what is not a sound, a WAV without a sample and a frame cut
+  short refused; a sound at its volume times its category and the master volume, a category or the
+  master changed moving there over one block by a straight line, another category left as it was,
+  muted and heard again, the volumes held within 0 and 1; faded in, then to another volume, then
+  stopped over its fade and gone, a sound unknown asked nothing; a clip ended or looped, two sounds
+  added; played before the device opens and heard once it is, one stopped meanwhile never heard;
+  without a device the reason said, nothing playing, nothing waited for; shut down, every sound
+  stopped and nothing played after. The module: the service, the category and its defaults, its
+  panel closed by default; the volumes of the settings taken at the next frame, silent while
+  minimised and heard again, not when the setting says otherwise; the commands playing a file of the
+  client's archives looped in the ambience at its volume, its volume changed, stopped, once and
+  faded in, the state said, a file absent, one not a sound, a category unknown and no file refused
+  with the reason, nothing without the service `vfs`; its panel saying the device, the sounds
+  playing, the module stopped and why there is no device. The sounds of the weather: the weathers
+  and the sounds read from tables the tests write, the empty names of files left out, their weights,
+  a table of another layout refused with its name; on the client's own when `UNIWOW_CLIENT` names
+  its folder, the rows of the states named as the probes read them, none for the fog and the black
+  rain, and every file of the weathers and of the thunder in the archives and decoded; the file of a
+  sound chosen by its weights below its folder; the state of a weather by its kind and grade, read
+  back as the same weather. The module: nothing heard in fine weather, nothing read; the tables,
+  then the file, read by jobs and said in the panel; the loop of the heavy rain of the server faded
+  in, once; a lighter rain cross-faded, by the state the server sent whatever its grade; faded out
+  in a room and back; a file that is no sound said and not read again; the loop of the Dark Portal
+  in a thunderstorm, then over two minutes a thunder at each strike of its storm and at no other
+  moment, of one of its three files, at 0.8 times the loudness of the strike, three at most missed
+  while their files are read; none in a room, its loop faded out; none with the lightning off, its
+  loop back; the black rain playing nothing, the loop before faded out; the loop stopped at once
+  when the module stops; why nothing is heard without a device and without the service. 29 changes
+  made on purpose (10 of the lightning, 9 of the runtime, 10 of the weather), all caught, one once
+  the test listened for the thunders of the storm before from its first step on.
+- **Not done**: the lightning drawn as a bolt in the sky (a model, or a line of light); the clouds
+  lit apart from the ground, the clouds not being drawn yet; lightning in any weather but the
+  thunderstorm. The choice of the audio device in the settings (the default one of the system, as it
+  is when the editor starts: a device plugged in later is not taken); the sounds placed in the world
+  (distances, left and right): none of the weather needs them. The volume of the loop by the
+  intensity within a state; the weather muffled inside rather than silent; the colour and the
+  `TransitionSkyBox` of `Weather.dbc`; its texture, which for the black rain is
+  `Particles\LeafBrown.blp` (falling leaves, which the editor still draws as black streaks); the
+  ambience and the music of the zones (`SoundAmbience`, `ZoneMusic`, the module `environment`).
 - **To check by the user**:
   1. A thunderstorm where a zone has weather (`.wchange 86 0.8` in Elwynn Forest, the weather the
      server's in the editor), at 00:00 and at 12:00 (the setting *Hour* of *Light*, the speed 0):
@@ -7637,6 +7684,23 @@ said where it is made, and what the game is to tell listed at the end.
      "Sound\\Music\\CityMusic\\Stormwind\\stormwind_intro-moment.mp3", category = "music"})`; the
      volumes of *Edit > Settings > Audio* moved while it plays, heard at once and without a click;
      the editor minimised, silent, then heard again once restored.
+  3. The weather heard, with a character in Elwynn Forest and the weather the server's in the
+     editor: `.wchange 1 0.3`, `.wchange 1 0.5`, `.wchange 1 0.9` (light, medium and heavy rain): the
+     panel of *Weather* says *Heard: Weather - RainLight, Sound\Ambience\Weather\RainLightLoop.wav*,
+     then the medium and the heavy; each loop against the game's at the same moment, the game's
+     ambience and the editor's (*Edit > Settings > Audio*) at the same volume; how fast it comes and
+     goes as the weather changes (the editor: 3 seconds); into the inn of Goldshire, whether the
+     game's rain goes silent or only quieter (the editor: silent within a second). `.wchange 2 0.8`
+     in Dun Morogh, `.wchange 3 0.3` and `.wchange 3 0.9` in Tanaris: by its table, the state 22
+     that AzerothCore calls light takes the heavy sandstorm's sound and 42 the medium's; which the
+     game plays. `.wchange 86 0.8`: whether the game plays the ambience of the Dark Portal, and a
+     thunder; the editor's thunders after its flashes (`StormPeaksLightning`), and if they sound
+     wrong, another row in *Weather > Thunder after a flash* (9843 `NetherstormLightningStrikes`,
+     8439 `LightningBolt - ZulGurub`), or 0 for none. `.wchange 90 0.8`: whether the game shows black
+     rain or falling leaves (its table names `Particles\LeafBrown.blp`), and plays nothing.
+  4. With `UNIWOW_CLIENT` naming the client's folder, `cargo test -p uniwow-module-assets
+     the_client_s_weathers` passes: the sounds of the weathers and of the thunder read from the
+     archives and decoded.
 
 #### Tests
 
