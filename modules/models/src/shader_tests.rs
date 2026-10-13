@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use uniwow_api::egui_wgpu;
 use uniwow_api::formats::{Batch, FileRef, Material, Model, ModelTexture, ModelTextureSource, Texture, TextureFormat};
 use uniwow_api::glam::{Mat4, Vec2, Vec3};
-use uniwow_api::models::{Geosets, Instance, Look, Models, Motion};
+use uniwow_api::models::{Geosets, Instance, Interior, Look, Models, Motion};
 use uniwow_api::viewport::View;
 
 use crate::gpu::{Shared, camera_values};
@@ -231,6 +231,18 @@ fn drawn_on(
     turn: f32,
     slots: Option<usize>,
 ) -> [u8; 4] {
+    drawn_lit(gpu, model, textures, turn, slots, None)
+}
+
+/// The pixel of `drawn_on`, its instance lit inside a building by `interior` when given.
+fn drawn_lit(
+    gpu: &egui_wgpu::RenderState,
+    model: &Model,
+    textures: &[(&str, Texture)],
+    turn: f32,
+    slots: Option<usize>,
+    interior: Option<Interior>,
+) -> [u8; 4] {
     let shared = Arc::new(Shared::new(gpu, &TARGET, slots));
     assert_eq!(shared.pool.is_some(), slots.is_some());
     let service = Arc::new(Service::default());
@@ -272,9 +284,40 @@ fn drawn_on(
         transform: Mat4::from_rotation_z(turn),
         alpha: 1.0,
         motion: Motion::Standing,
+        interior,
     };
     bench.service.place("test", &[placed]);
     middle(&render(&mut bench, FRONT, AIM))
+}
+
+#[test]
+fn an_instance_inside_a_building_is_lit_by_its_own_light_turned_to_the_light_of_the_insides() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    // White and lit, facing +X: its light everywhere from 0.9 to 1.1 times as it turns to the light
+    // of the insides, (0.30822, 0.30822, 0.9), plus its diffuse by that angle, in gamma; the sun of
+    // the view no part of it.
+    let textures = [("one.blp", grey(255, 255))];
+    let model = named(shaded(&[(0, 0)], &[[0, 0, 1, 0, 0, 0]], &[0], &[]), &["one.blp"]);
+    let interior = Interior {
+        ambient: [0.2, 0.4, 0.0],
+        diffuse: [0.4, 0.0, 0.2],
+    };
+    let facing = 0.30822;
+    let expected = [0.2, 0.4, 0.0]
+        .iter()
+        .zip([0.4, 0.0, 0.2])
+        .map(|(ambient, diffuse)| (ambient * (0.9 + 0.2 * facing) + diffuse * facing) * 255.0)
+        .collect::<Vec<f32>>();
+    let expected = [expected[0], expected[1], expected[2]];
+    for slots in [Some(pool::SLOTS), None] {
+        let seen = drawn_lit(&gpu, &model, &textures, 0.0, slots, Some(interior));
+        assert!(near(seen, expected, 3.0), "{slots:?}: {seen:?} against {expected:?}");
+    }
+    // Without it, the light of the view, grey.
+    let seen = drawn(&gpu, &model, &textures, 0.0);
+    assert!(seen[0] == seen[1] && seen[1] == seen[2], "{seen:?}");
 }
 
 /// Whether each colour of `pixel` is within `margin` of `wanted`.
@@ -531,6 +574,7 @@ fn the_axes_of_the_camera_are_those_of_its_view_whatever_its_projection() {
                 sun: Default::default(),
                 sky: None,
                 water: None,
+                night: 0.0,
             },
             100.0,
         );

@@ -6,12 +6,13 @@ use std::time::{Duration, Instant};
 use uniwow_api::serde_json::json;
 use uniwow_api::server_link::fake::FakeObserver;
 use uniwow_api::server_link::protocol::{
-    CYCLIC, Entity, FromObserver, Kind, MOVING, PathPoint, Spline, State, ToObserver, Zone,
+    CAPABILITY_READING, CAPABILITY_WORLD, CYCLIC, Entity, FromObserver, Kind, MOVING, PathPoint, Spline, State,
+    ToObserver, World as ServerWorld, Zone, ZoneWeather,
 };
 
 use crate::link::{self, Connection, MOVE_EVERY, Settings, Shared, Surroundings, should_subscribe};
 use crate::world::{Change, Tracked, World};
-use crate::{entities, lock, state};
+use crate::{entities, lock, state, time, weather};
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -372,6 +373,86 @@ fn the_link_follows_the_camera_and_the_map_keeps_the_entities_and_connects_again
 }
 
 /// The connection of the link with `settings`, once it is no longer connecting.
+#[test]
+fn the_world_is_asked_of_an_observer_that_sends_it_and_its_hour_counted_on() {
+    for offered in [false, true] {
+        let observer = FakeObserver::start("secret").unwrap();
+        if offered {
+            observer.set_capabilities(CAPABILITY_READING | CAPABILITY_WORLD);
+        }
+        let settings = Settings {
+            port: observer.address().port(),
+            world_port: free_port(),
+            token: "secret".to_owned(),
+            radius: 300.0,
+        };
+        let shared = Shared::default();
+        let fake = Fake::default();
+        // Before any connection: unknown, and why.
+        assert_eq!(time(&shared)["known"], json!(false));
+        assert_eq!(
+            time(&shared)["reason"],
+            json!("no connection to the observer of the server")
+        );
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| link::run(&settings, &shared, &fake, &|| stop.load(Ordering::Acquire)));
+            let _stopper = Stopper(&stop);
+            assert!(until(|| shared.status().world_offered.is_some()));
+            assert_eq!(shared.status().world_offered, Some(offered));
+            assert_eq!(state(&shared, &settings)["world_offered"], json!(offered));
+            if !offered {
+                // Never asked of an observer of before the world, which would close the connection.
+                std::thread::sleep(Duration::from_millis(100));
+                assert!(!observer.received().contains(&ToObserver::WatchWorld));
+                let reason = time(&shared)["reason"].as_str().unwrap().to_owned();
+                assert!(reason.contains("rebuild the worldserver"), "{reason}");
+                return;
+            }
+            assert!(until(|| observer.received().contains(&ToObserver::WatchWorld)));
+            assert_eq!(
+                time(&shared)["reason"],
+                json!("the observer has sent nothing of the world yet")
+            );
+            observer.send(&FromObserver::World(ServerWorld {
+                time: 86_399,
+                weathers: vec![ZoneWeather {
+                    zone: 12,
+                    state: 5,
+                    grade: 0.75,
+                    age: 30,
+                }],
+            }));
+            assert!(until(|| shared.observed().is_some()));
+            // The hour counted on from the last sent, past midnight; the weather of a zone, its age
+            // counted on too; none of a zone the server sent none of.
+            let observed = shared.observed().unwrap();
+            let later = observed.at + Duration::from_secs(2);
+            assert_eq!(observed.time_at(later), 1);
+            assert_eq!(observed.weather_at(12, later).map(|weather| weather.age), Some(32));
+            assert_eq!(observed.weather_at(14, later), None);
+            assert_eq!(time(&shared)["known"], json!(true));
+            let rain = weather(&shared, &json!({ "zone": 12 })).unwrap();
+            assert_eq!(
+                (&rain["known"], &rain["state"], &rain["grade"]),
+                (&json!(true), &json!(5), &json!(0.75))
+            );
+            let none = weather(&shared, &json!({ "zone": 14 })).unwrap();
+            assert_eq!(none["known"], json!(false));
+            assert!(
+                none["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("only while a player is in it")
+            );
+            assert!(weather(&shared, &json!({})).is_err(), "a zone asked for");
+            // The connection lost: unknown again.
+            observer.drop_connection();
+            assert!(until(|| shared.observed().is_none()));
+        });
+    }
+}
+
 fn standing(settings: Settings) -> Connection {
     let shared = Shared::default();
     let fake = Fake::default();

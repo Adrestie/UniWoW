@@ -17,12 +17,13 @@ use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
 use crate::cells::Cells;
 use crate::colours;
+use crate::eye::Lights;
 use crate::occlusion::Testing;
 
 /// The arrays of textures the shader binds at once.
 pub const SLOTS: usize = 64;
 /// Floats of the shader's `Camera`.
-pub const CAMERA: usize = 52;
+pub const CAMERA: usize = 56;
 /// The alpha under which an alpha-keyed batch is not drawn, as the models test it.
 pub const ALPHA_KEY: f32 = 224.0 / 255.0;
 
@@ -39,8 +40,10 @@ const UNFOGGED: u32 = 0x2;
 const TWO_SIDED: u32 = 0x4;
 const CLAMP_ACROSS: u32 = 0x40;
 const CLAMP_UP: u32 = 0x80;
-/// The flags of a group.
+/// The flags of a group: its vertex colours; lit as outside, as the streets of a city open to the
+/// sky.
 const HAS_COLOURS: u32 = 0x4;
+const GROUP_LIT_OUTSIDE: u32 = 0x40;
 /// The flag of a building lit as one (its "unified render path"): its vertex colours, unfixed and
 /// nearly black, do not light its insides, every batch of it lit as outside, its ambient colour
 /// added at the drawing; and the flag its groups give the shader then.
@@ -70,7 +73,7 @@ unsafe impl bytemuck::Pod for Vertex {}
 /// A material as the shader reads it: the codes of its two textures (`Placed::code`, `NONE` for
 /// white), how they wrap (the first in the two low bits, the second in the next two), its shader;
 /// the sizes of the classes of its textures; its alpha key, whether unlit and unfogged, the colour
-/// of its fog; its flags.
+/// of its fog; its flags, its blending and its emissive colour (`packed`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MaterialGpu {
@@ -148,8 +151,14 @@ pub fn shading(material: &WmoMaterial) -> [f32; 4] {
     [key, f32::from(u8::from(unlit)), f32::from(u8::from(unfogged)), fog]
 }
 
-/// The camera of the shader: the view, its sun and its fog, and the axes of the camera, across, up
-/// and back, which the environment is mapped by.
+/// A colour red, green, blue and alpha in one number, red in its low byte, as `unpack4x8unorm`
+/// reads it.
+pub fn packed(colour: [u8; 4]) -> u32 {
+    u32::from_le_bytes(colour)
+}
+
+/// The camera of the shader: the view, its sun and its fog, the axes of the camera, across, up and
+/// back, which the environment is mapped by, and the glow at night.
 pub fn camera_values(view: &View) -> [f32; CAMERA] {
     let mut values = [0f32; CAMERA];
     values[..16].copy_from_slice(&view.view_proj.to_cols_array());
@@ -163,6 +172,7 @@ pub fn camera_values(view: &View) -> [f32; CAMERA] {
     for (at, row) in [40, 44, 48].into_iter().zip(0..3) {
         values[at..at + 3].copy_from_slice(&view.view.row(row).truncate().normalize_or_zero().to_array());
     }
+    values[52] = view.night;
     values
 }
 
@@ -521,6 +531,8 @@ pub struct WmoGpu {
     /// What it takes on the GPU, its textures apart.
     pub bytes: u64,
     pub cells: Cells,
+    /// What the light of the map takes from it where the eye stands.
+    pub lights: Lights,
 }
 
 impl WmoGpu {
@@ -532,7 +544,8 @@ impl WmoGpu {
         ]
     }
 
-    /// What it keeps on the CPU: its groups and their batches, and its cells.
+    /// What it keeps on the CPU: its groups and their batches, its cells, and what the light takes
+    /// from it.
     pub fn cpu(&self) -> u64 {
         (size_of::<Self>()
             + self
@@ -541,6 +554,7 @@ impl WmoGpu {
                 .map(|group| size_of::<GroupGpu>() + group.batches.len() * size_of::<BatchGpu>())
                 .sum::<usize>()) as u64
             + self.cells.bytes()
+            + self.lights.bytes()
     }
 }
 
@@ -623,6 +637,7 @@ pub fn geometry(wmo: &mut Wmo) -> Geometry {
 /// arenas, its materials in the table, its textures in the arrays.
 pub fn upload(shared: &Arc<Shared>, formats: &dyn Formats, mut wmo: Wmo) -> Result<WmoGpu, Refusal> {
     let cells = Cells::new(&wmo);
+    let lights = Lights::new(&wmo);
     let Geometry {
         vertices,
         indices,
@@ -658,7 +673,7 @@ pub fn upload(shared: &Arc<Shared>, formats: &dyn Formats, mut wmo: Wmo) -> Resu
                 textures: [codes[0], codes[1], wrap | wrap << 2, material.shader],
                 sizes,
                 shading: shading(material),
-                flags: [material.flags, material.blending, 0, 0],
+                flags: [material.flags, material.blending, packed(material.emissive), 0],
             }
         })
         .collect();
@@ -686,7 +701,7 @@ pub fn upload(shared: &Arc<Shared>, formats: &dyn Formats, mut wmo: Wmo) -> Resu
         .map(|(group, (start, base))| GroupGpu {
             bounds: group.bounds,
             base_vertex: (vertex_range.start + u64::from(base)) as i32,
-            flags: group.flags & (HAS_COLOURS | colours::OUTSIDE)
+            flags: group.flags & (HAS_COLOURS | colours::OUTSIDE | GROUP_LIT_OUTSIDE)
                 | if wmo.flags & LIT_AS_ONE != 0 {
                     GROUP_LIT_AS_ONE
                 } else {
@@ -724,5 +739,6 @@ pub fn upload(shared: &Arc<Shared>, formats: &dyn Formats, mut wmo: Wmo) -> Resu
         bounds: wmo.bounds,
         ambient: [r, g, b].map(|value| f32::from(value) / 255.0),
         cells,
+        lights,
     })
 }

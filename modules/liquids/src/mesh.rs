@@ -25,13 +25,27 @@ pub fn is_water(kind: u32) -> bool {
 /// The words of the depths of a layer kept apart: its 9 × 9 bytes, four a word from the low byte,
 /// the last word ended by zeros.
 pub const DEPTH_WORDS: usize = (LIQUID_SIDE * LIQUID_SIDE).div_ceil(4);
-/// The bits of the slot of a type in `Vertex::slot`; the bits above hold the depths of its layer
-/// kept apart, by their place plus one, 0 where its vertices carry its depth.
+/// The bits of the slot of a type in `Vertex::slot`, `IN_ROOM` the highest; the bits above hold the
+/// light of a liquid of a room (`in_room`), else the depths of its layer kept apart, by their place
+/// plus one, 0 where its vertices carry its depth.
 pub const SLOT_BITS: u32 = 8;
+/// The bit of the slot of a vertex of a liquid of a room of a building.
+pub const IN_ROOM: u32 = 0x80;
+
+/// The bits a vertex of a liquid in a room lit by `light` adds to the slot of its type: `IN_ROOM`,
+/// and the light in 255ths to the nearest in the three high bytes; none outside.
+pub fn in_room(light: Option<[f32; 3]>) -> u32 {
+    light.map_or(0, |light| {
+        let [r, g, b] = light.map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u32);
+        IN_ROOM | r << 8 | g << 16 | b << 24
+    })
+}
 
 /// A vertex of a liquid: its place in the world, its coordinates of texture, its depth from 0 to
-/// 1, and the slot of its type in the table of the shader, with the place of the depths of its
-/// layer kept apart above `SLOT_BITS`.
+/// 1, and the slot of its type in the table of the shader in its low byte, under `IN_ROOM`; with
+/// `IN_ROOM` set for a liquid of a room of a building, the light of the room in its three high
+/// bytes, red first (`in_room`), its vertices carrying its depth; otherwise the place of the
+/// depths of its layer kept apart above `SLOT_BITS`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vertex {
@@ -262,6 +276,7 @@ pub fn placed(placed: &Placed, kind: impl Fn(u16) -> Option<(u32, bool)>) -> Mes
     let Some((slot, water)) = kind(placed.liquid) else {
         return meshes;
     };
+    let slot = slot | in_room(placed.room);
     meshes.vertices = placed
         .positions
         .iter()

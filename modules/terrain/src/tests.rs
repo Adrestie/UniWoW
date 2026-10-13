@@ -1191,6 +1191,7 @@ fn render_lit(
         sun: Default::default(),
         sky,
         water: None,
+        night: 0.0,
     };
     layer.prepare(gpu, &view);
     let texture = |format, usage| {
@@ -1498,6 +1499,7 @@ fn the_sky_is_seen_from_the_screen_as_precisely_far_from_the_middle_of_the_world
             sun: Default::default(),
             sky: None,
             water: None,
+            night: 0.0,
         };
         let values = crate::layer::camera_values(&view);
         let sky_from_screen = Mat4::from_cols_slice(&values[40..56]);
@@ -1797,4 +1799,24 @@ fn a_load_the_plan_no_longer_waits_for_is_dropped_once_done_its_model_freed_apar
     module.tile_loaded(JobId(4), built());
     assert_eq!(module.ready.len(), 1);
     assert!(module.loading.is_empty() && module.jobs.is_empty());
+}
+
+#[test]
+fn the_area_at_a_place_is_that_of_its_chunk_among_the_full_tiles() {
+    let id = TileId { x: 10, y: 60 };
+    let mut read = tile();
+    let at = read.chunks.iter().position(|chunk| chunk.index == [3, 5]).unwrap();
+    read.chunks[at].area = 40;
+    let nothing = read.chunks.iter().position(|chunk| chunk.index == [0, 1]).unwrap();
+    read.chunks[nothing].area = 0;
+    let areas = HashMap::from([(id, crate::areas_of(&TileModel::new(id, read)))]);
+    let [x, y] = id.corner();
+    // The chunk 3 along Y and 5 along X, in its middle and at its far edge.
+    assert_eq!(crate::area_at(&areas, x - CHUNK * 5.5, y - CHUNK * 3.5), Some(40));
+    assert_eq!(crate::area_at(&areas, x - CHUNK * 5.99, y - CHUNK * 3.99), Some(40));
+    assert_eq!(crate::area_at(&areas, x - 1.0, y - 1.0), Some(12), "the first chunk");
+    // A chunk without an area, a tile not held, a place off the map: none.
+    assert_eq!(crate::area_at(&areas, x - CHUNK * 1.5, y - CHUNK * 0.5), None);
+    assert_eq!(crate::area_at(&areas, x + 1.0, y - 1.0), None);
+    assert_eq!(crate::area_at(&areas, ORIGIN + 1.0, 0.0), None);
 }

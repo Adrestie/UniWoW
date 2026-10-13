@@ -63,6 +63,28 @@ fn game_object() -> Entity {
     }
 }
 
+/// The world at 13:30:15 of the server, a heavy rain in Elwynn Forest sent 42 seconds ago and the
+/// fine weather of Durotar.
+fn world() -> World {
+    World {
+        time: 13 * 3600 + 30 * 60 + 15,
+        weathers: vec![
+            ZoneWeather {
+                zone: 12,
+                state: 5,
+                grade: 0.85,
+                age: 42,
+            },
+            ZoneWeather {
+                zone: 14,
+                state: 0,
+                grade: 0.1,
+                age: 600,
+            },
+        ],
+    }
+}
+
 /// The kind and the body of a framed message.
 fn unframe(message: &[u8]) -> (u8, &[u8]) {
     let length = u32::from_le_bytes(message[..4].try_into().unwrap()) as usize;
@@ -85,6 +107,7 @@ fn every_message_both_ways_is_read_back_as_written() {
         }),
         ToObserver::Unsubscribe,
         ToObserver::Heartbeat,
+        ToObserver::WatchWorld,
     ] {
         let bytes = encode_to_observer(&message);
         let (kind, body) = unframe(&bytes);
@@ -121,6 +144,11 @@ fn every_message_both_ways_is_read_back_as_written() {
             entities: vec![game_object()],
             left: vec![5, 6],
         },
+        FromObserver::World(world()),
+        FromObserver::World(World {
+            time: 0,
+            weathers: Vec::new(),
+        }),
     ] {
         let bytes = encode_from_observer(&message);
         let (kind, body) = unframe(&bytes);
@@ -158,6 +186,16 @@ fn a_body_malformed_is_an_error_never_a_panic_nor_a_huge_allocation() {
     );
     let refused = [2, 0, 0xFF, 0xFE];
     assert!(decode_from_observer(102, &refused).unwrap_err().contains("UTF-8"));
+    // The world cut anywhere, or a count of four billion weathers in a body of 8 bytes.
+    let world = encode_from_observer(&FromObserver::World(world()));
+    let (kind, body) = unframe(&world);
+    assert_eq!(body.len(), 8 + 2 * 16, "the hour, the count, 16 bytes a weather");
+    for cut in 0..body.len() {
+        assert!(decode_from_observer(kind, &body[..cut]).is_err(), "cut at {cut}");
+    }
+    let mut lying = 0u32.to_le_bytes().to_vec();
+    lying.extend_from_slice(&u32::MAX.to_le_bytes());
+    assert!(decode_from_observer(kind, &lying).is_err());
 
     // From the editor too: a body longer or shorter than its kind says.
     let subscribe = encode_to_observer(&ToObserver::Subscribe(Zone {
@@ -172,6 +210,31 @@ fn a_body_malformed_is_an_error_never_a_panic_nor_a_huge_allocation() {
     assert!(decode_to_observer(kind, &longer).unwrap_err().contains("more than"));
     assert!(decode_to_observer(kind, &body[..body.len() - 1]).is_err());
     assert!(decode_to_observer(4, &[0]).is_err(), "a HEARTBEAT with a body");
+    assert!(decode_to_observer(5, &[0]).is_err(), "a WATCH_WORLD with a body");
+    assert_eq!(unframe(&encode_to_observer(&ToObserver::WatchWorld)), (5, &[][..]));
+}
+
+#[test]
+fn the_world_is_asked_of_an_observer_that_tells_it_can_and_read_back() {
+    let observer = FakeObserver::start("secret").unwrap();
+    // An observer of before the world tells only that it reads.
+    let client = Client::connect(observer.address(), "secret", WAIT).unwrap();
+    assert_eq!(client.welcome().capabilities, CAPABILITY_READING);
+    drop(client);
+    observer.set_capabilities(CAPABILITY_READING | CAPABILITY_WORLD);
+    let mut client = Client::connect(observer.address(), "secret", WAIT).unwrap();
+    assert_ne!(client.welcome().capabilities & CAPABILITY_WORLD, 0);
+    client.send(&ToObserver::WatchWorld).unwrap();
+    assert!(observer.wait_for(WAIT, |received| received.contains(&ToObserver::WatchWorld)));
+    observer.send(&FromObserver::World(world()));
+    let mut got = None;
+    for _ in 0..100 {
+        got = client.receive(Duration::from_millis(50)).unwrap();
+        if got.is_some() {
+            break;
+        }
+    }
+    assert_eq!(got, Some(FromObserver::World(world())));
 }
 
 #[test]

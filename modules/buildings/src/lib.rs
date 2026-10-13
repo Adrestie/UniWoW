@@ -11,6 +11,9 @@ mod cells;
 mod cells_tests;
 mod colours;
 mod doodads;
+mod eye;
+#[cfg(test)]
+mod eye_tests;
 mod gpu;
 mod keeping;
 mod layer;
@@ -24,6 +27,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use uniwow_api::arena::{self, Refusal};
+use uniwow_api::buildings::{self as service, Eye};
 use uniwow_api::formats::{self, Building, DoodadSet, FileRef, TileId, Wdt, WmoDoodad};
 use uniwow_api::glam::Vec3;
 use uniwow_api::serde_json::json;
@@ -52,8 +56,9 @@ pub struct WmoFile {
     pub gpu: Arc<WmoGpu>,
     pub sets: Vec<DoodadSet>,
     pub doodads: Vec<WmoDoodad>,
-    /// The groups holding each doodad.
+    /// The groups holding each doodad, and whether each is lit as the rooms are.
     pub holders: Vec<Vec<u16>>,
+    pub inside: Vec<bool>,
     pub liquids: Vec<liquid::GroupLiquid>,
 }
 
@@ -76,7 +81,8 @@ impl WmoFile {
                     .holders
                     .iter()
                     .map(|held| size_of::<Vec<u16>>() + held.len() * 2)
-                    .sum::<usize>()) as u64
+                    .sum::<usize>()
+                + self.inside.len()) as u64
     }
 }
 
@@ -113,6 +119,16 @@ fn held(state: &FileState, given: u64, eye: [f32; 2]) -> budget::Held {
 /// The owner of the liquids of the building `id` of the map `directory`.
 fn owner(directory: &str, id: u32) -> String {
     format!("buildings/{directory}/{id}")
+}
+
+/// The service `buildings`: where the eye stood among the buildings, as the layer left it in the
+/// scene.
+struct Seen(Arc<Mutex<Scene>>);
+
+impl service::Buildings for Seen {
+    fn eye(&self) -> Eye {
+        lock(&self.0).eye.clone()
+    }
 }
 
 /// The buildings a tile lists, or why it could not be read.
@@ -199,6 +215,7 @@ impl BuildingsModule {
         self.took = None;
         self.since = map.is_some().then(Instant::now);
         self.changed = true;
+        lock(&self.scene).eye = Eye::default();
         if let Some(models) = models {
             lock(&self.owners).want(models, map.as_deref().unwrap_or_default(), HashSet::new());
         }
@@ -235,6 +252,7 @@ impl BuildingsModule {
             let wmo = formats.wmo(&read)?;
             let (sets, doodads) = (wmo.doodad_sets.clone(), wmo.doodads.clone());
             let holders = doodads::holders(&wmo.groups, doodads.len());
+            let inside = doodads::lit_inside(&wmo.groups, &holders);
             let liquids = liquid::liquids(&wmo);
             if !wmo.faults.is_empty() {
                 log::warn!("{read:?}: {} faults, the first {}", wmo.faults.len(), wmo.faults[0]);
@@ -245,6 +263,7 @@ impl BuildingsModule {
                 sets,
                 doodads,
                 holders,
+                inside,
                 liquids,
             })
         });
@@ -539,6 +558,7 @@ impl BuildingsModule {
                     coordinates: liquid.coordinates.clone(),
                     depths: liquid.depths.clone(),
                     triangles: liquid.triangles.clone(),
+                    room: liquid.room,
                 })
                 .collect();
             let flags = service.place(&owner(directory, id), placed);
@@ -581,7 +601,15 @@ impl BuildingsModule {
             let distance = budget::distance(self.eye, budget::ground(&building));
             let label = format!("Place the doodads of the building {id}");
             let job = ctx.spawn_with_priority(&label, Priority::distance(distance), move |_| {
-                let parts = doodads::instances(&*models, &transform, &file.sets, &file.doodads, &file.holders, named);
+                let parts = doodads::instances(
+                    &*models,
+                    &transform,
+                    &file.sets,
+                    &file.doodads,
+                    &file.holders,
+                    &file.inside,
+                    named,
+                );
                 lock(&owners).place(&*models, &map, id, &parts);
             });
             self.doodad_jobs.insert(job);
@@ -592,8 +620,10 @@ impl BuildingsModule {
 
 impl Module for BuildingsModule {
     fn register(&mut self, reg: &mut Registrar) {
+        let seen: service::Handle = Arc::new(Seen(self.scene.clone()));
         reg.panel("buildings", "Buildings", DockArea::Right)
-            .settings("Buildings", vec![formats::distance_setting(DISTANCE)]);
+            .settings("Buildings", vec![formats::distance_setting(DISTANCE)])
+            .provide(service::SERVICE, seen);
     }
 
     fn init(&mut self, ctx: &mut Context) {

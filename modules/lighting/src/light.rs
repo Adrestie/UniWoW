@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 
-use uniwow_api::formats::{LightBand, LightParamsRecord, LightRecord, LiquidTypeRecord, TILE, ZoneLightRecord};
+use uniwow_api::formats::{
+    FogBand, LightBand, LightParamsRecord, LightRecord, LightSkyboxRecord, LiquidTypeRecord, TILE, ZoneLightRecord,
+};
 use uniwow_api::viewport::{Fog, MapLight, Sun, Water};
 
 /// A day, in half-minutes.
@@ -187,7 +189,22 @@ pub struct Tables {
     /// Every light, by id.
     by_id: HashMap<u32, LightRecord>,
     liquids: HashMap<u32, u32>,
+    /// The models of the sky (`LightSkybox.dbc`), by id.
+    skyboxes: HashMap<u32, LightSkyboxRecord>,
 }
+
+/// A model of the sky the lights give (`LightSkybox.dbc`): its id, its model, its flags (0x1 its
+/// animation following the hour) and its alpha.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Skybox {
+    pub id: u32,
+    pub model: String,
+    pub flags: u32,
+    pub alpha: f32,
+}
+
+/// The flag of a model of the sky whose first animation follows the hour.
+pub const FOLLOWS_THE_HOUR: u32 = 0x1;
 
 /// Whether `light` is the global light of its map, at 0, 0, 0.
 fn global(light: &LightRecord) -> bool {
@@ -281,7 +298,60 @@ impl Tables {
             numbers: numbers.iter().map(sorted).collect(),
             zones: by_zone,
             liquids: HashMap::new(),
+            skyboxes: HashMap::new(),
         }
+    }
+
+    /// The tables with the models of the sky `skyboxes`.
+    pub fn with_skyboxes(mut self, skyboxes: &[LightSkyboxRecord]) -> Self {
+        self.skyboxes = skyboxes.iter().map(|record| (record.id, record.clone())).collect();
+        self
+    }
+
+    /// The models of the sky of the lights mixed into `mixed`, the eye where `immersion` says: none
+    /// in a liquid, the client drawing no sky then (0x79ACAF); otherwise those the params of each
+    /// light name for its slot, in the order the lights are mixed, by their weights, as the public
+    /// implementation WebWowViewerCpp collects them (`SkyBoxCollector::addSkyBox`): a model given
+    /// again takes the greater of its two alphas, and every other is faded by what that one weighs;
+    /// a light without one changes nothing. Those of no alpha left out; the faintest first, so that
+    /// the strongest is drawn last.
+    pub fn skies(&self, mixed: &Mixed, immersion: Immersion) -> Vec<Skybox> {
+        if immersion != Immersion::Dry {
+            return Vec::new();
+        }
+        let mut skies: Vec<Skybox> = Vec::new();
+        for (id, weight) in &mixed.used {
+            let Some(record) = self
+                .by_id
+                .get(id)
+                .and_then(|light| self.params.get(&params_of(light, slot(immersion))))
+                .and_then(|params| self.skyboxes.get(&params.skybox))
+                .filter(|record| record.id > 0 && !record.model.is_empty())
+            else {
+                continue;
+            };
+            let alpha = match skies.iter_mut().find(|sky| sky.id == record.id) {
+                Some(sky) => {
+                    sky.alpha = sky.alpha.max(*weight);
+                    sky.alpha
+                }
+                None => {
+                    skies.push(Skybox {
+                        id: record.id,
+                        model: record.model.clone(),
+                        flags: record.flags,
+                        alpha: *weight,
+                    });
+                    *weight
+                }
+            };
+            for sky in skies.iter_mut().filter(|sky| sky.id != record.id) {
+                sky.alpha *= 1.0 - alpha;
+            }
+        }
+        skies.retain(|sky| sky.alpha > 0.0);
+        skies.sort_by(|a, b| a.alpha.total_cmp(&b.alpha));
+        skies
     }
 
     /// The tables with the params of the light of each of the types of liquid `types` naming one.
@@ -433,6 +503,20 @@ impl Tables {
         time: f32,
         far: f32,
     ) -> Option<[f32; 3]> {
+        self.fog_of_the_game_in(mixed, map, immersion, slot(immersion), time, far)
+    }
+
+    /// The same, of the params of the slot `slot` of each light, as those of storm
+    /// (`storm_slot`).
+    pub fn fog_of_the_game_in(
+        &self,
+        mixed: &Mixed,
+        map: u32,
+        immersion: Immersion,
+        slot: usize,
+        time: f32,
+        far: f32,
+    ) -> Option<[f32; 3]> {
         let prepared = |params: u32, weight: f32| {
             let values = self.values(params, time)?;
             let [end, share] = [
@@ -446,7 +530,7 @@ impl Tables {
             _ => mixed
                 .used
                 .iter()
-                .filter_map(|(id, weight)| prepared(params_of(self.by_id.get(id)?, slot(immersion)), *weight))
+                .filter_map(|(id, weight)| prepared(params_of(self.by_id.get(id)?, slot), *weight))
                 .collect(),
         };
         let (first, _) = *lights.first()?;
@@ -507,6 +591,26 @@ pub fn sun_direction(time: f32) -> [f32; 3] {
     [across, across, -angle.cos()]
 }
 
+/// The keys of the glow at night of the materials of the buildings, in half-minutes from midnight,
+/// and its value at each: whole until 6 h, nothing from 7 h to 20 h 30, whole again from 21 h 30.
+const NIGHT_KEYS: [(f32, f32); 4] = [(720.0, 1.0), (840.0, 0.0), (2460.0, 0.0), (2580.0, 1.0)];
+
+/// How much the materials of the buildings that glow at night (their flag 0x10) add their emissive
+/// colour at `time`, in half-minutes, from 0 to 1: as Wow.exe 12340 reads its table of four keys
+/// (`DayNight::SetColors`, 0x7F3230, its table at 0xAF4C80, as the comment of Noggit Red gives it,
+/// read for the facts only), linearly between them, whole from 21 h 30 to 6 h.
+pub fn night_glow(time: f32) -> f32 {
+    let time = time.rem_euclid(DAY);
+    let after = NIGHT_KEYS.iter().position(|(key, _)| time < *key);
+    match after {
+        Some(0) | None => 1.0,
+        Some(at) => {
+            let ((from, a), (to, b)) = (NIGHT_KEYS[at - 1], NIGHT_KEYS[at]);
+            mix(a, b, (time - from) / (to - from))
+        }
+    }
+}
+
 /// The linear value of a value in gamma, as an sRGB target encodes it back.
 fn linear(gamma: f32) -> f32 {
     if gamma <= 0.04045 {
@@ -530,8 +634,9 @@ fn gamma(linear: f32) -> f32 {
 /// linear (the fixed one where it has none); the fog of the game `game_fog`, where it starts and
 /// ends and its rate, when it is drawn (`Tables::fog_of_the_game`); its sky, the bands 2 to 7 in
 /// gamma, the colour of its fog where it has none, or that colour all over when the eye is
-/// `immersed` in a liquid, the client drawing no sky then (0x79ACAF); and the light of its water, its
-/// bands black where it has none, as Noggit reads them, with the alphas of its params.
+/// `immersed` in a liquid, the client drawing no sky then (0x79ACAF); the light of its water, its
+/// bands black where it has none, as Noggit reads them, with the alphas of its params; and the glow
+/// at night of the buildings at that hour (`night_glow`).
 pub fn map_light(values: &Values, time: f32, game_fog: Option<[f32; 3]>, immersed: bool) -> MapLight {
     let fixed = Sun::default();
     let fog = values.colours[7].unwrap_or(Fog::default().colour.map(gamma));
@@ -557,6 +662,7 @@ pub fn map_light(values: &Values, time: f32, game_fog: Option<[f32; 3]>, immerse
             ocean: [with(14, values.ocean_alphas[0]), with(15, values.ocean_alphas[1])],
             sun: band(9),
         },
+        night: night_glow(time),
     }
 }
 
@@ -601,10 +707,91 @@ fn curve(start: f32, end: f32, far: f32) -> f32 {
     }
 }
 
+/// How far into a room of a building, from its nearest portal, the fog of the building is whole over
+/// that of the light, in yards (WebWowViewerCpp, `distToExit * 0.04`).
+pub const WHOLE_INSIDE: f32 = 25.0;
+
+/// The light `given` of the map in a room of a building whose fog at the eye is `fog`, weighing
+/// `weight` over that of the light, as the public implementation WebWowViewerCpp mixes the fog of a
+/// building into that of the lights (`blendWmoFogIntoFogResult`, read for its facts): the colour of
+/// the fog mixed in gamma; the fog of the game, when it is drawn, the building's prepared as the
+/// fog of a light is on the map `map` (`prepared_fog`), within the far clip `far`, twice as steep on
+/// the curved maps when the eye is `immersed` in a liquid, its start, end and rate mixed by the same
+/// weight. The sky is left as it is.
+pub fn with_building_fog(given: MapLight, fog: FogBand, weight: f32, map: u32, immersed: bool, far: f32) -> MapLight {
+    let weight = weight.clamp(0.0, 1.0);
+    let colour: [f32; 3] = std::array::from_fn(|channel| {
+        let kept = gamma(given.fog_colour[channel]);
+        linear(mix(kept, f32::from(fog.colour[channel]) / 255.0, weight))
+    });
+    let fog = given.fog.map(|kept| {
+        let [end, share, rate] = prepared_fog(fog.end, fog.start, map, far);
+        let end = end.min(far);
+        let rate = match immersed && map >= CURVED_FROM {
+            true => rate * STEEPER_UNDER,
+            false => rate,
+        };
+        let building = [share * end, end, rate];
+        std::array::from_fn(|at| mix(kept[at], building[at], weight))
+    });
+    MapLight {
+        fog_colour: colour,
+        fog,
+        ..given
+    }
+}
+
 /// The slot of the params of each light the eye takes where `immersion` says: under the water, the
 /// second (0x7F33AD); the first otherwise.
 fn slot(immersion: Immersion) -> usize {
     usize::from(immersion == Immersion::Under)
+}
+
+/// The slot of the params of storm of each light, mixed in by the intensity of a weather that brings
+/// a storm: the third, the fourth under the water (`Light.dbc`: clear, clear under the water, storm,
+/// storm under the water).
+pub fn storm_slot(immersion: Immersion) -> usize {
+    2 + slot(immersion)
+}
+
+/// The values `clear` with `storm` mixed in by `share`, from 0 to 1, as the light of a weather of
+/// that intensity: each colour, number and alpha between the two, where both have it; that of the
+/// one that has it otherwise.
+pub fn mix_values(clear: &Values, storm: &Values, share: f32) -> Values {
+    let share = share.clamp(0.0, 1.0);
+    let mut values = clear.clone();
+    for (kept, given) in values.colours.iter_mut().zip(storm.colours) {
+        *kept = match (*kept, given) {
+            (Some(kept), Some(given)) => Some(mix_colour(kept, given, share)),
+            (kept, given) => kept.or(given),
+        };
+    }
+    for (kept, given) in values.numbers.iter_mut().zip(storm.numbers) {
+        *kept = match (*kept, given) {
+            (Some(kept), Some(given)) => Some(mix(kept, given, share)),
+            (kept, given) => kept.or(given),
+        };
+    }
+    for (kept, given) in values
+        .river_alphas
+        .iter_mut()
+        .chain(&mut values.ocean_alphas)
+        .zip(storm.river_alphas.iter().chain(&storm.ocean_alphas))
+    {
+        *kept = mix(*kept, *given, share);
+    }
+    values.glow = mix(values.glow, storm.glow, share);
+    values
+}
+
+/// How much nearer the fog of the game comes in the thickest fog or sandstorm: a quarter as far.
+pub const THICKEST: f32 = 0.75;
+
+/// The share of its distances the fog of the game keeps in a weather of fog or sand of `intensity`:
+/// from all of them to a quarter, a choice of the editor, the client's not being found in any
+/// public source.
+pub fn fog_share(intensity: f32) -> f32 {
+    1.0 - THICKEST * intensity.clamp(0.0, 1.0)
 }
 
 /// The params of the slot `slot` of `light`, or those of its first slot where it has none there (a

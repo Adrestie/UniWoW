@@ -166,6 +166,17 @@ namespace UniwowObserver
 
     using Subscriptions = std::vector<std::shared_ptr<Subscription>>;
 
+    // The weather of a zone as the server last sent it to the players in it: its state
+    // (`WeatherState`), its grade, and when it was recorded. AzerothCore holds the weather of a zone
+    // only while players are in it, and tells it only then.
+    struct ZoneWeather
+    {
+        uint32 zone = 0;
+        uint32 state = 0;
+        float grade = 0.0f;
+        Clock::time_point at;
+    };
+
     class Server;
 
     class Observer
@@ -184,6 +195,11 @@ namespace UniwowObserver
         Settings const& GetSettings() const { return _settings; }
         // The subscriptions the threads of the maps read, replaced by the network thread.
         void Publish(Subscriptions subscriptions);
+        // The weather of `zone` changed and was sent to its players: on the thread updating its map.
+        void RecordWeather(uint32 zone, uint32 state, float grade);
+        // The weathers recorded, and how many changes were recorded, which tells the network thread
+        // when to send them again.
+        std::vector<ZoneWeather> GetWeathers(uint64& version) const;
 
     private:
         void Update(Map* map, Subscription& subscription);
@@ -199,6 +215,10 @@ namespace UniwowObserver
         std::unordered_map<uint32, int16> _creatureEvents;
         std::unordered_map<uint32, int16> _gameObjectEvents;
         std::unique_ptr<Server> _server;
+        // The weathers recorded, by zone, from the threads of several maps at once.
+        mutable std::mutex _weatherLock;
+        std::unordered_map<uint32, ZoneWeather> _weathers;
+        uint64 _weatherVersion = 0;
     };
 }
 

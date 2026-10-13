@@ -6,7 +6,8 @@
 //! the group's type, or of each cell's for the type 15. A basic kind (its two low bits) is the water
 //! of the buildings (13), or their ocean (14) for a group of the flag 0x80000, their magma (19) or
 //! their slime (20). The water's vertices give their depth, those of magma and slime their
-//! coordinates.
+//! coordinates. A liquid of a room of a building, neither outside nor lit as outside, is lit by the
+//! ambient colour of its building, the light the rooms have without their vertex colours.
 
 use uniwow_api::formats::{Wmo, WmoGroup};
 use uniwow_api::liquids::CELL;
@@ -20,6 +21,12 @@ const FIRST_NOT_BASIC: u32 = 21;
 const BY_CELL: u32 = 15;
 /// The flag of a cell not drawn.
 const NOT_DRAWN: u8 = 0x8;
+/// The flags of a group outside, lit as outside, inside; of a building lit as one, its rooms lit as
+/// outside.
+const OUTSIDE: u32 = 0x8;
+const LIT_OUTSIDE: u32 = 0x40;
+const INSIDE: u32 = 0x2000;
+const LIT_AS_ONE: u16 = 0x2;
 /// The types of the water, the ocean, the magma and the slime of the buildings.
 const WATER: u16 = 13;
 const SEA: u16 = 14;
@@ -58,7 +65,8 @@ pub fn liquid_type(flags: u16, group: &WmoGroup, cell: u8) -> u16 {
 }
 
 /// The liquid of a group of a building, of one type, in the building's axes: its group, its type,
-/// its vertices (place, coordinates, depth) and its triangles.
+/// its vertices (place, coordinates, depth) and its triangles; the light of its room, for a group
+/// that is one.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GroupLiquid {
     pub group: u16,
@@ -67,6 +75,15 @@ pub struct GroupLiquid {
     pub coordinates: Vec<[f32; 2]>,
     pub depths: Vec<f32>,
     pub triangles: Vec<u32>,
+    pub room: Option<[f32; 3]>,
+}
+
+/// The light of the room `group` of `wmo` is, its ambient colour; none for a group outside, lit as
+/// outside, or of a building lit as one.
+pub fn room(wmo: &Wmo, group: &WmoGroup) -> Option<[f32; 3]> {
+    let room = group.flags & INSIDE != 0 && group.flags & (OUTSIDE | LIT_OUTSIDE) == 0;
+    let [r, g, b, _] = wmo.ambient;
+    (room && wmo.flags & LIT_AS_ONE == 0).then(|| [r, g, b].map(|channel| f32::from(channel) / 255.0))
 }
 
 /// The liquids of the groups of `wmo`, a liquid for each type a group's cells drawn have; the water
@@ -98,6 +115,7 @@ pub fn liquids(wmo: &Wmo) -> Vec<GroupLiquid> {
                         liquids.push(GroupLiquid {
                             group: index as u16,
                             liquid: kind,
+                            room: room(wmo, group),
                             ..GroupLiquid::default()
                         });
                         liquids.len() - 1

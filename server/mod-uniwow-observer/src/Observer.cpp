@@ -257,6 +257,30 @@ namespace UniwowObserver
         _subscriptions.store(std::make_shared<Subscriptions const>(std::move(subscriptions)));
     }
 
+    void Observer::RecordWeather(uint32 zone, uint32 state, float grade)
+    {
+        if (!_running.load(std::memory_order_acquire))
+            return;
+        std::lock_guard<std::mutex> guard(_weatherLock);
+        ZoneWeather& weather = _weathers[zone];
+        weather.zone = zone;
+        weather.state = state;
+        weather.grade = grade;
+        weather.at = Clock::now();
+        ++_weatherVersion;
+    }
+
+    std::vector<ZoneWeather> Observer::GetWeathers(uint64& version) const
+    {
+        std::lock_guard<std::mutex> guard(_weatherLock);
+        version = _weatherVersion;
+        std::vector<ZoneWeather> weathers;
+        weathers.reserve(_weathers.size());
+        for (auto const& [zone, weather] : _weathers)
+            weathers.push_back(weather);
+        return weathers;
+    }
+
     void Observer::Update(Map* map)
     {
         if (!_running.load(std::memory_order_acquire))

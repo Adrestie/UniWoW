@@ -55,7 +55,8 @@ pub trait Liquids: Send + Sync {
 
 /// A liquid another module places, in the world: its type of `LiquidType.dbc`; its vertices, each
 /// its place, its coordinates of texture and its depth from 0 to 1; its triangles, three indices
-/// into them each.
+/// into them each; and for a liquid of a room of a building, the light of the room, red, green and
+/// blue in gamma from 0 to 1, in place of the light of the view; none for one lit as outside.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Placed {
     pub liquid: u16,
@@ -63,6 +64,7 @@ pub struct Placed {
     pub coordinates: Vec<[f32; 2]>,
     pub depths: Vec<f32>,
     pub triangles: Vec<u32>,
+    pub room: Option<[f32; 3]>,
 }
 
 /// The water over a tile of the map: one height over all its cells, or the height over each, NaN

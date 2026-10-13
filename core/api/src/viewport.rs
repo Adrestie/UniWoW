@@ -52,7 +52,8 @@ pub trait Viewport: Send + Sync {
 
 /// The light of the map at the place of the camera and the hour: its sun, the colour of its fog in
 /// linear, where its fog starts and ends, in yards, and its rate when the fog of the game is drawn
-/// (`Fog`), none for the editor's, its sky (`Sky`) and the light of its water (`Water`).
+/// (`Fog`), none for the editor's, its sky (`Sky`), the light of its water (`Water`), and how much
+/// the materials of the buildings that glow at night glow at that hour, from 0 to 1 (`View::night`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapLight {
     pub sun: Sun,
@@ -60,6 +61,7 @@ pub struct MapLight {
     pub fog: Option<[f32; 3]>,
     pub sky: Sky,
     pub water: Water,
+    pub night: f32,
 }
 
 /// The colours of the sky, in gamma, from its top down to its fog (the bands 2 to 7 of a light): its
@@ -350,6 +352,10 @@ pub struct View {
     pub sky: Option<Sky>,
     /// The light of the water of the map, none for the fixed colours of the water.
     pub water: Option<Water>,
+    /// How much the materials of the buildings that glow at night (their flag 0x10) add their
+    /// emissive colour, from 0 by day to 1 by night, as the light of the map gives it; 0 without
+    /// it, the fixed light being that of noon.
+    pub night: f32,
 }
 
 /// How a layer draws: in a render bundle of its own, which the viewport records and keeps by its
@@ -362,12 +368,14 @@ pub enum Drawing {
     Pass,
 }
 
-/// When a layer is drawn among the others in each phase: the ground first, then the water, then the
-/// scene. Layers of one stage are drawn in the order they were added.
+/// When a layer is drawn among the others in each phase: the ground first, then the models of the
+/// sky, the water, then the scene. Layers of one stage are drawn in the order they were added.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Stage {
     /// The terrain and its sky.
     Ground,
+    /// The models of the sky, over the sky of the ground and behind the rest.
+    Sky,
     /// The liquids.
     Water,
     /// What stands on the ground, by default.

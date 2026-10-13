@@ -112,6 +112,8 @@ pub struct LookGpu {
     pub moving: Vec<Moving>,
     /// The bytes of its own, outside its model and textures.
     pub bytes: u64,
+    /// Whether it is a model of the sky (`Geosets::Sky`), drawn by the layer of the sky.
+    pub sky: bool,
 }
 
 impl LookGpu {
@@ -132,6 +134,11 @@ impl Ready {
             Ready::Pooled(look) => look.model.model.radius,
             Ready::Own(look) => look.radius(),
         }
+    }
+
+    /// Whether it is a model of the sky, always of its own (`load`).
+    pub fn sky(&self) -> bool {
+        matches!(self, Ready::Own(look) if look.sky)
     }
 
     /// What it is made of, with the setting `reach`.
@@ -223,7 +230,7 @@ pub fn key(file: &FileRef) -> String {
 /// Which submeshes of `ids` the look shows.
 pub fn shown(ids: &[u16], geosets: Geosets) -> Vec<bool> {
     match geosets {
-        Geosets::All => vec![true; ids.len()],
+        Geosets::All | Geosets::Sky => vec![true; ids.len()],
         Geosets::Default => formats::default_geosets(ids),
         Geosets::Creature(chosen) => formats::creature_geosets(ids, chosen),
         Geosets::Character { hair, facial } => {
@@ -352,8 +359,8 @@ pub struct Planned {
 
 /// The batches `look` draws of each skin of its model `data`, in the order they are drawn: those
 /// of the submeshes it shows, seen at rest or whose material moves, but the layers merged into
-/// their first, each with the shader WotLK chooses for it; and the slots of the materials that
-/// move, which their batches point to (`dress`).
+/// their first, each with the shader WotLK chooses for it, drawn as the sky for a model of the sky;
+/// and the slots of the materials that move, which their batches point to (`dress`).
 pub fn plan(data: &Model, look: &Look) -> (Vec<Vec<Planned>>, Vec<Moving>) {
     // The file of the texture `index` of the model: a file, one the display fills, or none.
     let file_of = |index: usize| match &data.textures[index].source {
@@ -403,7 +410,10 @@ pub fn plan(data: &Model, look: &Look) -> (Vec<Vec<Planned>>, Vec<Moving>) {
                     order,
                     Planned {
                         indices: submesh.start..submesh.start + submesh.count,
-                        state: State::of(material),
+                        state: match look.geosets {
+                            Geosets::Sky => State::of_sky(material),
+                            _ => State::of(material),
+                        },
                         params: BatchParams {
                             colour,
                             flags: flags(material),
@@ -517,5 +527,6 @@ pub fn look(
         skins,
         moving,
         bytes,
+        sky: look.geosets == Geosets::Sky,
     })
 }

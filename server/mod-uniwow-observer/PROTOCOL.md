@@ -3,7 +3,8 @@
 SPDX-License-Identifier: GPL-2.0-or-later
 
 The observer streams, read only, the creatures, game objects and players of a zone of a map to the
-editor, over TCP on 127.0.0.1. One connection holds one subscription at most.
+editor, over TCP on 127.0.0.1, and, once asked, the world: the hour of the server and the weathers
+of its zones. One connection holds one subscription at most.
 
 ## Framing
 
@@ -28,6 +29,7 @@ not exactly what its kind says closes the connection, nothing more.
 | 2 | SUBSCRIBE | `u32` map, `u32` instance (0 for a continent), `f32` x, y, z of the centre, `f32` radius in yards |
 | 3 | UNSUBSCRIBE | none |
 | 4 | HEARTBEAT | none |
+| 5 | WATCH_WORLD | none; to an observer whose WELCOME tells the capability world only |
 
 HELLO comes first, once. The radius of a SUBSCRIBE is brought within the maximum the observer
 gives. A SUBSCRIBE to the map and instance of the subscription already there moves its zone: what
@@ -35,6 +37,11 @@ was sent stays, and the readings that follow send what entered the zone, left it
 SUBSCRIBE to another map or instance starts again from nothing. Any message keeps the connection
 alive: the observer closes one it heard nothing from for the time its WELCOME gives, so that an
 editor that crashed leaves no zone kept alive; the editor sends HEARTBEAT more often than that.
+
+WATCH_WORLD asks for the world for the rest of the connection: a WORLD at once, then again each
+time the weather of a zone changes, and at least once a minute. An observer without the capability
+world does not know the kind 5 and closes the connection on it, as on any unknown kind: the editor
+sends it only when WELCOME tells the capability.
 
 A zone that follows a camera is moved once its centre is more than an eighth of its radius away
 from the one sent, twice a second at most. However often it moves, the observer reads it at most
@@ -49,8 +56,33 @@ once in half of its period, the first reading of a new map aside.
 | 103 | STATUS | `u8` state, `u32` map, `u32` instance, `f32` radius applied |
 | 104 | SNAPSHOT | `u32` map, `u32` instance, `u64` sequence, `u32` count, entities |
 | 105 | CHANGES | `u32` map, `u32` instance, `u64` sequence, `u32` count, entities that appeared or changed, `u32` count, `u64` GUIDs of the entities that left |
+| 106 | WORLD | `u32` seconds from midnight of the local time of the server, `u32` count, weathers |
 
-Capabilities: bit 0, reading. Nothing else in version 1.
+Capabilities: bit 0, reading; bit 1, world (WATCH_WORLD and WORLD). The world was added to version 1
+without changing its number: an observer without it tells bit 0 alone, and an editor that does not
+know it never sends WATCH_WORLD, so that either side may be older than the other.
+
+## The world
+
+The hour is that of the clock of the server, in its local time, which the hour of the game follows:
+the client is given it as it logs in (`SMSG_LOGIN_SETTIMESPEED`) and counts on from it. The editor
+counts on from the WORLD last received.
+
+A weather:
+
+| Field | Type | |
+|---|---|---|
+| zone | u32 | the zone, of `AreaTable.dbc` |
+| state | u32 | the `WeatherState` of AzerothCore: 0 fine, 1 fog, 3, 4, 5 light, medium, heavy rain, 6, 7, 8 snow, 22, 41, 42 sandstorm, 86 thunders, 90 black rain, 106 black snow |
+| grade | f32 | its intensity, from 0 to 1 |
+| age | u32 | the seconds since the server sent it to the players of the zone |
+
+The weathers are those the server sent its players (the hook `OnWeatherChange`, called by
+`Weather::UpdateWeather` only when a player is in the zone), the last of each zone since the
+worldserver started. AzerothCore keeps the weather of a zone only while a player is in it: a zone no
+player entered has none, and the weather of a zone the last player left is the one it had then. A
+weather a script sets over the zone's (`Map::SetZoneWeather`) does not call the hook and is not
+sent.
 
 States of STATUS:
 

@@ -4,12 +4,14 @@
 // under the light of a map, as the client draws its water of the first kind (psLiquidWater): its
 // ramp at its depth lit by the sun, plus its texel, plus the alpha of its texel times the sun it
 // reflects and a quarter, its alpha that of its ramp; otherwise its texel added to its fixed
-// colour, near where shallow and far where deep, its alpha so. Magma and slime: their texel
-// brightened, opaque and unlit, their coordinates running by their animation. Then fogged. The
-// fixed colours of the water and the gain of the magma are values taken from captures of the game
-// at noon. A layer of one height whose depths differ is drawn by quads, its depth read at each pixel
-// between the four of its 9 × 9 around the place in the layer, which its coordinates by default
-// give (`depths`, its place plus one above the 8 bits of the slot of its type). The bindings of the
+// colour, near where shallow and far where deep, its alpha so. In a room of a building, its ramp
+// that of the buildings white, as the client writes its right half for the insides, lit by the
+// light of the room alone, no sun reflected. Magma and slime: their texel brightened, opaque and
+// unlit, their coordinates running by their animation. Then fogged. The fixed colours of the water
+// and the gain of the magma are values taken from captures of the game at noon. A layer of one
+// height whose depths differ is drawn by quads, its depth read at each pixel between the four of
+// its 9 × 9 around the place in the layer, which its coordinates by default give (`depths`, its
+// place plus one above the 8 bits of the slot of its type, but in a room). The bindings of the
 // arrays, `sampled` and the depths follow, written for the count of slots.
 
 struct Camera {
@@ -44,10 +46,9 @@ struct LiquidType {
 @group(1) @binding(1) var liquid_sampler: sampler;
 
 const NONE: u32 = 0xFFFFFFFFu;
-// The bits of the slot of a type in a vertex's slot, the depths of its layer kept apart above, and
-// the words of those of a layer.
+// The bits of the slot of a type in a vertex's slot, the depths of its layer kept apart above but in
+// a room, and the words of those of a layer.
 const SLOT_BITS: u32 = 8u;
-const SLOT_MASK: u32 = 0xFFu;
 const DEPTH_WORDS: u32 = 21u;
 // The colour of the water, shallow and deep, in gamma, its alpha so.
 const SHALLOW: vec4<f32> = vec4<f32>(0.24, 0.35, 0.31, 0.65);
@@ -59,6 +60,12 @@ const MAGMA_GAIN: f32 = 1.35;
 const ROWS: f32 = 64.0;
 const SHININESS: f32 = 6.0;
 const GLINT: f32 = 0.25;
+// The slot of a type in the low bits of that of a vertex, the bit of a liquid of a room of a
+// building, the light of the room in the three high bytes (`mesh::in_room`); the ramp of the
+// buildings.
+const SLOT: u32 = 0x7Fu;
+const IN_ROOM: u32 = 0x80u;
+const BUILDINGS_RAMP: u32 = 2u;
 
 struct VertexIn {
     @location(0) position: vec3<f32>,
@@ -75,6 +82,11 @@ struct VertexOut {
     @location(3) @interpolate(flat) slot: u32,
     @location(4) along: f32,
 };
+
+// The type of the slot of a vertex.
+fn type_of(slot: u32) -> LiquidType {
+    return types[slot & SLOT];
+}
 
 // How far along its ramp the water of `kind` is at `depth`, from 0 to 1 for its byte, as the client
 // gives it to each vertex (0x79E3C0, 0x7CE45F): by the table of the rivers, the depth over 42 bytes,
@@ -126,15 +138,19 @@ fn vs_main(in: VertexIn) -> VertexOut {
     out.depth = in.depth;
     out.world = in.position;
     out.slot = in.slot;
-    out.along = along_ramp(types[in.slot & SLOT_MASK], in.depth);
+    out.along = along_ramp(type_of(in.slot), in.depth);
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    let kind = types[in.slot & SLOT_MASK];
-    // The depth of its vertices, or of its layer kept apart, read at the pixel.
-    let kept = in.slot >> SLOT_BITS;
+    let kind = type_of(in.slot);
+    // The depth of its vertices, or of its layer kept apart, read at the pixel; a liquid of a room
+    // carries its light above the bits of its slot, its vertices their depth.
+    var kept = in.slot >> SLOT_BITS;
+    if (in.slot & IN_ROOM) != 0u {
+        kept = 0u;
+    }
     var depth = in.depth;
     var along = in.along;
     if kept != 0u {
@@ -167,10 +183,17 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     var alpha = 1.0;
     if water && camera.towards_sun.w != 0.0 {
         // The surface of the water facing up, as the client gives it to each vertex.
-        let ramp = ramp_at(kind.info.z, along);
-        let lit = camera.ambient.rgb + clamp(camera.towards_sun.z, 0.0, 1.0) * camera.diffuse.rgb;
+        var ramp = ramp_at(kind.info.z, along);
+        var lit = camera.ambient.rgb + clamp(camera.towards_sun.z, 0.0, 1.0) * camera.diffuse.rgb;
         let half = normalize(normalize(camera.eye.xyz - in.world) + camera.towards_sun.xyz);
-        let reflected = pow(max(half.z, 0.0), SHININESS) * camera.sun.rgb;
+        var reflected = pow(max(half.z, 0.0), SHININESS) * camera.sun.rgb;
+        if (in.slot & IN_ROOM) != 0u {
+            if kind.info.z == BUILDINGS_RAMP {
+                ramp = vec4<f32>(vec3<f32>(1.0), ramp.a);
+            }
+            lit = unpack4x8unorm(in.slot).yzw;
+            reflected = vec3<f32>(0.0);
+        }
         let colour = lit * ramp.rgb + texel.rgb + texel.a * (reflected + GLINT);
         gamma = clamp(colour, vec3<f32>(0.0), vec3<f32>(1.0));
         alpha = ramp.a;

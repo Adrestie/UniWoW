@@ -153,6 +153,43 @@ struct TerrainModule {
     models_bytes: u64,
     /// The models given up this frame: thousands of allocations each, freed by a job.
     dropped: Vec<TileModel>,
+    /// The areas of the chunks of the full tiles, as the command `terrain.area` reads them from any
+    /// thread.
+    areas: Arc<Mutex<HashMap<TileId, Areas>>>,
+}
+
+/// The area of `AreaTable.dbc` of each chunk of a tile, by its index along Y then X; 0 where the
+/// tile has no chunk.
+type Areas = [[u32; 16]; 16];
+
+/// The areas of the chunks of `model`.
+fn areas_of(model: &TileModel) -> Areas {
+    let mut areas = [[0; 16]; 16];
+    for chunk in &model.tile.chunks {
+        let [across, down] = chunk.index.map(|index| index as usize);
+        if let Some(area) = areas.get_mut(across).and_then(|row| row.get_mut(down)) {
+            *area = chunk.area;
+        }
+    }
+    areas
+}
+
+/// The area at `x`, `y` in the world among `areas`, with its tile and its chunk; none where no full
+/// tile is held or its chunk has none.
+fn area_at(areas: &HashMap<TileId, Areas>, x: f32, y: f32) -> Option<u32> {
+    let place = |at: f32| ((model::ORIGIN - at) / model::TILE).floor();
+    let (row, column) = (place(x), place(y));
+    if !(0.0..64.0).contains(&row) || !(0.0..64.0).contains(&column) {
+        return None;
+    }
+    let tile = TileId {
+        x: column as u32,
+        y: row as u32,
+    };
+    let [corner_x, corner_y] = tile.corner();
+    let index = |from: f32, at: f32| (((from - at) / model::CHUNK).floor() as usize).min(15);
+    let area = areas.get(&tile)?[index(corner_y, y)][index(corner_x, x)];
+    (area != 0).then_some(area)
 }
 
 /// What a plan of the loads depends on: the camera, by eighths of a tile; the distance; what the
@@ -184,6 +221,7 @@ impl TerrainModule {
         self.loading.clear();
         self.ready.clear();
         self.dropped.extend(self.models.drain().map(|(_, model)| model));
+        lock(&self.areas).clear();
         self.models_bytes = 0;
         self.planned = None;
         self.refused.clear();
@@ -350,8 +388,14 @@ impl TerrainModule {
 
     /// Keeps `model` as the model of the tile `id`, or none, counting what the models take.
     fn keep_model(&mut self, id: TileId, model: Option<TileModel>) {
-        if let Some(model) = &model {
-            self.models_bytes += model.bytes();
+        match &model {
+            Some(model) => {
+                self.models_bytes += model.bytes();
+                lock(&self.areas).insert(id, areas_of(model));
+            }
+            None => {
+                lock(&self.areas).remove(&id);
+            }
         }
         let old = match model {
             Some(model) => self.models.insert(id, model),
@@ -603,6 +647,27 @@ impl Module for TerrainModule {
                     map.insert("distance".to_owned(), distance.load(Ordering::Relaxed).into());
                 }
                 Ok(shown)
+            }),
+        );
+        let areas = self.areas.clone();
+        reg.command_on_caller(
+            "terrain.area",
+            "The area of AreaTable.dbc of the chunk of the terrain at x, y on the map shown, as its tile              names it, among the tiles loaded in full around the camera; null where none is.",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "x": { "type": "number" }, "y": { "type": "number" } },
+                "required": ["x", "y"]
+            }),
+            serde_json::json!({ "type": ["integer", "null"] }),
+            Arc::new(move |arguments| {
+                let number = |key: &str| {
+                    arguments
+                        .get(key)
+                        .and_then(serde_json::Value::as_f64)
+                        .ok_or_else(|| format!("{key}: a number"))
+                };
+                let (x, y) = (number("x")?, number("y")?);
+                Ok(area_at(&lock(&areas), x as f32, y as f32).into())
             }),
         );
     }

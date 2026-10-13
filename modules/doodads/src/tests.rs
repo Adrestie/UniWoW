@@ -92,6 +92,7 @@ fn instance(id: u64) -> Instance {
         transform: Mat4::from_translation(Vec3::splat(id as f32)),
         alpha: 1.0,
         motion: Motion::Standing,
+        interior: None,
     }
 }
 

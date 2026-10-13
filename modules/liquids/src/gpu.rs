@@ -575,6 +575,10 @@ pub fn upload(shared: &Arc<Shared>, meshes: &Meshes) -> Result<Option<TileGpu>, 
                 .vertices
                 .iter()
                 .map(|vertex| {
+                    // A liquid of a room carries its light above the bits of its slot.
+                    if vertex.slot & mesh::IN_ROOM != 0 {
+                        return *vertex;
+                    }
                     let kept = vertex.slot >> SLOT_BITS;
                     let slot = vertex.slot & ((1 << SLOT_BITS) - 1);
                     let kept = if kept == 0 { 0 } else { kept + range.start as u32 };

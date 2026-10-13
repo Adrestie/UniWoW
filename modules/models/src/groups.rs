@@ -74,12 +74,25 @@ pub fn tile(position: Vec3) -> [i32; 2] {
     [(position.x / TILE).floor() as i32, (position.y / TILE).floor() as i32]
 }
 
-/// `instance` as the shader reads it.
+/// A colour from 0 to 1 in one float the shader reads back whole (`unpacked`): its red, green and
+/// blue in 255ths to the nearest, red the lowest of three bytes, under 2^24, which a float holds
+/// exactly.
+pub fn packed(colour: [f32; 3]) -> f32 {
+    let [r, g, b] = colour.map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u32);
+    (r | g << 8 | b << 16) as f32
+}
+
+/// `instance` as the shader reads it: the rows of its transform, then its alpha and its light inside
+/// a building, its light everywhere and its diffuse packed, and 1; 0 for the light of the view.
 pub fn as_gpu(instance: &Instance) -> InstanceGpu {
     let transform = instance.transform;
+    let [ambient, diffuse, inside] = match instance.interior {
+        Some(interior) => [packed(interior.ambient), packed(interior.diffuse), 1.0],
+        None => [0.0; 3],
+    };
     InstanceGpu {
         rows: std::array::from_fn(|row| transform.row(row).to_array()),
-        extra: [instance.alpha, 0.0, 0.0, 0.0],
+        extra: [instance.alpha, ambient, diffuse, inside],
     }
 }
 

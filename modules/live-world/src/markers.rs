@@ -145,6 +145,7 @@ pub fn build(world: &World, when: Instant, eye: Option<Vec3>, drawn: Option<Draw
                 ),
                 alpha: *alpha,
                 motion: tracked.motion_at(when),
+                interior: None,
             });
             let extent = *extents.entry(*look).or_insert_with(|| drawn.service.extent(*look));
             extent

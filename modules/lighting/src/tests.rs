@@ -8,19 +8,24 @@ use std::time::{Duration, Instant};
 
 use uniwow_api::formats::{
     AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef,
-    Formats, GameObjectDisplay, HairGeoset, LightBand, LightParamsRecord, LightRecord, LiquidTypeRecord, MapRecord,
-    Model, Texture, Tile, Wdl, Wdt, Wmo, ZoneLightRecord,
+    FogBand, Formats, GameObjectDisplay, HairGeoset, LightBand, LightParamsRecord, LightRecord, LightSkyboxRecord,
+    LiquidTypeRecord, MapRecord, Model, Texture, Tile, Wdl, Wdt, Wmo, ZoneLightRecord,
 };
 use uniwow_api::liquids::{Liquids, Surfaces};
+use uniwow_api::models::{self, Geosets, Instance, Look, LookId, LookState, Models, Motion};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::vfs::{Vfs, VfsState};
 use uniwow_api::viewport::{self, MapLight, Sun};
+use uniwow_api::weather::{Effect, Kind, Weather};
 use uniwow_api::{
     CallId, CommandInfo, Context, Editor, EditorBackend, Event, JobContext, JobFn, JobId, JobOutcome, Module,
     PropertyValue, Registrar, egui, egui_wgpu,
 };
 
-use crate::light::{Immersion, Tables, colour_at, map_light, number_at, prepared_fog, sun_direction};
+use crate::light::{
+    Immersion, Skybox, Tables, colour_at, fog_share, map_light, mix_values, night_glow, number_at, prepared_fog,
+    storm_slot, sun_direction, with_building_fog,
+};
 
 /// A band of numbers of `keys`.
 fn numbers(id: u32, keys: &[(u32, f32)]) -> LightBand<f32> {
@@ -503,6 +508,38 @@ fn the_sun_turns_once_a_day_by_noggit_s_table_to_the_north_west() {
 }
 
 #[test]
+fn the_buildings_glow_at_night_by_the_four_keys_of_the_client() {
+    let at = |hour: f32| night_glow(hour * 120.0);
+    // Whole until 6 h, falling to nothing at 7 h, nothing until 20 h 30, rising to whole at 21 h 30.
+    for (hour, glow) in [
+        (0.0, 1.0),
+        (5.99, 1.0),
+        (6.0, 1.0),
+        (6.5, 0.5),
+        (7.0, 0.0),
+        (12.0, 0.0),
+        (20.5, 0.0),
+        (20.75, 0.25),
+        (21.5, 1.0),
+        (23.9, 1.0),
+        (24.0, 1.0),
+        (30.5, 0.5),
+        (-3.25, 0.25),
+    ] {
+        assert!((at(hour) - glow).abs() < 1e-5, "{hour} h: {}", at(hour));
+    }
+    // Given to the view with the light of the hour.
+    let tables = tables();
+    let values = tables.light_at(0, [0.0; 2], 0.0, 0, true).unwrap().values;
+    assert_eq!(map_light(&values, 1440.0, None, false).night, 0.0, "noon");
+    assert_eq!(map_light(&values, 0.0, None, false).night, 1.0, "midnight");
+    assert!(
+        (map_light(&values, 780.0, None, false).night - 0.5).abs() < 1e-5,
+        "6 h 30"
+    );
+}
+
+#[test]
 fn the_light_of_the_water_is_that_of_its_bands_with_the_alphas_of_its_params() {
     let lights = [light(1, [0.0; 2], [0.0; 2], [1, 0])];
     // The bands 9, 14, 15 and 17 of the params 1; the band 16 lacking.
@@ -723,6 +760,157 @@ fn the_fog_of_the_game_is_that_of_the_lights_mixed_within_the_far_clip() {
 }
 
 #[test]
+fn the_fog_of_a_building_is_mixed_into_that_of_the_light_by_its_weight() {
+    let given = MapLight {
+        fog_colour: [0.0; 3],
+        fog: Some([125.0, 500.0, 1.0]),
+        ..map_light(
+            &tables().light_at(0, [-5_000.0, 0.0], 0.0, 0, true).unwrap().values,
+            0.0,
+            None,
+            false,
+        )
+    };
+    // A grey fog of a building from a fifth of 100 yards.
+    let fog = FogBand {
+        end: 100.0,
+        start: 0.2,
+        colour: [102, 102, 102, 255],
+    };
+    // Whole: its colour, made linear, and its fog, straight before Outland, the rest of the light
+    // kept.
+    let whole = with_building_fog(given, fog, 1.0, 0, false, 1_277.0);
+    let grey = |value: f32| (value - 0.1329).abs() < 1e-3;
+    assert!(
+        whole.fog_colour.iter().all(|channel| grey(*channel)),
+        "{:?}",
+        whole.fog_colour
+    );
+    assert_eq!(whole.fog, Some([20.0, 100.0, 1.0]));
+    assert_eq!((whole.sun, whole.sky, whole.night), (given.sun, given.sky, given.night));
+    // Half: halfway in gamma, from black to 0.4, and halfway along the fogs.
+    let half = with_building_fog(given, fog, 0.5, 0, false, 1_277.0);
+    assert!(
+        half.fog_colour.iter().all(|channel| (channel - 0.0331).abs() < 1e-3),
+        "{:?}",
+        half.fog_colour
+    );
+    assert_eq!(half.fog, Some([72.5, 300.0, 1.0]));
+    // None: the light's; the weight held within 0 and 1.
+    assert_eq!(with_building_fog(given, fog, 0.0, 0, false, 1_277.0), given);
+    assert_eq!(with_building_fog(given, fog, -1.0, 0, false, 1_277.0), given);
+    // From Outland on, curved to the far clip, twice as steep in a liquid.
+    let curved = with_building_fog(given, fog, 1.0, 571, false, 600.0).fog.unwrap();
+    let rate = 1.5 + 5.5 * (1.0 - 80.0 / 400.0);
+    assert_eq!(curved, [120.0, 600.0, rate]);
+    let immersed = with_building_fog(given, fog, 1.0, 571, true, 600.0).fog.unwrap();
+    assert_eq!(immersed, [120.0, 600.0, rate * 2.0]);
+    // The fog of the editor drawn: none still, the colour mixed alone.
+    let editor = with_building_fog(MapLight { fog: None, ..given }, fog, 1.0, 0, false, 1_277.0);
+    assert_eq!(editor.fog, None);
+    assert!(editor.fog_colour.iter().all(|channel| grey(*channel)));
+}
+
+/// The tables of `parts` whose params name models of the sky: the global light's (params 1) and
+/// the light 3's (params 3) the model 7, following the hour; the light 2's the model 8, under the
+/// water the model 9; params 3 naming none when `none_for_3`.
+fn skied(none_for_3: bool) -> Tables {
+    let (lights, mut records, colours, fog) = parts();
+    for record in &mut records {
+        record.skybox = match record.id {
+            1 => 7,
+            2 => 8,
+            3 if !none_for_3 => 7,
+            4 => 9,
+            _ => 0,
+        };
+    }
+    let skybox = |id: u32, model: &str, flags: u32| LightSkyboxRecord {
+        id,
+        model: model.to_owned(),
+        flags,
+    };
+    Tables::new(&lights, &records, &colours, &fog, &[]).with_skyboxes(&[
+        skybox(7, "Global.mdx", 0x1),
+        skybox(8, "Local.mdx", 0),
+        skybox(9, "Under.mdx", 0),
+    ])
+}
+
+/// The models of the sky of `tables` at `place`, the eye where `immersion` says, by their ids and
+/// alphas.
+fn skies_at(tables: &Tables, place: [f32; 2], immersion: Immersion) -> Vec<(u32, f32)> {
+    let mixed = tables.light_in(0, place, 0.0, true, immersion).unwrap();
+    tables
+        .skies(&mixed, immersion)
+        .into_iter()
+        .map(|sky| (sky.id, (sky.alpha * 1e4).round() / 1e4))
+        .collect()
+}
+
+#[test]
+fn the_models_of_the_sky_of_the_lights_are_collected_by_their_weights_as_the_client_does() {
+    let tables = skied(false);
+    // The global light alone, its model whole, with its flags.
+    let mixed = tables.light_at(0, [-5_000.0, 0.0], 0.0, 0, true).unwrap();
+    assert_eq!(
+        tables.skies(&mixed, Immersion::Dry),
+        [Skybox {
+            id: 7,
+            model: "Global.mdx".to_owned(),
+            flags: 0x1,
+            alpha: 1.0,
+        }]
+    );
+    // Wholly within the light 2: its model, the global one faded out.
+    assert_eq!(skies_at(&tables, [920.0, -50.0], Immersion::Dry), [(8, 1.0)]);
+    // Halfway to it: each by half, the faintest first.
+    assert_eq!(skies_at(&tables, [800.0, 0.0], Immersion::Dry), [(7, 0.5), (8, 0.5)]);
+    // Within the light 3 too, whose model is the global one's again: its greater alpha, the light
+    // 2's faded out.
+    assert_eq!(skies_at(&tables, [1_090.0, 0.0], Immersion::Dry), [(7, 1.0)]);
+    // A light without a model changes nothing.
+    assert_eq!(skies_at(&skied(true), [1_090.0, 0.0], Immersion::Dry), [(8, 1.0)]);
+    // In a liquid, none: the client draws no sky then.
+    assert!(skies_at(&tables, [920.0, -50.0], Immersion::Under).is_empty());
+    assert!(skies_at(&tables, [920.0, -50.0], Immersion::Lit(4)).is_empty());
+    assert!(
+        skies_at(&self::tables(), [-5_000.0, 0.0], Immersion::Dry).is_empty(),
+        "no models read"
+    );
+}
+
+#[test]
+fn the_params_of_storm_are_mixed_in_by_the_intensity_and_the_fog_brought_nearer() {
+    let tables = tables();
+    let clear = tables.light_at(0, [-5_000.0, 0.0], 0.0, 0, true).unwrap().values;
+    let mut storm = clear.clone();
+    storm.colours[0] = Some([1.0; 3]);
+    storm.colours[1] = None;
+    storm.numbers[0] = Some(9_000.0);
+    storm.river_alphas = [1.0, 0.0];
+    storm.glow = 1.0;
+    let half = mix_values(&clear, &storm, 0.5);
+    // Halfway in gamma where both have it, the clear one's where the storm has none.
+    let diffuse = clear.colours[0].unwrap()[0];
+    assert!((half.colours[0].unwrap()[0] - (diffuse + 1.0) / 2.0).abs() < 1e-6);
+    assert_eq!(half.colours[1], clear.colours[1]);
+    assert_eq!(half.numbers[0], Some((18_000.0 + 9_000.0) / 2.0));
+    assert_eq!(half.river_alphas, [0.55, 0.5]);
+    assert_eq!(half.glow, 0.55);
+    // None: the clear light; whole: the storm's, within 0 and 1.
+    assert_eq!(mix_values(&clear, &storm, 0.0), clear);
+    assert_eq!(mix_values(&clear, &storm, 2.0).numbers[0], Some(9_000.0));
+    // The slots of storm, the fourth under the water.
+    assert_eq!((storm_slot(Immersion::Dry), storm_slot(Immersion::Under)), (2, 3));
+    // The fog of the game a quarter as far in the thickest fog, all of it without.
+    assert_eq!(
+        (fog_share(0.0), fog_share(0.5), fog_share(1.0), fog_share(3.0)),
+        (1.0, 0.625, 0.25, 0.25)
+    );
+}
+
+#[test]
 fn the_hour_set_turns_at_its_speed_past_midnight() {
     assert_eq!(crate::half_minutes(720.0, 0, 100.0), 1440.0, "still");
     assert_eq!(crate::half_minutes(720.0, 60, 2.0), 1680.0, "two hours in two seconds");
@@ -758,7 +946,8 @@ fn the_light_is_a_category_of_the_settings_noon_by_default_still() {
             ("speed", [0, 1440], 0),
             ("local_lights", [0, 1], 1),
             ("game_fog", [0, 1], 1),
-            ("far_clip", [184, 2000], 1277)
+            ("far_clip", [184, 2000], 1277),
+            ("server_hour", [0, 1], 0),
         ]
     );
 }
@@ -895,6 +1084,8 @@ impl viewport::Viewport for View {
 struct Shown {
     map: Mutex<Value>,
     camera: Mutex<Option<[f64; 3]>>,
+    /// What `live-world.time` answers, none without a live world.
+    server: Mutex<Option<Value>>,
 }
 
 impl EditorBackend for Shown {
@@ -904,6 +1095,7 @@ impl EditorBackend for Shown {
     fn call(&self, _caller: &str, name: &str, _arguments: Value) -> Result<Value, String> {
         match name {
             "terrain.map" => Ok(self.map.lock().unwrap().clone()),
+            "live-world.time" => self.server.lock().unwrap().clone().ok_or_else(|| "unknown".to_owned()),
             _ => Err("unknown".to_owned()),
         }
     }
@@ -954,13 +1146,99 @@ impl Liquids for Pond {
     }
 }
 
-/// A host offering `formats`, `vfs`, `viewport` and `liquids`, counting the jobs started, kept
-/// unrun for the test to run them, and those cancelled, its editor `editor`.
+/// Models keeping the looks numbered and the instances of each owner, the looks in the state
+/// `states` gives them by their paths, waiting otherwise.
+#[derive(Default)]
+struct Sky {
+    looks: Mutex<Vec<Look>>,
+    placed: Mutex<HashMap<String, Vec<Instance>>>,
+    states: Mutex<HashMap<String, LookState>>,
+}
+
+impl Sky {
+    fn placed(&self) -> Vec<Instance> {
+        self.placed.lock().unwrap().get("lighting").cloned().unwrap_or_default()
+    }
+
+    fn look_of(&self, look: LookId) -> Look {
+        self.looks.lock().unwrap()[look.0 as usize].clone()
+    }
+}
+
+impl Models for Sky {
+    fn look(&self, look: &Look) -> LookId {
+        let mut looks = self.looks.lock().unwrap();
+        let at = looks.iter().position(|kept| kept == look).unwrap_or_else(|| {
+            looks.push(look.clone());
+            looks.len() - 1
+        });
+        LookId(at as u32)
+    }
+    fn display(&self, _display: u32) -> Result<(Look, f32), String> {
+        Err("no displays".to_owned())
+    }
+    fn object(&self, _display: u32) -> Result<Option<Look>, String> {
+        Err("no objects".to_owned())
+    }
+    fn place(&self, owner: &str, instances: &[Instance]) {
+        self.placed.lock().unwrap().insert(owner.to_owned(), instances.to_vec());
+    }
+    fn change(&self, _owner: &str, _changed: &[Instance], _removed: &[u64]) {}
+    fn clear(&self, owner: &str) {
+        self.placed.lock().unwrap().remove(owner);
+    }
+    fn shown(&self, _owner: &str) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::default()
+    }
+    fn state(&self, look: LookId) -> LookState {
+        let FileRef::Path(path) = self.look_of(look).model else {
+            return LookState::Waiting;
+        };
+        self.states
+            .lock()
+            .unwrap()
+            .get(&path)
+            .cloned()
+            .unwrap_or(LookState::Waiting)
+    }
+    fn extent(&self, _look: LookId) -> Option<models::Extent> {
+        None
+    }
+}
+
+/// The weather the test sets.
+#[derive(Default)]
+struct Sent(Mutex<Option<Effect>>);
+
+impl Weather for Sent {
+    fn current(&self) -> Option<Effect> {
+        *self.0.lock().unwrap()
+    }
+}
+
+/// Buildings where the eye stands as the test sets it.
+#[derive(Default)]
+struct Rooms(Mutex<uniwow_api::buildings::Eye>);
+
+impl uniwow_api::buildings::Buildings for Rooms {
+    fn eye(&self) -> uniwow_api::buildings::Eye {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// A host offering `formats`, `vfs`, `viewport`, `liquids`, `buildings`, `models` and `weather`, counting the jobs
+/// started, kept unrun for the test to run them, and those cancelled, its editor `editor`.
 struct Host {
     formats: Arc<dyn Formats>,
     files: Arc<dyn Vfs>,
     pond: Arc<Pond>,
     liquids: uniwow_api::liquids::Handle,
+    rooms: Arc<Rooms>,
+    buildings: uniwow_api::buildings::Handle,
+    sky: Arc<Sky>,
+    models: models::Handle,
+    sent: Arc<Sent>,
+    weather: Option<uniwow_api::weather::Handle>,
     view: viewport::Handle,
     seen: Arc<View>,
     started: Vec<String>,
@@ -973,9 +1251,18 @@ struct Host {
 fn host(files: Arc<Files>) -> Host {
     let seen = Arc::new(View::default());
     let pond = Arc::new(Pond::default());
+    let rooms = Arc::new(Rooms::default());
+    let sky = Arc::new(Sky::default());
+    let sent = Arc::new(Sent::default());
     Host {
+        weather: Some(sent.clone()),
+        sent,
         liquids: pond.clone(),
         pond,
+        buildings: rooms.clone(),
+        rooms,
+        models: sky.clone(),
+        sky,
         formats: Arc::new(TestFormats {
             zones: Err("none".to_owned()),
             liquids: Ok(liquids()),
@@ -990,6 +1277,7 @@ fn host(files: Arc<Files>) -> Host {
         editor: Arc::new(Shown {
             map: Mutex::new(Value::Null),
             camera: Mutex::new(None),
+            server: Mutex::new(None),
         }),
     }
 }
@@ -1004,6 +1292,9 @@ impl uniwow_api::Host for Host {
             "vfs" => Some(&self.files),
             "viewport" => Some(&self.view),
             "liquids" => Some(&self.liquids),
+            "buildings" => Some(&self.buildings),
+            "models" => Some(&self.models),
+            "weather" => self.weather.as_ref().map(|weather| weather as &(dyn Any + Send + Sync)),
             _ => None,
         }
     }
@@ -1083,7 +1374,7 @@ fn the_tables_are_read_once_the_client_is_open_and_again_once_it_changes() {
     assert_eq!(host.cancelled, [JobId(2)]);
     assert_eq!(host.started.len(), 2);
     // A job of before coming back is not taken.
-    let read: Result<crate::Read, String> = Ok((Arc::new(Tables::default()), None, None));
+    let read: Result<crate::Read, String> = Ok((Arc::new(Tables::default()), None, None, None));
     module.on_job(
         JobId(2),
         JobOutcome::Done(Box::new(read)),
@@ -1124,7 +1415,8 @@ fn the_tables_are_read_once_the_client_is_open_and_again_once_it_changes() {
         files: 150,
     };
     module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
-    let read: Result<crate::Read, String> = Ok((Arc::new(Tables::default()), Some("no Wow.exe".to_owned()), None));
+    let read: Result<crate::Read, String> =
+        Ok((Arc::new(Tables::default()), Some("no Wow.exe".to_owned()), None, None));
     module.on_job(
         JobId(5),
         JobOutcome::Done(Box::new(read)),
@@ -1207,6 +1499,20 @@ fn the_light_is_that_of_the_map_shown_at_the_camera_s_place_on_it() {
             .iter()
             .any(|text| text.contains("The eye in the liquid 3: the light of its params 4"))
     );
+    // The buildings decide first: in a room, its liquid alone, none over the water of the terrain;
+    // in the magma of a building over dry ground; leaving it to the terrain, its water.
+    *host.pond.liquid.lock().unwrap() = Some(5);
+    host.rooms.0.lock().unwrap().liquid = Some(None);
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert_eq!(module.shown.as_ref().unwrap().immersion, Immersion::Dry);
+    *host.pond.liquid.lock().unwrap() = None;
+    host.rooms.0.lock().unwrap().liquid = Some(Some(3));
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert_eq!(module.shown.as_ref().unwrap().immersion, Immersion::Lit(4));
+    *host.pond.liquid.lock().unwrap() = Some(5);
+    host.rooms.0.lock().unwrap().liquid = None;
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert_eq!(module.shown.as_ref().unwrap().immersion, Immersion::Under);
     *host.pond.liquid.lock().unwrap() = None;
     module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
     assert_eq!(module.shown.as_ref().unwrap().immersion, Immersion::Dry);
@@ -1246,6 +1552,285 @@ fn the_light_is_that_of_the_map_shown_at_the_camera_s_place_on_it() {
     assert!(host.seen.0.lock().unwrap().is_some());
     module.shutdown();
     assert!(host.seen.0.lock().unwrap().is_none());
+}
+
+#[test]
+fn the_fog_of_the_building_whose_room_the_eye_is_in_weighs_by_how_far_it_is_from_its_portals() {
+    let files = Arc::new(Files(Mutex::new(VfsState::Ready { archives: 1, files: 1 })));
+    let mut host = host(files);
+    let mut module = crate::LightingModule {
+        client: Some((1, 1)),
+        tables: Some(Ok(Arc::new(tables().with_liquids(&liquids())))),
+        ..Default::default()
+    };
+    let egui = egui::Context::default();
+    *host.editor.map.lock().unwrap() = json!({ "id": 0, "name": "Azeroth" });
+    // The global light alone, its fog from a quarter of 500 yards.
+    *host.editor.camera.lock().unwrap() = Some([-5_000.0, 0.0, 600.0]);
+    let given = |module: &mut crate::LightingModule, host: &mut Host| {
+        module.windows_ui(&egui, &mut Context::new(host, "lighting"));
+        host.seen.0.lock().unwrap().expect("given")
+    };
+    let outside = given(&mut module, &mut host);
+    assert_eq!(outside.fog, Some([125.0, 500.0, 1.0]));
+    let band = |end: f32, grey: u8| FogBand {
+        end,
+        start: 0.2,
+        colour: [grey, grey, grey, 255],
+    };
+    let [air, water] = [band(100.0, 102), band(50.0, 51)];
+    let group = |flags: u32, exit: f32| uniwow_api::buildings::EyeGroup {
+        flags,
+        fog: Some([air, water]),
+        exit,
+        skybox: None,
+    };
+    // In a room, 12.5 yards from its portals: half of the fog of the building, said in the panel.
+    host.rooms.0.lock().unwrap().group = Some(group(0x2000, 12.5));
+    let half = given(&mut module, &mut host);
+    assert_eq!(half.fog, Some([72.5, 300.0, 1.0]));
+    assert_eq!(half, with_building_fog(outside, air, 0.5, 0, false, 1_277.0));
+    assert_eq!(module.shown.as_ref().unwrap().building_fog, Some(0.5));
+    assert!(
+        panel(&mut module, &mut host)
+            .iter()
+            .any(|text| text.contains("the fog of the building weighing 0.50"))
+    );
+    // Deep in it: the building's whole.
+    host.rooms.0.lock().unwrap().group = Some(group(0x2000, 40.0));
+    assert_eq!(given(&mut module, &mut host).fog, Some([20.0, 100.0, 1.0]));
+    // Under the water of the room: its fog under the water, over that of the lights there.
+    *host.pond.liquid.lock().unwrap() = Some(5);
+    host.rooms.0.lock().unwrap().group = None;
+    let under = given(&mut module, &mut host);
+    host.rooms.0.lock().unwrap().group = Some(group(0x2000, 40.0));
+    assert_eq!(
+        given(&mut module, &mut host),
+        with_building_fog(under, water, 1.0, 0, true, 1_277.0)
+    );
+    // In a liquid with a light of its own: that light alone.
+    *host.pond.liquid.lock().unwrap() = Some(3);
+    host.rooms.0.lock().unwrap().group = None;
+    let lit = given(&mut module, &mut host);
+    host.rooms.0.lock().unwrap().group = Some(group(0x2000, 40.0));
+    assert_eq!(given(&mut module, &mut host), lit);
+    assert_eq!(module.shown.as_ref().unwrap().building_fog, None);
+    *host.pond.liquid.lock().unwrap() = None;
+    // In a street lit as outside, or a room whose building has no fog: the light's.
+    host.rooms.0.lock().unwrap().group = Some(group(0x40, 40.0));
+    assert_eq!(given(&mut module, &mut host), outside);
+    host.rooms.0.lock().unwrap().group = Some(uniwow_api::buildings::EyeGroup {
+        fog: None,
+        ..group(0x2000, 40.0)
+    });
+    assert_eq!(given(&mut module, &mut host), outside);
+    assert!(
+        !panel(&mut module, &mut host)
+            .iter()
+            .any(|text| text.contains("the fog of the building"))
+    );
+}
+
+#[test]
+fn the_models_of_the_sky_are_placed_at_the_eye_the_building_s_over_those_of_the_lights() {
+    let files = Arc::new(Files(Mutex::new(VfsState::Ready { archives: 1, files: 1 })));
+    let mut host = host(files);
+    let mut module = crate::LightingModule {
+        client: Some((1, 1)),
+        tables: Some(Ok(Arc::new(skied(false).with_liquids(&liquids())))),
+        ..Default::default()
+    };
+    let egui = egui::Context::default();
+    *host.editor.map.lock().unwrap() = json!({ "id": 0, "name": "Azeroth" });
+    *host.editor.camera.lock().unwrap() = Some([-5_000.0, 0.0, 600.0]);
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    // The global light's, at the eye, drawn as the sky, at noon halfway through its animation.
+    let placed = host.sky.placed();
+    assert_eq!(placed.len(), 1);
+    assert_eq!(
+        host.sky.look_of(placed[0].look),
+        Look {
+            model: FileRef::Path("Global.mdx".to_owned()),
+            textures: Vec::new(),
+            geosets: Geosets::Sky,
+        }
+    );
+    assert_eq!(placed[0].transform.w_axis.truncate().to_array(), [-5_000.0, 0.0, 600.0]);
+    assert_eq!(
+        (placed[0].id, placed[0].alpha, placed[0].motion),
+        (7, 1.0, Motion::Share(0.5))
+    );
+    assert!(
+        panel(&mut module, &mut host)
+            .iter()
+            .any(|text| text.contains("Models of the sky: Global.mdx (1.00, following the hour)"))
+    );
+    // In a group of a building showing its own: over it, whole, playing at its pace; said refused
+    // when the models refuse it.
+    host.rooms.0.lock().unwrap().group = Some(uniwow_api::buildings::EyeGroup {
+        flags: 0x40000 | 0x40,
+        fog: None,
+        exit: 0.0,
+        skybox: Some(FileRef::Path("World\\Sky.m2".to_owned())),
+    });
+    host.sky.states.lock().unwrap().insert(
+        "World\\Sky.m2".to_owned(),
+        LookState::Refused("not in the client".to_owned()),
+    );
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    let placed = host.sky.placed();
+    assert_eq!(placed.len(), 2);
+    assert_eq!(
+        host.sky.look_of(placed[1].look).model,
+        FileRef::Path("World\\Sky.m2".to_owned())
+    );
+    assert_eq!(
+        (placed[1].id, placed[1].alpha, placed[1].motion),
+        (1 << 32, 1.0, Motion::Standing)
+    );
+    let texts = panel(&mut module, &mut host);
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("the building's World\\Sky.m2 (1.00)")),
+        "{texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("World\\Sky.m2: not in the client"))
+    );
+    // Under the water: none, taken back.
+    *host.pond.liquid.lock().unwrap() = Some(5);
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert!(host.sky.placed().is_empty());
+    // Out of it again, then the module stopped: cleared.
+    *host.pond.liquid.lock().unwrap() = None;
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert_eq!(host.sky.placed().len(), 2);
+    module.shutdown();
+    assert!(!host.sky.placed.lock().unwrap().contains_key("lighting"));
+}
+
+#[test]
+fn the_hour_of_the_server_is_taken_through_the_live_world_when_asked_for_and_known() {
+    let files = Arc::new(Files(Mutex::new(VfsState::Ready { archives: 1, files: 1 })));
+    let mut host = host(files);
+    let mut module = crate::LightingModule {
+        client: Some((1, 1)),
+        tables: Some(Ok(Arc::new(tables()))),
+        ..Default::default()
+    };
+    let egui = egui::Context::default();
+    *host.editor.map.lock().unwrap() = json!({ "id": 0, "name": "Azeroth" });
+    *host.editor.camera.lock().unwrap() = Some([-5_000.0, 0.0, 600.0]);
+    // Not asked for: the hour of the settings, noon.
+    *host.editor.server.lock().unwrap() = Some(json!({ "known": true, "time": 6 * 3600 + 15 * 60 }));
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    let shown = module.shown.as_ref().unwrap();
+    assert_eq!((shown.time, &shown.server_hour), (1440.0, &None));
+    // Asked for and known: 6:15, in half-minutes, the sun of that hour.
+    host.settings.insert("server_hour".to_owned(), json!(1));
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    let shown = module.shown.as_ref().unwrap();
+    assert_eq!((shown.time, &shown.server_hour), (750.0, &Some(Ok(()))));
+    assert_eq!(host.seen.0.lock().unwrap().unwrap().sun.direction, sun_direction(750.0));
+    assert!(
+        panel(&mut module, &mut host)
+            .iter()
+            .any(|text| text == "The hour of the server, through the live world.")
+    );
+    // Unknown, or no live world: the hour of the settings, why said.
+    *host.editor.server.lock().unwrap() = Some(json!({
+        "known": false, "time": null, "reason": "no connection to the observer of the server",
+    }));
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    let shown = module.shown.as_ref().unwrap();
+    assert_eq!(shown.time, 1440.0);
+    assert!(
+        panel(&mut module, &mut host).contains(
+            &"The hour of the server is not known (no connection to the observer of the server): that of the settings."
+                .to_owned()
+        )
+    );
+    *host.editor.server.lock().unwrap() = None;
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert_eq!(
+        module.shown.as_ref().unwrap().server_hour,
+        Some(Err("no live world (unknown)".to_owned()))
+    );
+}
+
+#[test]
+fn the_weather_given_mixes_in_the_params_of_storm_and_brings_the_fog_nearer() {
+    // The global light's params of storm, 5: a diffuse of 200, the fog to 250 yards from a quarter.
+    let (mut lights, mut records, mut colours, mut fog) = parts();
+    lights[0].params[2] = 5;
+    records.push(params(5, 0.2));
+    colours.push(greys(73, &[(0, 200)]));
+    fog.extend([numbers(25, &[(0, 9_000.0)]), numbers(26, &[(0, 0.25)])]);
+    let files = Arc::new(Files(Mutex::new(VfsState::Ready { archives: 1, files: 1 })));
+    let mut host = host(files);
+    let mut module = crate::LightingModule {
+        client: Some((1, 1)),
+        tables: Some(Ok(Arc::new(Tables::new(&lights, &records, &colours, &fog, &[])))),
+        ..Default::default()
+    };
+    let egui = egui::Context::default();
+    *host.editor.map.lock().unwrap() = json!({ "id": 0, "name": "Azeroth" });
+    *host.editor.camera.lock().unwrap() = Some([-5_000.0, 0.0, 600.0]);
+    let seen = |module: &mut crate::LightingModule, host: &mut Host| {
+        module.windows_ui(&egui, &mut Context::new(host, "lighting"));
+        let shown = module.shown.as_ref().unwrap();
+        (
+            diffuse(shown.light.as_ref().unwrap()),
+            host.seen.0.lock().unwrap().unwrap().fog.unwrap(),
+        )
+    };
+    // Fine weather: the clear params, the fog from a quarter of 500 yards.
+    assert_eq!(seen(&mut module, &mut host), (100.0, [125.0, 500.0, 1.0]));
+    // Rain at 0.5: halfway to the params of storm, their fog too.
+    *host.sent.0.lock().unwrap() = Some(Effect {
+        kind: Kind::Rain,
+        intensity: 0.5,
+    });
+    let (lit, fogged) = seen(&mut module, &mut host);
+    assert!((lit - 150.0).abs() < 1e-3, "{lit}");
+    assert!(
+        fogged
+            .iter()
+            .zip([93.75, 375.0, 1.0])
+            .all(|(a, b)| (a - b).abs() < 1e-3),
+        "{fogged:?}"
+    );
+    assert!(
+        panel(&mut module, &mut host)
+            .contains(&"Weather: rain at 0.50; the params of storm mixed in by 0.50.".to_owned())
+    );
+    // The fog at 1: the clear params, the fog a quarter as far.
+    *host.sent.0.lock().unwrap() = Some(Effect {
+        kind: Kind::Fog,
+        intensity: 1.0,
+    });
+    assert_eq!(seen(&mut module, &mut host), (100.0, [31.25, 125.0, 1.0]));
+    assert!(
+        panel(&mut module, &mut host)
+            .contains(&"Weather: fog at 1.00; the fog of the game 0.25 times as far.".to_owned())
+    );
+    // A sandstorm both.
+    *host.sent.0.lock().unwrap() = Some(Effect {
+        kind: Kind::Sandstorm,
+        intensity: 1.0,
+    });
+    let (lit, fogged) = seen(&mut module, &mut host);
+    assert!(
+        (lit - 200.0).abs() < 1e-3 && (fogged[1] - 62.5).abs() < 1e-3,
+        "{lit} {fogged:?}"
+    );
+    // Without the service: the clear light.
+    host.weather = None;
+    assert_eq!(seen(&mut module, &mut host), (100.0, [125.0, 500.0, 1.0]));
+    assert!(module.shown.as_ref().unwrap().weather.is_none());
 }
 
 /// The texts the panel of `module` draws.
@@ -1292,6 +1877,11 @@ fn the_lights_of_the_liquids_are_read_with_the_tables_the_light_read_without_the
         module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
         let immersion = module.shown.as_ref().unwrap().immersion;
         let texts = panel(&mut module, &mut host);
+        // The models of the sky, which these tables do not give: the light read without them.
+        assert!(
+            texts.contains(&"No models of the sky: the models of the sky are not read".to_owned()),
+            "{texts:?}"
+        );
         if liquids.is_ok() {
             assert_eq!(immersion, Immersion::Lit(4), "in the magma, its light");
             assert_eq!(module.liquids_unread, None);

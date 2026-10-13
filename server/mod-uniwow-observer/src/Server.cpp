@@ -5,6 +5,7 @@
 #include "GitRevision.h"
 #include "GridDefines.h"
 #include "Log.h"
+#include "Timer.h"
 
 #include <boost/asio/post.hpp>
 #include <boost/asio/read.hpp>
@@ -12,7 +13,9 @@
 
 #include <cmath>
 #include <cstring>
+#include <ctime>
 #include <exception>
+#include <limits>
 
 namespace UniwowObserver
 {
@@ -22,6 +25,10 @@ namespace UniwowObserver
 
         constexpr uint16 VERSION = 1;
         constexpr uint32 CAPABILITY_READING = 0x1;
+        // The world: the hour of the server and the weathers of its zones, on WATCH_WORLD.
+        constexpr uint32 CAPABILITY_WORLD = 0x2;
+        // WORLD is sent again at least this often, the hour with it.
+        constexpr auto WORLD_EVERY = std::chrono::seconds(60);
         // The longest message from the editor, and from the observer.
         constexpr uint32 MAX_IN = 1024;
         constexpr size_t MAX_OUT = 16u << 20;
@@ -36,12 +43,23 @@ namespace UniwowObserver
             SUBSCRIBE = 2,
             UNSUBSCRIBE = 3,
             HEARTBEAT = 4,
+            WATCH_WORLD = 5,
             WELCOME = 101,
             REFUSED = 102,
             STATUS = 103,
             SNAPSHOT = 104,
             CHANGES = 105,
+            WORLD = 106,
         };
+
+        // The seconds since midnight of the local time of the server, which the hour of the game
+        // follows: the client is given that time as it logs in (`SMSG_LOGIN_SETTIMESPEED`, packed
+        // from `GameTime::GetGameTime` in local time) and counts on from it, a minute a minute.
+        uint32 SecondsOfTheDay()
+        {
+            std::tm const local = Acore::Time::TimeBreakdown();
+            return uint32(local.tm_hour * 3600 + local.tm_min * 60 + local.tm_sec);
+        }
 
         // Little-endian bytes: a message, its length filled by `Finish`, or the bytes of an entity.
         class Writer
@@ -276,7 +294,7 @@ namespace UniwowObserver
             _welcomed = true;
             Writer writer(WELCOME);
             writer.U16(VERSION);
-            writer.U32(CAPABILITY_READING);
+            writer.U32(CAPABILITY_READING | CAPABILITY_WORLD);
             writer.String(GitRevision::GetFullVersion());
             writer.String(GitRevision::GetHash());
             writer.F32(settings.maxRadius);
@@ -307,6 +325,13 @@ namespace UniwowObserver
                 return true;
             case HEARTBEAT:
                 return reader.Done();
+            case WATCH_WORLD:
+                if (!reader.Done())
+                    return false;
+                // Sent at the next tick, whatever was sent before.
+                _world = true;
+                _worldSentOnce = false;
+                return true;
             default:
                 return false;
         }
@@ -369,6 +394,29 @@ namespace UniwowObserver
         Send(writer.Finish());
     }
 
+    void Connection::SendWorld(Clock::time_point now)
+    {
+        uint64 version = 0;
+        std::vector<ZoneWeather> const weathers = Observer::Instance().GetWeathers(version);
+        if (_worldSentOnce && version == _worldVersion && now - _worldSent < WORLD_EVERY)
+            return;
+        _worldSentOnce = true;
+        _worldVersion = version;
+        _worldSent = now;
+        Writer writer(WORLD);
+        writer.U32(SecondsOfTheDay());
+        writer.U32(uint32(weathers.size()));
+        for (ZoneWeather const& weather : weathers)
+        {
+            writer.U32(weather.zone);
+            writer.U32(weather.state);
+            writer.F32(weather.grade);
+            int64 const age = std::chrono::duration_cast<std::chrono::seconds>(now - weather.at).count();
+            writer.U32(uint32(std::clamp<int64>(age, 0, int64(std::numeric_limits<uint32>::max()))));
+        }
+        Send(writer.Finish());
+    }
+
     void Connection::Tick(Clock::time_point now)
     {
         if (_closed)
@@ -378,7 +426,9 @@ namespace UniwowObserver
             Close("silent");
             return;
         }
-        if (!_welcomed || _closing || !_subscription)
+        if (_welcomed && !_closing && _world)
+            SendWorld(now);
+        if (_closed || !_welcomed || _closing || !_subscription)
             return;
 
         State state;

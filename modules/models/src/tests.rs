@@ -128,6 +128,7 @@ pub fn instance(id: u64, look: u32, at: Vec3, scale: f32) -> Instance {
         transform: Mat4::from_scale_rotation_translation(Vec3::splat(scale), Default::default(), at),
         alpha: 1.0,
         motion: Motion::Standing,
+        interior: None,
     }
 }
 
@@ -415,13 +416,18 @@ fn a_material_gives_its_pipeline_state_and_the_flags_of_its_shader() {
             blending: 0,
             two_sided: false,
             depth_test: true,
-            depth_write: true
+            depth_write: true,
+            sky: false,
         }
     );
     assert!(!opaque.blended());
     let alpha = State::of(&material(0x04 | 0x08, 2));
     assert!(alpha.blended() && alpha.two_sided && !alpha.depth_test && !alpha.depth_write);
     assert!(!State::of(&material(0x10, 1)).depth_write, "the flag 0x10");
+    // In a model of the sky: its blending and its sides kept, tested against the depth, writing none.
+    let sky = State::of_sky(&material(0x04 | 0x08, 2));
+    assert!(sky.sky && sky.blended() && sky.two_sided && sky.depth_test && !sky.depth_write);
+    assert!(!State::of_sky(&material(0, 0)).depth_write);
     assert_eq!(State::of(&material(0, 9)).blending, 0, "an unknown blending is opaque");
     assert_eq!(gpu::flags(&material(0, 1)), [ALPHA_KEY, 0.0, 0.0, 0.0]);
     assert_eq!(
@@ -933,6 +939,12 @@ pub fn read_back(gpu: &egui_wgpu::RenderState, buffer: &wgpu::Buffer, size: u64)
 /// the view draws it: the opaque phase in a first pass; the layer's computing against a pyramid of
 /// the depth of `bench.wall`; the other phases in a second pass.
 pub fn render(bench: &mut Bench, eye: Vec3, look: Vec3) -> Vec<u8> {
+    render_with(bench, eye, look, None)
+}
+
+/// The same, with the layer `before`, drawn in the pass, before the layer of the bench in each
+/// phase, as its stage puts the layer of the sky.
+pub fn render_with(bench: &mut Bench, eye: Vec3, look: Vec3, mut before: Option<&mut dyn Layer>) -> Vec<u8> {
     let gpu = bench.gpu.clone();
     let size = 32u32;
     let view = View {
@@ -946,7 +958,11 @@ pub fn render(bench: &mut Bench, eye: Vec3, look: Vec3) -> Vec<u8> {
         sun: bench.sun,
         sky: None,
         water: None,
+        night: 0.0,
     };
+    if let Some(before) = &mut before {
+        before.prepare(&gpu, &view);
+    }
     bench.layer.prepare(&gpu, &view);
     let in_pass = bench.layer.drawing() == Drawing::Pass;
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
@@ -1048,6 +1064,9 @@ pub fn render(bench: &mut Bench, eye: Vec3, look: Vec3) -> Vec<u8> {
         for (phase, bundle) in Phase::ALL.into_iter().zip(&bundles) {
             if phase.first_pass() != first {
                 continue;
+            }
+            if let Some(before) = &mut before {
+                before.draw_pass(&gpu, &TARGET, &view, phase, &mut pass);
             }
             pass.execute_bundles([bundle]);
             if in_pass {

@@ -3,9 +3,11 @@
 // its placement among those of the frame, its material, the flags of its group and its kind; its
 // textures are read from the arrays by slot (the bindings of the arrays and `sampled` follow,
 // written for the count of slots). The pixel shaders of 3.3.5a combine its textures in gamma; a
-// batch outside is lit by the sun and the ambient light of the view, one inside by its vertex
-// colours and the ambient colour of its building, one of a transition by both, blended by the alpha
-// of its vertex colours; then fogged.
+// batch is lit as the public implementation WebWowViewerCpp lights them (`calcLight`, read for its
+// facts): inside by the ambient colour of its building and its vertex colours, outside by the
+// ambient light and the sun of the view with its vertex colours, a transition between the two by
+// the alpha of its vertex colours; then what is added after the light, the environment and the
+// glow at night of its material; then fogged.
 
 struct Camera {
     view_proj: mat4x4<f32>,
@@ -22,6 +24,8 @@ struct Camera {
     across: vec4<f32>,
     up: vec4<f32>,
     back: vec4<f32>,
+    // How much the materials glowing at night glow, from 0 by day to 1 by night.
+    glow: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
@@ -42,7 +46,7 @@ struct Material {
     sizes: vec4<f32>,
     // Its alpha key (0 for none), whether unlit and unfogged, the colour of its fog.
     shading: vec4<f32>,
-    // Its flags and its blending.
+    // Its flags, its blending and its emissive colour, red in the low byte.
     flags: vec4<u32>,
 };
 
@@ -56,12 +60,18 @@ const NONE: u32 = 0xFFFFFFFFu;
 const LEAST_ALPHA: f32 = 1.0 / 255.0;
 // The blending of an opaque material.
 const OPAQUE: u32 = 0u;
-// The flags of a group: its vertex colours, outside; of a material: lit as outside.
+// The flags of a group: its vertex colours, outside, lit as outside; of a material: lit as outside,
+// glowing at night.
 const HAS_COLOURS: u32 = 0x4u;
 const OUTSIDE: u32 = 0x8u;
+const GROUP_LIT_OUTSIDE: u32 = 0x40u;
 const LIT_OUTSIDE: u32 = 0x8u;
+const GLOWS_AT_NIGHT: u32 = 0x10u;
 // The flag a building lit as one gives its groups.
 const LIT_AS_ONE: u32 = 0x10u;
+// Towards the light of the insides, the opposite of the direction the client gives it,
+// (-0.30822, -0.30822, -0.9) in the axes of the world (WebWowViewerCpp, `uInteriorSunDir`).
+const TOWARDS_INSIDE_LIGHT: vec3<f32> = vec3<f32>(0.30822, 0.30822, 0.9);
 
 struct VertexIn {
     @location(0) position: vec3<f32>,
@@ -145,17 +155,47 @@ fn texel(code: u32, wrap: u32, size: vec2<f32>, uv: vec2<f32>, ddx: vec2<f32>, d
     return sampled(code >> 16u, i32(code & 0xFFFFu), at, ddx, ddy);
 }
 
+// What a pixel shader gives: the colour lit and its alpha, and what is added after the light, in
+// gamma.
+struct Combined {
+    lit: vec4<f32>,
+    added: vec3<f32>,
+};
+
 // The pixel shaders of 3.3.5a, in gamma: diffuse (0), specular (1) and metal (2) as diffuse, their
-// highlight left out; environment (3) and environment metal (5), the second texture mapped on the
-// environment and added by the alpha of the first; opaque (4); two layers (6), the second texture
-// blended over the first by the alpha of the second colours.
-fn combine(shader: u32, one: vec4<f32>, two: vec4<f32>, blend: f32) -> vec4<f32> {
+// highlight left out as the public implementation WebWowViewerCpp leaves it out; environment (3)
+// and environment metal (5), the second texture mapped on the environment added after the light,
+// as WebWowViewerCpp adds it (`caclWMOFragMat`): by the alpha of the first, and for the metal times
+// the first too; opaque (4); two layers (6), the second texture blended over the first by the alpha
+// of the second colours.
+fn combine(shader: u32, one: vec4<f32>, two: vec4<f32>, blend: f32) -> Combined {
     switch shader {
-        case 3u, 5u: { return vec4<f32>(one.rgb + two.rgb * one.a, one.a); }
-        case 4u: { return vec4<f32>(one.rgb, 1.0); }
-        case 6u: { return vec4<f32>(mix(two.rgb, one.rgb, blend), one.a); }
-        default: { return one; }
+        case 3u: { return Combined(one, two.rgb * one.a); }
+        case 5u: { return Combined(one, one.rgb * one.a * two.rgb); }
+        case 4u: { return Combined(vec4<f32>(one.rgb, 1.0), vec3<f32>(0.0)); }
+        case 6u: { return Combined(vec4<f32>(mix(two.rgb, one.rgb, blend), one.a), vec3<f32>(0.0)); }
+        default: { return Combined(one, vec3<f32>(0.0)); }
     }
+}
+
+// The light everywhere of a face of `normal`, `ambient` from 0.9 to 1.1 times as the face turns to
+// `towards`, as the client mixes its colours of the sky and of the ground (`applyAndMixAmbients`).
+fn turned(ambient: vec3<f32>, normal: vec3<f32>, towards: vec3<f32>) -> vec3<f32> {
+    let facing = clamp(dot(normal, towards), 0.0, 1.0);
+    return ambient * (0.9 + 0.2 * facing);
+}
+
+// The light of a batch of a building, in gamma, as WebWowViewerCpp lights them (`calcLight`): its
+// vertex colours `vertex`, doubled back, added to the light everywhere, inside the ambient colour
+// `ambient` of the building, turned towards the light of the insides, without a diffuse; outside the
+// ambient light of the view turned towards the sun, plus its diffuse by the angle; the two mixed by
+// the share `outside`, 0 wholly inside and 1 wholly outside.
+fn batch_light(normal: vec3<f32>, vertex: vec3<f32>, ambient: vec3<f32>, outside: f32) -> vec3<f32> {
+    let n = normalize(normal);
+    let inside = turned(ambient + vertex, n, TOWARDS_INSIDE_LIGHT);
+    let facing = clamp(dot(n, camera.sun.xyz), 0.0, 1.0);
+    let lit_outside = turned(camera.ambient.rgb + vertex, n, camera.sun.xyz) + camera.sun_colour.rgb * facing;
+    return mix(inside, lit_outside, outside);
 }
 
 // The colour of the fog of a batch but a mod2x one: the view's, black, or white.
@@ -181,7 +221,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let one = texel(material.textures.x, material.textures.z & 3u, material.sizes.xy, in.uv1, ddx_one, ddy_one);
     let two = texel(material.textures.y, (material.textures.z >> 2u) & 3u, material.sizes.zw, second, ddx_two, ddy_two);
     let combined = combine(shader, one, two, in.blend);
-    var alpha = clamp(combined.a, 0.0, 1.0);
+    var alpha = clamp(combined.lit.a, 0.0, 1.0);
     let shading = material.shading;
     // An opaque batch keeps every pixel, the alpha of its textures a mask of their own; an
     // alpha-keyed one those over its key; a blended one those it shows. The first two are opaque.
@@ -204,37 +244,49 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let fog = select(fog_amount(in.world), 0.0, shading.z > 0.5);
     // A mod2x batch doubles what is drawn in gamma, as the models draw it.
     if shading.w > 2.5 {
-        let gamma = mix(combined.rgb, vec3<f32>(0.5), fog);
+        let gamma = mix(combined.lit.rgb, vec3<f32>(0.5), fog);
         return vec4<f32>(pow(gamma * 2.0, vec3<f32>(2.2)) * 0.5, alpha);
     }
-    var rgb = linear(clamp(combined.rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
+    var rgb = linear(clamp(combined.lit.rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
     if shading.y < 0.5 {
-        let outside = light(in.normal);
-        // Inside: the vertex colours, halved when fixed, and the ambient colour, both in gamma.
+        // Its vertex colours, halved when fixed; its share of the light outside: 1 in a group lit
+        // as outside, for a batch outside (the outer walls of the rooms, their colours left out)
+        // and a material lit as outside; the alpha of its colours for a transition, which the fix
+        // left there; 0 inside.
         let coloured = (in.group & HAS_COLOURS) != 0u;
-        let inside = linear(select(vec3<f32>(0.0), in.colour1.rgb * 2.0, coloured) + in.ambient);
-        // By the kind of the batch: a transition adds the light outside by the alpha of its vertex
-        // colours to theirs, which the fix darkened by the rest; without colours, its group says.
-        var lit = outside;
-        switch (in.group >> 8u) & 3u {
-            case 0u: {
-                if coloured {
-                    lit = inside + outside * in.colour1.a;
-                } else if (in.group & OUTSIDE) == 0u {
-                    lit = inside;
+        var vertex = select(vec3<f32>(0.0), in.colour1.rgb * 2.0, coloured);
+        var outside = 0.0;
+        if (in.group & (OUTSIDE | GROUP_LIT_OUTSIDE)) != 0u {
+            outside = 1.0;
+        } else {
+            switch (in.group >> 8u) & 3u {
+                case 0u: { outside = select(0.0, in.colour1.a, coloured); }
+                case 1u: { outside = 0.0; }
+                default: {
+                    outside = 1.0;
+                    vertex = vec3<f32>(0.0);
                 }
             }
-            case 1u: { lit = inside; }
-            default: {}
-        }
-        // A building lit as one: outside, its ambient colour added at the drawing.
-        if (in.group & LIT_AS_ONE) != 0u {
-            lit = outside + linear(in.ambient);
         }
         if (material.flags.x & LIT_OUTSIDE) != 0u {
-            lit = outside;
+            outside = 1.0;
+            vertex = vec3<f32>(0.0);
+        }
+        var lit = linear(batch_light(in.normal, vertex, in.ambient, outside));
+        // A building lit as one: outside, its ambient colour added at the drawing.
+        if (in.group & LIT_AS_ONE) != 0u {
+            lit = light(in.normal) + linear(in.ambient);
         }
         rgb = rgb * lit;
+    }
+    // Added after the light, in gamma: the environment, and the emissive colour of a material
+    // glowing at night by how much it is night, as Noggit Red adds it (read for the facts only).
+    var added = combined.added;
+    if (material.flags.x & GLOWS_AT_NIGHT) != 0u {
+        added = added + unpack4x8unorm(material.flags.z).rgb * camera.glow.x;
+    }
+    if any(added > vec3<f32>(0.0)) {
+        rgb = linear(clamp(srgb(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0))) + added, vec3<f32>(0.0), vec3<f32>(1.0)));
     }
     return vec4<f32>(fog_mix(rgb, fog_colour(shading.w), fog), alpha);
 }

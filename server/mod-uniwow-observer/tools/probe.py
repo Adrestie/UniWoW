@@ -8,6 +8,9 @@
     probe.py abuse --token T
         sends what a careful server must survive: messages corrupted, cut short, too long, out of
         order, 100 connections in a row, more connections than allowed, zones that do not exist.
+    probe.py world --token T --seconds 120
+        asks for the world and prints the hour of the server and the weathers of its zones each time
+        they come (a player in a zone, and `.wchange` there, changes its weather).
 
 Standard library only.
 """
@@ -19,8 +22,12 @@ import struct
 import sys
 import time
 
-HELLO, SUBSCRIBE, UNSUBSCRIBE, HEARTBEAT = 1, 2, 3, 4
-WELCOME, REFUSED, STATUS, SNAPSHOT, CHANGES = 101, 102, 103, 104, 105
+HELLO, SUBSCRIBE, UNSUBSCRIBE, HEARTBEAT, WATCH_WORLD = 1, 2, 3, 4, 5
+WELCOME, REFUSED, STATUS, SNAPSHOT, CHANGES, WORLD = 101, 102, 103, 104, 105, 106
+CAPABILITY_WORLD = 0x2
+WEATHERS = {0: "fine", 1: "fog", 3: "light rain", 4: "medium rain", 5: "heavy rain", 6: "light snow",
+            7: "medium snow", 8: "heavy snow", 22: "light sandstorm", 41: "medium sandstorm",
+            42: "heavy sandstorm", 86: "thunders", 90: "black rain", 106: "black snow"}
 KINDS = {1: "creature", 2: "game object", 3: "player"}
 STATES = {0: "waiting", 1: "active", 2: "not found"}
 
@@ -352,9 +359,40 @@ def abuse(args):
     return 1 if failed else 0
 
 
+def world(args):
+    connection = Connection(args.port)
+    connection.send(hello(args.token))
+    info = welcome(connection)
+    if not info["capabilities"] & CAPABILITY_WORLD:
+        print(f"the observer of {info['server']} does not send the world: build the module again")
+        return 1
+    connection.send(message(WATCH_WORLD))
+    connection.socket.settimeout(1.0)
+    start = last_beat = time.time()
+    while time.time() - start < args.seconds:
+        now = time.time()
+        if now - last_beat >= 2.0:
+            connection.send(message(HEARTBEAT))
+            last_beat = now
+        try:
+            kind, body = connection.read()
+        except socket.timeout:
+            continue
+        if kind != WORLD:
+            print("unexpected:", kind)
+            continue
+        seconds, count = body.take("II")
+        print(f"{now - start:5.1f} s: the hour of the server {seconds // 3600:02}:{seconds // 60 % 60:02}:"
+              f"{seconds % 60:02}, {count} zones")
+        for _ in range(count):
+            zone, state, grade, age = body.take("IIfI")
+            print(f"    zone {zone}: {WEATHERS.get(state, state)}, grade {grade:.2f}, sent {age} s ago")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["watch", "move", "abuse"])
+    parser.add_argument("command", choices=["watch", "move", "abuse", "world"])
     parser.add_argument("--port", type=int, default=8087)
     parser.add_argument("--token", required=True)
     parser.add_argument("--map", type=int, default=1)
@@ -373,6 +411,8 @@ def main():
         return 0
     if args.command == "move":
         return move(args)
+    if args.command == "world":
+        return world(args)
     return abuse(args)
 
 

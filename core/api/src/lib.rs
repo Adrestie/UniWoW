@@ -46,6 +46,7 @@ macro_rules! numbered {
 }
 
 pub mod arena;
+pub mod buildings;
 mod command;
 mod commands;
 mod context;
@@ -72,6 +73,7 @@ pub mod ui;
 pub mod uploads;
 pub mod vfs;
 pub mod viewport;
+pub mod weather;
 
 pub use command::{AppliedChange, Command};
 pub use commands::{CallId, CommandHandler, CommandInfo, CommandSpec, RunsOn, decode_arguments};
