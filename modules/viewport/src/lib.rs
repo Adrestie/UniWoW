@@ -730,7 +730,7 @@ impl Module for ViewportModule {
 
 impl ViewportModule {
     /// The panel of the statistics: their text, the last second of the view, in its own panel so
-    /// that it hides nothing of the view.
+    /// that it hides nothing of the view, the lines of each module folding under its name.
     fn statistics_ui(&mut self, ui: &mut egui::Ui, ctx: &mut Context) {
         let allowance = budget(&self.budget).allowance;
         // The report of the allocator lists every allocation: made again once a second.
@@ -749,7 +749,16 @@ impl ViewportModule {
             .stats
             .text(self.timer.is_some(), stats::process_memory(), allocator, &allowance);
         egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
-            ui.add(egui::Label::new(egui::RichText::new(text).monospace()).extend());
+            ui.add(egui::Label::new(egui::RichText::new(text.view).monospace()).extend());
+            // Each module under an arrow that folds and unfolds its lines, unfolded at first.
+            for (module, lines) in text.modules {
+                egui::CollapsingHeader::new(egui::RichText::new(&module).monospace())
+                    .id_salt(("statistics", &module))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.add(egui::Label::new(egui::RichText::new(lines).monospace()).extend());
+                    });
+            }
         });
     }
 
@@ -2146,6 +2155,33 @@ mod tests {
         module.init(&mut Context::new(&mut host, "viewport"));
         let texts = texts_of_panel(&mut module, &mut host, "statistics");
         assert!(texts.iter().any(|text| text.starts_with("0 fps: a frame")), "{texts:?}");
+        let layer = |owner: &str, items: &str| LayerTiming {
+            owner: owner.to_owned(),
+            stats: LayerStats {
+                items: items.to_owned(),
+                ..LayerStats::default()
+            },
+            ..LayerTiming::default()
+        };
+        let sample = Sample {
+            layers: vec![
+                layer("lighting", "the sky"),
+                layer("terrain", "85 tiles"),
+                layer("lighting", "the glare"),
+            ],
+            ..Sample::default()
+        };
+        module.stats.push(Instant::now(), sample);
+        let texts = texts_of_panel(&mut module, &mut host, "statistics");
+        let at = |wanted: &str| texts.iter().position(|text| text == wanted);
+        let (Some(lighting), Some(_)) = (at("lighting"), at("terrain")) else {
+            panic!("the arrow of each module: {texts:?}");
+        };
+        let lines = &texts[lighting + 1];
+        assert!(
+            lines.contains("the sky") && lines.contains("the glare") && !lines.contains("85 tiles"),
+            "the layers of a module together, unfolded at first: {texts:?}"
+        );
         let Some(gpu) = gpu() else {
             eprintln!("skipped, the view: no software adapter for a device");
             return;
@@ -3732,7 +3768,17 @@ fn main() {
                 layers: vec![("terrain".to_owned(), 0.25, 1.5)],
             },
         );
-        let text = stats.text(true, None, None, &Allowance::default());
+        let sections = stats.text(true, None, None, &Allowance::default());
+        assert_eq!(
+            sections
+                .modules
+                .iter()
+                .map(|(module, _)| module.as_str())
+                .collect::<Vec<_>>(),
+            ["terrain"],
+            "its layer under its module"
+        );
+        let text = whole(sections);
         assert!(text.starts_with("48 fps: a frame 20.7 ms, the longest 40.0"), "{text}");
         assert!(text.contains("view, interface thread: 2.00 ms"), "{text}");
         assert!(text.contains("GPU: 3.00 ms"), "{text}");
@@ -3743,7 +3789,7 @@ fn main() {
         );
         assert!(!text.contains("the pass failed"), "{text}");
         stats.set_pass(Some((3, "refused".to_owned())));
-        let failing = stats.text(true, None, None, &Allowance::default());
+        let failing = whole(stats.text(true, None, None, &Allowance::default()));
         assert!(
             failing.contains("the pass failed, 3 frames in a row not drawn: refused"),
             "{failing}"
@@ -3759,11 +3805,7 @@ fn main() {
             ),
             "{text}"
         );
-        assert!(
-            stats
-                .text(false, None, None, &Allowance::default())
-                .contains("not timed")
-        );
+        assert!(whole(stats.text(false, None, None, &Allowance::default())).contains("not timed"));
         let report = wgpu::AllocatorReport {
             allocations: Vec::new(),
             blocks: Vec::new(),
@@ -3771,12 +3813,12 @@ fn main() {
             total_reserved_bytes: 400 << 20,
         };
         assert_eq!(super::stats::allocator(&report), [100 << 20, 400 << 20, 0]);
-        let memory = stats.text(
+        let memory = whole(stats.text(
             true,
             Some((300 << 20, 200 << 20)),
             Some([100 << 20, 400 << 20, 7]),
             &Allowance::default(),
-        );
+        ));
         assert!(memory.contains("process: 300 MB in memory, 200 MB private"), "{memory}");
         assert!(
             memory.contains("allocator of the device: 100 MB allocated of 400 MB reserved, 7 blocks"),
@@ -3789,7 +3831,7 @@ fn main() {
             limited: Some(viewport::BAND * 8.0),
             ..Allowance::default()
         };
-        let limited = stats.text(true, None, None, &budget);
+        let limited = whole(stats.text(true, None, None, &budget));
         assert!(
             limited.contains("GPU budget of the view: 300 of 1000 MB; reach limited to 2.0 tiles"),
             "{limited}"
@@ -3803,12 +3845,15 @@ fn main() {
             ..Sample::default()
         };
         stats.push(start + Duration::from_secs(3), later);
-        assert!(
-            stats
-                .text(true, None, None, &Allowance::default())
-                .starts_with("100 fps"),
-            "{}",
-            stats.text(true, None, None, &Allowance::default())
-        );
+        let later = whole(stats.text(true, None, None, &Allowance::default()));
+        assert!(later.starts_with("100 fps"), "{later}");
+    }
+
+    /// The lines of the view, then those of each module.
+    fn whole(text: super::stats::Text) -> String {
+        std::iter::once(text.view)
+            .chain(text.modules.into_iter().map(|(_, lines)| lines))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }

@@ -2,7 +2,7 @@
 //! the layers, recording their bundles and submitting; what the GPU spent on a frame, timed by its
 //! timestamps when the device has them, and on each layer's computing and drawing where it can time
 //! them inside encoders and passes; what the process takes in memory; and what each layer drew.
-//! Averaged over the last second, with the longest, as the view shows them over itself.
+//! Averaged over the last second, with the longest, as the panel of the statistics shows them.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -51,6 +51,14 @@ pub struct Sample {
     pub record: Duration,
     pub submit: Duration,
     pub layers: Vec<LayerTiming>,
+}
+
+/// The statistics as the panel shows them: the lines of the view, then those of each module, its
+/// layers together, in the order of their first layer.
+#[derive(Debug)]
+pub struct Text {
+    pub view: String,
+    pub modules: Vec<(String, String)>,
 }
 
 #[derive(Default)]
@@ -141,8 +149,8 @@ impl Stats {
         }
     }
 
-    /// The statistics as the view shows them, a line each: the frames, the interface thread, the
-    /// GPU, the memory of the process and of the allocator of the device, then each layer; `timed`
+    /// The statistics, a line each: the frames, the interface thread, the GPU, the memory of the
+    /// process and of the allocator of the device, then each layer under its module; `timed`
     /// says whether the GPU is timed, `memory` what the process takes, its working set and its
     /// private bytes, `allocator` what the allocator of the device holds, its bytes allocated, those
     /// reserved and its blocks.
@@ -152,7 +160,7 @@ impl Stats {
         memory: Option<(u64, u64)>,
         allocator: Option<[u64; 3]>,
         budget: &Allowance,
-    ) -> String {
+    ) -> Text {
         let samples = || self.samples.iter().map(|(_, sample)| sample);
         let (interval, longest) = spread(samples().filter_map(|s| s.interval.map(ms)));
         let mut lines = vec![format!(
@@ -203,10 +211,15 @@ impl Stats {
                 mb(budget.budget)
             ));
         }
+        let mut text = Text {
+            view: lines.join("\n"),
+            modules: Vec::new(),
+        };
         let Some((_, last)) = self.samples.back() else {
-            return lines.join("\n");
+            return text;
         };
         for layer in &last.layers {
+            let mut lines = Vec::new();
             let of_layer = || samples().filter_map(|sample| sample.layers.iter().find(|l| l.owner == layer.owner));
             let (interface, longest) = spread(of_layer().map(|l| ms(l.interface())));
             let (steering, longest_steering) = spread(of_layer().map(|l| ms(l.stats.steering)));
@@ -244,8 +257,16 @@ impl Stats {
                     "  GPU: computing {compute:.2} ms ({longest_compute:.2}), drawing {draw:.2} ({longest_draw:.2})"
                 ));
             }
+            let lines = lines.join("\n");
+            match text.modules.iter_mut().find(|(owner, _)| *owner == layer.owner) {
+                Some((_, of_module)) => {
+                    of_module.push('\n');
+                    of_module.push_str(&lines);
+                }
+                None => text.modules.push((layer.owner.clone(), lines)),
+            }
         }
-        lines.join("\n")
+        text
     }
 }
 

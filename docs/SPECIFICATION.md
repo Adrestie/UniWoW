@@ -8103,7 +8103,8 @@ Asked by the user while trying the integration: the statistics of the view (step
 part of it. They are no longer written over the view but in a panel of the module `viewport`,
 *Statistics*, in the bottom area, closed by default and opened from the menu *Window*, which can be
 torn off into a window of its own as any panel; the text the same, in the monospace font, scrolled
-both ways. The item *View > Statistics* and the setting `statistics` are gone: the panel open or
+both ways, the lines of the view first, then those of each module, its layers together, under an
+arrow that folds and unfolds them (asked by the user afterwards), unfolded at first. The item *View > Statistics* and the setting `statistics` are gone: the panel open or
 closed is kept with the layout. The report of the allocator is still made once a second, only while
 the panel is drawn.
 
@@ -8112,7 +8113,7 @@ the panel is drawn.
   view writing none of them, even with the setting of before. 3 changes made on purpose, all caught.
 - **To check by the user**: *Window > Statistics (viewport)* opens the panel beside the Log; nothing
   is written over the view; the panel torn off into its own window, the numbers moving as the view
-  draws.
+  draws; the arrow of a module folding and unfolding its lines.
 
 #### Tests
 
