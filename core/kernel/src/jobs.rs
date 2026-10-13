@@ -116,6 +116,9 @@ pub struct Pool {
     queue: Arc<Queue>,
     threads: usize,
     finished: Arc<Mutex<Vec<Finished>>>,
+    /// The jobs ended, taken from the workers in the order they ended, not yet handed back: still
+    /// listed as running until they are.
+    ended: VecDeque<Finished>,
     running: Vec<Running>,
     next_id: u64,
     /// Repaints the window when a job ends, so that its result is handed back at once.
@@ -174,6 +177,7 @@ impl Pool {
             queue,
             threads,
             finished: Arc::default(),
+            ended: VecDeque::new(),
             running: Vec::new(),
             next_id: 0,
             wake,
@@ -302,11 +306,35 @@ impl Pool {
         }
     }
 
-    /// The jobs that ended since the last call, removed from the running list.
+    /// The next job ended, in the order they ended, removed from the running list as it is handed
+    /// back; none when every job ended was.
+    pub fn next_finished(&mut self) -> Option<Finished> {
+        if self.ended.is_empty() {
+            let mut finished = self.finished.lock().unwrap_or_else(|e| e.into_inner());
+            self.ended.extend(finished.drain(..));
+        }
+        let next = self.ended.pop_front()?;
+        if let Some(at) = self.running.iter().position(|job| job.id == next.id) {
+            self.running.remove(at);
+        }
+        Some(next)
+    }
+
+    /// Whether jobs ended that are not handed back yet.
+    pub fn has_finished(&self) -> bool {
+        !self.ended.is_empty() || !self.finished.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+    }
+
+    /// How many jobs ended that are not handed back yet.
+    #[cfg(test)]
+    pub fn finished_count(&self) -> usize {
+        self.ended.len() + self.finished.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Every job ended not handed back yet, in the order they ended, removed from the running list.
+    #[cfg(test)]
     pub fn take_finished(&mut self) -> Vec<Finished> {
-        let finished = std::mem::take(&mut *self.finished.lock().unwrap_or_else(|e| e.into_inner()));
-        self.running.retain(|job| !finished.iter().any(|f| f.id == job.id));
-        finished
+        std::iter::from_fn(|| self.next_finished()).collect()
     }
 }
 
@@ -677,6 +705,30 @@ mod tests {
             matches!(&finished[..], [Finished { id: ended, outcome: JobOutcome::Panicked(_), .. }] if *ended == id)
         );
         assert!(pool.running().is_empty(), "it left the Jobs panel");
+    }
+
+    #[test]
+    fn the_jobs_ended_are_handed_back_one_by_one_in_the_order_they_ended_listed_until_then() {
+        // One worker: the jobs end in the order they were queued.
+        let mut pool = Pool::new(1, None, None);
+        let ids: Vec<_> = (0..5u32)
+            .map(|number| pool.spawn("test", "number", Box::new(move |_| Box::new(number)), editor()))
+            .collect();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pool.finished_count() < 5 {
+            assert!(Instant::now() < deadline, "the jobs never ended");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(pool.running().len(), 5, "listed until handed back");
+        let first = pool.next_finished().expect("one ended");
+        assert_eq!(first.id, ids[0]);
+        assert_eq!(first.outcome.take::<u32>(), Some(0));
+        assert_eq!(pool.running().len(), 4);
+        assert!(pool.has_finished());
+        let rest: Vec<_> = pool.take_finished().into_iter().map(|finished| finished.id).collect();
+        assert_eq!(rest, ids[1..]);
+        assert!(!pool.has_finished() && pool.running().is_empty());
+        assert!(pool.next_finished().is_none());
     }
 
     #[test]

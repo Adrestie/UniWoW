@@ -438,7 +438,7 @@ Who runs what, and how the threads reach each other:
  interface thread (T1): owns each module's state, the history and the open groups, the views of
  the interface objects, the pending commands and events (KernelHost)
    logic: collect events and failures -> apply commands -> serve requests for a time budget
-          -> ended jobs -> events -> closing
+          -> ended jobs for a time budget -> events -> closing
    ui:    panels, modules' windows (modal windows), menus, Undo and Redo
    |  jobs posted (mpsc, one queue per compiled module)
    v
@@ -6173,6 +6173,16 @@ section.
     uploads of a few KB to twice the budget while the frames come every millisecond, all passing;
     the journal counting the jobs held and their time; the setting declared, 32 MB by default, and
     the frame signal giving the budget again.
+- **The jobs handed back within a time a frame** (`kernel/src/shell/calls.rs`, `jobs.rs`): the jobs
+  ended are handed back to their modules one by one, in the order they ended, until 3 ms have
+  passed in the frame, one job at least; the others wait for the next frames, in their order, and
+  the next frame is asked for. While the window is minimised, 80 ms, as for the calls. A job ended
+  stays in the list of those running, which the Jobs panel and the journal of the frames count,
+  until it is handed back.
+  - **Tested**: the pool gives back the jobs ended one by one in the order they ended, each listed
+    as running until then; a module taking 10 ms to take each of six jobs back is given one at each
+    pass of the kernel (egui may make two of a frame), the others still listed, each once; one
+    taking them back at once is given twenty in a frame.
 
 **To measure by the user**: the flights of *The frames measured in flight, before any correction*
 (the terrain at 64 tiles, the buildings at 8, the doodads at 4, the models at a reach of 1,000; 300
@@ -6183,6 +6193,8 @@ of the frames (`UNIWOW_SLOW_FRAMES`), before this work and after it:
    bytes sent to the GPU in each, which should no longer pass the budget of the uploads by much; the
    new column of the jobs held by that budget, and whether the loads seem slower (the panels say
    how long the tiles within reach took to load). The same with the budget at 16 and at 64 MB.
+2. The part `kernel: jobs handed back` in the slow frames, which should stay near 3 ms, and the
+   jobs started not yet handed back, which may now stay higher for a few frames after a burst.
 
 #### Step 9.7, proposed: the light of the map
 

@@ -1792,6 +1792,80 @@ impl Module for Told {
     }
 }
 
+/// Starts `count` jobs at its start, each giving its number, and takes `took` to take each back,
+/// keeping the numbers in the order they come back; counts the passes of the kernel by its windows,
+/// drawn once a pass after the jobs are handed back (egui may make two passes of a frame).
+struct Slow {
+    count: u32,
+    took: Duration,
+    back: Arc<Mutex<Vec<u32>>>,
+    passes: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Module for Slow {
+    fn register(&mut self, _reg: &mut Registrar) {}
+
+    fn init(&mut self, ctx: &mut Context) {
+        for number in 0..self.count {
+            ctx.spawn("number", move |_| number);
+        }
+    }
+
+    fn on_job(&mut self, _job: uniwow_api::JobId, outcome: uniwow_api::JobOutcome, _ctx: &mut Context) {
+        std::thread::sleep(self.took);
+        lock(&self.back).push(outcome.take::<u32>().expect("a number"));
+    }
+
+    fn windows_ui(&mut self, _egui: &egui::Context, _ctx: &mut Context) {
+        self.passes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// A harness running a module of `Slow`, once its `count` jobs all ended; what it took back, and
+/// the passes of the kernel.
+type SlowHarness = (Harness, Arc<Mutex<Vec<u32>>>, Arc<std::sync::atomic::AtomicUsize>);
+
+fn slow(count: u32, took: Duration) -> SlowHarness {
+    let back = Arc::new(Mutex::new(Vec::new()));
+    let passes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let module = Slow {
+        count,
+        took,
+        back: back.clone(),
+        passes: passes.clone(),
+    };
+    let harness = Harness::new(vec![("slow", Box::new(module))]);
+    let started = Instant::now();
+    while harness.shell.host.pool.finished_count() < count as usize {
+        assert!(started.elapsed() < Duration::from_secs(10), "the jobs never ended");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    (harness, back, passes)
+}
+
+#[test]
+fn the_jobs_ended_are_handed_back_for_a_few_milliseconds_a_frame_one_at_least_the_rest_at_the_next() {
+    // Each taking longer than the time of a frame: one a pass of the kernel, the others still
+    // listed.
+    let (mut harness, back, passes) = slow(6, Duration::from_millis(10));
+    let mut frames = 0;
+    while lock(&back).len() < 6 {
+        harness.frame(RawInput::default());
+        frames += 1;
+        assert!(frames <= 12, "never all handed back");
+        let back = lock(&back).len();
+        assert_eq!(back, passes.load(std::sync::atomic::Ordering::Relaxed).min(6));
+        assert_eq!(harness.shell.host.pool.running().len(), 6 - back, "not yet handed back");
+    }
+    let mut numbers = lock(&back).clone();
+    numbers.sort_unstable();
+    assert_eq!(numbers, [0, 1, 2, 3, 4, 5], "each handed back once");
+    // Quick to take back: all in one frame.
+    let (mut harness, back, _) = slow(20, Duration::ZERO);
+    harness.frame(RawInput::default());
+    assert_eq!(lock(&back).len(), 20);
+}
+
 #[test]
 fn a_module_is_told_the_memory_of_the_gpu_when_it_registers() {
     let told = Arc::new(Mutex::new(None));
