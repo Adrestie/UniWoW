@@ -1,13 +1,18 @@
 //! The pool of worker threads that runs the jobs of the modules (rule T2), and the slices of
-//! their `parallel_for`: a worker takes a job, or the kernel's own work, before any slice.
+//! their `parallel_for`: a worker takes the slices left of a `parallel_for` before any job, since
+//! their caller waits for them, often with a deadline each frame, as the thread of the animations
+//! does; then the jobs, and the kernel's own work, the lowest priority first, those of one
+//! priority in the order they came. A job given a distance counts nearer as it waits
+//! (`YARD_EVERY_MS`), so that none waits for ever behind the nearer ones queued after it.
 
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::cmp::Ordering as Order;
+use std::collections::{BinaryHeap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use uniwow_api::parallel::{Helper, Workers};
-use uniwow_api::{Editor, JobContext, JobFn, JobId, JobOutcome, egui};
+use uniwow_api::{Editor, JobContext, JobFn, JobId, JobOutcome, Priority, egui};
 
 use crate::guard::{acting_as, current_module, guarded_as};
 use crate::router::{Bridge, Request};
@@ -44,21 +49,81 @@ pub struct Finished {
 /// A helper of slices, with the module that called `parallel_for`, on whose behalf it runs.
 type Helping = (Option<String>, Helper);
 
-/// What the workers take: the jobs and the kernel's own work first, then the helpers of the slices.
-#[derive(Default)]
+/// A job given a distance counts a yard nearer for each of these milliseconds it waits: 500 yards
+/// a second, about the speed of the fastest flights measured (300 to 600 yards a second), so that a
+/// tile queued far ahead of a camera flying to it comes about when the camera is over it, rather
+/// than after every job nearer the camera queued meanwhile, and a far job waits behind newer ones
+/// for a time bounded by its distance. The jobs at `Priority::FIRST` stay before them all.
+const YARD_EVERY_MS: u128 = 2;
+
+/// Where a job at `priority` queued at `at` from the start of the pool comes among those waiting,
+/// the lowest first: those at `Priority::FIRST` before all, then the others by their distance less
+/// what their wait is worth since the start of the pool, the same for all of them.
+fn rank(priority: Priority, at: Duration) -> (bool, u64) {
+    if priority == Priority::FIRST {
+        return (false, 0);
+    }
+    let aged = u64::try_from(at.as_millis() / YARD_EVERY_MS).unwrap_or(u64::MAX);
+    (true, u64::from(priority.0).saturating_add(aged))
+}
+
+/// A job or the kernel's work waiting, with its rank and its place in the order they came.
+struct Queued {
+    rank: (bool, u64),
+    order: u64,
+    task: Task,
+}
+
+impl PartialEq for Queued {
+    fn eq(&self, other: &Self) -> bool {
+        (self.rank, self.order) == (other.rank, other.order)
+    }
+}
+
+impl Eq for Queued {}
+
+impl PartialOrd for Queued {
+    fn partial_cmp(&self, other: &Self) -> Option<Order> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Queued {
+    /// The greatest is taken first from the heap: the lowest rank, then the first come.
+    fn cmp(&self, other: &Self) -> Order {
+        (other.rank, other.order).cmp(&(self.rank, self.order))
+    }
+}
+
+/// What the workers take: the helpers of the slices first, then the jobs and the kernel's own work
+/// by their rank.
 struct Waiting {
-    jobs: VecDeque<Task>,
+    /// When the pool started, from which the wait of the jobs is counted.
+    start: Instant,
+    jobs: BinaryHeap<Queued>,
+    /// Counts the jobs queued, for their order among those of one priority.
+    queued: u64,
     helpers: VecDeque<Helping>,
     /// Set when the pool is dropped: the workers end once nothing waits.
     closed: bool,
+}
+
+impl Default for Waiting {
+    fn default() -> Self {
+        Self {
+            start: Instant::now(),
+            jobs: BinaryHeap::new(),
+            queued: 0,
+            helpers: VecDeque::new(),
+            closed: false,
+        }
+    }
 }
 
 #[derive(Default)]
 struct Queue {
     waiting: Mutex<Waiting>,
     ready: Condvar,
-    /// The jobs waiting, read without the lock by a worker between two slices.
-    jobs: AtomicUsize,
 }
 
 impl Queue {
@@ -66,14 +131,16 @@ impl Queue {
         self.waiting.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Queues a job or the kernel's work; false once the pool is gone.
-    fn push_job(&self, task: Task) -> bool {
+    /// Queues a job or the kernel's work at `priority`; false once the pool is gone.
+    fn push_job(&self, task: Task, priority: Priority) -> bool {
         let mut waiting = self.lock();
         if waiting.closed {
             return false;
         }
-        waiting.jobs.push_back(task);
-        self.jobs.fetch_add(1, Ordering::Release);
+        let order = waiting.queued;
+        waiting.queued += 1;
+        let rank = rank(priority, waiting.start.elapsed());
+        waiting.jobs.push(Queued { rank, order, task });
         self.ready.notify_one();
         true
     }
@@ -93,16 +160,16 @@ impl Queue {
         self.ready.notify_all();
     }
 
-    /// What a worker runs: a job, else a helper; none once the pool is gone and nothing waits.
+    /// What a worker runs: a helper of slices, else the first job by its priority; none once the
+    /// pool is gone and nothing waits.
     fn take(&self) -> Option<Result<Task, Helping>> {
         let mut waiting = self.lock();
         loop {
-            if let Some(task) = waiting.jobs.pop_front() {
-                self.jobs.fetch_sub(1, Ordering::Release);
-                return Some(Ok(task));
-            }
             if let Some(helper) = waiting.helpers.pop_front() {
                 return Some(Err(helper));
+            }
+            if let Some(queued) = waiting.jobs.pop() {
+                return Some(Ok(queued.task));
             }
             if waiting.closed {
                 return None;
@@ -116,6 +183,9 @@ pub struct Pool {
     queue: Arc<Queue>,
     threads: usize,
     finished: Arc<Mutex<Vec<Finished>>>,
+    /// The jobs ended, taken from the workers in the order they ended, not yet handed back: still
+    /// listed as running until they are.
+    ended: VecDeque<Finished>,
     running: Vec<Running>,
     next_id: u64,
     /// Repaints the window when a job ends, so that its result is handed back at once.
@@ -154,14 +224,9 @@ impl Pool {
                     while let Some(work) = queue.take() {
                         match work {
                             Ok(task) => task(),
-                            // Between two slices, a job waiting takes the worker back; the helper
-                            // is queued again for the slices left, taken after that job.
+                            // The slices taken until none is left: their caller waits for them.
                             Err((owner, helper)) => {
-                                let left =
-                                    acting_as(owner.as_deref(), || helper(&|| queue.jobs.load(Ordering::Acquire) > 0));
-                                if left {
-                                    queue.push_helper((owner, helper));
-                                }
+                                acting_as(owner.as_deref(), || helper(&|| false));
                             }
                         }
                     }
@@ -174,6 +239,7 @@ impl Pool {
             queue,
             threads,
             finished: Arc::default(),
+            ended: VecDeque::new(),
             running: Vec::new(),
             next_id: 0,
             wake,
@@ -190,7 +256,7 @@ impl Pool {
     pub fn background(&self) -> uniwow_api::ui::Background {
         let queue = self.queue.clone();
         Arc::new(move |task| {
-            if !queue.push_job(task) {
+            if !queue.push_job(task, Priority::FIRST) {
                 uniwow_api::log::error!("the work of the objects could not be queued: no worker thread");
             }
         })
@@ -209,18 +275,31 @@ impl Pool {
         &self.running
     }
 
-    /// Runs a job on the pool, for computations.
+    /// Runs a job on the pool, for computations, before the jobs given a distance.
     pub fn spawn(&mut self, owner: &str, label: &str, job: JobFn, editor: Editor) -> JobId {
-        self.start(owner, label, job, editor, false)
+        self.start(owner, label, job, editor, Some(Priority::FIRST))
+    }
+
+    /// Runs a job on the pool in the order of `priority` among those waiting.
+    pub fn spawn_with_priority(
+        &mut self,
+        owner: &str,
+        label: &str,
+        priority: Priority,
+        job: JobFn,
+        editor: Editor,
+    ) -> JobId {
+        self.start(owner, label, job, editor, Some(priority))
     }
 
     /// Runs a job on a thread of its own, for work that waits, such as a script: waiting there
     /// never holds a thread of the pool (T2, T6).
     pub fn spawn_thread(&mut self, owner: &str, label: &str, job: JobFn, editor: Editor) -> JobId {
-        self.start(owner, label, job, editor, true)
+        self.start(owner, label, job, editor, None)
     }
 
-    fn start(&mut self, owner: &str, label: &str, job: JobFn, editor: Editor, own_thread: bool) -> JobId {
+    /// Starts a job on the pool at `priority`, or on a thread of its own without one.
+    fn start(&mut self, owner: &str, label: &str, job: JobFn, editor: Editor, pooled: Option<Priority>) -> JobId {
         self.next_id += 1;
         let id = JobId(self.next_id);
         let progress = Arc::new(AtomicU32::new(0f32.to_bits()));
@@ -264,14 +343,15 @@ impl Pool {
                 wake.request_repaint();
             }
         });
-        let not_started = if own_thread {
-            std::thread::Builder::new()
+        let not_started = match pooled {
+            None => std::thread::Builder::new()
                 .name(thread_name)
                 .spawn(task)
                 .err()
-                .map(|error| format!("its thread could not start: {error}"))
-        } else {
-            (!self.queue.push_job(task)).then(|| "it could not be queued: no worker thread".to_owned())
+                .map(|error| format!("its thread could not start: {error}")),
+            Some(priority) => {
+                (!self.queue.push_job(task, priority)).then(|| "it could not be queued: no worker thread".to_owned())
+            }
         };
         // A job that never runs ends at once, as failed, so that it leaves the Jobs panel.
         if let Some(why) = not_started {
@@ -302,11 +382,35 @@ impl Pool {
         }
     }
 
-    /// The jobs that ended since the last call, removed from the running list.
+    /// The next job ended, in the order they ended, removed from the running list as it is handed
+    /// back; none when every job ended was.
+    pub fn next_finished(&mut self) -> Option<Finished> {
+        if self.ended.is_empty() {
+            let mut finished = self.finished.lock().unwrap_or_else(|e| e.into_inner());
+            self.ended.extend(finished.drain(..));
+        }
+        let next = self.ended.pop_front()?;
+        if let Some(at) = self.running.iter().position(|job| job.id == next.id) {
+            self.running.remove(at);
+        }
+        Some(next)
+    }
+
+    /// Whether jobs ended that are not handed back yet.
+    pub fn has_finished(&self) -> bool {
+        !self.ended.is_empty() || !self.finished.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+    }
+
+    /// How many jobs ended that are not handed back yet.
+    #[cfg(test)]
+    pub fn finished_count(&self) -> usize {
+        self.ended.len() + self.finished.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Every job ended not handed back yet, in the order they ended, removed from the running list.
+    #[cfg(test)]
     pub fn take_finished(&mut self) -> Vec<Finished> {
-        let finished = std::mem::take(&mut *self.finished.lock().unwrap_or_else(|e| e.into_inner()));
-        self.running.retain(|job| !finished.iter().any(|f| f.id == job.id));
-        finished
+        std::iter::from_fn(|| self.next_finished()).collect()
     }
 }
 
@@ -323,9 +427,9 @@ mod tests {
     use std::sync::{Arc, Barrier, Mutex};
     use std::time::{Duration, Instant};
 
-    use uniwow_api::{CommandInfo, Editor, EditorBackend, JobOutcome, serde_json::Value};
+    use uniwow_api::{CommandInfo, Editor, EditorBackend, JobOutcome, Priority, serde_json::Value};
 
-    use super::{Finished, Pool};
+    use super::{Finished, Pool, rank};
 
     struct NoEditor;
 
@@ -577,66 +681,127 @@ mod tests {
     }
 
     #[test]
-    fn a_job_started_while_every_thread_runs_slices_waits_for_one_slice() {
+    fn the_slices_left_are_taken_before_a_job_started_meanwhile() {
         let mut pool = Pool::new(2, None, None);
         let workers = pool.workers();
-        let slices = pool.spawn(
-            "terrain",
+        let done = Arc::new(AtomicUsize::new(0));
+        let counted = done.clone();
+        pool.spawn(
+            "models",
             "slices",
             Box::new(move |_| {
-                workers.parallel_for(100, 1, |_| std::thread::sleep(Duration::from_millis(10)));
-                Box::new(Instant::now())
+                workers.parallel_for(100, 1, |_| {
+                    std::thread::sleep(Duration::from_millis(5));
+                    counted.fetch_add(1, Ordering::SeqCst);
+                });
+                Box::new(())
             }),
             editor(),
         );
         std::thread::sleep(Duration::from_millis(50));
-        let started = Instant::now();
-        let job = pool.spawn("notes", "add", Box::new(|_| Box::new(Instant::now())), editor());
+        let seen = done.clone();
+        let job = pool.spawn(
+            "terrain",
+            "tile",
+            Box::new(move |_| Box::new(seen.load(Ordering::SeqCst))),
+            editor(),
+        );
         let finished = wait_for(&mut pool, 2);
-        let ended = |id| {
-            finished
-                .iter()
-                .find(|f| f.id == id)
-                .and_then(|f| match &f.outcome {
-                    JobOutcome::Done(value) => value.downcast_ref::<Instant>().copied(),
-                    _ => None,
-                })
-                .expect("ended")
-        };
-        let waited = ended(job) - started;
-        assert!(waited < Duration::from_millis(100), "waited {waited:?}");
-        assert!(ended(job) < ended(slices), "the job ended before the slices");
+        let outcome = finished.into_iter().find(|f| f.id == job).expect("ended").outcome;
+        // Every slice taken first: at most the one its caller still runs left.
+        let slices = outcome.take::<usize>().expect("its value");
+        assert!(slices >= 99, "the job ran after {slices} slices of 100");
     }
 
     #[test]
-    fn a_worker_called_away_by_a_job_comes_back_to_the_slices_left() {
+    fn a_worker_helping_with_slices_takes_a_job_only_once_none_is_left() {
         let pool = Pool::new(1, None, None);
         let workers = pool.workers();
         let background = pool.background();
         let caller = std::thread::current().id();
-        let called = AtomicBool::new(false);
-        let done = Arc::new(AtomicBool::new(false));
-        let after = AtomicUsize::new(0);
+        let queued = AtomicBool::new(false);
+        let taken = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(Mutex::new(None));
         workers.parallel_for(60, 1, |_| {
-            if std::thread::current().id() == caller {
-                // The caller waits for the job, so that slices are left for the worker after it.
-                let started = Instant::now();
-                while !done.load(Ordering::Acquire) && started.elapsed() < Duration::from_secs(5) {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-            } else if !called.swap(true, Ordering::AcqRel) {
-                let done = done.clone();
-                background(Box::new(move || done.store(true, Ordering::Release)));
-            } else if done.load(Ordering::Acquire) {
-                after.fetch_add(1, Ordering::Relaxed);
+            taken.fetch_add(1, Ordering::SeqCst);
+            if std::thread::current().id() != caller && !queued.swap(true, Ordering::AcqRel) {
+                let (taken, seen) = (taken.clone(), seen.clone());
+                background(Box::new(move || {
+                    *seen.lock().unwrap() = Some(taken.load(Ordering::SeqCst))
+                }));
             }
             std::thread::sleep(Duration::from_millis(1));
         });
-        assert!(done.load(Ordering::Acquire), "the job ran");
-        assert!(
-            after.load(Ordering::Relaxed) > 0,
-            "the worker took slices again after the job"
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while seen.lock().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "the job never ran");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(queued.load(Ordering::Acquire), "the worker helped");
+        assert_eq!(*seen.lock().unwrap(), Some(60), "the job after every slice");
+    }
+
+    #[test]
+    fn the_jobs_waiting_run_the_lowest_priority_first_those_of_one_priority_in_their_order() {
+        let mut pool = Pool::new(1, None, None);
+        // The worker held, so that the others wait.
+        let gate = Arc::new(Barrier::new(2));
+        let held = gate.clone();
+        pool.spawn(
+            "test",
+            "held",
+            Box::new(move |_| {
+                held.wait();
+                Box::new(())
+            }),
+            editor(),
         );
+        let order = Arc::new(Mutex::new(Vec::new()));
+        // Far enough apart that the time between two queued, worth a yard every 2 ms, cannot change
+        // their order.
+        let priorities = [
+            ("far", Priority(30_000)),
+            ("near", Priority(10_000)),
+            ("first", Priority::FIRST),
+            ("near again", Priority(10_000)),
+            ("middle", Priority(20_000)),
+        ];
+        for (name, priority) in priorities {
+            let order = order.clone();
+            pool.spawn_with_priority(
+                "test",
+                name,
+                priority,
+                Box::new(move |_| {
+                    order.lock().unwrap().push(name);
+                    Box::new(())
+                }),
+                editor(),
+            );
+        }
+        gate.wait();
+        wait_for(&mut pool, 6);
+        assert_eq!(*order.lock().unwrap(), ["first", "near", "near again", "middle", "far"]);
+    }
+
+    #[test]
+    fn a_job_given_a_distance_counts_nearer_as_it_waits_never_before_those_tied_to_no_place() {
+        let at = Duration::from_millis;
+        // A tile queued 2,000 yards ahead, then 3 s later one 600 yards from the camera flying to
+        // the first: the first, now about as near, comes first.
+        assert!(rank(Priority::distance(2_000.0), at(0)) < rank(Priority::distance(600.0), at(3_000)));
+        // Queued at once, the nearer first.
+        assert!(rank(Priority::distance(600.0), at(10)) < rank(Priority::distance(2_000.0), at(10)));
+        // A yard every 2 ms: 1,000 yards farther and 2 s sooner, tied.
+        assert_eq!(
+            rank(Priority::distance(1_999.0), at(0)),
+            rank(Priority::distance(999.0), at(2_000))
+        );
+        // Whatever the wait, after those tied to no place, which keep the order they came in.
+        assert!(rank(Priority::FIRST, at(1_000_000)) < rank(Priority::distance(0.0), at(0)));
+        assert_eq!(rank(Priority::FIRST, at(0)), rank(Priority::FIRST, at(5_000)));
+        // Saturating, never wrapping round.
+        assert_eq!(rank(Priority(u32::MAX), Duration::MAX).1, u64::MAX);
     }
 
     #[test]
@@ -677,6 +842,30 @@ mod tests {
             matches!(&finished[..], [Finished { id: ended, outcome: JobOutcome::Panicked(_), .. }] if *ended == id)
         );
         assert!(pool.running().is_empty(), "it left the Jobs panel");
+    }
+
+    #[test]
+    fn the_jobs_ended_are_handed_back_one_by_one_in_the_order_they_ended_listed_until_then() {
+        // One worker: the jobs end in the order they were queued.
+        let mut pool = Pool::new(1, None, None);
+        let ids: Vec<_> = (0..5u32)
+            .map(|number| pool.spawn("test", "number", Box::new(move |_| Box::new(number)), editor()))
+            .collect();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pool.finished_count() < 5 {
+            assert!(Instant::now() < deadline, "the jobs never ended");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(pool.running().len(), 5, "listed until handed back");
+        let first = pool.next_finished().expect("one ended");
+        assert_eq!(first.id, ids[0]);
+        assert_eq!(first.outcome.take::<u32>(), Some(0));
+        assert_eq!(pool.running().len(), 4);
+        assert!(pool.has_finished());
+        let rest: Vec<_> = pool.take_finished().into_iter().map(|finished| finished.id).collect();
+        assert_eq!(rest, ids[1..]);
+        assert!(!pool.has_finished() && pool.running().is_empty());
+        assert!(pool.next_finished().is_none());
     }
 
     #[test]

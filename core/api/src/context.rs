@@ -2,7 +2,8 @@ use std::any::Any;
 
 use crate::ui::SharedUi;
 use crate::{
-    CallId, Command, Editor, JobContext, JobFn, JobId, PropertyInfo, PropertyValue, ServiceKey, egui, egui_wgpu,
+    CallId, Command, Editor, JobContext, JobFn, JobId, Priority, PropertyInfo, PropertyValue, ServiceKey, egui,
+    egui_wgpu,
 };
 
 /// What the kernel offers to modules. Implemented by the kernel only.
@@ -22,6 +23,12 @@ pub trait Host {
     fn set_setting(&mut self, module: &str, key: &str, value: serde_json::Value);
     fn report_failure(&mut self, reporter: &str, culprit: &str, message: &str);
     fn spawn(&mut self, owner: &str, label: &str, job: JobFn) -> JobId;
+    /// A job of the pool run in the order of `priority` among those waiting; by default in the
+    /// order of `spawn`.
+    fn spawn_with_priority(&mut self, owner: &str, label: &str, priority: Priority, job: JobFn) -> JobId {
+        let _ = priority;
+        self.spawn(owner, label, job)
+    }
     fn spawn_thread(&mut self, owner: &str, label: &str, job: JobFn) -> JobId;
     fn cancel(&mut self, owner: &str, job: JobId);
     fn call(&mut self, caller: &str, name: &str, arguments: serde_json::Value) -> CallId;
@@ -152,11 +159,29 @@ impl<'a> Context<'a> {
         self.host.report_failure(self.module, culprit, message);
     }
 
-    /// Runs `job` on a worker thread (rule T2). Its value, cancellation or panic comes back to
-    /// this module on the interface thread through `Module::on_job`.
+    /// Runs `job` on a worker thread (rule T2), before the jobs given a distance
+    /// (`Priority::FIRST`). Its value, cancellation or panic comes back to this module on the
+    /// interface thread through `Module::on_job`.
     pub fn spawn<T: Any + Send>(&mut self, label: &str, job: impl FnOnce(&JobContext) -> T + Send + 'static) -> JobId {
         self.host
             .spawn(self.module, label, Box::new(move |context| Box::new(job(context))))
+    }
+
+    /// Like `spawn`, run in the order of `priority` among the jobs waiting, whatever their module:
+    /// for a job reading or putting on the GPU what lies somewhere, `Priority::distance` of it
+    /// from the camera, so that the nearest comes first.
+    pub fn spawn_with_priority<T: Any + Send>(
+        &mut self,
+        label: &str,
+        priority: Priority,
+        job: impl FnOnce(&JobContext) -> T + Send + 'static,
+    ) -> JobId {
+        self.host.spawn_with_priority(
+            self.module,
+            label,
+            priority,
+            Box::new(move |context| Box::new(job(context))),
+        )
     }
 
     /// Like `spawn`, on a thread of its own instead of the pool: for work that waits, such as a

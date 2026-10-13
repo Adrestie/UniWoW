@@ -13,26 +13,38 @@ impl Shell {
         self.host.reported.extend(failures);
     }
 
-    /// Hands the jobs that ended back to their modules.
-    pub(super) fn deliver_jobs(&mut self) {
-        for finished in self.host.pool.take_finished() {
-            let Some(index) = self.running_index(&finished.owner) else {
-                log::warn!(
-                    "job '{}' of '{}' ended after its module stopped",
-                    finished.label,
-                    finished.owner
-                );
-                continue;
-            };
-            let (id, outcome) = (finished.id, finished.outcome);
-            let start = Instant::now();
-            let done = call_module(&mut self.slots[index], &mut self.host, |f, ctx| {
-                f.on_job(id, outcome, ctx)
-            });
-            uniwow_api::journal::spent(&format!("jobs handed back to {}", finished.owner), start.elapsed());
-            if let Err(message) = done {
-                self.fail(index, format!("job '{}': {message}", finished.label));
+    /// Hands the jobs that ended back to their modules, in the order they ended, for at most
+    /// `budget` and one at least: those left are handed back at the next frames, in their order.
+    /// Returns whether some are left, the next frame then being needed.
+    pub(super) fn deliver_jobs(&mut self, budget: Duration) -> bool {
+        let started = Instant::now();
+        while let Some(finished) = self.host.pool.next_finished() {
+            self.deliver_job(finished);
+            if started.elapsed() >= budget {
+                return self.host.pool.has_finished();
             }
+        }
+        false
+    }
+
+    /// Hands the job `finished` back to its module.
+    fn deliver_job(&mut self, finished: Finished) {
+        let Some(index) = self.running_index(&finished.owner) else {
+            log::warn!(
+                "job '{}' of '{}' ended after its module stopped",
+                finished.label,
+                finished.owner
+            );
+            return;
+        };
+        let (id, outcome) = (finished.id, finished.outcome);
+        let start = Instant::now();
+        let done = call_module(&mut self.slots[index], &mut self.host, |f, ctx| {
+            f.on_job(id, outcome, ctx)
+        });
+        uniwow_api::journal::spent(&format!("jobs handed back to {}", finished.owner), start.elapsed());
+        if let Err(message) = done {
+            self.fail(index, format!("job '{}': {message}", finished.label));
         }
     }
 

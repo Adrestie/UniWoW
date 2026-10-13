@@ -1,8 +1,8 @@
 //! Fork-join on the kernel's pool (rule T2): `parallel_for` splits work into slices that the
 //! workers of the pool share with the calling thread, which works on its own slices while it
-//! waits, never on other jobs. The pool runs a job before any slice, and a worker helping with
-//! slices goes back to the jobs between two slices, so that a job of another module waits for at
-//! most one slice; once the job is done, it comes back to the slices left.
+//! waits, never on other jobs. The pool takes the slices left before any job, since their caller
+//! waits for them, often with a deadline each frame, as the thread of the animations does; a
+//! worker helping with slices takes them until none is left, then goes back to the jobs.
 
 use std::any::Any;
 use std::ops::Range;
@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 /// A helper of a `parallel_for`, run by a worker of the pool: it takes slices until none is left,
-/// or until its argument says that a job waits for the worker. Returns whether it left slices to
-/// take: the pool then queues it again, to come back once the job is done.
+/// or until its argument says that the worker is wanted elsewhere (the kernel's pool never says
+/// so). Returns whether it left slices to take.
 pub type Helper = Arc<dyn Fn(&dyn Fn() -> bool) -> bool + Send + Sync>;
 
 /// The workers of the pool that help with the slices: how many, and how to queue a helper.

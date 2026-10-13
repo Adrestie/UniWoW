@@ -418,7 +418,7 @@ Threads:
 | Id | Rule |
 |---|---|
 | T1 | The interface thread draws, applies the undoable commands and owns the state of each module. It never waits for slow work. |
-| T2 | The kernel keeps a pool of worker threads, one per processor core, for computations, below the normal priority, so that the interface thread is never kept waiting for a core while every worker computes. `Context::spawn` runs a job there, with progress and cancel; its result comes back to the module on the interface thread. Work that waits, such as a script, runs with `Context::spawn_thread` on a thread of its own, so that waiting never holds a thread of the pool; it is otherwise a job like the others. A job of the pool never waits without a time limit, for instance in `next_event` without a timeout; waiting in `parallel_for` for its slices, which the workers of the pool share with it, is not waiting without a limit. A Jobs panel lists the jobs running. |
+| T2 | The kernel keeps a pool of worker threads, one per processor core, for computations, below the normal priority, so that the interface thread is never kept waiting for a core while every worker computes. `Context::spawn` runs a job there, with progress and cancel; its result comes back to the module on the interface thread. The jobs waiting run the lowest priority first, whatever their module: `Context::spawn_with_priority` gives a job reading what lies somewhere its distance from the camera (`Priority::distance`), so that the nearest is loaded first; `Context::spawn` gives the first (`Priority::FIRST`), for the short jobs tied to no place. Work that waits, such as a script, runs with `Context::spawn_thread` on a thread of its own, so that waiting never holds a thread of the pool; it is otherwise a job like the others. A job of the pool never waits without a time limit, for instance in `next_event` without a timeout; waiting in `parallel_for` for its slices, which the workers of the pool share with it, is not waiting without a limit. A Jobs panel lists the jobs running. |
 | T3 | Service interfaces are shared between threads (`Send + Sync`, held in an `Arc`), so that jobs, scripts and compiled modules call them directly. An interface tied to the interface thread says so explicitly. |
 | T4 | Each named command declares where it runs: on the interface thread when it changes a module's state (through an undoable command), or on the calling thread when it only reads or synchronises itself. The second kind answers at once, without waiting for a frame; called from the interface thread, a compiled module's command runs on the module's own thread and answers later. |
 | T5 | The GPU device and queue can be used from any thread: jobs create and upload buffers and textures; only drawing happens on the interface thread. |
@@ -438,7 +438,7 @@ Who runs what, and how the threads reach each other:
  interface thread (T1): owns each module's state, the history and the open groups, the views of
  the interface objects, the pending commands and events (KernelHost)
    logic: collect events and failures -> apply commands -> serve requests for a time budget
-          -> ended jobs -> events -> closing
+          -> ended jobs for a time budget -> events -> closing
    ui:    panels, modules' windows (modal windows), menus, Undo and Redo
    |  jobs posted (mpsc, one queue per compiled module)
    v
@@ -449,7 +449,7 @@ Who runs what, and how the threads reach each other:
 | Thread | Owns | Runs |
 |---|---|---|
 | Interface | Every module's state, the history and the open groups, the views of the interface objects, the kernel's state | The `Module` methods of every module, the undoable commands, Undo and Redo, the requests of the queue, the drawing |
-| Worker of the pool | Nothing | Jobs of `Context::spawn` (T2); the sorts of large tables of the interface objects; the slices of `parallel_for`, after any job waiting |
+| Worker of the pool | Nothing | The slices of `parallel_for`, before any job, their caller waiting for them; jobs of `Context::spawn` (T2) by their priority; the sorts of large tables of the interface objects |
 | Thread of its own | Nothing | Scripts and jobs that wait (`Context::spawn_thread`), among them the threads of modules waiting for the frame signal of the viewport |
 | Thread of a compiled module | The module's data, by its own rules | Its slots, paintings and `apply_change`, and its commands called from the interface thread |
 | Any thread | — | Commands running on the caller (T4), the reading and writing of animatable properties, the C functions (T7) |
@@ -462,7 +462,7 @@ Shared state and locks:
 | Events and failures from other threads | Lock of the bridge | Pushed by any thread, taken by the interface thread at each frame |
 | Subscriptions | Lock of the bridge, then one queue per subscription | Delivered by the interface thread, read by the subscriber's thread |
 | Interface objects of a compiled module | One lock per module | The interface thread while it draws them, any thread in the C functions. Never held while the code of the module owning them runs: slots, paintings and replies are called once it is released. The services drawing curve views, dopesheets and property grids, code of other modules, run while it is held: they touch no module's objects, and the properties they show are read before it is taken. In C++ and C#, the lock of the classes' connections is taken before it, never after |
-| Queues of the pool: the jobs and the kernel's work, then the slices | One lock | Released before a job or a slice runs; the count of jobs waiting is read without it between two slices |
+| Queues of the pool: the slices, then the jobs and the kernel's work by their priority | One lock | Released before a job or a slice runs |
 
 No lock is held while the kernel calls a module.
 
@@ -6137,6 +6137,317 @@ covers a whole chunk under another, the two were added.
   Reviewed by another instance: nothing serious; one middling point taken, the model said to hold
   what the tile stores where it holds shares; light points taken: a name no longer hiding the
   function, the shares of texels each by itself, the layers without 0x100 counted in the client.
+
+#### The optimizations set aside, as built
+
+Asked by the user after the review of the frames measured in flight (*The frames measured in
+flight, before any correction*): the interface thread past 16.7 ms while flying fast in Northrend,
+and now and then a frame of 190 to 350 ms while the jobs sent 90 to 200 MB to the GPU at once.
+Built where neither the client nor a GPU of its own was at hand: the tests of the GPU ran on a
+software adapter, and nothing was measured in the editor; what the user is to measure closes the
+section.
+
+- **The budget of the uploads of a frame** (`core/api/src/uploads.rs`): a job passes it with the
+  bytes it is about to send, before it takes any lock, and waits while the frame has sent its
+  budget: 32 MB by default, the setting *Uploads of the jobs a frame (MB)* of the category *View*,
+  from 4 to 1,024. The view gives it again at each frame signal, what is left never more than one
+  frame's. An upload larger than the whole budget passes once the budget is whole, the frames
+  after it paying for it, and the jobs pass in the order they came, so that none waits for ever.
+  The interface thread is never held back nor counted. Until the view gives its first frame signal
+  nothing is held back, so that the tests of the modules run as before; once the view stops
+  drawing, the budget is given again every 100 ms, so that a job never waits without a limit (T2).
+  - Passed by: a range put in an arena, and the copy of an arena grown, the lock of its holes let
+    go meanwhile, since the interface thread takes it to give a range back; a texture placed in an
+    array, and the copy of an array grown, before the lock of the arrays; the tiles and the horizon
+    of the terrain; the buffers and the textures of the looks of their own of `models`, and the
+    tables of its choice. Not passed: what a frame needs at once, the per-frame tables of the
+    layers, the bones the thread of the animations writes, and a range of an arena written again
+    in place, as the instances an owner moves; nor the instances of the owners of `models`, an
+    arena not held back (`Arena::not_held_back`): they are few, and the jobs of the doodads put
+    them under the lock of their module, which the interface thread takes when the map changes. A
+    job must never wait for the budget holding a lock the interface thread waits for: the budget is
+    given again only once that thread draws its frame, the time apart. For the same reason the
+    panel of the buildings no longer waits for the lock of the doodads placed, the count of the
+    frame before shown while a job holds it. A range an arena cannot hold, even grown as large as
+    the device takes, is refused before the copy of its growth passes the budget: refused items
+    are tried again at each move of the camera, and each would otherwise hold back the uploads of
+    every module by the bytes of a whole arena never copied (found by the review of the branch).
+  - The journal of the frames says, in a column of its own, how many jobs the budget held back in
+    a frame and how long they waited in all.
+  - **Tested**: nothing held back before the first frame, then the budget of each frame given
+    again, never more than one frame's; a job past the budget waiting for the next frame; an upload
+    larger than the budget passing once it is whole, three frames paying for it; a small job not
+    passing before a larger one that came first; the interface thread neither held back nor
+    counted; without a frame signal, the budget given again by the time; eight threads passing 320
+    uploads of a few KB to twice the budget while the frames come every millisecond, all passing;
+    the journal counting the jobs held and their time; the setting declared, 32 MB by default, and
+    the frame signal giving the budget again.
+- **The jobs handed back within a time a frame** (`kernel/src/shell/calls.rs`, `jobs.rs`): the jobs
+  ended are handed back to their modules one by one, in the order they ended, until 3 ms have
+  passed in the frame, one job at least; the others wait for the next frames, in their order, and
+  the next frame is asked for. While the window is minimised, 80 ms, as for the calls. A job ended
+  stays in the list of those running, which the Jobs panel and the journal of the frames count,
+  until it is handed back.
+  - **Tested**: the pool gives back the jobs ended one by one in the order they ended, each listed
+    as running until then; a module taking 10 ms to take each of six jobs back is given one at each
+    pass of the kernel (egui may make two of a frame), the others still listed, each once; one
+    taking them back at once is given twenty in a frame.
+- **The tiles of the terrain by blocks, each a bundle kept** (`terrain/src/layer.rs`): the bundle of
+  the terrain was recorded again whole once the tiles in sight or their levels changed, that is at
+  nearly every frame of a flight (3.9 ms of the interface thread in a slow frame). The layer now
+  draws in the pass: the tiles in sight are gathered by blocks of 4 × 4 tiles of the map, each block
+  a render bundle of its own, kept from a frame to the next while the tiles of the block in sight,
+  their levels and the generation of the arrays of textures stay the same, and recorded again alone,
+  in `prepare`, once one of them changes; a tile loaded again is another, told by the place of its
+  resources. A block out of sight recorded with arrays of textures before the current ones is let
+  go, so that its bundle keeps no array grown or purged on the GPU (found by the review of the
+  branch). The pass runs the bundles of the blocks in sight, then draws the horizon, and the sky in
+  `Beyond`, as before. A block holding a tile the scene no longer has is let go with it, in sight or
+  not, so that no bundle keeps the resources of a tile released. The statistics say the blocks in
+  sight and those recorded again at the frame.
+  - **Why blocks rather than a bundle a tile and a level**, as proposed: a probe of wgpu-core 30
+    alone, on its backend that draws nothing (`noop`), on the Linux machine this was built on and
+    not on the user's, drawing 500 tiles as the terrain does (a pipeline, the camera, twelve arrays,
+    then a bind group, two buffers and a draw a tile) into a pass, all of a frame on the CPU
+    counted, its submission included; three runs, in ms a frame: one bundle recorded again at each
+    frame 0.91 to 1.04, one bundle kept 0.41 to 0.43; a bundle a tile, kept, 0.79 to 0.85; drawn in
+    the pass at each frame 0.62 to 0.74; bundles of 16 tiles kept 0.43 to 0.48, a tenth of them
+    recorded again at each frame 0.51 to 0.62. Running a bundle costs wgpu-core about as much as
+    validating its commands once more: each binds its pipeline and groups again and merges their
+    resources (the twelve arrays) into the pass, so that a bundle a tile saves little over the
+    bundle recorded at each frame (at 1,000 tiles it cost more), while bundles of a few tiles kept
+    cost nearly what one kept costs. A draw of every tile at once (`multi_draw_indexed_indirect`)
+    would need the textures of blending of every tile in arrays, 256 layers of 64 × 64 for a full
+    tile where an array takes 2,048 at most on Direct3D 12: not done.
+  - **Tested** on the software adapter: a block recorded once and drawn, kept at the next frame at
+    the same level, recorded again farther at a coarser level, again once its tile is loaded again;
+    a tile of another block in sight recording that block alone, both drawn, both kept at the next
+    frame; both recorded again once the arrays change; the block of a tile let go dropped; a block
+    out of sight kept, then let go once a tile it holds is released, or once the arrays change. The
+    tests of the drawing of the terrain (the textures, the horizon, the sky, the fog, the light)
+    draw it in the pass now, as the view does. 7 changes made on purpose, 6 caught (every block
+    recorded at each frame, the levels left out, the arrays left out, a block kept while one of its
+    tiles is, one block for the whole map, a bundle not run); the seventh, the tiles told by their
+    place in the map rather than by their resources, is covered by the blocks let go with a tile the
+    scene no longer has, a tile loaded again changing the scene.
+
+- **The jobs by their priority** (`core/api/src/job.rs`, `kernel/src/jobs.rs`): the queue of the
+  pool kept the jobs in the order they came, so that a burst of one module, fifteen files of
+  buildings, waited before the tile of terrain under the camera. A job has a priority now, the
+  lowest run first, those of one priority in the order they came (a heap):
+  `Context::spawn_with_priority(label, priority, job)`. `Context::spawn` gives `Priority::FIRST`,
+  before every job given a distance: the jobs tied to no place (a pipeline built, what was let go
+  freed, a WDT read, the distances of the models walked, the tables of their choice) are short and
+  few, and a frame often waits for them. `Priority::distance(yards)`, for what lies somewhere, by
+  whole yards from the camera, after `FIRST`. Given by the loads of the terrain (the nearest point
+  of the tile, none under the camera), of the doodads and of the liquids (their tiles, and the
+  liquids placed by the nearest of their vertices), of the buildings (their tiles, a file by its
+  nearest building, the doodads of a building by its ground), and by the looks of `models` (their
+  nearest instance). A job keeps the priority it was queued with while the camera moves; the
+  kernel's own work, the sorts of the large tables of the interface objects, is queued at `FIRST`. A
+  job given a distance counts a yard nearer for each 2 ms it waits (500 yards a second, about the
+  speed of the fastest flights measured): without it, a tile queued 2,000 yards ahead of a flight
+  kept that rank once the camera was over it and waited behind every nearer job queued meanwhile,
+  the models' within 1,000 yards among them (found by the review of the branch). Every job gaining
+  at the same pace, the heap keeps them by their distance plus half the milliseconds from the start
+  of the pool at which they were queued; those at `FIRST` stay before them all.
+  - **Tested**: the jobs waiting run the lowest priority first, those of one priority in the order
+    they came; `Priority::distance` by whole yards, after `FIRST`, a distance below zero or not a
+    number as none; the nearest point of a tile, none within it, half a tile past its side, half a
+    diagonal past its corner, as the terrain gives it to a load. Not tested: each module giving its
+    distance, in the steering of the modules, which no test drives. The rank of the wait: a tile
+    queued 2,000 yards ahead coming before one 600 yards away queued 3 s later, the nearer first
+    when queued at once, a yard every 2 ms, those at `FIRST` first whatever the wait, saturating.
+
+- **The slices of `parallel_for` before the jobs** (`kernel/src/jobs.rs`,
+  `core/api/src/parallel.rs`): a worker took a job before any slice, and one helping with slices
+  went back to the jobs between two of them, so that a job waited for one slice at most. The thread
+  of the animations, which splits its bones with `parallel_for` and must end before the frame it is
+  for, rose to 9 ms while the loads kept the workers. A worker now takes the slices left before any
+  job, and helps until none is left: the caller of `parallel_for` waits for no job but those already
+  running, and a job waits for the slices taken meanwhile, short by the rule of `parallel_for`
+  (under a millisecond each). The jobs of a module calling `parallel_for` (the chunks of a tile of
+  the terrain built) finish sooner the same way.
+  - **Tested**: a job started while every worker runs slices runs once the slices are all taken (99
+    of 100 at least, the last of its caller running); a worker helping takes a job queued
+    meanwhile only once no slice is left; the slices as before (every index once, nested, a panic
+    coming back once every slice ended, on behalf of the module calling). The two tests of the
+    order before, a job waiting for one slice at most and a worker called away by a job, replaced
+    by those two.
+
+- **The water: one draw a phase, and the coasts by quads** (`liquids`), the two questions of
+  *Step 9.6e1, its review points as built*:
+  - The tiles of liquids in sight are drawn by one `multi_draw_indexed_indirect` a phase, the water
+    in its phase and the magma and slime with the opaque, their commands (a tile's indices, one
+    instance, its first index, where its vertices begin) written at each frame for the tiles in
+    sight and the liquids shown, in a buffer made again larger when they outgrow it. What it needs
+    is the indirect execution of the device (`DownlevelFlags::INDIRECT_EXECUTION`), as the buildings
+    need it, but not the first instance: where the device lacks it, a draw a tile as before
+    (`Shared::indirect`). The statistics count the draws given to the GPU.
+  - A layer of one height whose depths differ, the ocean of the format 2 along the coasts among
+    them, is drawn by quads as the flat layers, a quad for each rectangle of the cells it covers.
+    Its 9 × 9 depths are kept apart, 21 words a layer (four bytes a word), in an arena of storage of
+    their own, bound with the arrays, a buffer of one layer bound before any; a vertex names them by
+    their place plus one in the bits of its slot above the 8 of its type (0 where its vertices carry
+    its depth), rebased where the tile's depths land in the arena. The shader reads the depth at
+    each pixel between the four around its place in the layer, which the coordinates by default give
+    (a quarter of a repeat a cell), along the columns then the rows, then its place along the ramp,
+    where the vertices of a layer over its 9 × 9 vertices give theirs to be read between in their
+    triangles. A layer whose heights differ, or whose coordinates are given, keeps its 9 × 9
+    vertices. The triangles such layers took are not counted here (no client at hand): the
+    statistics of the layer say them.
+  - **Tested**: a layer of one height whose depths differ meshed as a quad, its depths kept apart
+    and named by its vertices, a second layer's after the first, a layer of one depth keeping none,
+    one whose heights differ over its 9 × 9 vertices; on the software adapter, an ocean deepest
+    along its middle row, under a ramp from black to white, drawn by a quad as over its 9 × 9
+    vertices within 3 of 255 at every pixel, deep in the middle and shallow at both sides, its
+    depths not the first of their arena; two tiles drawn by one indirect draw as by a draw a tile,
+    each at its depth. 8 changes made on purpose, all caught (the depths of the vertices read, the
+    rows and the columns swapped, the place of the depths not less one, the ramp of the vertices
+    kept, the depths not rebased, the layers of one height whose depths differ over their vertices,
+    the vertices of a command not placed, one command drawn).
+
+- **The groups of the buildings tested against the depth** (`buildings/src/occlusion.rs`,
+  `occlusion.wgsl`), the step 9.6f3 proposed: the groups the CPU lists by the view and the portals
+  are tested on the GPU in two phases, as the instances of `models`. Each group of the buildings
+  drawn has a place in two tables of those seen (a word each), read and written in turn at each
+  frame. The CPU writes, with the commands and the entries of the frame, the box in the world of
+  each group listed and its place, and the entry of each draw names its group. Before the first
+  pass (`Layer::compute`), `first` writes the draws of the opaque batches, drawn where their group
+  was seen at the frame before; between the passes (`Layer::occlude`), `test` tests each group
+  listed against the pyramid as the models test a box (its corners projected, its nearest depth
+  against the least of the pyramid over the rectangle it covers), those found in sight marked in
+  the table written, those hidden counted; `second` writes the draws of the opaque batches of the
+  groups found in sight that the first did not draw, drawn in `Revealed`, and of the blended
+  batches of the groups found in sight, drawn in their phases. A draw keeps the command the CPU
+  listed, its count of instances 1 or 0. The buildings changed (another list of `Scene::placed`),
+  every group is set seen, so that the next frame draws them all first, as without the depth. The
+  statistics say the groups the depth hid, read back without waiting. Where the device runs no
+  compute shaders or binds fewer than 7 storage buffers a stage, the buildings are drawn as before.
+  - **Tested** on the software adapter, the bench drawing as the view does, its two passes around
+    the layer's computing against a pyramid of a wall at a depth: a group in sight drawn; behind the
+    wall, drawn one frame more by the first pass, then no longer, its count of the hidden said;
+    found in sight again, drawn by the second pass at once, by the first at the next frame; the
+    buildings given anew, every group drawn first; two buildings, the left behind the wall and the
+    right not, told apart; a blended group drawn only while found in sight. 9 changes made on
+    purpose, all caught (the first phase drawing all, every group seen, the farthest corner for the
+    nearest, the blended drawn as the opaque, the table written not cleared, the groups not set
+    seen once the buildings change, the tables not turning, the places of the groups of two
+    buildings the same, `Revealed` not drawn). Not tested: an opaque batch drawn again by the
+    second phase, which the image does not show.
+
+- **The bones written in parallel** (`models/src/animator.rs`, `fill`): the thread of the
+  animations copied the bones it keeps into the view of `Queue::write_buffer_with` in one piece,
+  about 40 % of its time (*Step 9.4e3, after its review*). The view is now cut into blocks of 64 KB,
+  each a `WriteOnly<[u8; 65536]>`, which is `Send` where `WriteOnly<[u8]>` is not (wgpu 30 makes a
+  `WriteOnly<T>` `Send` for a `T` of known size), handed to the slices of a `parallel_for` through a
+  lock each, each slice writing its blocks (the tables, zeros, the slots and the bones, zeros, as
+  they fall in the block), the bytes after the last block on the calling thread. Without `unsafe`.
+  The bones are still computed into the vectors kept from a frame to the next, then copied: the
+  copy is spread over the workers, not saved; writing them straight from the computing would cut
+  the instances' parts across the blocks, each slice then locking the blocks it touches.
+  - **Tested**: the bytes written by blocks the same as written whole, within one block, over three
+    and a tail, over exactly two, and with zeros after the bones, over a buffer first filled with
+    another byte. 4 changes made on purpose, all caught (the tail left, a block written at the place
+    of its number, the zeros before the bones left, those after left).
+
+- **The files of the tiles read last kept** (`assets/src/recent.rs`), left undone by 9.6e1: the
+  root of a tile is read from the archives by the terrain, the doodads, the buildings and the
+  liquids, each in a job of its own, at about the same moment, and its `_tex0` and `_obj0` where
+  the tile is split. `Client` keeps the files of the tiles it read last, by their path in lower
+  case, up to 96 MB in all, those read longest ago let go first (a file read again the last to go);
+  a file being read is read once, a job asking for it meanwhile waiting for it and taking the same
+  bytes, shared and not copied; a file absent from the archives is kept as absent, one that could
+  not be read is not kept. The models, the buildings and the textures are read once each and not
+  kept.
+  - **Tested**: a file read again taken from those kept, case and slashes ignored, the same bytes;
+    an absent file kept as absent; a file that could not be read read again; past the bytes kept,
+    the longest ago read let go first, a file read again kept the longest, one larger than all
+    kept alone until the next; four threads asking for a file being read, read once. 3 changes made
+    on purpose, all caught (a file read again not kept the longest, a failure kept, more kept than
+    the bytes allow).
+
+- **The indices of the buildings in 16 bits** (`buildings/src/gpu.rs`): each group's indices are
+  kept as the file gives them, into its own vertices (a group's `MOVI` is of 16 bits), two to a
+  unit of their arena, a group's an even number of them, a last one added where they are odd; each
+  group has the place where its vertices begin in their arena, which the command of each of its
+  batches gives as its base vertex. The arena of the indices takes half its bytes before (64 MB of
+  32-bit indices, 45 used, in the flight from Zul'Drak to the Storm Peaks of 9.6e1).
+  - **Tested**: the geometry of three groups, each one's indices into its own vertices from where
+    they begin, the last of three indices made even; a file's indices taking half the bytes of
+    before; on the software adapter, a building of two groups after another of one triangle, its
+    groups drawn whole each where its vertices are. 3 changes made on purpose, all caught (the base
+    vertex of the building for every group, the indices not made even, the first index taken as the
+    unit of the arena).
+
+- **The arrays of textures shared by `models` and `buildings`: not done.** Both keep 64 slots of
+  arrays read as stored, so that one set could serve both through a service of `core/api`; but
+  neither module may depend on the other (either may be disabled or fail), the pool of `models` is
+  made by a job after its start where `buildings` makes its arrays when it starts, the classes of
+  both would share the 64 slots each shader binds and fill them sooner, and the files they share
+  are few: the materials of the buildings name the textures of `World\wmo` and of the dungeons,
+  the models those of their own folders, the doodads of the buildings being drawn by `models`
+  already. The memory saved is not known (no client at hand to count the textures both hold); kept
+  apart.
+- **A building seen from outside drawn through the portals of its groups outside**
+  (`buildings/src/cells.rs`, `layer.rs`), question 2 of *Step 9.6e2, as built*: from outside, a
+  building drew every group in sight by its bounds, so that from under Dalaran its sewers showed
+  through the faces turned away. Now, as the client draws it, a building the camera is in no group
+  inside of draws its groups outside and the groups inside their portals let the camera see, passed
+  as from inside (from the side of the group listing the portal, clipped by the view and the portals
+  before, eight at most one after the other). A building without a group outside, as a dungeon, is
+  drawn by the bounds of its groups as before. The doodads and the liquids of its groups follow what
+  is seen, as from inside: those of a group inside not seen hidden. A group inside whose bounds hold
+  the camera with a floor under it, or without a tree, is seen too, its portals passed: where no
+  triangle over the camera faces down, as under a hole in a roof, the group the camera is in cannot
+  be told, and the room around it would have been lost (found by the review of the branch). The
+  groups then drawn are fewer; the portals of the groups outside are passed for each building in
+  sight at each frame, which the listing did not do from outside before.
+  - **Tested**: past the group outside, looking in through the door, every room one after the
+    other; looking away, or from the other end behind the walls, the group outside alone; the
+    second door aside, the first room only; a building without a group outside, by its bounds; the
+    layer listing from the other end the group outside alone, the doodads and the liquid of the
+    rooms hidden, and from the far end every group; in a room without a ceiling, the room and the
+    one its door leads to seen with the group outside, not from under its floor, and a room
+    without a tree seen. 3 changes made on purpose, all caught (the
+    groups seen from outside not asked, the portals of the groups outside not passed, a building
+    without a group outside passed as one with).
+
+**To measure by the user**: the flights of *The frames measured in flight, before any correction*
+(the terrain at 64 tiles, the buildings at 8, the doodads at 4, the models at a reach of 1,000; 300
+then 600 yards a second, from the Howling Fjord to Dalaran by the Grizzly Hills), with the journal
+of the frames (`UNIWOW_SLOW_FRAMES`), before this work and after it:
+
+1. The frames a second, the share of slow frames and the longest; the frames past 100 ms, and the
+   bytes sent to the GPU in each, which should no longer pass the budget of the uploads by much; the
+   new column of the jobs held by that budget, and whether the loads seem slower (the panels say
+   how long the tiles within reach took to load). The same with the budget at 16 and at 64 MB.
+2. The part `kernel: jobs handed back` in the slow frames, which should stay near 3 ms, and the
+   jobs started not yet handed back, which may now stay higher for a few frames after a burst.
+3. The terrain: `view: terrain record` (3.9 ms in a slow frame before) against, now, `view:
+   terrain prepare` (the blocks recorded again), `view: terrain record` (the bundles run) and `view:
+   submit` (wgpu-core validating the pass, bundles included); the blocks recorded again a frame, in
+   the statistics of the layer, flying straight and turning.
+4. The jobs started not yet handed back and whether the tile under the camera, and the buildings
+   and models near it, now come first after a fast flight stops (the ground under the camera no
+   longer missing while far buildings load).
+5. The thread of the animations: its time a frame on average and at most, in the statistics of
+   `models`, during the loads (9 ms at most before), and whether the loads seem slower; then in
+   Orgrimmar held still, where the writing of its bones took 0.35 to 0.54 ms.
+6. The water at sea (off Booty Bay, the terrain at 64 tiles) and along the coasts of Northrend: the
+   triangles of water in the statistics of `liquids` against those of *Step 9.6e1, its review
+   points as built* (3.18 M in Northrend, 2.44 M at sea), the GPU of the layer (1.2 ms before) and
+   `view: liquids record`; the colours of the coasts, which should look as before.
+7. The buildings in the cities (Dalaran, Stormwind) and over Northrend: the groups hidden by the
+   depth in the statistics of `buildings`, the GPU of the layer (its computing included) against
+   before, and `view: buildings prepare`.
+8. The arenas of the buildings in the statistics of the layer, the indices against before, from
+   Zul'Drak to the Storm Peaks.
+9. Under Dalaran and in Stormwind, from outside: the sewers no longer shown through the faces
+   turned away, nothing missing that the game shows (the insides seen through the doors and the
+   windows that are portals); the part `buildings prepare: the listing` against before.
+10. The time the tiles within reach take to load once a map is shown, which the panels of the
+   terrain, the doodads and the buildings say, against before (the files of the tiles kept).
 
 #### Step 9.7, proposed: the light of the map
 

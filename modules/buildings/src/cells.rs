@@ -5,7 +5,9 @@
 //! over a street, is not in it. From it, the groups seen through the portals: a
 //! portal passed from the side of the group listing it, clipped by what the camera sees through the
 //! portals before it, which then sees through its sides only; to a group outside, the outside is
-//! seen, and through the portals of the groups outside the groups inside them.
+//! seen, and through the portals of the groups outside the groups inside them. From outside the
+//! building, as the client draws it: its groups outside, and the groups inside their portals let
+//! the camera see; a building without a group outside, as a dungeon, by the bounds of its groups.
 
 use std::ops::Range;
 
@@ -67,6 +69,14 @@ pub struct Cells {
     pub groups: Vec<Cell>,
     pub gates: Vec<Gate>,
     pub passages: Vec<Passage>,
+}
+
+impl Cell {
+    /// Whether its bounds hold `eye`, within `MARGIN`.
+    fn holds(&self, eye: Vec3) -> bool {
+        let [low, high] = self.bounds;
+        !(eye.cmplt(low - Vec3::splat(MARGIN)).any() || eye.cmpgt(high + Vec3::splat(MARGIN)).any())
+    }
 }
 
 impl Floor {
@@ -259,8 +269,7 @@ impl Cells {
     pub fn holding(&self, eye: Vec3) -> Option<usize> {
         let mut found: Option<(f32, usize)> = None;
         for (index, cell) in self.groups.iter().enumerate() {
-            let [low, high] = cell.bounds;
-            if eye.cmplt(low - Vec3::splat(MARGIN)).any() || eye.cmpgt(high + Vec3::splat(MARGIN)).any() {
+            if !cell.holds(eye) {
                 continue;
             }
             let Some(floor) = &cell.floor else {
@@ -290,15 +299,45 @@ impl Cells {
         let mut outside = false;
         self.pass(eye, start, planes, &mut Vec::new(), &mut seen, &mut outside);
         if outside {
-            let mut again = false;
-            for (index, cell) in self.groups.iter().enumerate() {
-                if cell.outside {
-                    seen[index] = true;
-                    self.pass(eye, index, planes, &mut Vec::new(), &mut seen, &mut again);
-                }
-            }
+            self.see_outside(eye, planes, &mut seen);
         }
         seen
+    }
+
+    /// The groups seen from `eye` in no group inside, the view given by `planes`: its groups
+    /// outside, and those inside their portals lead to; none for a building without a group
+    /// outside, drawn by the bounds of its groups. A group inside whose bounds hold the eye with a
+    /// floor under it, or without a tree, is seen too, its portals passed: `holding` cannot tell
+    /// the eye is in it where no triangle over the eye faces down, as under a hole in its roof, so
+    /// that the room around the camera is not lost.
+    pub fn seen_outside(&self, eye: Vec3, planes: &[Vec4]) -> Option<Vec<bool>> {
+        if !self.groups.iter().any(|cell| cell.outside) {
+            return None;
+        }
+        let mut seen = vec![false; self.groups.len()];
+        let mut again = false;
+        for (index, cell) in self.groups.iter().enumerate() {
+            if cell.outside || !cell.holds(eye) {
+                continue;
+            }
+            if cell.floor.as_ref().is_none_or(|floor| floor.around(eye).0.is_some()) {
+                seen[index] = true;
+                self.pass(eye, index, planes, &mut Vec::new(), &mut seen, &mut again);
+            }
+        }
+        self.see_outside(eye, planes, &mut seen);
+        Some(seen)
+    }
+
+    /// Marks in `seen` the groups outside, and those their portals lead to from `eye`.
+    fn see_outside(&self, eye: Vec3, planes: &[Vec4], seen: &mut [bool]) {
+        let mut again = false;
+        for (index, cell) in self.groups.iter().enumerate() {
+            if cell.outside {
+                seen[index] = true;
+                self.pass(eye, index, planes, &mut Vec::new(), seen, &mut again);
+            }
+        }
     }
 
     /// Passes the portals of the group `from` seen through `planes`, the portals of `path` passed

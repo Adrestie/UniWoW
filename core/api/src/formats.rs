@@ -40,6 +40,14 @@ impl TileId {
         let [x, y] = self.centre();
         (x - eye[0]).hypot(y - eye[1]) / TILE
     }
+
+    /// How far from the point `eye` its nearest point lies, on the ground, in yards: none from a
+    /// point within it. The priority of a job reading it (`Priority::distance`).
+    pub fn nearest(self, eye: [f32; 2]) -> f32 {
+        let [x, y] = self.centre();
+        let outside = |along: f32| (along.abs() - TILE / 2.0).max(0.0);
+        outside(x - eye[0]).hypot(outside(y - eye[1]))
+    }
 }
 
 /// The distance, in tiles, at which `tiles_around` takes every tile of a map from any point of it:
@@ -1035,6 +1043,23 @@ mod tests {
         let mut holed = all.clone();
         holed[40 * 64 + 30] = false;
         assert!(!tiles_around(&holed, eye, 1, &HashSet::new()).contains(&TileId { x: 30, y: 40 }));
+    }
+
+    #[test]
+    fn the_nearest_point_of_a_tile_is_none_within_it_and_its_side_or_corner_beyond() {
+        let tile = TileId { x: 30, y: 40 };
+        let [x, y] = tile.centre();
+        assert_eq!(tile.nearest([x, y]), 0.0);
+        assert_eq!(tile.nearest([x + TILE * 0.4, y - TILE * 0.4]), 0.0, "within it");
+        assert!(
+            (tile.nearest([x + TILE, y]) - TILE / 2.0).abs() < 1e-2,
+            "half a tile past its side"
+        );
+        let corner = tile.nearest([x + TILE, y + TILE]);
+        assert!(
+            (corner - TILE / 2.0 * 2f32.sqrt()).abs() < 1e-2,
+            "from its corner: {corner}"
+        );
     }
 
     #[test]

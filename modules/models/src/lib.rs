@@ -45,8 +45,8 @@ use uniwow_api::journal;
 use uniwow_api::models::{self, Geosets, Instance, Look, LookId, LookState, Models, Motion};
 use uniwow_api::viewport::Demand;
 use uniwow_api::{
-    Context, DockArea, Event, JobId, JobOutcome, MODULE_FAILED_TOPIC, Module, PropertyValue, Registrar, SettingSpec,
-    egui, liquids, log, serde_json, viewport,
+    Context, DockArea, Event, JobId, JobOutcome, MODULE_FAILED_TOPIC, Module, Priority, PropertyValue, Registrar,
+    SettingSpec, egui, liquids, log, serde_json, viewport,
 };
 
 use choice::Tables;
@@ -820,12 +820,13 @@ impl ModelsModule {
         wanted.sort_by(|a, b| a.0.total_cmp(&b.0));
         let most = std::thread::available_parallelism().map_or(1, |cores| cores.get().saturating_sub(1).max(1));
         if let Some(formats) = lock(&self.service.formats).clone() {
-            for (_, id) in wanted.into_iter().take(most.saturating_sub(self.loading.len())) {
+            for (distance, id) in wanted.into_iter().take(most.saturating_sub(self.loading.len())) {
                 let Some((look, _)) = self.service.look_of(id) else {
                     continue;
                 };
                 let (shared, caches, formats) = (shared.clone(), self.caches.clone(), formats.clone());
-                let job = ctx.spawn(&format!("Load the model {:?}", look.model), move |job| -> Loaded {
+                let label = format!("Load the model {:?}", look.model);
+                let job = ctx.spawn_with_priority(&label, Priority::distance(distance), move |job| -> Loaded {
                     if job.is_cancelled() {
                         return None;
                     }

@@ -14,11 +14,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use uniwow_api::glam::{Mat4, Vec3};
-use uniwow_api::journal;
 use uniwow_api::models::LookId;
 use uniwow_api::viewport::{Phase, Pyramid};
 use uniwow_api::wgpu::util::DeviceExt;
 use uniwow_api::{bytemuck, wgpu};
+use uniwow_api::{journal, uploads};
 
 use crate::gpu::State;
 use crate::layer::{LIMITS, MARGIN, rank};
@@ -166,6 +166,7 @@ impl Tables {
         ];
         let mut words = [region_words, look_words, reference_words, record_words].concat();
         words.resize(words.len().max(4), 0);
+        uploads::pass(words.len() as u64 * 4);
         Self {
             generation,
             slots: pooled

@@ -45,7 +45,11 @@ impl Shell {
         }
         timed("kernel: calls", start);
         let start = Instant::now();
-        self.deliver_jobs();
+        let jobs_budget = if minimised { MINIMISED_JOBS_BUDGET } else { JOBS_BUDGET };
+        if self.deliver_jobs(jobs_budget) {
+            // Jobs were left for the next frame: it must come even if nothing else asks for it.
+            ctx.request_repaint();
+        }
         timed("kernel: jobs handed back", start);
         let start = Instant::now();
         self.collect_from_threads();

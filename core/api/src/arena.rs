@@ -5,14 +5,17 @@
 //! a buffer of its use, the one before copied into it, so that every range keeps its place; a range
 //! that even that would not hold is refused for want of room, which a range given back can make.
 //! Its jobs write a range by `Queue::write_buffer`, under the lock of its holes, without a buffer of
-//! their own; the frame reads the buffer and the bytes held without that lock.
+//! their own; the frame reads the buffer and the bytes held without that lock. A range put, and the
+//! copy of a growth, first pass the budget of the uploads of a frame (`uploads`), before that lock:
+//! the interface thread takes it to give a range back; but in an arena not held back by it
+//! (`Arena::not_held_back`).
 
 use std::fmt;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::{journal, wgpu};
+use crate::{journal, uploads, wgpu};
 
 /// The holes of an arena of `capacity` units, sorted, none touching another.
 #[derive(Debug, Default, PartialEq)]
@@ -196,6 +199,8 @@ pub struct Arena {
     held: AtomicU64,
     used: AtomicU64,
     given: AtomicU64,
+    /// Whether what is put passes the budget of the uploads of a frame.
+    held_back: bool,
 }
 
 impl Arena {
@@ -226,21 +231,54 @@ impl Arena {
             held: AtomicU64::new(0),
             used: AtomicU64::new(0),
             given: AtomicU64::new(0),
+            held_back: true,
+        }
+    }
+
+    /// The arena, what is put in it not held back by the budget of the uploads of a frame: for
+    /// small ranges put by a job holding a lock the interface thread may wait for, such as the
+    /// instances of an owner of `models`, put by the job of the doodads placing them under the lock
+    /// of its module.
+    pub fn not_held_back(mut self) -> Self {
+        self.held_back = false;
+        self
+    }
+
+    /// Waits for the turn of `bytes` at the budget of the uploads of a frame, where held back.
+    fn pass(&self, bytes: u64) {
+        if self.held_back {
+            uploads::pass(bytes);
         }
     }
 
     /// `data` written to a range of the arena, its units; refused when the buffer it needs is
-    /// larger than the device takes.
+    /// larger than the device takes. Its bytes pass the budget of the uploads of a frame first, and
+    /// those a growth copies, the lock of the holes let go meanwhile.
     pub fn put(&self, data: &[u8]) -> Result<Range<u64>, NoRoom> {
         debug_assert_eq!(data.len() as u64 % self.unit, 0);
         let length = data.len() as u64 / self.unit;
+        self.pass(data.len() as u64);
         let mut holes = journal::lock(&self.holes, "arena holes");
-        let range = match holes.take(length) {
-            Some(range) => range,
-            None => {
-                self.grow(&mut holes, length)?;
-                holes.take(length).expect("grown to hold it")
+        let mut copy_passed = false;
+        let range = loop {
+            if let Some(range) = holes.take(length) {
+                break range;
             }
+            let copied = self.held.load(Ordering::Acquire);
+            if self.held_back && !copy_passed && copied > 0 {
+                // Refused before its copy passes the budget, where no growth can hold it: a refused
+                // put retried at each move of the camera would otherwise hold back the uploads of
+                // every module by a copy never made.
+                self.room(&holes, length)?;
+                // Another job may grow it meanwhile: its holes are looked at again.
+                drop(holes);
+                self.pass(copied);
+                copy_passed = true;
+                holes = journal::lock(&self.holes, "arena holes");
+                continue;
+            }
+            self.grow(&mut holes, length)?;
+            break holes.take(length).expect("grown to hold it");
         };
         if !data.is_empty() {
             let (buffer, _) = self.buffer().expect("grown before");
@@ -253,9 +291,9 @@ impl Arena {
         Ok(range)
     }
 
-    /// A buffer holding `length` more units at least: twice as large, or as large as the device
-    /// takes, the one before copied into it; refused when even that does not hold them.
-    fn grow(&self, holes: &mut Holes, length: u64) -> Result<(), NoRoom> {
+    /// The units a buffer holding `length` more needs, the free units at its end used; refused when
+    /// that is more than the device takes.
+    fn room(&self, holes: &Holes, length: u64) -> Result<u64, NoRoom> {
         let needed = holes.capacity() + length - holes.tail();
         if needed > self.most {
             return Err(NoRoom {
@@ -264,6 +302,13 @@ impl Arena {
                 most: self.most * self.unit,
             });
         }
+        Ok(needed)
+    }
+
+    /// A buffer holding `length` more units at least: twice as large, or as large as the device
+    /// takes, the one before copied into it; refused when even that does not hold them.
+    fn grow(&self, holes: &mut Holes, length: u64) -> Result<(), NoRoom> {
+        let needed = self.room(holes, length)?;
         let capacity = (holes.capacity() * 2).max(needed).max(self.least).min(self.most);
         let size = capacity * self.unit;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -289,7 +334,8 @@ impl Arena {
     }
 
     /// `data` written again from the unit `at` of a range held, under the lock of the holes, so that
-    /// no growth copies the buffer between.
+    /// no growth copies the buffer between. Not held back by the budget of the uploads: a range
+    /// written again in place is what the next frame shows, as the instances an owner moved.
     pub fn write(&self, at: u64, data: &[u8]) {
         let _holes = journal::lock(&self.holes, "arena holes");
         if let Some((buffer, _)) = self.buffer()

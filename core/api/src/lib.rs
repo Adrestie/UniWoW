@@ -69,6 +69,7 @@ pub mod sequence;
 mod service;
 pub mod texture_arrays;
 pub mod ui;
+pub mod uploads;
 pub mod vfs;
 pub mod viewport;
 
@@ -77,7 +78,7 @@ pub use commands::{CallId, CommandHandler, CommandInfo, CommandSpec, RunsOn, dec
 pub use context::{Context, Host};
 pub use editor::{Editor, EditorBackend};
 pub use event::Event;
-pub use job::{JobContext, JobFn, JobId, JobOutcome};
+pub use job::{JobContext, JobFn, JobId, JobOutcome, Priority};
 pub use module::{CREATE_SYMBOL, CreateFn, Module, PACKAGE_SYMBOL, PackageFn};
 pub use parallel::parallel_for;
 pub use property::{

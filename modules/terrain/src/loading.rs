@@ -17,6 +17,14 @@ pub fn distance(tile: TileId, eye: [f32; 2]) -> f32 {
     ((x - eye[0]).powi(2) + (y - eye[1]).powi(2)).sqrt()
 }
 
+/// How far from the point `eye` the nearest point of `tile` lies, on the ground, in yards: none
+/// from a point within it. The priority of the job loading it.
+pub fn nearest(tile: TileId, eye: [f32; 2]) -> f32 {
+    let [x, y] = tile.centre();
+    let outside = |along: f32| (along.abs() - TILE / 2.0).max(0.0);
+    outside(x - eye[0]).hypot(outside(y - eye[1]))
+}
+
 /// The tiles of the map, `tiles` at `y * 64 + x`, whose centre is within `radius` tiles of `eye`,
 /// the nearest first, with their distance in tiles: the nearer, the larger on screen.
 pub fn wanted(tiles: &[bool], eye: [f32; 2], radius: u32) -> Vec<(TileId, f32)> {

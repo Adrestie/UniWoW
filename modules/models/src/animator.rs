@@ -518,16 +518,64 @@ impl Animator {
     }
 }
 
+/// The bytes of a block of the view the slices of `fill` write each.
+pub(crate) const BLOCK: usize = 64 << 10;
+
 /// Writes into `out` the `tables`, zeros up to `bones_at` words, then the `posed` slots and bones,
-/// then zeros.
-fn fill(out: WriteOnly<'_, [u8]>, tables: &[u32], bones_at: usize, posed: &[[f32; 4]]) {
-    let (mut head, rest) = out.split_at(tables.len() * 4);
-    head.copy_from_slice(bytemuck::cast_slice(tables));
-    let (mut pad, rest) = rest.split_at((bones_at - tables.len()) * 4);
-    pad.fill(0);
-    let (mut written, mut rest) = rest.split_at(posed.len() * 16);
-    written.copy_from_slice(bytemuck::cast_slice(posed));
-    rest.fill(0);
+/// then zeros: in blocks of `BLOCK` bytes split with `parallel_for`, each slice writing its own
+/// blocks, the bytes left after the last on the calling thread. A block of the view, of a size
+/// known when compiled, may go to another thread, where the view whole may not (`WriteOnly<[u8]>`
+/// is not `Send`).
+pub(crate) fn fill(out: WriteOnly<'_, [u8]>, tables: &[u32], bones_at: usize, posed: &[[f32; 4]]) {
+    let bytes = Bytes {
+        tables: bytemuck::cast_slice(tables),
+        posed_at: bones_at * 4,
+        posed: bytemuck::cast_slice(posed),
+    };
+    let (blocks, rest) = out.into_chunks::<BLOCK>();
+    let blocks: Vec<Mutex<Option<WriteOnly<'_, [u8; BLOCK]>>>> =
+        blocks.into_iter().map(|block| Mutex::new(Some(block))).collect();
+    parallel_for(blocks.len(), 1, |range| {
+        for at in range {
+            if let Some(block) = lock(&blocks[at]).take() {
+                bytes.write(block.into(), at * BLOCK);
+            }
+        }
+    });
+    bytes.write(rest, blocks.len() * BLOCK);
+}
+
+/// What `fill` writes, a byte after the other: `tables`, zeros up to `posed_at`, `posed`, then zeros.
+struct Bytes<'a> {
+    tables: &'a [u8],
+    posed_at: usize,
+    posed: &'a [u8],
+}
+
+impl Bytes<'_> {
+    /// Writes into `out` its bytes from `start` on, as many as `out` holds.
+    fn write(&self, mut out: WriteOnly<'_, [u8]>, start: usize) {
+        let end = start + out.len();
+        let mut at = start;
+        // The parts in their order, each from where it begins: what lies before the first written,
+        // and each part where it falls, zeros where there is none.
+        let parts: [(usize, &[u8]); 2] = [(0, self.tables), (self.posed_at, self.posed)];
+        for (from, part) in parts {
+            let (begin, finish) = (from.max(at).min(end), (from + part.len()).min(end));
+            if begin > at {
+                out.slice(at - start..begin - start).fill(0);
+                at = begin;
+            }
+            if finish > at {
+                out.slice(at - start..finish - start)
+                    .copy_from_slice(&part[at - from..finish - from]);
+                at = finish;
+            }
+        }
+        if end > at {
+            out.slice(at - start..end - start).fill(0);
+        }
+    }
 }
 
 /// The thread: a step at each frame of `view`, until `cancelled`.

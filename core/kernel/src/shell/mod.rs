@@ -31,7 +31,7 @@ use crate::guard::{guarded, guarded_as};
 use crate::history::{self, History};
 use crate::host::{KernelHost, Service};
 use crate::hotkeys::Hotkeys;
-use crate::jobs::Pool;
+use crate::jobs::{Finished, Pool};
 use crate::layout::{self, PanelEntry, Tab};
 use crate::loader::{self, Slot, State};
 use crate::logger;
@@ -62,6 +62,11 @@ const CALL_BUDGET: Duration = Duration::from_millis(4);
 /// The same while the window is minimised: eframe then wakes the editor at most every 100 ms, and
 /// nothing is drawn, so most of that time can go to the calls.
 const MINIMISED_CALL_BUDGET: Duration = Duration::from_millis(80);
+/// Time the interface thread spends each frame handing the jobs that ended back to their modules,
+/// one job at least: those left wait for the next frames, in their order.
+const JOBS_BUDGET: Duration = Duration::from_millis(3);
+/// The same while the window is minimised, nothing being drawn.
+const MINIMISED_JOBS_BUDGET: Duration = Duration::from_millis(80);
 /// After a call, how long to wait for the next one of a thread calling in a loop.
 const CALL_IDLE: Duration = Duration::from_micros(500);
 /// How long a compiled module's thread may run one job before the Modules panel shows it as not

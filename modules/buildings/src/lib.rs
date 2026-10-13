@@ -15,6 +15,7 @@ mod gpu;
 mod keeping;
 mod layer;
 mod liquid;
+mod occlusion;
 #[cfg(test)]
 mod tests;
 
@@ -28,7 +29,8 @@ use uniwow_api::glam::Vec3;
 use uniwow_api::serde_json::json;
 use uniwow_api::viewport::Demand;
 use uniwow_api::{
-    Context, DockArea, JobId, JobOutcome, Module, PropertyValue, Registrar, egui, liquids, log, models, viewport,
+    Context, DockArea, JobId, JobOutcome, Module, Priority, PropertyValue, Registrar, egui, liquids, log, models,
+    viewport,
 };
 
 use doodads::Owners;
@@ -154,6 +156,8 @@ struct BuildingsModule {
     refusals: VecDeque<String>,
     /// Whether the buildings drawn changed since the scene was last given them.
     changed: bool,
+    /// The buildings whose doodads are placed, as the panel last read it.
+    doodads_placed: usize,
     told_budget: Option<Demand>,
     /// The last frame signal seen, and the camera then.
     frame: u64,
@@ -220,11 +224,13 @@ impl BuildingsModule {
         self.changed = true;
     }
 
-    /// Reads the file `file` by a job and puts it on the GPU.
-    fn load(&mut self, file: FileRef, formats: &Arc<dyn formats::Formats>, ctx: &mut Context) {
+    /// Reads the file `file` by a job and puts it on the GPU, its nearest building `distance` yards
+    /// from the camera.
+    fn load(&mut self, file: FileRef, distance: f32, formats: &Arc<dyn formats::Formats>, ctx: &mut Context) {
         let given = self.shared.as_ref().map_or(0, |shared| shared.given());
         let (shared, formats, read) = (self.shared.clone(), formats.clone(), file.clone());
-        let job = ctx.spawn(&format!("Read the building {read:?}"), move |_| -> Loaded {
+        let label = format!("Read the building {read:?}");
+        let job = ctx.spawn_with_priority(&label, Priority::distance(distance), move |_| -> Loaded {
             let shared = shared.ok_or("no device to draw on")?;
             let wmo = formats.wmo(&read)?;
             let (sets, doodads) = (wmo.doodad_sets.clone(), wmo.doodads.clone());
@@ -401,7 +407,7 @@ impl BuildingsModule {
             }
             let (formats, read, tile) = (formats.clone(), directory.clone(), *tile);
             let label = format!("Read the buildings of the tile {} {} of {directory}", tile.x, tile.y);
-            let job = ctx.spawn(&label, move |_| -> Read {
+            let job = ctx.spawn_with_priority(&label, Priority::distance(tile.nearest(eye)), move |_| -> Read {
                 Ok(formats
                     .placements(&read, tile.x, tile.y)?
                     .ok_or("named by its WDT, but not read")?
@@ -431,7 +437,11 @@ impl BuildingsModule {
         };
         let plan = budget::plan(&files, &allowance, room, slots);
         for file in plan.start {
-            self.load(file, &formats, ctx);
+            let distance = files
+                .iter()
+                .find(|budgeted| budgeted.key == file)
+                .map_or(f32::INFINITY, |budgeted| budgeted.distance);
+            self.load(file, distance, &formats, ctx);
         }
         for file in plan.release {
             if let Some(entry) = self.files.get_mut(&file) {
@@ -568,7 +578,9 @@ impl BuildingsModule {
             let (owners, models, map) = (self.owners.clone(), models.clone(), directory.to_owned());
             let transform = formats::placement(building.position, building.rotation, building.scale);
             let named = building.doodad_set;
-            let job = ctx.spawn(&format!("Place the doodads of the building {id}"), move |_| {
+            let distance = budget::distance(self.eye, budget::ground(&building));
+            let label = format!("Place the doodads of the building {id}");
+            let job = ctx.spawn_with_priority(&label, Priority::distance(distance), move |_| {
                 let parts = doodads::instances(&*models, &transform, &file.sets, &file.doodads, &file.holders, named);
                 lock(&owners).place(&*models, &map, id, &parts);
             });
@@ -631,7 +643,11 @@ impl Module for BuildingsModule {
                 FileState::Refused => refused += 1,
             }
         }
-        let doodads = lock(&self.owners).placed();
+        // A job placing doodads holds the lock: the count of the frame before then.
+        if let Ok(owners) = self.owners.try_lock() {
+            self.doodads_placed = owners.placed();
+        }
+        let doodads = self.doodads_placed;
         let bytes = self.shared.as_ref().map_or(0, |shared| shared.bytes());
         ui.label(format!(
             "{map}: {} tiles held, {} reading; {} buildings, of {ready} files read, {loading} reading, {waiting} \

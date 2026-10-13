@@ -7,7 +7,10 @@
 // colour, near where shallow and far where deep, its alpha so. Magma and slime: their texel
 // brightened, opaque and unlit, their coordinates running by their animation. Then fogged. The
 // fixed colours of the water and the gain of the magma are values taken from captures of the game
-// at noon. The bindings of the arrays and `sampled` follow, written for the count of slots.
+// at noon. A layer of one height whose depths differ is drawn by quads, its depth read at each pixel
+// between the four of its 9 × 9 around the place in the layer, which its coordinates by default
+// give (`depths`, its place plus one above the 8 bits of the slot of its type). The bindings of the
+// arrays, `sampled` and the depths follow, written for the count of slots.
 
 struct Camera {
     view_proj: mat4x4<f32>,
@@ -41,6 +44,11 @@ struct LiquidType {
 @group(1) @binding(1) var liquid_sampler: sampler;
 
 const NONE: u32 = 0xFFFFFFFFu;
+// The bits of the slot of a type in a vertex's slot, the depths of its layer kept apart above, and
+// the words of those of a layer.
+const SLOT_BITS: u32 = 8u;
+const SLOT_MASK: u32 = 0xFFu;
+const DEPTH_WORDS: u32 = 21u;
 // The colour of the water, shallow and deep, in gamma, its alpha so.
 const SHALLOW: vec4<f32> = vec4<f32>(0.24, 0.35, 0.31, 0.65);
 const DEEP: vec4<f32> = vec4<f32>(0.18, 0.28, 0.27, 0.9);
@@ -90,6 +98,26 @@ fn ramp_at(ramp: u32, along: f32) -> vec4<f32> {
     return mix(camera.ramps[base + first], camera.ramps[base + next], row - f32(first));
 }
 
+// The depth at `row` and `column` of the layer whose depths are kept at `kept` (its place plus one),
+// from 0 to 1.
+fn kept_depth(kept: u32, row: u32, column: u32) -> f32 {
+    let at = row * 9u + column;
+    let word = depths[(kept - 1u) * DEPTH_WORDS + at / 4u];
+    return f32((word >> ((at % 4u) * 8u)) & 0xFFu) / 255.0;
+}
+
+// The depth of the layer whose depths are kept at `kept` at the place its coordinates by default
+// `uv` give, a quarter of a repeat a cell: read between the four depths around it, along its
+// columns then its rows.
+fn level_depth(kept: u32, uv: vec2<f32>) -> f32 {
+    let at = clamp(vec2<f32>(uv.y, uv.x) * 4.0, vec2<f32>(0.0), vec2<f32>(8.0));
+    let cell = min(vec2<u32>(at), vec2<u32>(7u));
+    let within = at - vec2<f32>(cell);
+    let near = mix(kept_depth(kept, cell.x, cell.y), kept_depth(kept, cell.x, cell.y + 1u), within.y);
+    let far = mix(kept_depth(kept, cell.x + 1u, cell.y), kept_depth(kept, cell.x + 1u, cell.y + 1u), within.y);
+    return mix(near, far, within.x);
+}
+
 @vertex
 fn vs_main(in: VertexIn) -> VertexOut {
     var out: VertexOut;
@@ -98,13 +126,21 @@ fn vs_main(in: VertexIn) -> VertexOut {
     out.depth = in.depth;
     out.world = in.position;
     out.slot = in.slot;
-    out.along = along_ramp(types[in.slot], in.depth);
+    out.along = along_ramp(types[in.slot & SLOT_MASK], in.depth);
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    let kind = types[in.slot];
+    let kind = types[in.slot & SLOT_MASK];
+    // The depth of its vertices, or of its layer kept apart, read at the pixel.
+    let kept = in.slot >> SLOT_BITS;
+    var depth = in.depth;
+    var along = in.along;
+    if kept != 0u {
+        depth = level_depth(kept, in.uv);
+        along = along_ramp(kind, depth);
+    }
     let milliseconds = camera.eye.w * 1000.0;
     let count = max(kind.info.x, 1u);
     let frame = u32(ceil(milliseconds / 60.0)) % count;
@@ -131,7 +167,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     var alpha = 1.0;
     if water && camera.towards_sun.w != 0.0 {
         // The surface of the water facing up, as the client gives it to each vertex.
-        let ramp = ramp_at(kind.info.z, in.along);
+        let ramp = ramp_at(kind.info.z, along);
         let lit = camera.ambient.rgb + clamp(camera.towards_sun.z, 0.0, 1.0) * camera.diffuse.rgb;
         let half = normalize(normalize(camera.eye.xyz - in.world) + camera.towards_sun.xyz);
         let reflected = pow(max(half.z, 0.0), SHININESS) * camera.sun.rgb;
@@ -139,7 +175,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         gamma = clamp(colour, vec3<f32>(0.0), vec3<f32>(1.0));
         alpha = ramp.a;
     } else if water {
-        let colour = mix(SHALLOW, DEEP, clamp(in.depth, 0.0, 1.0));
+        let colour = mix(SHALLOW, DEEP, clamp(depth, 0.0, 1.0));
         gamma = clamp(texel.rgb + colour.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
         alpha = colour.a;
     }

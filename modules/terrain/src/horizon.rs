@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 use uniwow_api::bytemuck::{Pod, Zeroable};
 use uniwow_api::formats::Wdl;
 use uniwow_api::wgpu::util::DeviceExt;
-use uniwow_api::{bytemuck, parallel_for, wgpu};
+use uniwow_api::{bytemuck, parallel_for, uploads, wgpu};
 
 use crate::gpu::Shared;
 use crate::model::{ORIGIN, TILE, TileId};
@@ -146,6 +146,7 @@ pub fn build(shared: &Shared, wdl: &Wdl) -> Option<HorizonGpu> {
     if indices.is_empty() {
         return None;
     }
+    uploads::pass((size_of_val(vertices.as_slice()) + size_of_val(indices.as_slice())) as u64);
     let buffer = |label, contents: &[u8], usage| {
         shared.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
