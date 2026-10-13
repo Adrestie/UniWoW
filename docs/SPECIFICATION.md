@@ -6332,6 +6332,22 @@ section.
     another byte. 4 changes made on purpose, all caught (the tail left, a block written at the place
     of its number, the zeros before the bones left, those after left).
 
+- **The files of the tiles read last kept** (`assets/src/recent.rs`), left undone by 9.6e1: the
+  root of a tile is read from the archives by the terrain, the doodads, the buildings and the
+  liquids, each in a job of its own, at about the same moment, and its `_tex0` and `_obj0` where
+  the tile is split. `Client` keeps the files of the tiles it read last, by their path in lower
+  case, up to 96 MB in all, those read longest ago let go first (a file read again the last to go);
+  a file being read is read once, a job asking for it meanwhile waiting for it and taking the same
+  bytes, shared and not copied; a file absent from the archives is kept as absent, one that could
+  not be read is not kept. The models, the buildings and the textures are read once each and not
+  kept.
+  - **Tested**: a file read again taken from those kept, case and slashes ignored, the same bytes;
+    an absent file kept as absent; a file that could not be read read again; past the bytes kept,
+    the longest ago read let go first, a file read again kept the longest, one larger than all
+    kept alone until the next; four threads asking for a file being read, read once. 3 changes made
+    on purpose, all caught (a file read again not kept the longest, a failure kept, more kept than
+    the bytes allow).
+
 **To measure by the user**: the flights of *The frames measured in flight, before any correction*
 (the terrain at 64 tiles, the buildings at 8, the doodads at 4, the models at a reach of 1,000; 300
 then 600 yards a second, from the Howling Fjord to Dalaran by the Grizzly Hills), with the journal
@@ -6360,6 +6376,8 @@ of the frames (`UNIWOW_SLOW_FRAMES`), before this work and after it:
 7. The buildings in the cities (Dalaran, Stormwind) and over Northrend: the groups hidden by the
    depth in the statistics of `buildings`, the GPU of the layer (its computing included) against
    before, and `view: buildings prepare`.
+8. The time the tiles within reach take to load once a map is shown, which the panels of the
+   terrain, the doodads and the buildings say, against before (the files of the tiles kept).
 
 #### Step 9.7, proposed: the light of the map
 

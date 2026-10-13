@@ -17,6 +17,7 @@ mod m2;
 #[cfg(test)]
 mod m2_tests;
 mod mpq;
+mod recent;
 #[cfg(test)]
 mod table_tests;
 mod terrain;
@@ -48,17 +49,22 @@ use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, Registrar, egui, 
 use chain::{Chain, Source};
 use db2::FileIds;
 use dbc::Tables;
+use recent::Recent;
 
 /// The setting holding the folder of the client.
 const CLIENT_FOLDER: &str = "client_folder";
+/// The bytes of the files of the tiles read last that are kept (`recent`).
+const RECENT: u64 = 96 << 20;
 
 /// The client once open: its folder, its archives, its FileDataIDs, and its tables, each read when
-/// first asked, as the zones of light of its Wow.exe.
+/// first asked, as the zones of light of its Wow.exe; the files of the tiles read last, which four
+/// modules read each.
 struct Client {
     folder: PathBuf,
     chain: Chain,
     file_ids: FileIds,
     tables: Tables,
+    recent: Recent,
     zones: OnceLock<Result<Arc<Vec<ZoneLightRecord>>, String>>,
     /// The WDT of each map read, by its folder in lower case.
     wdts: Mutex<HashMap<String, Arc<Wdt>>>,
@@ -75,6 +81,7 @@ impl Client {
             chain,
             file_ids,
             tables: Tables::new(locale),
+            recent: Recent::new(RECENT),
             zones: OnceLock::new(),
             wdts: Mutex::default(),
         };
@@ -118,13 +125,20 @@ impl Client {
         Ok(wdt)
     }
 
+    /// A file of a tile, `path`: kept from a read of another module, or read and kept (`recent`).
+    fn tile_file(&self, path: &str) -> recent::Read {
+        self.recent
+            .get(path, || self.chain.read(path))
+            .map_err(|e| format!("{path}: {e}"))
+    }
+
     fn tile(&self, directory: &str, x: u32, y: u32) -> Result<Option<Tile>, String> {
         let wdt = self.wdt(directory)?;
         if x > 63 || y > 63 || !wdt.tiles[(y * 64 + x) as usize] {
             return Ok(None);
         }
         let stem = format!("World\\Maps\\{directory}\\{directory}_{x}_{y}");
-        let read = |path: &str| self.chain.read(path).map_err(|e| format!("{path}: {e}"));
+        let read = |path: &str| self.tile_file(path);
         let root_path = format!("{stem}.adt");
         let root = read(&root_path)?.ok_or_else(|| format!("{root_path}: named by its WDT, not in the client"))?;
         // Split, as WarcraftXL loads it, when its `_tex0` exists.
@@ -144,7 +158,7 @@ impl Client {
             return Ok(None);
         }
         let stem = format!("World\\Maps\\{directory}\\{directory}_{x}_{y}");
-        let read = |path: &str| self.chain.read(path).map_err(|e| format!("{path}: {e}"));
+        let read = |path: &str| self.tile_file(path);
         // Split as `tile` reads it, when its `_tex0` exists: its placements in its `_obj0`.
         if self.chain.exists(&format!("{stem}_tex0.adt")) {
             let obj_path = format!("{stem}_obj0.adt");
@@ -167,9 +181,7 @@ impl Client {
         }
         let root_path = format!("World\\Maps\\{directory}\\{directory}_{x}_{y}.adt");
         let root = self
-            .chain
-            .read(&root_path)
-            .map_err(|e| format!("{root_path}: {e}"))?
+            .tile_file(&root_path)?
             .ok_or_else(|| format!("{root_path}: named by its WDT, not in the client"))?;
         liquid::liquids(&root, [x, y])
             .map(Some)
