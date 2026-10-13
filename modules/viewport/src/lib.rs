@@ -22,7 +22,6 @@ use std::time::{Duration, Instant};
 
 use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::hotkey::{Hotkey, HotkeyKind, Keys};
-use uniwow_api::journal;
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::viewport::{
     self, Allowance, Demand, Drawing, Fog, Frame, Label, Layer, MAX_FRAME_WAIT, MapLight, Phase, Pyramid, Sky, Sun,
@@ -32,6 +31,7 @@ use uniwow_api::{
     Context, DockArea, Event, MODULE_FAILED_TOPIC, Module, PropertyKind, PropertyValue, Registrar, SettingSpec, egui,
     egui_wgpu, log, wgpu,
 };
+use uniwow_api::{journal, uploads};
 
 use camera::{FOV, OrbitCamera, REACH};
 use grid::Grid;
@@ -318,6 +318,19 @@ fn budget_setting(gpu_memory: Option<u64>) -> SettingSpec {
     )
 }
 
+/// The setting of what the jobs send to the GPU in a frame, in MB (`uploads`), in the category
+/// *View*: given again at each frame signal.
+const UPLOADS: &str = "upload_budget_mb";
+
+fn uploads_setting() -> SettingSpec {
+    SettingSpec::integer(
+        UPLOADS,
+        "Uploads of the jobs a frame (MB)",
+        [4, 1024],
+        (uploads::DEFAULT_BUDGET / MB) as i64,
+    )
+}
+
 /// Implementation of the service, sharing the layer list, the frame signal and the budget with the
 /// module.
 struct Service {
@@ -557,7 +570,7 @@ impl Module for ViewportModule {
         });
         let gpu_memory = reg.gpu_memory;
         reg.panel("view", "3D View", DockArea::Center)
-            .settings("View", vec![budget_setting(gpu_memory)])
+            .settings("View", vec![budget_setting(gpu_memory), uploads_setting()])
             .provide(viewport::SERVICE, service)
             .subscribe(MODULE_FAILED_TOPIC)
             .menu_item("View", "Reset camera", "reset_camera")
@@ -628,6 +641,7 @@ impl Module for ViewportModule {
         let mut state = budget(&self.budget);
         state.bytes = budget_setting(ctx.gpu_memory()).value(ctx.setting(BUDGET).as_ref()) as u64 * MB;
         state.allow();
+        uploads::set_budget(uploads_setting().value(ctx.setting(UPLOADS).as_ref()) as u64 * MB);
     }
 
     fn windows_ui(&mut self, _egui: &egui::Context, ctx: &mut Context) {
@@ -642,6 +656,8 @@ impl Module for ViewportModule {
             state.bytes = bytes;
             state.allow();
         }
+        drop(state);
+        uploads::set_budget(uploads_setting().value(ctx.setting(UPLOADS).as_ref()) as u64 * MB);
     }
 
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
@@ -936,7 +952,8 @@ impl ViewportModule {
         }
     }
 
-    /// Gives the frame signal of the frame to come, once the frame drawn at `time` is submitted.
+    /// Gives the frame signal of the frame to come, once the frame drawn at `time` is submitted, and
+    /// the budget of the uploads of the jobs for it.
     fn signal_frame(&mut self, time: f32) {
         if let Some(last) = self.last_time {
             // A pause of the view, hidden or minimised, is not a frame's time.
@@ -951,6 +968,7 @@ impl ViewportModule {
         }
         self.last_time = Some(time);
         self.submitted += 1;
+        uploads::refill();
         self.frames.give(Frame {
             number: self.submitted + 1,
             time: time + self.interval,
@@ -2002,6 +2020,13 @@ mod tests {
             ("gpu_budget_mb", [64, 65_536], 6144),
             "half the memory of a GPU of 12 GB by default"
         );
+        let uploads = &category.settings[1];
+        assert_eq!(
+            (uploads.key.as_str(), uploads.range, uploads.default),
+            ("upload_budget_mb", [4, 1024], 32),
+            "the budget of the uploads of a frame, 32 MB by default"
+        );
+        assert_eq!(uploads.value(Some(&json!(64))), 64);
         let mut host = SettingsHost {
             gpu_memory: Some(12 << 30),
             ..SettingsHost::default()
@@ -2117,8 +2142,13 @@ mod tests {
     fn the_frame_to_come_is_given_with_its_time_estimated_from_the_frames_before() {
         let mut module = ViewportModule::default();
         let next = |module: &ViewportModule| module.frames.wait(0, Duration::ZERO).unwrap();
+        let refills = uniwow_api::uploads::frames();
         module.signal_frame(1.0);
         assert_eq!(next(&module), Frame { number: 2, time: 1.0 });
+        assert!(
+            uniwow_api::uploads::frames() > refills,
+            "the budget of the uploads given again"
+        );
         module.signal_frame(1.016);
         let frame = next(&module);
         assert_eq!(frame.number, 3);

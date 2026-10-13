@@ -7,10 +7,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use uniwow_api::formats::{self, Texture, TextureFormat};
-use uniwow_api::journal;
 use uniwow_api::viewport::{self, Target, View};
 use uniwow_api::wgpu::util::DeviceExt;
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
+use uniwow_api::{journal, uploads};
 
 use crate::lock;
 use crate::pool::Pool;
@@ -448,8 +448,10 @@ impl Shared {
         )
     }
 
-    /// A buffer of `usage` made with `contents`.
+    /// A buffer of `usage` made with `contents`, which pass the budget of the uploads of a frame
+    /// first.
     pub fn buffer(&self, label: &str, contents: &[u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
+        uploads::pass(contents.len() as u64);
         journal::uploaded(contents.len() as u64);
         self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
@@ -522,6 +524,7 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, texture: &Texture) -> Resu
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
+    uploads::pass(bytes.len() as u64);
     journal::uploaded(bytes.len() as u64);
     let source = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("models texture"),

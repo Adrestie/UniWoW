@@ -8,7 +8,9 @@
 //! be read is not read again; one refused for want of room is tried again. A layer is filled by a
 //! copy the job submits, never by `Queue::write_texture`: wgpu-core 30 holds the state of
 //! initialisation of the texture written while it takes its trackers, a submission takes them the
-//! other way round, and the frame drawing the array would lock up with the job writing to it.
+//! other way round, and the frame drawing the array would lock up with the job writing to it. The
+//! bytes of a texture, and those an array grown copies, pass the budget of the uploads of a frame
+//! (`uploads`) before the lock of the arrays.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -16,7 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 use crate::formats::{FileRef, Formats, Texture, TextureFormat};
 use crate::wgpu::util::DeviceExt;
-use crate::{journal, log, wgpu};
+use crate::{journal, log, uploads, wgpu};
 
 /// The levels of `class` for `texture`: its own, then those it lacks, as the client's textures cut
 /// short at their end, each made from the one before: texels averaged 2 × 2, or for BC one block of
@@ -398,6 +400,7 @@ impl TextureArrays {
             }
         }
         // Written where the GPU reads it from, without a buffer of wgpu's own copied into it.
+        uploads::pass(bytes.len() as u64);
         let source = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(self.owner),
             contents: &bytes,
@@ -405,6 +408,14 @@ impl TextureArrays {
         });
         journal::uploaded(bytes.len() as u64);
         let mut arrays = lock(&self.arrays);
+        // What a growth would copy passes the budget too, the lock let go meanwhile; another job
+        // may have made a layer free by then.
+        let copied = self.growth(&arrays, class);
+        if copied > 0 {
+            drop(arrays);
+            uploads::pass(copied);
+            arrays = lock(&self.arrays);
+        }
         let (slot, layer) = self.free_layer(&mut arrays, class).ok_or_else(|| {
             format!(
                 "{} arrays of textures are full, the last of {}×{} {format:?}",
@@ -447,6 +458,18 @@ impl TextureArrays {
             height: class.height,
             bytes: class.layer_bytes(),
         })
+    }
+
+    /// The bytes an array of `class` grown for one more texture would copy: none while one has a
+    /// free layer, or when a new one would be made.
+    fn growth(&self, arrays: &Arrays, class: Class) -> u64 {
+        let of_class = || arrays.slots.iter().flatten().filter(|array| array.class == class);
+        if of_class().any(|array| array.used.contains(&false)) {
+            return 0;
+        }
+        of_class()
+            .find(|array| (array.used.len() as u32) < self.max_layers)
+            .map_or(0, |array| class.layer_bytes() * array.used.len() as u64)
     }
 
     /// A free layer for a texture of `class`, marked used: in an array of its class, in one grown,

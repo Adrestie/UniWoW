@@ -6138,6 +6138,52 @@ covers a whole chunk under another, the two were added.
   what the tile stores where it holds shares; light points taken: a name no longer hiding the
   function, the shares of texels each by itself, the layers without 0x100 counted in the client.
 
+#### The optimizations set aside, as built
+
+Asked by the user after the review of the frames measured in flight (*The frames measured in
+flight, before any correction*): the interface thread past 16.7 ms while flying fast in Northrend,
+and now and then a frame of 190 to 350 ms while the jobs sent 90 to 200 MB to the GPU at once.
+Built where neither the client nor a GPU of its own was at hand: the tests of the GPU ran on a
+software adapter, and nothing was measured in the editor; what the user is to measure closes the
+section.
+
+- **The budget of the uploads of a frame** (`core/api/src/uploads.rs`): a job passes it with the
+  bytes it is about to send, before it takes any lock, and waits while the frame has sent its
+  budget: 32 MB by default, the setting *Uploads of the jobs a frame (MB)* of the category *View*,
+  from 4 to 1,024. The view gives it again at each frame signal, what is left never more than one
+  frame's. An upload larger than the whole budget passes once the budget is whole, the frames
+  after it paying for it, and the jobs pass in the order they came, so that none waits for ever.
+  The interface thread is never held back nor counted. Until the view gives its first frame signal
+  nothing is held back, so that the tests of the modules run as before; once the view stops
+  drawing, the budget is given again every 100 ms, so that a job never waits without a limit (T2).
+  - Passed by: a range put in an arena, and the copy of an arena grown, the lock of its holes let
+    go meanwhile, since the interface thread takes it to give a range back; a texture placed in an
+    array, and the copy of an array grown, before the lock of the arrays; the tiles and the horizon
+    of the terrain; the buffers and the textures of the looks of their own of `models`, and the
+    tables of its choice. Not passed: what a frame needs at once, the per-frame tables of the
+    layers, the bones the thread of the animations writes, and a range of an arena written again
+    in place, as the instances an owner moves.
+  - The journal of the frames says, in a column of its own, how many jobs the budget held back in
+    a frame and how long they waited in all.
+  - **Tested**: nothing held back before the first frame, then the budget of each frame given
+    again, never more than one frame's; a job past the budget waiting for the next frame; an upload
+    larger than the budget passing once it is whole, three frames paying for it; a small job not
+    passing before a larger one that came first; the interface thread neither held back nor
+    counted; without a frame signal, the budget given again by the time; eight threads passing 320
+    uploads of a few KB to twice the budget while the frames come every millisecond, all passing;
+    the journal counting the jobs held and their time; the setting declared, 32 MB by default, and
+    the frame signal giving the budget again.
+
+**To measure by the user**: the flights of *The frames measured in flight, before any correction*
+(the terrain at 64 tiles, the buildings at 8, the doodads at 4, the models at a reach of 1,000; 300
+then 600 yards a second, from the Howling Fjord to Dalaran by the Grizzly Hills), with the journal
+of the frames (`UNIWOW_SLOW_FRAMES`), before this work and after it:
+
+1. The frames a second, the share of slow frames and the longest; the frames past 100 ms, and the
+   bytes sent to the GPU in each, which should no longer pass the budget of the uploads by much; the
+   new column of the jobs held by that budget, and whether the loads seem slower (the panels say
+   how long the tiles within reach took to load). The same with the budget at 16 and at 64 MB.
+
 #### Step 9.7, proposed: the light of the map
 
 Asked by the user after the blending of the textures. Until now the light is fixed: a sun of 0.55

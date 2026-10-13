@@ -69,6 +69,7 @@ pub mod sequence;
 mod service;
 pub mod texture_arrays;
 pub mod ui;
+pub mod uploads;
 pub mod vfs;
 pub mod viewport;
 

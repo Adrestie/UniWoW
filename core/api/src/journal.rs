@@ -1,7 +1,7 @@
 //! The journal of a frame: what each part of the editor spent on the interface thread, what was
 //! sent to the GPU from any thread (`Queue::write_buffer`, `Queue::write_texture`), the arenas grown
-//! and what they copied, and the locks the interface thread waited for; with what the GPU last spent
-//! on each layer. The kernel takes it at the start of each frame and writes the frames that missed
+//! and what they copied, the locks the interface thread waited for, and how long the jobs waited for
+//! the budget of the uploads of a frame (`uploads`); with what the GPU last spent on each layer. The kernel takes it at the start of each frame and writes the frames that missed
 //! their deadline where `UNIWOW_SLOW_FRAMES` names a file. Kept cheap whether written or not: sums
 //! by part, and counters. The waits for locks are timed on the interface thread only, the thread
 //! whose frames the journal is about; the workers' waits are not seen.
@@ -22,6 +22,8 @@ static GPU: Mutex<String> = Mutex::new(String::new());
 static UPLOADED: AtomicU64 = AtomicU64::new(0);
 static GROWN: AtomicU64 = AtomicU64::new(0);
 static GROWTHS: AtomicU64 = AtomicU64::new(0);
+static HELD: AtomicU64 = AtomicU64::new(0);
+static HELD_NANOS: AtomicU64 = AtomicU64::new(0);
 
 fn lock_plain<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -59,6 +61,12 @@ pub fn grown(bytes: u64) {
     GROWTHS.fetch_add(1, Ordering::Relaxed);
 }
 
+/// A job held `took` by the budget of the uploads of a frame.
+pub fn held(took: Duration) {
+    HELD.fetch_add(1, Ordering::Relaxed);
+    HELD_NANOS.fetch_add(took.as_nanos() as u64, Ordering::Relaxed);
+}
+
 /// What the GPU spent on the last frame it timed, by layer, as the view says it.
 pub fn set_gpu(said: String) {
     *lock_plain(&GPU) = said;
@@ -85,7 +93,8 @@ pub fn lock<'a, T>(mutex: &'a Mutex<T>, name: &'static str) -> MutexGuard<'a, T>
 
 /// What a frame took: each part's time on the interface thread, the longest first; the bytes sent
 /// to the GPU; the arenas grown and the bytes they copied; the waits of the interface thread for a
-/// lock, the longest first; what the GPU last spent by layer.
+/// lock, the longest first; the jobs the budget of the uploads held back and how long in all; what
+/// the GPU last spent by layer.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Frame {
     pub spent: Vec<(String, Duration)>,
@@ -93,6 +102,8 @@ pub struct Frame {
     pub growths: u64,
     pub grown: u64,
     pub waited: Vec<(&'static str, Duration)>,
+    pub held: u64,
+    pub held_for: Duration,
     pub gpu: String,
 }
 
@@ -108,6 +119,8 @@ pub fn take() -> Frame {
         growths: GROWTHS.swap(0, Ordering::Relaxed),
         grown: GROWN.swap(0, Ordering::Relaxed),
         waited,
+        held: HELD.swap(0, Ordering::Relaxed),
+        held_for: Duration::from_nanos(HELD_NANOS.swap(0, Ordering::Relaxed)),
         gpu: lock_plain(&GPU).clone(),
     }
 }
@@ -119,7 +132,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_frame_says_what_each_part_spent_what_was_sent_and_grown_and_what_the_interface_waited_for() {
+    fn a_frame_says_what_each_part_spent_what_was_sent_grown_and_held_and_what_the_interface_waited_for() {
         // One test for the whole journal, which is shared by the process.
         take();
         mark_interface_thread();
@@ -129,6 +142,8 @@ mod tests {
         uploaded(100);
         std::thread::spawn(|| uploaded(28)).join().unwrap();
         grown(1 << 20);
+        held(Duration::from_millis(4));
+        std::thread::spawn(|| held(Duration::from_millis(3))).join().unwrap();
         set_gpu("terrain 0.50".to_owned());
         // A lock held by another thread for a while: waited for, and said under its name.
         let held = Arc::new(Mutex::new(0));
@@ -161,6 +176,10 @@ mod tests {
         );
         assert_eq!(frame.waited.len(), 1, "a lock free not waited for");
         assert!(frame.waited[0].0 == "test lock" && frame.waited[0].1 >= Duration::from_millis(20));
+        assert!(
+            frame.held >= 2 && frame.held_for >= Duration::from_millis(7),
+            "{frame:?}"
+        );
         assert_eq!(frame.gpu, "terrain 0.50");
         assert_eq!(take().spent, Vec::new(), "the next frame from nothing");
     }

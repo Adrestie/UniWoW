@@ -8,11 +8,11 @@ use std::sync::{Arc, OnceLock};
 
 use uniwow_api::bytemuck::Zeroable;
 use uniwow_api::formats::{Formats, Layer, Tile};
-use uniwow_api::journal;
 use uniwow_api::texture_arrays::{NONE, Placed, TextureArrays};
 use uniwow_api::viewport::{self, Target};
 use uniwow_api::wgpu::util::DeviceExt;
 use uniwow_api::{bytemuck, egui_wgpu, parallel_for, wgpu};
+use uniwow_api::{journal, uploads};
 
 use crate::horizon::HorizonVertex;
 use crate::loading::Kind;
@@ -533,6 +533,8 @@ pub fn build_tile(
         }
         texels.extend(blend);
     }
+    let (indices, lods) = mesh::indices(&model.tile);
+    uploads::pass((size_of_val(all.as_slice()) + texels.len() + size_of_val(indices.as_slice())) as u64);
     let device = &shared.device;
     let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("terrain vertices"),
@@ -540,7 +542,6 @@ pub fn build_tile(
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
     });
     write_blend(&shared.queue, &parts.blend, 0, 64, &texels);
-    let (indices, lods) = mesh::indices(&model.tile);
     let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("terrain indices"),
         contents: bytemuck::cast_slice(&indices),
@@ -578,8 +579,9 @@ pub fn build_light(
         return Ok(None);
     };
     let texels: Vec<u8> = tile.chunks.iter().flat_map(mesh::light_blend).collect();
-    write_blend(&shared.queue, &parts.blend, 0, side, &texels);
     let (vertices, indices) = mesh::light(id, tile);
+    uploads::pass((texels.len() + size_of_val(vertices.as_slice()) + size_of_val(indices.as_slice())) as u64);
+    write_blend(&shared.queue, &parts.blend, 0, side, &texels);
     let buffer = |label, contents: &[u8], usage| {
         shared.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),

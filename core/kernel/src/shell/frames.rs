@@ -50,8 +50,8 @@ impl Frames {
             let _ = writeln!(
                 file,
                 "seconds\tms\tslow\tjobs started not yet handed back\tsent to the GPU\tarenas grown\twaits of the \
-                 interface thread\tGPU of the frame timed last\tthe interface thread by part, nested, ms\tthe work of \
-                 the kernel, its parts summed, ms"
+                 interface thread\tjobs held by the budget of the uploads, ms in all\tGPU of the frame timed last\tthe \
+                 interface thread by part, nested, ms\tthe work of the kernel, its parts summed, ms"
             );
             Some(file)
         });
@@ -95,7 +95,7 @@ impl Frames {
             .collect();
         let _ = writeln!(
             file,
-            "{:.3}\t{:.2}\t{}\t{jobs}\t{:.2} MB\t{} {:.1} MB\t{}\t{}\t{}\t{:.2}",
+            "{:.3}\t{:.2}\t{}\t{jobs}\t{:.2} MB\t{} {:.1} MB\t{}\t{} {:.2}\t{}\t{}\t{:.2}",
             (started - self.origin).as_secs_f64(),
             ms(interval),
             if interval > SLOW { "slow" } else { "" },
@@ -103,6 +103,8 @@ impl Frames {
             frame.growths,
             frame.grown as f64 / (1024.0 * 1024.0),
             waited.join("; "),
+            frame.held,
+            ms(frame.held_for),
             frame.gpu,
             parts.join("; "),
             ms(work(&frame.spent))
