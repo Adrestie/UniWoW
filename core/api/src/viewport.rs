@@ -369,18 +369,23 @@ pub enum Drawing {
 }
 
 /// When a layer is drawn among the others in each phase: the ground first, then the models of the
-/// sky, the water, then the scene. Layers of one stage are drawn in the order they were added.
+/// sky, the sun, the moon and the clouds, the water, the scene, then the glare of the sun. Layers of
+/// one stage are drawn in the order they were added.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Stage {
     /// The terrain and its sky.
     Ground,
     /// The models of the sky, over the sky of the ground and behind the rest.
     Sky,
+    /// The sun, the moon and the clouds, over the models of the sky and behind the rest.
+    Celestial,
     /// The liquids.
     Water,
     /// What stands on the ground, by default.
     #[default]
     Scene,
+    /// The glare of the sun or of the moon, over everything, as the client draws it last.
+    Glare,
 }
 
 /// The phases a frame is drawn in, over two passes. The first draws what every layer draws opaque,

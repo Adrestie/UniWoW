@@ -26,6 +26,8 @@ struct Camera {
     back: vec4<f32>,
     // How much the materials glowing at night glow, from 0 by day to 1 by night.
     glow: vec4<f32>,
+    // The colour of the highlight of the specular and metal materials, in gamma, black for none.
+    highlight: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
@@ -163,11 +165,10 @@ struct Combined {
 };
 
 // The pixel shaders of 3.3.5a, in gamma: diffuse (0), specular (1) and metal (2) as diffuse, their
-// highlight left out as the public implementation WebWowViewerCpp leaves it out; environment (3)
-// and environment metal (5), the second texture mapped on the environment added after the light,
-// as WebWowViewerCpp adds it (`caclWMOFragMat`): by the alpha of the first, and for the metal times
-// the first too; opaque (4); two layers (6), the second texture blended over the first by the alpha
-// of the second colours.
+// highlight added after the light (`highlight`); environment (3) and environment metal (5), the
+// second texture mapped on the environment added after the light, as WebWowViewerCpp adds it
+// (`caclWMOFragMat`): by the alpha of the first, and for the metal times the first too; opaque (4);
+// two layers (6), the second texture blended over the first by the alpha of the second colours.
 fn combine(shader: u32, one: vec4<f32>, two: vec4<f32>, blend: f32) -> Combined {
     switch shader {
         case 3u: { return Combined(one, two.rgb * one.a); }
@@ -196,6 +197,23 @@ fn batch_light(normal: vec3<f32>, vertex: vec3<f32>, ambient: vec3<f32>, outside
     let facing = clamp(dot(n, camera.sun.xyz), 0.0, 1.0);
     let lit_outside = turned(camera.ambient.rgb + vertex, n, camera.sun.xyz) + camera.sun_colour.rgb * facing;
     return mix(inside, lit_outside, outside);
+}
+
+// The highlight of a texel `texel` of the shaders specular (1) and metal (2) on a face of `normal`
+// at `world`, in gamma, by the formula of later clients (the public implementation
+// WebWowViewerCpp's `calcSpec`, which it leaves out, read for its facts): half way between towards
+// the sun and towards the eye, 1.25 times the cosine of that way with the normal to the 8th; times
+// what the face reflects, the 5th power of what the cosine of the sun with that way leaves of 1,
+// mixed towards 1 by the alpha of the texel, for the metal by its red four times its alpha, beyond
+// 1 above it; times the colour of the highlight and the cosine of the sun with the normal.
+fn highlight(shader: u32, texel: vec4<f32>, normal: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
+    let n = normalize(normal);
+    let to_sun = camera.sun.xyz;
+    let half_way = normalize(to_sun + normalize(camera.eye.xyz - world));
+    let shine = 1.25 * pow(clamp(dot(n, half_way), 0.0, 1.0), 8.0);
+    let mask = select(texel.a, texel.r * 4.0 * texel.a, shader == 2u);
+    let reflected = mix(pow(1.0 - clamp(dot(to_sun, half_way), 0.0, 1.0), 5.0), 1.0, mask);
+    return camera.highlight.rgb * shine * reflected * clamp(dot(n, to_sun), 0.0, 1.0);
 }
 
 // The colour of the fog of a batch but a mod2x one: the view's, black, or white.
@@ -248,6 +266,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         return vec4<f32>(pow(gamma * 2.0, vec3<f32>(2.2)) * 0.5, alpha);
     }
     var rgb = linear(clamp(combined.lit.rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
+    // The highlight of the specular and metal materials, by their share of the light outside.
+    var shining = vec3<f32>(0.0);
     if shading.y < 0.5 {
         // Its vertex colours, halved when fixed; its share of the light outside: 1 in a group lit
         // as outside, for a batch outside (the outer walls of the rooms, their colours left out)
@@ -278,10 +298,14 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             lit = light(in.normal) + linear(in.ambient);
         }
         rgb = rgb * lit;
+        if shader == 1u || shader == 2u {
+            shining = highlight(shader, one, in.normal, in.world) * outside;
+        }
     }
-    // Added after the light, in gamma: the environment, and the emissive colour of a material
-    // glowing at night by how much it is night, as Noggit Red adds it (read for the facts only).
-    var added = combined.added;
+    // Added after the light, in gamma: the environment, the highlight, and the emissive colour of a
+    // material glowing at night by how much it is night, as Noggit Red adds it (read for the facts
+    // only).
+    var added = combined.added + shining;
     if (material.flags.x & GLOWS_AT_NIGHT) != 0u {
         added = added + unpack4x8unorm(material.flags.z).rgb * camera.glow.x;
     }

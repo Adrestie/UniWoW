@@ -53,6 +53,8 @@ pub struct Scene {
     pub steering: Duration,
     /// Where the eye stood among the buildings at the last frame prepared.
     pub eye: Eye,
+    /// Whether the materials of the shaders specular and metal are highlighted (`gpu::camera_values`).
+    pub highlights: bool,
 }
 
 /// The bounds in the world of `bounds` moved by `transform`: those of its eight corners.
@@ -402,9 +404,15 @@ impl Layer for BuildingsLayer {
             part = Instant::now();
         };
         let shared = self.shared.clone();
-        let (placed, steering, cpu, liquids) = {
+        let (placed, steering, cpu, liquids, highlights) = {
             let scene = journal::lock(&self.scene, "buildings scene");
-            (scene.placed.clone(), scene.steering, scene.cpu, scene.liquids.clone())
+            (
+                scene.placed.clone(),
+                scene.steering,
+                scene.cpu,
+                scene.liquids.clone(),
+                scene.highlights,
+            )
         };
         let surfaces = liquids.map(|liquids| liquids.surfaces());
         let (camera, _) = self.camera.get_or_insert_with(|| {
@@ -425,7 +433,7 @@ impl Layer for BuildingsLayer {
             (buffer, group)
         });
         gpu.queue
-            .write_buffer(camera, 0, bytemuck::cast_slice(&camera_values(view)));
+            .write_buffer(camera, 0, bytemuck::cast_slice(&camera_values(view, highlights)));
         spent("buildings prepare: the scene and the camera");
         // The buildings of the frame before let go once they changed, the last of those held.
         let changed = !Arc::ptr_eq(&placed, &self.drawn);

@@ -527,6 +527,8 @@ pub struct WmoGroup {
     pub batches: Vec<WmoBatch>,
     /// The doodads it holds, of `Wmo::doodads`.
     pub doodad_refs: Vec<u16>,
+    /// The lights of its building it names (`MOLR`), of `Wmo::lights`: those its doodads are lit by.
+    pub light_refs: Vec<u16>,
     pub liquid: Option<WmoLiquid>,
     /// Its BSP tree, its root first; none where it has none, or one that does not hold together.
     pub bsp: Vec<BspNode>,
@@ -595,8 +597,9 @@ pub struct PortalRef {
     pub side: i16,
 }
 
-/// A light of a building: its kind (0 a point, 1 a spot, 2 directed, 3 ambient), whether it fades,
-/// and between which distances.
+/// A light of a building, in its axes: its kind (0 a point, 1 a spot, 2 directed, 3 ambient),
+/// whether it fades, its colour (red first) and intensity, and the distances between which it fades
+/// out, in yards.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WmoLight {
     pub kind: u8,

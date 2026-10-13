@@ -33,8 +33,8 @@ use uniwow_api::glam::Vec3;
 use uniwow_api::serde_json::json;
 use uniwow_api::viewport::Demand;
 use uniwow_api::{
-    Context, DockArea, JobId, JobOutcome, Module, Priority, PropertyValue, Registrar, egui, liquids, log, models,
-    viewport,
+    Context, DockArea, JobId, JobOutcome, Module, Priority, PropertyValue, Registrar, SettingSpec, egui, liquids, log,
+    models, viewport,
 };
 
 use doodads::Owners;
@@ -44,6 +44,19 @@ use layer::{BuildingsLayer, Placed, Poured, Scene};
 
 /// The setting of how far around the camera tiles are read, in tiles (`formats::distance_setting`).
 const DISTANCE: &str = "distance";
+/// The setting of the highlight of the specular and metal materials (`highlights_setting`).
+const HIGHLIGHTS: &str = "highlights";
+
+/// The highlight of the materials of the shaders specular (1) and metal (2), by the formula of later
+/// clients, or none, as the client 3.3.5a may draw them: on by default.
+fn highlights_setting() -> SettingSpec {
+    SettingSpec::integer(
+        HIGHLIGHTS,
+        "Highlights of the specular and metal materials, by the formula of later clients (1) or none (0)",
+        [0, 1],
+        1,
+    )
+}
 /// The refusals the panel keeps.
 const REFUSALS: usize = 8;
 
@@ -56,9 +69,11 @@ pub struct WmoFile {
     pub gpu: Arc<WmoGpu>,
     pub sets: Vec<DoodadSet>,
     pub doodads: Vec<WmoDoodad>,
-    /// The groups holding each doodad, and whether each is lit as the rooms are.
+    /// The groups holding each doodad, whether each is lit as the rooms are, and the lights of the
+    /// building on each (`doodads::lamps`).
     pub holders: Vec<Vec<u16>>,
     pub inside: Vec<bool>,
+    pub lamps: Vec<Vec<doodads::Lamp>>,
     pub liquids: Vec<liquid::GroupLiquid>,
 }
 
@@ -82,7 +97,12 @@ impl WmoFile {
                     .iter()
                     .map(|held| size_of::<Vec<u16>>() + held.len() * 2)
                     .sum::<usize>()
-                + self.inside.len()) as u64
+                + self.inside.len()
+                + self
+                    .lamps
+                    .iter()
+                    .map(|lit| size_of::<Vec<doodads::Lamp>>() + lit.len() * size_of::<doodads::Lamp>())
+                    .sum::<usize>()) as u64
     }
 }
 
@@ -253,6 +273,7 @@ impl BuildingsModule {
             let (sets, doodads) = (wmo.doodad_sets.clone(), wmo.doodads.clone());
             let holders = doodads::holders(&wmo.groups, doodads.len());
             let inside = doodads::lit_inside(&wmo.groups, &holders);
+            let lamps = doodads::lamps(&wmo.groups, &wmo.lights, &doodads, &holders);
             let liquids = liquid::liquids(&wmo);
             if !wmo.faults.is_empty() {
                 log::warn!("{read:?}: {} faults, the first {}", wmo.faults.len(), wmo.faults[0]);
@@ -264,6 +285,7 @@ impl BuildingsModule {
                 doodads,
                 holders,
                 inside,
+                lamps,
                 liquids,
             })
         });
@@ -337,10 +359,12 @@ impl BuildingsModule {
             self.took = None;
         }
         self.steer_tiles(ctx);
+        let highlights = highlights_setting().value(ctx.setting(HIGHLIGHTS).as_ref()) == 1;
         let mut scene = lock(&self.scene);
         if scene.liquids.is_none() {
             scene.liquids = ctx.service(liquids::SERVICE);
         }
+        scene.highlights = highlights;
         scene.steering = start.elapsed();
     }
 
@@ -608,6 +632,7 @@ impl BuildingsModule {
                     &file.doodads,
                     &file.holders,
                     &file.inside,
+                    &file.lamps,
                     named,
                 );
                 lock(&owners).place(&*models, &map, id, &parts);
@@ -622,7 +647,10 @@ impl Module for BuildingsModule {
     fn register(&mut self, reg: &mut Registrar) {
         let seen: service::Handle = Arc::new(Seen(self.scene.clone()));
         reg.panel("buildings", "Buildings", DockArea::Right)
-            .settings("Buildings", vec![formats::distance_setting(DISTANCE)])
+            .settings(
+                "Buildings",
+                vec![formats::distance_setting(DISTANCE), highlights_setting()],
+            )
             .provide(service::SERVICE, seen);
     }
 

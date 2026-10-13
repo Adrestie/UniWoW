@@ -4,14 +4,21 @@
 //! to the view (`Viewport::set_light`) and said in the panel; taken back when the module stops.
 //! They are read by a job once the client's archives are open, and again whenever they change. The
 //! models of the sky the lights name, and that of the building whose group the eye is in, are
-//! placed at the eye through the service `models`, which draws them around it. The weather the
-//! service `weather` gives mixes in the params of storm of the lights and brings the fog nearer.
+//! placed at the eye through the service `models`, which draws them around it, the stars first. The
+//! sun, the moon and the clouds are drawn by layers of its own (`sky`), over the models of the sky,
+//! and their glare over everything. The weather the service `weather` gives mixes in the params of
+//! storm of the lights and brings the fog nearer.
 
+mod clouds;
+mod heavens;
 mod light;
+mod sky;
+#[cfg(test)]
+mod sky_tests;
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use uniwow_api::formats::FileRef;
@@ -21,10 +28,13 @@ use uniwow_api::serde_json::json;
 use uniwow_api::vfs::{self, VfsState};
 use uniwow_api::viewport::{self, MapLight};
 use uniwow_api::weather::{self, Effect};
-use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, PropertyValue, Registrar, SettingSpec, egui, log};
+use uniwow_api::{
+    Context, DockArea, JobId, JobOutcome, Module, PropertyValue, Registrar, SettingSpec, egui, egui_wgpu, log,
+};
 use uniwow_api::{buildings, formats, liquids};
 
 use light::{COLOURS, DAY, FOLLOWS_THE_HOUR, Immersion, Mixed, NUMBERS, Tables, WHOLE_INSIDE};
+use sky::{Drawn, GlareLayer, HeavensLayer};
 
 /// The settings: the hour, in minutes from midnight; how many minutes of the game pass in a second;
 /// whether the zones of light and the local lights are mixed in; whether the fog is the game's or
@@ -125,20 +135,33 @@ fn half_minutes(from: f64, speed: i64, seconds: f64) -> f32 {
 /// could not be, if so.
 type Read = (Arc<Tables>, Option<String>, Option<String>, Option<String>);
 
+/// Whose a model of the sky is: a light's (`LightSkybox.dbc`, by its id), the building's (`MOSB`),
+/// or the stars of the night.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Whose {
+    Light(u32),
+    Building,
+    Stars,
+}
+
 /// A model of the sky drawn around the eye: its model, its alpha, its share of the day when its
-/// animation follows the hour, and whose it is, a light's (`LightSkybox.dbc`, by its id) or the
-/// building's (`MOSB`).
+/// animation follows the hour, and whose it is.
 #[derive(Clone, Debug, PartialEq)]
 struct Sky {
     model: FileRef,
     alpha: f32,
     share: Option<f32>,
-    light: Option<u32>,
+    whose: Whose,
 }
 
-/// The id of the instance of the model of the sky of a building, apart from those of the lights,
-/// their ids in `LightSkybox.dbc`.
+/// The ids of the instances of the model of the sky of a building and of the stars, apart from those
+/// of the lights, their ids in `LightSkybox.dbc`.
 const BUILDING_SKY: u64 = 1 << 32;
+const STARS_SKY: u64 = BUILDING_SKY + 1;
+
+/// The model of the stars of the night, drawn as a model of the sky by the client (Noggit and
+/// WebWowViewerCpp draw it so), faded by the hour (`heavens::stars`).
+const STARS: &str = "Environments\\Stars\\Stars.m2";
 
 impl Sky {
     /// Its instance at `eye`, where the models find it in sight, drawn around the eye wherever it
@@ -146,7 +169,11 @@ impl Sky {
     /// update`).
     fn instance(&self, look: models::LookId, eye: Vec3) -> Instance {
         Instance {
-            id: self.light.map_or(BUILDING_SKY, u64::from),
+            id: match self.whose {
+                Whose::Light(id) => u64::from(id),
+                Whose::Building => BUILDING_SKY,
+                Whose::Stars => STARS_SKY,
+            },
             look,
             transform: Mat4::from_translation(eye),
             alpha: self.alpha,
@@ -178,15 +205,19 @@ struct Shown {
     immersion: Immersion,
     /// The hour of the server, when asked for: none when it was taken, why not otherwise.
     server_hour: Option<Result<(), String>>,
-    /// The weather applied, whether the params of storm were mixed in by its intensity, and the
+    /// The weather applied, the weight the params of storm were mixed in by, if they were, and the
     /// share of its distances the fog of the game kept.
-    weather: Option<(Effect, bool, Option<f32>)>,
+    weather: Option<(Effect, Option<f32>, Option<f32>)>,
     building_fog: Option<f32>,
     light: Option<Mixed>,
     given: Option<MapLight>,
     /// The models of the sky drawn around the eye, in their order, at `eye`.
     skies: Vec<Sky>,
     eye: Vec3,
+    /// The sun, the moon and the glares given to the layers of the sky, and the density of the
+    /// clouds.
+    heavens: Option<sky::Heavens>,
+    density: f32,
 }
 
 #[derive(Default)]
@@ -210,6 +241,22 @@ struct LightingModule {
     shown: Option<Shown>,
     /// The view the light is given to, taken back from it when the module stops.
     view: Option<viewport::Handle>,
+    /// What the layers of the sky draw, the resources the job building them hands them, the job,
+    /// and whether they were added to the view, with the device they draw on.
+    drawn: Arc<Mutex<Drawn>>,
+    incoming: Arc<Mutex<Option<Arc<sky::Gpu>>>>,
+    setup: Option<JobId>,
+    layered: bool,
+    gpu: Option<egui_wgpu::RenderState>,
+    /// The job reading the images of the bodies for the client's archives as open, why some could
+    /// not be read once read, and how many times they were given.
+    imaging: Option<JobId>,
+    images_unread: Option<Vec<String>>,
+    images_given: u64,
+    /// The clouds, when they were last made, and how many times their texels were given.
+    clouds: clouds::Field,
+    clouds_made: Option<Instant>,
+    clouds_given: u64,
 }
 
 impl LightingModule {
@@ -231,10 +278,13 @@ impl LightingModule {
         half_minutes(from, speed, 0.0)
     }
 
-    /// At each frame: the light of the map shown given to the view, none while there is none; its
-    /// models of the sky placed at the eye.
+    /// At each frame: the light of the map shown given to the view, none while there is none, nor
+    /// then any heavens to the layers of the sky; its models of the sky placed at the eye.
     fn steer(&mut self, ctx: &mut Context) {
         let given = self.light(ctx);
+        if given.is_none() {
+            sky::lock(&self.drawn).heavens = None;
+        }
         self.view = ctx.service(viewport::SERVICE);
         if let Some(view) = &self.view {
             view.set_light(OWNER, given);
@@ -276,14 +326,30 @@ impl LightingModule {
             if let Some(job) = self.reading.take() {
                 ctx.cancel(job);
             }
+            if let Some(job) = self.imaging.take() {
+                ctx.cancel(job);
+            }
             self.client = client;
             self.tables = None;
             self.zones_unread = None;
             self.liquids_unread = None;
             self.skyboxes_unread = None;
+            self.images_unread = None;
+            sky::lock(&self.drawn).images = None;
             self.shown = None;
         }
         self.client?;
+        // The images of the bodies, once for the archives as open, when the sky is drawn.
+        if let Some(gpu) = self
+            .gpu
+            .clone()
+            .filter(|_| self.imaging.is_none() && self.images_unread.is_none())
+        {
+            let formats = formats.clone();
+            self.imaging = Some(ctx.spawn("Read the images of the sun and the moon", move |_| {
+                sky::images(&gpu.device, &gpu.queue, formats.as_ref())
+            }));
+        }
         let tables = match &self.tables {
             Some(Ok(tables)) => tables.clone(),
             Some(Err(_)) => return None,
@@ -352,12 +418,14 @@ impl LightingModule {
         // storm of the lights by its intensity (their third slot, the fourth under the water), but
         // in a liquid lit by its own light; the fog or a sandstorm brings the fog of the game nearer.
         let effect = ctx.service(weather::SERVICE).and_then(|weather| weather.current());
+        // Their weight four times the intensity, whole from a quarter, as the client weighs them
+        // (`heavens::storm_share`).
         let storm = effect
             .filter(|effect| effect.kind.stormy() && effect.intensity > 0.0)
             .filter(|_| !matches!(immersion, Immersion::Lit(_)))
             .and_then(|effect| {
                 let storm = tables.light_at(map, place, time, light::storm_slot(immersion), local == 1)?;
-                Some((effect.intensity, storm))
+                Some((heavens::storm_share(effect.intensity), storm))
             });
         if let (Some(clear), Some((share, storm))) = (&mut light, &storm) {
             clear.values = light::mix_values(&clear.values, &storm.values, *share);
@@ -385,7 +453,13 @@ impl LightingModule {
             });
             light::map_light(&light.values, time, game_fog.flatten(), immersion != Immersion::Dry)
         });
-        let weather = effect.map(|effect| (effect, storm.is_some(), thinned.filter(|_| fog == 1)));
+        let weather = effect.map(|effect| {
+            (
+                effect,
+                storm.as_ref().map(|(share, _)| *share),
+                thinned.filter(|_| fog == 1),
+            )
+        });
         // In a room of a building, the fog of the building weighing by how far the eye is from its
         // portals, whole 25 yards in; under the water, its fog under the water; in a liquid with a
         // light of its own, the light of the liquid alone (WebWowViewerCpp leaves the fog of the
@@ -415,28 +489,63 @@ impl LightingModule {
         // the eye is in shows it (its flag 0x40000), as WebWowViewerCpp adds it to the models of
         // the sky; none in a liquid, the client drawing no sky then. Those whose animation follows
         // the hour at their share of the day (`setOverrideAnimationPerc(time / 2880)`).
-        let mut skies: Vec<Sky> = light
+        let of_lights = light
             .as_ref()
             .map(|light| tables.skies(light, immersion))
-            .unwrap_or_default()
-            .into_iter()
-            .map(|sky| Sky {
-                model: FileRef::Path(sky.model),
-                alpha: sky.alpha,
-                share: (sky.flags & FOLLOWS_THE_HOUR != 0).then_some(time / DAY),
-                light: Some(sky.id),
-            })
+            .unwrap_or_default();
+        let building_sky = among
+            .as_ref()
+            .and_then(|eye| eye.group.as_ref()?.skybox.clone())
+            .filter(|_| immersion == Immersion::Dry);
+        // How much of the sky the stars, the sun, the moon and the clouds are drawn over: under the
+        // models of the lights without the flag 0x2, none under the building's.
+        let hiding: Vec<(f32, bool)> = of_lights
+            .iter()
+            .map(|sky| (sky.alpha, sky.flags & light::DRAWN_UNDER != 0))
             .collect();
-        if immersion == Immersion::Dry
-            && let Some(model) = among.as_ref().and_then(|eye| eye.group.as_ref()?.skybox.clone())
-        {
+        let share = heavens::share(&hiding, building_sky.is_some(), immersion != Immersion::Dry);
+        let stars = heavens::stars(time) * share;
+        let mut skies: Vec<Sky> = Vec::new();
+        if stars > 0.0 {
+            skies.push(Sky {
+                model: FileRef::Path(STARS.to_owned()),
+                alpha: stars,
+                share: None,
+                whose: Whose::Stars,
+            });
+        }
+        skies.extend(of_lights.into_iter().map(|sky| Sky {
+            model: FileRef::Path(sky.model),
+            alpha: sky.alpha,
+            share: (sky.flags & FOLLOWS_THE_HOUR != 0).then_some(time / DAY),
+            whose: Whose::Light(sky.id),
+        }));
+        if let Some(model) = building_sky {
             skies.push(Sky {
                 model,
                 alpha: 1.0,
                 share: None,
-                light: None,
+                whose: Whose::Building,
             });
         }
+        // The sun, the moon and the clouds for the layers of the sky; the glares none in a room or a
+        // liquid.
+        let in_room = among
+            .as_ref()
+            .and_then(|eye| eye.group.as_ref())
+            .is_some_and(|group| group.room());
+        let storm_weight = storm.as_ref().map_or(0.0, |(share, _)| *share);
+        let (heavens, density) = match &light {
+            Some(light) => self.heavens(
+                &light.values,
+                time,
+                share,
+                storm_weight,
+                in_room || immersion != Immersion::Dry,
+            ),
+            None => (None, 0.0),
+        };
+        sky::lock(&self.drawn).heavens = heavens;
         self.shown = Some(Shown {
             map,
             name,
@@ -451,8 +560,78 @@ impl LightingModule {
             given,
             skies,
             eye: Vec3::new(x as f32, y as f32, z as f32),
+            heavens,
+            density,
         });
         given
+    }
+
+    /// The sun, the moon and their glares at `time` from the values of the light `values`, drawn over
+    /// the share `share` of the sky, under a storm of weight `storm`, the glares none when
+    /// `sheltered`; the clouds made on as the time passed, given to the layers when they change; and
+    /// the density of the clouds. None while the sky is not drawn.
+    fn heavens(
+        &mut self,
+        values: &light::Values,
+        time: f32,
+        share: f32,
+        storm: f32,
+        sheltered: bool,
+    ) -> (Option<sky::Heavens>, f32) {
+        let band = |band: usize| values.colours[band].unwrap_or([0.0; 3]);
+        let density = values.numbers[3].unwrap_or(0.0).clamp(0.0, 1.0);
+        if !self.layered {
+            return (None, density);
+        }
+        let [sun, moon] = heavens::bodies(time, band(9), storm);
+        let (envelope, sun_glows) = heavens::cloud_glow(time);
+        let palette = clouds::Palette {
+            glow: band(10),
+            thin: band(11),
+            body: band(12),
+            storm,
+            towards: if sun_glows { sun.towards } else { moon.towards },
+            envelope,
+        };
+        let now = Instant::now();
+        let seconds = self
+            .clouds_made
+            .map_or(0.0, |made| now.duration_since(made).as_secs_f32().min(1.0));
+        self.clouds_made = Some(now);
+        if self.clouds.tick(seconds, density, &palette) {
+            self.clouds_given += 1;
+            sky::lock(&self.drawn).clouds = Some((self.clouds_given, Arc::new(self.clouds.texels().to_vec())));
+        }
+        let [sun_flare, moon_flare] = heavens::flares(time);
+        let flares = if sheltered {
+            [0.0; 2]
+        } else {
+            // The glare of the sun dims as the clouds cover it; the moon's blooms in thin clouds only,
+            // none in clear sky nor under full cover (`0x6cf7b0`, `0x6cf7d0`).
+            let sun_cover = self.clouds.cover_towards(sun.towards);
+            let moon_cover = self.clouds.cover_towards(moon.towards);
+            [
+                sun_flare * (1.0 - sun_cover) * share,
+                moon_flare * (1.0 - (2.0 * moon_cover - 1.0).abs()) * share,
+            ]
+        };
+        let heavens = sky::Heavens {
+            sun,
+            moon,
+            share,
+            glares: [
+                sky::Glare {
+                    sides: heavens::SUN_GLARE_SIDE,
+                    alphas: heavens::SUN_GLARE_ALPHA,
+                },
+                sky::Glare {
+                    sides: [heavens::MOON_GLARE_SIZE * heavens::moon_size(time); 2],
+                    alphas: heavens::MOON_GLARE_ALPHA,
+                },
+            ],
+            flares,
+        };
+        (Some(heavens), density)
     }
 }
 
@@ -526,6 +705,31 @@ impl Module for LightingModule {
                 given.night
             ));
         }
+        if let Some(heavens) = &shown.heavens {
+            let height = |body: &heavens::Body| {
+                let degrees = body.towards[2].clamp(-1.0, 1.0).asin().to_degrees();
+                if degrees > 0.0 {
+                    format!("{degrees:.0}° high")
+                } else {
+                    "under the horizon".to_owned()
+                }
+            };
+            ui.label(format!(
+                "The sky: the sun {}, the moon {}; drawn over {:.2} of it; the clouds of density {:.2}; the glare of the sun towards {:.2}, of the moon {:.2}",
+                height(&heavens.sun),
+                height(&heavens.moon),
+                heavens.share,
+                shown.density,
+                heavens.flares[0],
+                heavens.flares[1]
+            ));
+        }
+        if let Some(unread) = self.images_unread.as_ref().filter(|unread| !unread.is_empty()) {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!("Images of the sky not read: {}", unread.join("; ")),
+            );
+        }
         let Some(light) = &shown.light else {
             let said = match (shown.liquid, shown.immersion) {
                 (Some(liquid), Immersion::Lit(params)) => {
@@ -580,8 +784,8 @@ impl Module for LightingModule {
         }
         if let Some((effect, stormy, thinned)) = &shown.weather {
             let mut said = vec![format!("{} at {:.2}", effect.kind.name(), effect.intensity)];
-            if *stormy {
-                said.push(format!("the params of storm mixed in by {:.2}", effect.intensity));
+            if let Some(weight) = stormy {
+                said.push(format!("the params of storm mixed in by {weight:.2}"));
             }
             if let Some(kept) = thinned {
                 said.push(format!("the fog of the game {kept:.2} times as far"));
@@ -598,7 +802,11 @@ impl Module for LightingModule {
                 .skies
                 .iter()
                 .map(|sky| {
-                    let whose = if sky.light.is_some() { "" } else { "the building's " };
+                    let whose = match sky.whose {
+                        Whose::Light(_) => "",
+                        Whose::Building => "the building's ",
+                        Whose::Stars => "the stars, ",
+                    };
                     let hour = if sky.share.is_some() {
                         ", following the hour"
                     } else {
@@ -672,12 +880,35 @@ impl Module for LightingModule {
         });
     }
 
+    fn init(&mut self, ctx: &mut Context) {
+        // The layers of the sky, their pipelines built by a job.
+        let (Some(view), Some(gpu)) = (ctx.service(viewport::SERVICE), ctx.gpu().cloned()) else {
+            return;
+        };
+        view.add_layer(
+            OWNER,
+            Box::new(HeavensLayer::new(self.drawn.clone(), self.incoming.clone())),
+        );
+        view.add_layer(
+            OWNER,
+            Box::new(GlareLayer::new(self.drawn.clone(), self.incoming.clone())),
+        );
+        self.layered = true;
+        let target = view.target();
+        let device = gpu.clone();
+        self.gpu = Some(gpu);
+        self.setup = Some(ctx.spawn("Build the pipelines of the sky", move |_| {
+            Arc::new(sky::Gpu::new(&device, &target))
+        }));
+    }
+
     fn windows_ui(&mut self, _egui: &egui::Context, ctx: &mut Context) {
         // The only call at every frame, whatever panel is shown.
         self.steer(ctx);
     }
 
     fn shutdown(&mut self) {
+        sky::lock(&self.drawn).heavens = None;
         if let Some(view) = self.view.take() {
             view.set_light(OWNER, None);
         }
@@ -687,6 +918,34 @@ impl Module for LightingModule {
     }
 
     fn on_job(&mut self, job: JobId, outcome: JobOutcome, _ctx: &mut Context) {
+        if self.setup == Some(job) {
+            self.setup = None;
+            match outcome {
+                JobOutcome::Panicked(message) => log::error!("the sky cannot be drawn: {message}"),
+                outcome => *sky::lock(&self.incoming) = outcome.take::<Arc<sky::Gpu>>(),
+            }
+            return;
+        }
+        if self.imaging == Some(job) {
+            self.imaging = None;
+            let (images, unread) = match outcome {
+                JobOutcome::Panicked(message) => (None, vec![message]),
+                JobOutcome::Cancelled => return,
+                outcome => match outcome.take::<(sky::Images, Vec<String>)>() {
+                    Some((images, unread)) => (Some(images), unread),
+                    None => return,
+                },
+            };
+            if !unread.is_empty() {
+                log::warn!("images of the sky not read: {}", unread.join("; "));
+            }
+            self.images_unread = Some(unread);
+            if let Some(images) = images {
+                self.images_given += 1;
+                sky::lock(&self.drawn).images = Some((self.images_given, Arc::new(images)));
+            }
+            return;
+        }
         if self.reading != Some(job) {
             return;
         }

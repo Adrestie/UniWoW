@@ -205,6 +205,9 @@ pub struct Skybox {
 
 /// The flag of a model of the sky whose first animation follows the hour.
 pub const FOLLOWS_THE_HOUR: u32 = 0x1;
+/// The flag of a model of the sky under which the stars, the sun, the moon and the clouds are drawn
+/// still (Noggit: "combine procedural and skybox"); without it, it hides them.
+pub const DRAWN_UNDER: u32 = 0x2;
 
 /// Whether `light` is the global light of its map, at 0, 0, 0.
 fn global(light: &LightRecord) -> bool {

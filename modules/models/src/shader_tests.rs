@@ -303,6 +303,7 @@ fn an_instance_inside_a_building_is_lit_by_its_own_light_turned_to_the_light_of_
     let interior = Interior {
         ambient: [0.2, 0.4, 0.0],
         diffuse: [0.4, 0.0, 0.2],
+        towards: None,
     };
     let facing = 0.30822;
     let expected = [0.2, 0.4, 0.0]
@@ -318,6 +319,61 @@ fn an_instance_inside_a_building_is_lit_by_its_own_light_turned_to_the_light_of_
     // Without it, the light of the view, grey.
     let seen = drawn(&gpu, &model, &textures, 0.0);
     assert!(seen[0] == seen[1] && seen[1] == seen[2], "{seen:?}");
+    // Its light from another direction: from +X, the face lit whole, its light everywhere 1.1 times;
+    // from −X, not at all, 0.9 times; from 60° off +X under the horizon, by the cosine.
+    for (towards, facing) in [
+        ([1.0, 0.0, 0.0], 1.0),
+        ([-1.0, 0.0, 0.0], 0.0),
+        ([0.5, 0.0, -(0.75f32).sqrt()], 0.5),
+    ] {
+        let turned = Interior {
+            towards: Some(towards),
+            ..interior
+        };
+        let expected = [0.2, 0.4, 0.0]
+            .iter()
+            .zip([0.4, 0.0, 0.2])
+            .map(|(ambient, diffuse)| (ambient * (0.9 + 0.2 * facing) + diffuse * facing) * 255.0)
+            .collect::<Vec<f32>>();
+        let expected = [expected[0], expected[1], expected[2]];
+        for slots in [Some(pool::SLOTS), None] {
+            let seen = drawn_lit(&gpu, &model, &textures, 0.0, slots, Some(turned));
+            assert!(
+                near(seen, expected, 3.0),
+                "{towards:?} {slots:?}: {seen:?} against {expected:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_direction_of_the_light_of_an_instance_inside_is_folded_on_an_octahedron_in_one_float() {
+    // Straight up: the middle of both coordinates, 1024 of 2047, plus 2; straight down, folded to a
+    // corner; whole numbers under 2^24, which a float holds exactly.
+    let up = crate::groups::towards([0.0, 0.0, 1.0]);
+    assert_eq!(up, (2 + (1024 | 1024 << 11)) as f32);
+    let down = crate::groups::towards([0.0, 0.0, -1.0]);
+    assert_eq!(down, (2 + (2047 | 2047 << 11)) as f32);
+    let east = crate::groups::towards([1.0, 0.0, 0.0]);
+    assert_eq!(east, (2 + (2047 | 1024 << 11)) as f32);
+    for value in [up, down, east] {
+        assert!(value >= 2.0 && value < (1 << 24) as f32 && value.fract() == 0.0);
+    }
+    // The light of the insides of the client stays 1.
+    let instance = |towards| Instance {
+        id: 0,
+        look: uniwow_api::models::LookId(0),
+        transform: Mat4::IDENTITY,
+        alpha: 1.0,
+        motion: Motion::Standing,
+        interior: Some(Interior {
+            ambient: [0.0; 3],
+            diffuse: [0.0; 3],
+            towards,
+        }),
+    };
+    assert_eq!(crate::groups::as_gpu(&instance(None)).extra[3], 1.0);
+    assert_eq!(crate::groups::as_gpu(&instance(Some([0.0, 0.0, -1.0]))).extra[3], down);
 }
 
 /// Whether each colour of `pixel` is within `margin` of `wanted`.

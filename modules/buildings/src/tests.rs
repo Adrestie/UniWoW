@@ -13,12 +13,12 @@ use uniwow_api::arena::Refusal;
 use uniwow_api::formats::{
     AnimationRecord, AreaRecord, Building, CharSection, CreatureDisplay, CreatureLook, CreatureModel, DoodadSet,
     FacialHair, FileRef, Formats, GameObjectDisplay, HairGeoset, MapRecord, Model, ORIGIN, Texture, TextureFormat,
-    Tile, TileId, Wdl, Wdt, Wmo, WmoBatch, WmoDoodad, WmoGroup, WmoLiquid, WmoMaterial,
+    Tile, TileId, Wdl, Wdt, Wmo, WmoBatch, WmoDoodad, WmoGroup, WmoLight, WmoLiquid, WmoMaterial,
 };
-use uniwow_api::glam::{Mat4, Quat, Vec3};
+use uniwow_api::glam::{Mat3, Mat4, Quat, Vec3};
 use uniwow_api::liquids::{Liquids, Surfaces};
 use uniwow_api::models::{Extent, Instance, Look, LookId, LookState, Models};
-use uniwow_api::viewport::{Layer, Phase, Pyramid, Target, View};
+use uniwow_api::viewport::{Layer, Phase, Pyramid, Target, View, Water};
 use uniwow_api::{egui, egui_wgpu, wgpu};
 
 use crate::budget;
@@ -346,13 +346,20 @@ fn the_doodads_of_a_building_are_those_of_its_set_0_and_of_the_set_it_names() {
             .collect::<Vec<_>>()
     };
     let inside = vec![false; doodads.len()];
-    let only_first = doodads::instances(&models, &transform, &sets, &doodads, &holders, &inside, 0);
+    let only_first = doodads::instances(&models, &transform, &sets, &doodads, &holders, &inside, &[], 0);
     assert_eq!(ids(&only_first), [0], "the empty name left out");
-    let named = doodads::instances(&models, &transform, &sets, &doodads, &holders, &inside, 2);
+    let named = doodads::instances(&models, &transform, &sets, &doodads, &holders, &inside, &[], 2);
     assert_eq!(ids(&named), [0, 3]);
     assert_eq!(
         ids(&doodads::instances(
-            &models, &transform, &sets, &doodads, &holders, &inside, 9
+            &models,
+            &transform,
+            &sets,
+            &doodads,
+            &holders,
+            &inside,
+            &[],
+            9
         )),
         [0],
         "a set it lacks"
@@ -418,6 +425,7 @@ fn a_doodad_of_the_rooms_is_lit_by_its_colour_as_the_client_lights_it() {
         &[coloured.clone(), coloured],
         &[vec![0], vec![2]],
         &[true, false],
+        &[],
         0,
     );
     let interiors: Vec<_> = parts
@@ -425,6 +433,118 @@ fn a_doodad_of_the_rooms_is_lit_by_its_colour_as_the_client_lights_it() {
         .flat_map(|(_, instances)| instances.iter().map(|instance| (instance.id, instance.interior)))
         .collect();
     assert_eq!(interiors, [(0, Some(dim)), (1, None)]);
+}
+
+/// A light of a building of the kind `kind` at `position`, white at the intensity `intensity`,
+/// fading out from `attenuation[0]` to `attenuation[1]` yards.
+fn lamp(kind: u8, position: [f32; 3], intensity: f32, attenuation: [f32; 2]) -> WmoLight {
+    WmoLight {
+        kind,
+        attenuated: true,
+        colour: [255, 128, 0, 255],
+        position,
+        intensity,
+        attenuation,
+    }
+}
+
+#[test]
+fn a_doodad_of_the_rooms_is_lit_too_by_the_lights_its_groups_name_folded_into_its_light() {
+    // The group 0 names the light 0, the group 1 the lights 1 and 0, the group 2 the lights 2 and 3;
+    // the doodad 0, held by the groups 0 and 1, at the origin; the doodad 1 by the group 2, the
+    // doodad 2 by none.
+    let named = |refs: Vec<u16>| WmoGroup {
+        flags: 0x2000,
+        light_refs: refs,
+        ..WmoGroup::default()
+    };
+    let groups = [named(vec![0]), named(vec![1, 0]), named(vec![2, 3])];
+    let lights = [
+        // 4 yards over the origin, whole within 5: whole.
+        lamp(0, [0.0, 0.0, 4.0], 2.0, [5.0, 10.0]),
+        // 6 yards along +X, fading from 2 to 10: weighing a half.
+        lamp(0, [6.0, 0.0, 0.0], 1.0, [2.0, 10.0]),
+        // A spot, which lights no doodad.
+        lamp(1, [0.0, 0.0, 1.0], 1.0, [5.0, 10.0]),
+        // Past its second distance: nothing.
+        lamp(0, [0.0, 20.0, 0.0], 1.0, [5.0, 10.0]),
+    ];
+    let doodads = [
+        doodad("a.mdx", [0.0; 3]),
+        doodad("b.mdx", [0.0; 3]),
+        doodad("c.mdx", [0.0; 3]),
+    ];
+    let holders = [vec![0, 1], vec![2], vec![]];
+    let lamps = doodads::lamps(&groups, &lights, &doodads, &holders);
+    assert_eq!(lamps.len(), 3);
+    assert_eq!(
+        lamps[0],
+        [
+            ([0.0, 0.0, 1.0], [2.0, 256.0 / 255.0, 0.0]),
+            ([1.0, 0.0, 0.0], [0.5, 64.0 / 255.0, 0.0]),
+        ],
+        "each light named once, by its weight"
+    );
+    assert!(lamps[1].is_empty() && lamps[2].is_empty());
+    // Folded into its light: its diffuse and each light, from the mean of their directions weighed
+    // by their brightness, each by how much it faces that mean, each channel at most 1.
+    let base = doodads::interior([56, 28, 14, 255]);
+    let lit = doodads::lit_by(base, &lamps[0], Mat3::IDENTITY);
+    let towards = Vec3::from(lit.towards.expect("a light of its own"));
+    let brightness = |colour: [f32; 3]| colour.iter().sum::<f32>() / 3.0;
+    let mean = (Vec3::new(0.30822, 0.30822, 0.9) * brightness(base.diffuse)
+        + Vec3::Z * brightness(lamps[0][0].1)
+        + Vec3::X * brightness(lamps[0][1].1))
+    .normalize();
+    assert!(towards.abs_diff_eq(mean, 1e-5), "{towards} {mean}");
+    let facing = |direction: Vec3| direction.dot(mean).max(0.0);
+    let red =
+        (base.diffuse[0] * facing(Vec3::new(0.30822, 0.30822, 0.9)) + 2.0 * facing(Vec3::Z) + 0.5 * facing(Vec3::X))
+            .min(1.0);
+    let green = base.diffuse[1] * facing(Vec3::new(0.30822, 0.30822, 0.9))
+        + 256.0 / 255.0 * facing(Vec3::Z)
+        + 64.0 / 255.0 * facing(Vec3::X);
+    assert!(
+        (lit.diffuse[0] - red).abs() < 1e-5 && (lit.diffuse[1] - green.min(1.0)).abs() < 1e-5,
+        "{lit:?}"
+    );
+    assert_eq!(lit.diffuse[0], 1.0, "bounded to 1");
+    assert_eq!(lit.ambient, base.ambient, "its light everywhere as it is");
+    // Turned with the building: a quarter turn about the vertical, the light along +X now along +Y.
+    let turned = doodads::lit_by(base, &lamps[0][1..], Mat3::from_rotation_z(std::f32::consts::FRAC_PI_2));
+    assert!(turned.towards.unwrap()[1] > 0.5, "{turned:?}");
+    // A light from behind the mean of the others adds nothing, rather than taking away.
+    let behind = [([1.0, 0.0, 0.0], [0.5; 3]), ([-1.0, 0.0, 0.0], [0.2; 3])];
+    let backed = doodads::lit_by(base, &behind, Mat3::IDENTITY);
+    let mean = Vec3::from(backed.towards.unwrap());
+    let facing = |direction: Vec3| direction.dot(mean).max(0.0);
+    let blue = base.diffuse[2] * facing(Vec3::new(0.30822, 0.30822, 0.9)) + 0.5 * facing(Vec3::X);
+    assert!((backed.diffuse[2] - blue).abs() < 1e-5, "{backed:?}");
+    // Without lights, as it is.
+    assert_eq!(doodads::lit_by(base, &[], Mat3::IDENTITY), base);
+    // Given to its instance.
+    let models = FakeModels::default();
+    let parts = doodads::instances(
+        &models,
+        &Mat4::IDENTITY,
+        &[set(0, 3)],
+        &doodads,
+        &holders,
+        &[true, true, false],
+        &lamps,
+        0,
+    );
+    let interiors: Vec<_> = parts
+        .iter()
+        .flat_map(|(_, instances)| instances.iter().map(|instance| (instance.id, instance.interior)))
+        .collect();
+    let plain = doodads::interior([0, 0, 0, 0]);
+    assert!(
+        interiors.contains(&(0, Some(doodads::lit_by(plain, &lamps[0], Mat3::IDENTITY)))),
+        "{interiors:?}"
+    );
+    assert!(interiors.contains(&(1, Some(plain))));
+    assert!(interiors.contains(&(2, None)));
 }
 
 #[test]
@@ -450,6 +570,7 @@ fn the_doodads_of_a_building_are_placed_while_it_is_kept_and_taken_away_after() 
         &[doodad("a.mdx", [0.0; 3])],
         &[vec![2, 5]],
         &[false],
+        &[],
         0,
     );
     owners.want(&models, "Map", HashSet::from([1]));
@@ -474,6 +595,7 @@ fn the_doodads_of_a_building_are_placed_while_it_is_kept_and_taken_away_after() 
         &[doodad("a.mdx", [0.0; 3])],
         &[Vec::new()],
         &[false],
+        &[],
         0,
     );
     assert!(owners.place(&models, "Map", 1, &moved));
@@ -1556,6 +1678,106 @@ fn the_environment_is_added_after_the_light() {
     let lit = row_of(&gpu, &mut metal, &seen, &Phase::ALL)[16];
     let added = 128.0 / 255.0 * 64.0 / 255.0;
     assert!(near(lit, [grey, grey + added, grey]), "{lit:?}");
+}
+
+#[test]
+fn the_specular_and_metal_materials_are_highlighted_by_the_colour_of_the_sun_outside() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    let shining = |shader, texture: Option<&str>, inside| {
+        let mut material = material(0, 0);
+        material.shader = shader;
+        material.textures[0] = texture.map(|path| FileRef::Path(path.to_owned()));
+        square(material, inside, None)
+    };
+    let Some(mut white) = bench(&gpu, shining(1, None, false)) else {
+        return;
+    };
+    // Seen from the front, the sun of the view behind the eye, the colour of the sun given or not.
+    let seen = |sun: Option<[f32; 3]>| View {
+        sun: facing_sun(),
+        water: sun.map(|sun| Water {
+            river: [[0.0; 4]; 2],
+            ocean: [[0.0; 4]; 2],
+            sun,
+        }),
+        ..view(Vec3::new(5.0, 0.0, 0.0))
+    };
+    let highlighted = |layer: &mut BuildingsLayer, on: bool, view: &View| {
+        layer.scene().lock().unwrap().highlights = on;
+        row_of(&gpu, layer, view, &Phase::ALL)[16]
+    };
+    let sunny = seen(Some([0.1, 0.05, 0.0]));
+    // Straight on the face: 1.25 times the colour of the sun by the alpha of the texel, added in
+    // gamma to the white lit, 0.64.
+    let lit = highlighted(&mut white, true, &sunny);
+    assert!(near(lit, [0.64 + 0.125, 0.64 + 0.0625, 0.64]), "{lit:?}");
+    // Off, none; nor without the colour of the sun.
+    let off = highlighted(&mut white, false, &sunny);
+    assert!(near(off, [0.64; 3]), "{off:?}");
+    let unlit = highlighted(&mut white, true, &seen(None));
+    assert!(near(unlit, [0.64; 3]), "{unlit:?}");
+    // Its texel of no alpha: only what the face reflects of the sun seen straight, nothing.
+    let mut masked = bench(&gpu, shining(1, Some("masked.blp"), false)).unwrap();
+    let lit = highlighted(&mut masked, true, &sunny);
+    assert!(near(lit, [0.64; 3]), "{lit:?}");
+    // Grey: the specular by its alpha alone, the metal by its red four times its alpha.
+    let linear = |gamma: f32| ((gamma + 0.055) / 1.055).powf(2.4);
+    let gamma = |linear: f32| 1.055 * linear.powf(1.0 / 2.4) - 0.055;
+    let grey = gamma(linear(128.0 / 255.0) * linear(0.64));
+    let mut specular = bench(&gpu, shining(1, Some("grey.blp"), false)).unwrap();
+    let lit = highlighted(&mut specular, true, &sunny);
+    assert!(near(lit, [grey + 0.125, grey + 0.0625, grey]), "{lit:?}");
+    let mut metal = bench(&gpu, shining(2, Some("grey.blp"), false)).unwrap();
+    let mask = 4.0 * 128.0 / 255.0;
+    let lit = highlighted(&mut metal, true, &sunny);
+    assert!(near(lit, [grey + 0.125 * mask, grey + 0.0625 * mask, grey]), "{lit:?}");
+    // Nor any other shader.
+    let mut diffuse = bench(&gpu, shining(0, Some("grey.blp"), false)).unwrap();
+    let lit = highlighted(&mut diffuse, true, &sunny);
+    assert!(near(lit, [grey; 3]), "{lit:?}");
+    // The sun 60° aside: half way between it and the eye, 30° from the normal, 1.25 × cos⁸ 30°,
+    // times the cosine of the sun with the face, a half; over the white lit by half its diffuse.
+    let mut aside = seen(Some([0.4, 0.2, 0.0]));
+    aside.sun.direction = [0.5, 3f32.sqrt() / 2.0, 0.0];
+    let shine = 1.25 * (3f32.sqrt() / 2.0).powi(8) * 0.5;
+    let lit = highlighted(&mut white, true, &aside);
+    assert!(near(lit, [0.5 + 0.4 * shine, 0.5 + 0.2 * shine, 0.5]), "{lit:?}");
+    // The eye and the sun 60° either side of the normal: half way, the normal itself; 1.25 times the
+    // cosine of the sun with the face, a half, times what a texel of no alpha reflects of a sun 60°
+    // from that way, (1 − cos 60°)⁵.
+    let mut grazing = View {
+        sun: facing_sun(),
+        water: seen(Some([1.0; 3])).water,
+        ..view(Vec3::new(2.5, 2.5 * 3f32.sqrt(), 0.0))
+    };
+    grazing.sun.direction = [0.5, -(3f32.sqrt()) / 2.0, 0.0];
+    let reflected = 1.25 * 0.5 * 0.5f32.powi(5);
+    let lit = highlighted(&mut masked, true, &grazing);
+    assert!(near(lit, [0.5 + reflected; 3]), "{lit:?}");
+    // Inside, none: what the rooms show with or without it; but in a building lit as one, as outside.
+    let mut room = bench(&gpu, shining(1, None, true)).unwrap();
+    assert_eq!(
+        highlighted(&mut room, true, &sunny),
+        highlighted(&mut room, false, &sunny)
+    );
+    let mut as_one = shining(1, None, true);
+    as_one.flags = 0xF;
+    let mut as_one = bench(&gpu, as_one).unwrap();
+    let off = highlighted(&mut as_one, false, &sunny).map(|value| f32::from(value) / 255.0);
+    let lit = highlighted(&mut as_one, true, &sunny);
+    assert!(
+        near(lit, [off[0] + 0.125, off[1] + 0.0625, off[2]]),
+        "{lit:?} against {off:?}"
+    );
+}
+
+#[test]
+fn the_highlights_are_a_setting_on_by_default() {
+    let setting = crate::highlights_setting();
+    assert_eq!((setting.range, setting.default), ([0, 1], 1));
+    assert_eq!(setting.value(Some(&uniwow_api::serde_json::json!(0))), 0);
 }
 
 #[test]
