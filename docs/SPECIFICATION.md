@@ -8293,6 +8293,11 @@ efficiency first, and so the threads. It fits what exists, checked in the code a
 figure says whether it was **measured** (where, by whom) or is **estimated** (from what), and each
 estimate is replaced by its measure when the step that builds it runs its benchmark.
 
+**Validated by the user**, as written here, with its decisions (the history limited to 256 MB by
+default and the autosave every 60 seconds, both settings; no index added to the database by the
+editor). **The building is put off until the user asks for it**: no step of this milestone is
+started before then.
+
 **What exists and is used as it is:**
 
 - **The pool of the kernel** (`core/kernel/src/jobs.rs`): a worker a core, below the normal
