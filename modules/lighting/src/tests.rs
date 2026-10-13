@@ -1789,23 +1789,33 @@ fn the_weather_given_mixes_in_the_params_of_storm_and_brings_the_fog_nearer() {
     };
     // Fine weather: the clear params, the fog from a quarter of 500 yards.
     assert_eq!(seen(&mut module, &mut host), (100.0, [125.0, 500.0, 1.0]));
-    // Rain at 0.5: halfway to the params of storm, their fog too.
+    // Rain at 0.1: the params of storm weigh four times it, their fog too.
     *host.sent.0.lock().unwrap() = Some(Effect {
         kind: Kind::Rain,
-        intensity: 0.5,
+        intensity: 0.1,
     });
     let (lit, fogged) = seen(&mut module, &mut host);
-    assert!((lit - 150.0).abs() < 1e-3, "{lit}");
+    assert!((lit - 140.0).abs() < 1e-3, "{lit}");
     assert!(
         fogged
             .iter()
-            .zip([93.75, 375.0, 1.0])
+            .zip([100.0, 400.0, 1.0])
             .all(|(a, b)| (a - b).abs() < 1e-3),
         "{fogged:?}"
     );
     assert!(
         panel(&mut module, &mut host)
-            .contains(&"Weather: rain at 0.50; the params of storm mixed in by 0.50.".to_owned())
+            .contains(&"Weather: rain at 0.10; the params of storm mixed in by 0.40.".to_owned())
+    );
+    // At 0.5, whole from a quarter.
+    *host.sent.0.lock().unwrap() = Some(Effect {
+        kind: Kind::Rain,
+        intensity: 0.5,
+    });
+    let (lit, fogged) = seen(&mut module, &mut host);
+    assert!(
+        (lit - 200.0).abs() < 1e-3 && (fogged[1] - 250.0).abs() < 1e-3,
+        "{lit} {fogged:?}"
     );
     // The fog at 1: the clear params, the fog a quarter as far.
     *host.sent.0.lock().unwrap() = Some(Effect {
@@ -1959,4 +1969,162 @@ fn the_zones_of_light_are_read_with_the_tables_and_said_in_the_panel() {
             assert!(texts.contains(&format!("No zones of light: {refused}")), "{texts:?}");
         }
     }
+}
+
+/// Tables of `parts` whose params 1, 2 and 3 name the model of the sky 7 of the flags `flags`.
+fn skied_with(flags: u32) -> Tables {
+    let (lights, mut records, mut colours, fog) = parts();
+    for record in records.iter_mut().filter(|record| record.id <= 3) {
+        record.skybox = 7;
+    }
+    // The band 9 of the params 1, the colour of the sun and the moon.
+    colours.push(greys(10, &[(0, 200)]));
+    Tables::new(&lights, &records, &colours, &fog, &[]).with_skyboxes(&[LightSkyboxRecord {
+        id: 7,
+        model: "Global.mdx".to_owned(),
+        flags,
+    }])
+}
+
+#[test]
+fn the_stars_are_placed_first_at_night_faded_by_the_hour_not_under_a_model_of_the_sky_hiding_them() {
+    let files = Arc::new(Files(Mutex::new(VfsState::Ready { archives: 1, files: 1 })));
+    let mut host = host(files);
+    host.settings.insert("hour".to_owned(), json!(0));
+    let mut module = crate::LightingModule {
+        client: Some((1, 1)),
+        tables: Some(Ok(Arc::new(tables().with_liquids(&liquids())))),
+        ..Default::default()
+    };
+    let egui = egui::Context::default();
+    *host.editor.map.lock().unwrap() = json!({ "id": 0, "name": "Azeroth" });
+    *host.editor.camera.lock().unwrap() = Some([-5_000.0, 0.0, 600.0]);
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    // At midnight, the stars whole, at the eye, as a model of the sky playing at its pace.
+    let placed = host.sky.placed();
+    assert_eq!(placed.len(), 1);
+    assert_eq!(
+        host.sky.look_of(placed[0].look),
+        Look {
+            model: FileRef::Path("Environments\\Stars\\Stars.m2".to_owned()),
+            textures: Vec::new(),
+            geosets: Geosets::Sky,
+        }
+    );
+    assert_eq!(
+        (placed[0].id, placed[0].alpha, placed[0].motion),
+        ((1 << 32) + 1, 1.0, Motion::Standing)
+    );
+    assert_eq!(placed[0].transform.w_axis.truncate().to_array(), [-5_000.0, 0.0, 600.0]);
+    assert!(
+        panel(&mut module, &mut host)
+            .iter()
+            .any(|text| text.contains("Models of the sky: the stars, Environments\\Stars\\Stars.m2 (1.00)"))
+    );
+    // At 3 h 45, half gone, by bytes.
+    host.settings.insert("hour".to_owned(), json!(225));
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert_eq!(host.sky.placed()[0].alpha, 128.0 / 255.0);
+    // Under a model of the sky of the lights letting them be drawn (its flag 0x2): first, under it.
+    host.settings.insert("hour".to_owned(), json!(0));
+    module.tables = Some(Ok(Arc::new(skied_with(0x2).with_liquids(&liquids()))));
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    let placed = host.sky.placed();
+    assert_eq!(placed.len(), 2);
+    assert_eq!((placed[0].id, placed[0].alpha), ((1 << 32) + 1, 1.0));
+    assert_eq!(
+        host.sky.look_of(placed[1].look).model,
+        FileRef::Path("Global.mdx".to_owned())
+    );
+    // Under one hiding them: none.
+    module.tables = Some(Ok(Arc::new(skied_with(0).with_liquids(&liquids()))));
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    let placed = host.sky.placed();
+    assert_eq!(placed.len(), 1);
+    assert_eq!(
+        host.sky.look_of(placed[0].look).model,
+        FileRef::Path("Global.mdx".to_owned())
+    );
+    // None by day, nor under the water.
+    module.tables = Some(Ok(Arc::new(tables().with_liquids(&liquids()))));
+    host.settings.insert("hour".to_owned(), json!(720));
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert!(host.sky.placed().is_empty());
+    host.settings.insert("hour".to_owned(), json!(0));
+    *host.pond.liquid.lock().unwrap() = Some(5);
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert!(host.sky.placed().is_empty());
+}
+
+#[test]
+fn the_sun_the_moon_and_their_glares_are_given_to_the_layers_of_the_sky_with_the_light() {
+    let files = Arc::new(Files(Mutex::new(VfsState::Ready { archives: 1, files: 1 })));
+    let mut host = host(files);
+    let mut module = crate::LightingModule {
+        client: Some((1, 1)),
+        tables: Some(Ok(Arc::new(skied_with(0x2).with_liquids(&liquids())))),
+        ..Default::default()
+    };
+    let egui = egui::Context::default();
+    *host.editor.map.lock().unwrap() = json!({ "id": 0, "name": "Azeroth" });
+    *host.editor.camera.lock().unwrap() = Some([-5_000.0, 0.0, 600.0]);
+    // Without the layers of the sky, nothing given.
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert_eq!(crate::sky::lock(&module.drawn).heavens, None);
+    module.layered = true;
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    let given = crate::sky::lock(&module.drawn).heavens.unwrap();
+    // At noon: the sun near the top, in the colour of the band 9, the moon under the horizon; the
+    // whole sky, a model of the sky letting them be drawn; the glare of the sun whole, no clouds.
+    assert_eq!(given.sun.towards, crate::heavens::sun_towards(1440.0));
+    assert_eq!(given.moon.towards, crate::heavens::moon_towards(1440.0));
+    assert_eq!(
+        (given.sun.colour, given.sun.side, given.sun.alpha),
+        ([200.0 / 255.0; 3], 1.0, 1.0)
+    );
+    assert_eq!(given.share, 1.0);
+    assert_eq!(given.flares, [1.0, 0.0]);
+    assert_eq!(given.glares[0].sides, [3.0, 20.0]);
+    assert_eq!(given.glares[1].sides, [2.0 * 1.5; 2]);
+    assert!(crate::sky::lock(&module.drawn).clouds.is_some(), "the clouds made");
+    let texts = panel(&mut module, &mut host);
+    assert!(
+        texts.iter().any(|text| text.contains(
+            "The sky: the sun 85° high, the moon under the horizon; drawn over 1.00 of it; the clouds of density 0.00; the glare of the sun towards 1.00, of the moon 0.00"
+        )),
+        "{texts:?}"
+    );
+    // In a room, no glare.
+    host.rooms.0.lock().unwrap().group = Some(uniwow_api::buildings::EyeGroup {
+        flags: 0x2000,
+        fog: None,
+        exit: 0.0,
+        skybox: None,
+    });
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert_eq!(crate::sky::lock(&module.drawn).heavens.unwrap().flares, [0.0, 0.0]);
+    // In a street open to the sky, the glare again; under a storm the bodies fade.
+    host.rooms.0.lock().unwrap().group.as_mut().unwrap().flags = 0x2000 | 0x40;
+    *host.sent.0.lock().unwrap() = Some(Effect {
+        kind: Kind::Rain,
+        intensity: 0.0625,
+    });
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    let given = crate::sky::lock(&module.drawn).heavens.unwrap();
+    assert_eq!(given.flares, [1.0, 0.0]);
+    assert_eq!(given.sun.alpha, 191.0 / 255.0);
+    // Under a model of the sky hiding them, drawn over none of the sky, no glare.
+    *host.sent.0.lock().unwrap() = None;
+    module.tables = Some(Ok(Arc::new(skied_with(0).with_liquids(&liquids()))));
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    let given = crate::sky::lock(&module.drawn).heavens.unwrap();
+    assert_eq!((given.share, given.flares), (0.0, [0.0, 0.0]));
+    // Under the water, none; once stopped, nothing given.
+    module.tables = Some(Ok(Arc::new(skied_with(0x2).with_liquids(&liquids()))));
+    *host.pond.liquid.lock().unwrap() = Some(5);
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    let given = crate::sky::lock(&module.drawn).heavens.unwrap();
+    assert_eq!((given.share, given.flares), (0.0, [0.0, 0.0]));
+    module.shutdown();
+    assert_eq!(crate::sky::lock(&module.drawn).heavens, None);
 }
