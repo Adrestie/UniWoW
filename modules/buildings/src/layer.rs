@@ -2,8 +2,11 @@
 //! then each of its groups by its own, those of a building the camera is inside of first by what
 //! its portals let it see; the batches of the groups seen listed as indirect draws, the opaque ones
 //! by state, the blended ones from the farthest group, and drawn in the pass, a
-//! `multi_draw_indexed_indirect` for each run of one state. The doodads and the liquid of a group
-//! are shown while it is seen through the portals, read by `models` and `liquids` at the frame
+//! `multi_draw_indexed_indirect` for each run of one state. Where the device computes, the groups
+//! listed are tested against the depth on the GPU (`occlusion`): the opaque batches of those seen at
+//! the frame before drawn in the first pass, those of the groups found in sight then in
+//! `Phase::Revealed`, the blended ones of the groups found in sight. The doodads and the liquid of a
+//! group are shown while it is seen through the portals, read by `models` and `liquids` at the frame
 //! after.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,11 +16,12 @@ use std::time::{Duration, Instant};
 use uniwow_api::glam::{Mat4, Vec3, Vec4};
 use uniwow_api::journal;
 use uniwow_api::liquids::{self, Surfaces};
-use uniwow_api::viewport::{Drawing, Layer, LayerStats, Phase, Target, View};
+use uniwow_api::viewport::{Drawing, Layer, LayerStats, Phase, Pyramid, Target, View};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
 use crate::doodads::Part;
 use crate::gpu::{CAMERA, Shared, State, WmoGpu, camera_values};
+use crate::occlusion::Occlusion;
 
 /// The liquids of a building placed through the service `liquids`: the flag of each, with its group.
 pub type Poured = Arc<[(u16, Arc<AtomicBool>)]>;
@@ -82,7 +86,8 @@ pub fn in_sight(planes: &[Vec4; 5], bounds: &[Vec3; 2]) -> bool {
     })
 }
 
-/// A draw listed: its state, its indirect command and its entry, and its distance for the blended.
+/// A draw listed: its state, its indirect command and its entry, the last word of which its group
+/// listed, and its distance for the blended.
 pub(crate) struct Listed {
     pub state: State,
     pub distance: f32,
@@ -128,14 +133,16 @@ fn show_liquids(liquids: Option<&Poured>, seen: Option<&[bool]>) {
 
 /// What the frame draws of the buildings: the draws of the batches of the groups in sight, the
 /// opaque ones by state, the blended ones from the farthest, those beyond the surface of the water
-/// from the eye apart from those on its side; how many placements and groups are in sight, how
-/// many placements hold the camera in a group inside, and how many groups those see through their
-/// portals.
+/// from the eye apart from those on its side; the groups listed, the box of each in the world, its
+/// place among the groups of the buildings drawn in the bits of the last of its lowest corner; how
+/// many placements and groups are in sight, how many placements hold the camera in a group inside,
+/// and how many groups those see through their portals.
 #[derive(Default)]
 pub(crate) struct Listing {
     pub opaque: Vec<Listed>,
     pub beyond: Vec<Listed>,
     pub near: Vec<Listed>,
+    pub boxes: Vec<[f32; 4]>,
     pub buildings: usize,
     pub groups: usize,
     pub inside: usize,
@@ -150,7 +157,11 @@ pub(crate) fn list(placed: &[Placed], view: &View, surfaces: Option<&Surfaces>) 
     // Beyond the surface when one of the eye and the centre lies under the water and the other
     // not, the eye told once.
     let eye_under = surfaces.is_some_and(|surfaces| surfaces.under(view.eye));
+    // The place of the first group of each building among the groups of all.
+    let mut first_group = 0u32;
     for (instance, building) in placed.iter().enumerate() {
+        let base = first_group;
+        first_group += building.wmo.groups.len() as u32;
         let bounds = world_bounds(&building.transform, &building.wmo.bounds);
         if !in_sight(&planes, &bounds) {
             show(building.parts.as_ref(), None);
@@ -177,6 +188,10 @@ pub(crate) fn list(placed: &[Placed], view: &View, surfaces: Option<&Surfaces>) 
                 continue;
             }
             listing.groups += 1;
+            let listed = (listing.boxes.len() / 2) as u32;
+            let slot = f32::from_bits(base + index as u32);
+            listing.boxes.push([bounds[0].x, bounds[0].y, bounds[0].z, slot]);
+            listing.boxes.push([bounds[1].x, bounds[1].y, bounds[1].z, 0.0]);
             let centre = (bounds[0] + bounds[1]) * 0.5;
             let distance = centre.distance(view.eye);
             let beyond = surfaces.is_some_and(|surfaces| surfaces.under(centre) != eye_under);
@@ -185,7 +200,7 @@ pub(crate) fn list(placed: &[Placed], view: &View, surfaces: Option<&Surfaces>) 
                     state: batch.state,
                     distance,
                     command: [batch.count, 1, batch.first, building.wmo.base_vertex as u32, 0],
-                    entry: [instance as u32, batch.material, group.flags | batch.kind << 8, 0],
+                    entry: [instance as u32, batch.material, group.flags | batch.kind << 8, listed],
                 };
                 if !batch.state.blended() {
                     listing.opaque.push(listed);
@@ -273,6 +288,8 @@ pub struct BuildingsLayer {
     instances: Grown,
     entries: Grown,
     commands: Grown,
+    /// The test of the groups against the depth, where the device computes.
+    occlusion: Option<Occlusion>,
     group: Option<(wgpu::BindGroup, (u64, u64))>,
     /// The buildings drawn this frame, held until the next, and the runs of each phase.
     drawn: Arc<[Placed]>,
@@ -284,13 +301,21 @@ pub struct BuildingsLayer {
 
 impl BuildingsLayer {
     pub fn new(shared: Arc<Shared>, scene: Arc<Mutex<Scene>>) -> Self {
+        let occlusion = shared
+            .testing
+            .clone()
+            .map(|testing| Occlusion::new(testing, &shared.device));
         Self {
             shared,
             scene,
             camera: None,
             instances: Grown::new("buildings instances", wgpu::BufferUsages::STORAGE),
             entries: Grown::new("buildings entries", wgpu::BufferUsages::STORAGE),
-            commands: Grown::new("buildings commands", wgpu::BufferUsages::INDIRECT),
+            commands: Grown::new(
+                "buildings commands",
+                wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::STORAGE,
+            ),
+            occlusion,
             group: None,
             drawn: Arc::default(),
             opaque: Vec::new(),
@@ -298,6 +323,14 @@ impl BuildingsLayer {
             near: Vec::new(),
             stats: LayerStats::default(),
         }
+    }
+}
+
+impl BuildingsLayer {
+    /// What the module shares with it, for the tests.
+    #[cfg(test)]
+    pub fn scene(&self) -> Arc<Mutex<Scene>> {
+        self.scene.clone()
     }
 }
 
@@ -346,6 +379,7 @@ impl Layer for BuildingsLayer {
             opaque,
             beyond,
             near,
+            boxes,
             buildings,
             groups,
             inside,
@@ -399,16 +433,35 @@ impl Layer for BuildingsLayer {
         self.opaque = runs(&opaque, 0);
         self.beyond = runs(&beyond, opaque.len() as u32);
         self.near = runs(&near, (opaque.len() + beyond.len()) as u32);
+        if let (Some(occlusion), Some(commands), Some(entries)) =
+            (&mut self.occlusion, &self.commands.buffer, &self.entries.buffer)
+        {
+            let slots = placed.iter().map(|building| building.wmo.groups.len() as u32).sum();
+            occlusion.prepare(
+                &gpu.queue,
+                view.view_proj.to_cols_array(),
+                &boxes,
+                opaque.len() as u32,
+                listed.len() as u32,
+                slots,
+                changed,
+                [commands, entries],
+            );
+        }
         spent("buildings prepare: the buffers written");
         let triangles: u64 = listed.iter().map(|listed| u64::from(listed.command[0] / 3)).sum();
         let all_groups: usize = placed.iter().map(|building| building.wmo.groups.len()).sum();
+        let hidden = self.occlusion.as_ref().map_or_else(
+            || "; not tested against the depth".to_owned(),
+            |occlusion| format!(", {} hidden by the depth", occlusion.hid),
+        );
         self.stats = LayerStats {
             draws: (self.opaque.len() + self.beyond.len() + self.near.len()) as u64,
             triangles,
             bytes: shared.bytes(),
             items: format!(
-                "{buildings} buildings in sight of {}, {groups} groups of {all_groups}, {} batches ({} blended, {} \
-                 beyond the water)\n  \
+                "{buildings} buildings in sight of {}, {groups} groups of {all_groups}{hidden}, {} batches ({} \
+                 blended, {} beyond the water)\n  \
                  the camera inside {inside} of them, {through} groups seen through their portals; the arrays {} \
                  textures; arenas of vertices, indices and materials of {}, {} and {} MB ({}, {} and {} used), \
                  of {} MB at most each; on the CPU {:.1} MB",
@@ -431,6 +484,32 @@ impl Layer for BuildingsLayer {
         spent("buildings prepare: the statistics");
     }
 
+    fn compute(&mut self, _gpu: &egui_wgpu::RenderState, _view: &View, encoder: &mut wgpu::CommandEncoder) {
+        if let Some(occlusion) = &mut self.occlusion {
+            occlusion.compute(encoder);
+        }
+    }
+
+    fn computes(&self) -> bool {
+        self.occlusion.is_some()
+    }
+
+    fn occlude(
+        &mut self,
+        _gpu: &egui_wgpu::RenderState,
+        _view: &View,
+        pyramid: &Pyramid<'_>,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        if let Some(occlusion) = &mut self.occlusion {
+            occlusion.occlude(encoder, pyramid);
+        }
+    }
+
+    fn occludes(&self) -> bool {
+        self.occlusion.is_some()
+    }
+
     fn drawing(&self) -> Drawing {
         Drawing::Pass
     }
@@ -443,16 +522,26 @@ impl Layer for BuildingsLayer {
         phase: Phase,
         pass: &mut wgpu::RenderPass<'_>,
     ) {
-        let runs = match phase {
-            Phase::Opaque => &self.opaque,
-            Phase::Beyond => &self.beyond,
-            Phase::Near => &self.near,
+        // Tested against the depth: the first pass draws the draws of the first phase, the second
+        // those of the second; otherwise every draw as listed, the opaque in the first pass.
+        let occlusion = self.occlusion.as_ref();
+        let first = occlusion
+            .filter(|occlusion| occlusion.computed)
+            .and_then(|occlusion| occlusion.first.as_ref());
+        let second = occlusion
+            .filter(|occlusion| occlusion.occluded)
+            .and_then(|occlusion| occlusion.second.as_ref());
+        let (runs, drawn) = match phase {
+            Phase::Opaque => (&self.opaque, first.or(self.commands.buffer.as_ref())),
+            Phase::Revealed if second.is_some() => (&self.opaque, second),
+            Phase::Beyond => (&self.beyond, second.or(self.commands.buffer.as_ref())),
+            Phase::Near => (&self.near, second.or(self.commands.buffer.as_ref())),
             Phase::Revealed | Phase::Water => return,
         };
         let (Some((_, camera)), Some((group, _)), Some(commands), Some((vertices, _)), Some((indices, _))) = (
             &self.camera,
             &self.group,
-            &self.commands.buffer,
+            drawn,
             self.shared.vertices.buffer(),
             self.shared.indices.buffer(),
         ) else {

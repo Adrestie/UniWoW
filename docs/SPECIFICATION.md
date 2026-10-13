@@ -6288,6 +6288,35 @@ section.
     kept, the depths not rebased, the layers of one height whose depths differ over their vertices,
     the vertices of a command not placed, one command drawn).
 
+- **The groups of the buildings tested against the depth** (`buildings/src/occlusion.rs`,
+  `occlusion.wgsl`), the step 9.6f3 proposed: the groups the CPU lists by the view and the portals
+  are tested on the GPU in two phases, as the instances of `models`. Each group of the buildings
+  drawn has a place in two tables of those seen (a word each), read and written in turn at each
+  frame. The CPU writes, with the commands and the entries of the frame, the box in the world of
+  each group listed and its place, and the entry of each draw names its group. Before the first
+  pass (`Layer::compute`), `first` writes the draws of the opaque batches, drawn where their group
+  was seen at the frame before; between the passes (`Layer::occlude`), `test` tests each group
+  listed against the pyramid as the models test a box (its corners projected, its nearest depth
+  against the least of the pyramid over the rectangle it covers), those found in sight marked in
+  the table written, those hidden counted; `second` writes the draws of the opaque batches of the
+  groups found in sight that the first did not draw, drawn in `Revealed`, and of the blended
+  batches of the groups found in sight, drawn in their phases. A draw keeps the command the CPU
+  listed, its count of instances 1 or 0. The buildings changed (another list of `Scene::placed`),
+  every group is set seen, so that the next frame draws them all first, as without the depth. The
+  statistics say the groups the depth hid, read back without waiting. Where the device runs no
+  compute shaders or binds fewer than 7 storage buffers a stage, the buildings are drawn as before.
+  - **Tested** on the software adapter, the bench drawing as the view does, its two passes around
+    the layer's computing against a pyramid of a wall at a depth: a group in sight drawn; behind the
+    wall, drawn one frame more by the first pass, then no longer, its count of the hidden said;
+    found in sight again, drawn by the second pass at once, by the first at the next frame; the
+    buildings given anew, every group drawn first; two buildings, the left behind the wall and the
+    right not, told apart; a blended group drawn only while found in sight. 9 changes made on
+    purpose, all caught (the first phase drawing all, every group seen, the farthest corner for the
+    nearest, the blended drawn as the opaque, the table written not cleared, the groups not set
+    seen once the buildings change, the tables not turning, the places of the groups of two
+    buildings the same, `Revealed` not drawn). Not tested: an opaque batch drawn again by the
+    second phase, which the image does not show.
+
 **To measure by the user**: the flights of *The frames measured in flight, before any correction*
 (the terrain at 64 tiles, the buildings at 8, the doodads at 4, the models at a reach of 1,000; 300
 then 600 yards a second, from the Howling Fjord to Dalaran by the Grizzly Hills), with the journal
@@ -6312,6 +6341,9 @@ of the frames (`UNIWOW_SLOW_FRAMES`), before this work and after it:
    triangles of water in the statistics of `liquids` against those of *Step 9.6e1, its review
    points as built* (3.18 M in Northrend, 2.44 M at sea), the GPU of the layer (1.2 ms before) and
    `view: liquids record`; the colours of the coasts, which should look as before.
+7. The buildings in the cities (Dalaran, Stormwind) and over Northrend: the groups hidden by the
+   depth in the statistics of `buildings`, the GPU of the layer (its computing included) against
+   before, and `view: buildings prepare`.
 
 #### Step 9.7, proposed: the light of the map
 

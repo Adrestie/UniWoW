@@ -16,6 +16,7 @@ use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
 use crate::cells::Cells;
 use crate::colours;
+use crate::occlusion::Testing;
 
 /// The arrays of textures the shader binds at once.
 pub const SLOTS: usize = 64;
@@ -201,6 +202,8 @@ pub struct Shared {
     pub indices: Arena,
     pub materials: Arena,
     pub arrays: TextureArrays,
+    /// The pipelines testing the groups against the depth, where the device computes.
+    pub testing: Option<Arc<Testing>>,
     pub camera_layout: wgpu::BindGroupLayout,
     pub layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
@@ -342,6 +345,7 @@ impl Shared {
                 1 << 10,
             ),
             arrays: TextureArrays::new(device, queue, "the buildings", SLOTS, false),
+            testing: Testing::new(gpu).map(Arc::new),
             device: device.clone(),
             camera_layout,
             layout,

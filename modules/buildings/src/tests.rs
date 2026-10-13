@@ -18,7 +18,7 @@ use uniwow_api::formats::{
 use uniwow_api::glam::{Mat4, Quat, Vec3};
 use uniwow_api::liquids::{Liquids, Surfaces};
 use uniwow_api::models::{Extent, Instance, Look, LookId, LookState, Models};
-use uniwow_api::viewport::{Layer, Phase, Target, View};
+use uniwow_api::viewport::{Layer, Phase, Pyramid, Target, View};
 use uniwow_api::{egui, egui_wgpu, wgpu};
 
 use crate::budget;
@@ -586,6 +586,98 @@ fn row_in(gpu: &egui_wgpu::RenderState, layer: &mut BuildingsLayer, eye: Vec3, p
 
 /// The middle row of what `layer` draws in `phases` seen by `view`.
 fn row_of(gpu: &egui_wgpu::RenderState, layer: &mut BuildingsLayer, view: &View, phases: &[Phase]) -> Vec<[u8; 4]> {
+    row_behind(gpu, layer, view, phases, 0.0)
+}
+
+/// Counts the pyramids `row_behind` makes, a new one each frame as when the view changes size.
+static PYRAMIDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// A pyramid of the depth of a view of `size` × `size`, its first level at the depths `halves` on
+/// its left half and its right one, each next level the least of the 2 × 2 texels under each.
+fn pyramid_at(gpu: &egui_wgpu::RenderState, size: u32, halves: [f32; 2]) -> (wgpu::TextureView, u32) {
+    let levels = u32::BITS - size.leading_zeros();
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: levels,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let mut texels: Vec<f32> = (0..size * size)
+        .map(|at| halves[usize::from(at % size >= size / 2)])
+        .collect();
+    for level in 0..levels {
+        let side = size >> level;
+        if level > 0 {
+            let under = &texels;
+            texels = (0..side * side)
+                .map(|at| {
+                    let (x, y) = (2 * (at % side), 2 * (at / side));
+                    let texel = |x: u32, y: u32| under[(y * 2 * side + x) as usize];
+                    texel(x, y)
+                        .min(texel(x + 1, y))
+                        .min(texel(x, y + 1))
+                        .min(texel(x + 1, y + 1))
+                })
+                .collect();
+        }
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: level,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            uniwow_api::bytemuck::cast_slice(&texels),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * side),
+                rows_per_image: Some(side),
+            },
+            wgpu::Extent3d {
+                width: side,
+                height: side,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+    (texture.create_view(&Default::default()), levels)
+}
+
+/// The depth of a point `distance` yards before the eye, in reverse Z with the near plane of `view`.
+fn depth_at(distance: f32) -> f32 {
+    0.1 / distance
+}
+
+/// The middle row of what `layer` draws in `phases` seen by `view`, as the view draws it: the opaque
+/// phase in a first pass, the layer's computing before it; its testing against a pyramid of the
+/// depth `wall` (in reverse Z, 0 the farthest) between the passes; the other phases in a second.
+fn row_behind(
+    gpu: &egui_wgpu::RenderState,
+    layer: &mut BuildingsLayer,
+    view: &View,
+    phases: &[Phase],
+    wall: f32,
+) -> Vec<[u8; 4]> {
+    row_behind_halves(gpu, layer, view, phases, [wall; 2])
+}
+
+/// What `row_behind` draws, the wall at the depths `halves` on the left half of the view and on its
+/// right one.
+fn row_behind_halves(
+    gpu: &egui_wgpu::RenderState,
+    layer: &mut BuildingsLayer,
+    view: &View,
+    phases: &[Phase],
+    halves: [f32; 2],
+) -> Vec<[u8; 4]> {
     let size = 32u32;
     let view = *view;
     layer.prepare(gpu, &view);
@@ -616,24 +708,52 @@ fn row_of(gpu: &egui_wgpu::RenderState, layer: &mut BuildingsLayer, view: &View,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
+    let (colour_view, depth_view) = (
+        colour.create_view(&Default::default()),
+        depth.create_view(&Default::default()),
+    );
+    let (wall, levels) = pyramid_at(gpu, size, halves);
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
-    {
+    if layer.computes() {
+        layer.compute(gpu, &view, &mut encoder);
+    }
+    for first in [true, false] {
+        if !first && layer.occludes() {
+            let pyramid = Pyramid {
+                view: &wall,
+                size: [size, size],
+                levels,
+                generation: PYRAMIDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            };
+            layer.occlude(gpu, &view, &pyramid, &mut encoder);
+        }
+        let load = |clear| {
+            if first {
+                wgpu::LoadOp::Clear(clear)
+            } else {
+                wgpu::LoadOp::Load
+            }
+        };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: None,
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &colour.create_view(&Default::default()),
+                view: &colour_view,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    load: if first {
+                        wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
                     store: wgpu::StoreOp::Store,
                 },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &depth.create_view(&Default::default()),
+                view: &depth_view,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(0.0),
-                    store: wgpu::StoreOp::Discard,
+                    load: load(0.0),
+                    store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
             }),
@@ -641,7 +761,7 @@ fn row_of(gpu: &egui_wgpu::RenderState, layer: &mut BuildingsLayer, view: &View,
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        for phase in phases {
+        for phase in phases.iter().filter(|phase| phase.first_pass() == first) {
             layer.draw_pass(gpu, &TARGET, &view, *phase, &mut pass);
         }
     }
@@ -692,6 +812,123 @@ fn bench(gpu: &egui_wgpu::RenderState, wmo: Wmo) -> Option<BuildingsLayer> {
     }]
     .into();
     Some(BuildingsLayer::new(shared, scene))
+}
+
+#[test]
+fn a_group_hidden_by_the_depth_is_drawn_one_frame_more_then_no_longer_and_again_once_in_sight() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    let Some(mut layer) = bench(&gpu, square(material(0x1, 0), false, None)) else {
+        eprintln!("skipped: the software adapter does not draw buildings");
+        return;
+    };
+    if !layer.occludes() {
+        eprintln!("skipped: the software adapter does not compute");
+        return;
+    }
+    let seen = view(Vec3::new(5.0, 0.0, 0.0));
+    let white = [255, 255, 255, 255];
+    let black = [0, 0, 0, 255];
+    let frame = |layer: &mut BuildingsLayer, wall: f32| row_behind(&gpu, layer, &seen, &Phase::ALL, wall)[16];
+    // The square 5 yards away; a wall at 2 yards hides it, one at 10 does not.
+    let (near, far) = (depth_at(2.0), depth_at(10.0));
+    assert_eq!(frame(&mut layer, far), white, "in sight");
+    assert_eq!(
+        frame(&mut layer, near),
+        white,
+        "seen at the frame before: drawn first, one frame more"
+    );
+    assert_eq!(frame(&mut layer, near), black, "then hidden");
+    assert_eq!(frame(&mut layer, near), black);
+    assert!(
+        layer.stats().items.contains("1 hidden by the depth"),
+        "{}",
+        layer.stats().items
+    );
+    assert_eq!(
+        frame(&mut layer, far),
+        white,
+        "found in sight: drawn by the second pass at once"
+    );
+    assert_eq!(
+        row_behind(&gpu, &mut layer, &seen, &[Phase::Opaque], far)[16],
+        white,
+        "and by the first at the next frame"
+    );
+    // Hidden again, then the buildings given anew: every group seen, drawn first at that frame.
+    frame(&mut layer, near);
+    assert_eq!(frame(&mut layer, near), black);
+    let scene = layer.scene();
+    let placed: Vec<Placed> = scene.lock().unwrap().placed.iter().cloned().collect();
+    scene.lock().unwrap().placed = placed.into();
+    assert_eq!(frame(&mut layer, near), white, "the buildings changed: all drawn first");
+    assert_eq!(frame(&mut layer, near), black);
+}
+
+#[test]
+fn the_groups_of_two_buildings_are_told_apart_one_hidden_the_other_not() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    let Some(mut layer) = bench(&gpu, square(material(0x1, 0), false, None)) else {
+        eprintln!("skipped: the software adapter does not draw buildings");
+        return;
+    };
+    if !layer.occludes() {
+        eprintln!("skipped: the software adapter does not compute");
+        return;
+    }
+    // The square twice, to the left of the view and to its right.
+    let scene = layer.scene();
+    let wmo = scene.lock().unwrap().placed[0].wmo.clone();
+    let at = |y: f32| Placed {
+        transform: Mat4::from_translation(Vec3::new(0.0, y, 0.0)),
+        wmo: wmo.clone(),
+        parts: None,
+        liquids: None,
+    };
+    scene.lock().unwrap().placed = vec![at(-1.5), at(1.5)].into();
+    let seen = view(Vec3::new(5.0, 0.0, 0.0));
+    let frame = |layer: &mut BuildingsLayer, halves: [f32; 2]| {
+        let row = row_behind_halves(&gpu, layer, &seen, &Phase::ALL, halves);
+        [row[8], row[24]]
+    };
+    let (near, far) = (depth_at(2.0), depth_at(10.0));
+    let [white, black] = [[255, 255, 255, 255], [0, 0, 0, 255]];
+    assert_eq!(frame(&mut layer, [far, far]), [white, white]);
+    assert_eq!(
+        frame(&mut layer, [near, far]),
+        [white, white],
+        "the left one drawn one frame more"
+    );
+    assert_eq!(frame(&mut layer, [near, far]), [black, white], "then hidden alone");
+    assert_eq!(frame(&mut layer, [near, far]), [black, white]);
+}
+
+#[test]
+fn a_blended_group_is_drawn_only_while_found_in_sight() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    let Some(mut layer) = bench(&gpu, square(material(0x1, 2), false, None)) else {
+        eprintln!("skipped: the software adapter does not draw buildings");
+        return;
+    };
+    if !layer.occludes() {
+        eprintln!("skipped: the software adapter does not compute");
+        return;
+    }
+    let seen = view(Vec3::new(5.0, 0.0, 0.0));
+    let frame = |layer: &mut BuildingsLayer, wall: f32| row_behind(&gpu, layer, &seen, &Phase::ALL, wall)[16];
+    let drawn = frame(&mut layer, depth_at(10.0));
+    assert!(drawn[0] > 100, "in sight: {drawn:?}");
+    assert_eq!(
+        frame(&mut layer, depth_at(2.0)),
+        [0, 0, 0, 255],
+        "hidden at once, though seen before"
+    );
+    assert_eq!(frame(&mut layer, depth_at(10.0)), drawn);
 }
 
 #[test]

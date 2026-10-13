@@ -15,6 +15,7 @@ mod gpu;
 mod keeping;
 mod layer;
 mod liquid;
+mod occlusion;
 #[cfg(test)]
 mod tests;
 
