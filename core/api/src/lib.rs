@@ -97,6 +97,12 @@ pub use service::ServiceKey;
 /// Topic published by the kernel when a module fails while running. Payload: `{ "id": <module id> }`.
 pub const MODULE_FAILED_TOPIC: &str = "kernel.module_failed";
 
+/// Topic published by the kernel when the editor goes out of sight, its main window minimised with
+/// no panel torn off from it showing, and when it comes back. Payload: `{ "minimised": <bool> }`.
+/// Delivered while it is minimised too, when neither `Module::windows_ui` nor the panels are
+/// called.
+pub const MINIMISED_TOPIC: &str = "kernel.minimised";
+
 /// Command opening a modal window, offered by a module when one runs. Arguments:
 /// `{ "title", "text", "buttons": [{ "id", "label" }], "escape": <id of a button>, "first": <bool> }`,
 /// `first` putting the window before those waiting, for the kernel's question when the editor

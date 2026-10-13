@@ -2201,3 +2201,106 @@ fn the_window_settings_closed_fades_out_then_is_drawn_no_more() {
     let idle = harness.frame_output(RawInput::default());
     assert_eq!(repaint_delay(&idle), Duration::MAX, "and nothing asked for after");
 }
+
+/// A module that keeps the payloads of the kernel's topic of the window minimised, counts its
+/// shutdowns, panics when asked, and in its shutdown too when told.
+struct Watcher {
+    seen: Arc<Mutex<Vec<Value>>>,
+    shut: Arc<Mutex<u32>>,
+    panics_in_shutdown: bool,
+}
+
+/// The payloads a watcher kept, and how many times it was shut down.
+type Watched = (Arc<Mutex<Vec<Value>>>, Arc<Mutex<u32>>);
+
+fn watcher(panics_in_shutdown: bool) -> (Box<dyn Module>, Watched) {
+    let (seen, shut) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(0)));
+    let module = Watcher {
+        seen: seen.clone(),
+        shut: shut.clone(),
+        panics_in_shutdown,
+    };
+    (Box::new(module), (seen, shut))
+}
+
+impl Module for Watcher {
+    fn register(&mut self, reg: &mut Registrar) {
+        reg.subscribe(MINIMISED_TOPIC);
+        reg.command("watcher.panic", "Panics", json!({}), json!({}));
+    }
+
+    fn on_event(&mut self, event: &Event, _ctx: &mut Context) {
+        lock(&self.seen).push(event.payload.clone());
+    }
+
+    fn on_command(&mut self, _name: &str, _arguments: Value, _ctx: &mut Context) -> Result<Value, String> {
+        panic!("the watcher breaks");
+    }
+
+    fn shutdown(&mut self) {
+        *lock(&self.shut) += 1;
+        if self.panics_in_shutdown {
+            panic!("its shutdown breaks too");
+        }
+    }
+}
+
+/// The input of a frame of the window minimised.
+fn minimised_input() -> RawInput {
+    let mut input = RawInput::default();
+    input.viewports.entry(ViewportId::ROOT).or_default().minimized = Some(true);
+    input
+}
+
+#[test]
+fn the_modules_are_told_when_the_editor_goes_out_of_sight_and_back_even_while_minimised() {
+    let (module, (seen, _)) = watcher(false);
+    let mut harness = Harness::new(vec![("watcher", module)]);
+    harness.frame(RawInput::default());
+    assert!(lock(&seen).is_empty(), "shown: nothing told");
+    // Minimised, eframe running `logic` alone: told then, once.
+    harness.minimised(minimised_input());
+    assert_eq!(*lock(&seen), [json!({ "minimised": true })]);
+    harness.minimised(minimised_input());
+    assert_eq!(lock(&seen).len(), 1, "once");
+    // Shown again.
+    harness.frame(RawInput::default());
+    assert_eq!(
+        *lock(&seen),
+        [json!({ "minimised": true }), json!({ "minimised": false })]
+    );
+    harness.frame(RawInput::default());
+    assert_eq!(lock(&seen).len(), 2, "once");
+}
+
+#[test]
+fn a_module_that_fails_is_shut_down_once_a_failure_there_only_logged() {
+    let (module, (_, shut)) = watcher(false);
+    let (breaking, (_, broken)) = watcher(true);
+    let (counting, value) = counter("a");
+    let mut harness = Harness::new(vec![("watcher", module), ("a", counting)]);
+    assert!(harness.call("watcher", "watcher.panic", json!({})).is_err());
+    assert!(matches!(slot(&harness.shell, "watcher").state, State::Failed(_)));
+    assert_eq!(*lock(&shut), 1, "shut down as it stops");
+    // Not again when the editor closes, the others then.
+    eframe::App::on_exit(&mut harness.shell);
+    assert_eq!(*lock(&shut), 1);
+    // A shutdown that panics: logged, the module failed all the same, the others working.
+    let mut harness = Harness::new(vec![
+        ("watcher", breaking),
+        (
+            "a",
+            Box::new(Counter {
+                id: "a",
+                value: value.clone(),
+                saved: 0,
+            }),
+        ),
+    ]);
+    assert!(harness.call("watcher", "watcher.panic", json!({})).is_err());
+    assert_eq!(*lock(&broken), 1);
+    assert!(matches!(slot(&harness.shell, "watcher").state, State::Failed(_)));
+    harness.call("a", "a.add", json!({ "by": 2 })).unwrap();
+    harness.frame(RawInput::default());
+    assert_eq!(*lock(&value), 2);
+}

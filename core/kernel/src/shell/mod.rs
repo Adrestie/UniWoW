@@ -24,8 +24,8 @@ use uniwow_api::egui_dock::{self, DockArea, DockState, TabViewer};
 use uniwow_api::theme::{self, Level, Theme};
 use uniwow_api::{
     CallId, CommandHandler, CommandInfo, CommandSpec, Context, DIALOG_ANSWERED_TOPIC, DIALOG_COMMAND, DockArea as Area,
-    Event, Host, MODULE_FAILED_TOPIC, Module, PropertyInfo, Registrar, RunsOn, eframe, egui, log, name_error,
-    range_error, serde_json,
+    Event, Host, MINIMISED_TOPIC, MODULE_FAILED_TOPIC, Module, PropertyInfo, Registrar, RunsOn, eframe, egui, log,
+    name_error, range_error, serde_json,
 };
 
 use crate::capi;
@@ -115,6 +115,8 @@ pub struct Shell {
     native_windows: Option<bool>,
     /// Whether the main window was told to draw its frame dark.
     themed: bool,
+    /// Whether the editor was out of sight at the last `logic`, as `MINIMISED_TOPIC` tells.
+    minimised: bool,
     /// The style of the dock, made from the theme once.
     dock_style: egui_dock::Style,
 }
@@ -209,6 +211,7 @@ impl Shell {
             torn: Vec::new(),
             native_windows: None,
             themed: false,
+            minimised: false,
             dock_style: Theme::DARK.dock_style(),
         };
         shell.register_all();
@@ -411,11 +414,18 @@ impl Shell {
         self.stop(index, State::Blocked(reason));
     }
 
-    /// Stops a module, left in `state`: its services withdrawn, what the interface kept of its
-    /// objects let go, their textures with it, the bridge told, and the catalogue made again
-    /// without its commands.
+    /// Stops a module, left in `state`: shut down, so that it lets go of what it holds outside the
+    /// kernel, such as its sounds, a failure there only logged; its services withdrawn, what the
+    /// interface kept of its objects let go, their textures with it, the bridge told, and the
+    /// catalogue made again without its commands.
     fn stop(&mut self, index: usize, state: State) {
         let id = self.slots[index].id.clone();
+        if self.slots[index].state.is_running()
+            && let Some(module) = self.slots[index].module.as_deref_mut()
+            && let Err(message) = guarded_as(&id, || module.shutdown())
+        {
+            log::error!("module '{id}' failed in shutdown: {message}");
+        }
         self.slots[index].state = state;
         self.host.services.retain(|_, s| s.provider != id);
         self.host.views.retain(|(owner, _), _| *owner != id);

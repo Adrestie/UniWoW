@@ -1242,3 +1242,44 @@ fn the_weather_is_heard_its_loop_faded_in_and_out_silent_where_sheltered_its_thu
             .any(|text| text.starts_with("Nothing heard"))
     );
 }
+
+#[test]
+fn the_loop_is_stopped_on_the_service_it_plays_on_once_that_service_goes_or_changes() {
+    let mut host = host();
+    let first = Arc::new(Ears::default());
+    host.audio = Some(first.clone());
+    let mut module = WeatherModule::default();
+    let mut reg = Registrar::default();
+    module.register(&mut reg);
+    frame(&mut module, &mut host, 0.0);
+    run_jobs(&mut module, &mut host);
+    server_sends(&mut module, &mut host, 5, 0.85);
+    let mut now = 0.1;
+    while first.heard() == 0 {
+        assert!(now < 1.0, "never played");
+        frame(&mut module, &mut host, now);
+        run_jobs(&mut module, &mut host);
+        now += 0.1;
+    }
+    // Another service, as when the module audio starts again: the loop stopped on the first at
+    // once, played on the other.
+    let second = Arc::new(Ears::default());
+    host.audio = Some(second.clone());
+    frame(&mut module, &mut host, now);
+    assert_eq!(
+        first.since(0),
+        [
+            "play 1: 20 samples at 0.69, looped, faded in over 3 s",
+            "stop 1 over 0 s"
+        ]
+    );
+    assert_eq!(
+        second.since(0),
+        ["play 1: 20 samples at 0.69, looped, faded in over 3 s"]
+    );
+    // The service gone: stopped on the one it played on.
+    host.audio = None;
+    frame(&mut module, &mut host, now + 0.1);
+    assert_eq!(second.since(1), ["stop 1 over 0 s"]);
+    assert!(panel(&mut module, &mut host).contains(&"Nothing heard: no service audio.".to_owned()));
+}

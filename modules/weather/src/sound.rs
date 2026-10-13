@@ -207,7 +207,17 @@ impl Sounds {
         thunder: Option<Thunder>,
         thunder_sound: u32,
     ) {
-        self.audio = ctx.service(audio::SERVICE);
+        // The service gone, or another one: the loop stopped at once on the one it plays on.
+        let given = ctx.service(audio::SERVICE);
+        let same = match (&self.audio, &given) {
+            (Some(kept), Some(given)) => Arc::ptr_eq(kept, given),
+            (Some(_), None) => false,
+            (None, _) => true,
+        };
+        if !same {
+            self.stop(Duration::ZERO);
+        }
+        self.audio = given;
         if state.is_none() && self.looping.is_none() && thunder.is_none() {
             self.heard = Some(Heard::Nothing);
             return;
@@ -218,7 +228,7 @@ impl Sounds {
             return;
         };
         if let State::Silent(why) = audio.state() {
-            self.looping = None;
+            self.stop(Duration::ZERO);
             self.heard = Some(Heard::Unheard(why));
             return;
         }

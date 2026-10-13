@@ -4,7 +4,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use uniwow_api::audio::{BLOCK, Category, Clip, Engine, Output, Sound, State};
@@ -12,7 +12,9 @@ use uniwow_api::rodio::mixer::{self, MixerSource};
 use uniwow_api::rodio::{ChannelCount, SampleRate};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::vfs::{Vfs, VfsState};
-use uniwow_api::{CallId, Context, Editor, JobFn, JobId, Module, Registrar, RunsOn, egui, egui_wgpu};
+use uniwow_api::{
+    CallId, Context, Editor, Event, JobFn, JobId, MINIMISED_TOPIC, Module, Registrar, RunsOn, egui, egui_wgpu,
+};
 
 use crate::AudioModule;
 
@@ -114,9 +116,10 @@ impl uniwow_api::Host for Host {
 /// registered; its output open.
 fn module() -> (AudioModule, Registrar, MixerSource, Arc<Engine>) {
     let (mixer, source) = mixer::mixer(ChannelCount::new(1).unwrap(), SampleRate::new(1_000).unwrap());
-    let engine = Engine::with_output(Box::new(move || {
+    let mut mixer = Some(mixer);
+    let engine = Engine::with_output(Box::new(move |_| {
         Ok(Output {
-            mixer,
+            mixer: mixer.take().ok_or("opened once")?,
             device: "the test's".to_owned(),
             keep: Box::new(()),
         })
@@ -133,15 +136,24 @@ fn module() -> (AudioModule, Registrar, MixerSource, Arc<Engine>) {
     (module, reg, source, engine)
 }
 
-/// A frame of the editor, minimised or not.
-fn frame(module: &mut AudioModule, host: &mut Host, minimised: bool) {
+/// A frame of the editor shown.
+fn frame(module: &mut AudioModule, host: &mut Host) {
     let egui = egui::Context::default();
-    let mut input = egui::RawInput::default();
-    input.viewports.entry(egui::ViewportId::ROOT).or_default().minimized = Some(minimised);
-    let mut output = egui.run_ui(input, |ui| {
+    let mut output = egui.run_ui(egui::RawInput::default(), |ui| {
         module.windows_ui(ui.ctx(), &mut Context::new(host, "audio"));
     });
     output.textures_delta.clear();
+}
+
+/// The kernel telling the module the editor went out of sight, or came back: no frame drawn while
+/// it is minimised, as eframe runs the kernel's `logic` alone then.
+fn told(module: &mut AudioModule, host: &mut Host, minimised: bool) {
+    let event = Event {
+        topic: MINIMISED_TOPIC.to_owned(),
+        source: "kernel".to_owned(),
+        payload: json!({ "minimised": minimised }),
+    };
+    module.on_event(&event, &mut Context::new(host, "audio"));
 }
 
 /// The samples of the next block once a whole block has passed, as the volumes take a block to
@@ -171,7 +183,7 @@ fn the_service_and_the_settings_are_declared_the_volumes_taken_at_each_frame_sil
     );
     // A sound of the ambience at 1: the master volume and the ambience by default, 0.8 × 0.7.
     let mut host = Host::default();
-    frame(&mut module, &mut host, false);
+    frame(&mut module, &mut host);
     engine.play(Sound {
         clip: Clip::new(1, 1_000, vec![1.0]).unwrap(),
         category: Category::Ambience,
@@ -183,19 +195,24 @@ fn the_service_and_the_settings_are_declared_the_volumes_taken_at_each_frame_sil
     // The settings changed: taken at the next frame.
     host.settings.insert("master".to_owned(), json!(50));
     host.settings.insert("ambience".to_owned(), json!(20));
-    frame(&mut module, &mut host, false);
+    frame(&mut module, &mut host);
     assert!(all_near(&settled(&mut source), 0.1));
     host.settings.insert("effects".to_owned(), json!(0));
-    frame(&mut module, &mut host, false);
+    frame(&mut module, &mut host);
     assert!(all_near(&settled(&mut source), 0.1), "the ambience alone");
-    // Minimised: silent; shown again, heard; minimised without the setting, heard.
-    frame(&mut module, &mut host, true);
+    // Minimised, as the kernel tells it without a frame: silent, a frame meanwhile (of a window
+    // torn off) keeping it so; shown again, heard before any frame; minimised without the
+    // setting, heard.
+    assert!(reg.subscriptions.contains(&MINIMISED_TOPIC.to_owned()));
+    told(&mut module, &mut host, true);
+    assert!(all_near(&settled(&mut source), 0.0));
+    frame(&mut module, &mut host);
     assert!(all_near(&settled(&mut source), 0.0));
     assert!(texts(&mut module, &mut host).contains(&"Silent while the editor is minimised.".to_owned()));
-    frame(&mut module, &mut host, false);
+    told(&mut module, &mut host, false);
     assert!(all_near(&settled(&mut source), 0.1));
     host.settings.insert("mute_minimised".to_owned(), json!(0));
-    frame(&mut module, &mut host, true);
+    told(&mut module, &mut host, true);
     assert!(all_near(&settled(&mut source), 0.1));
 }
 
@@ -212,13 +229,13 @@ fn call(reg: &Registrar, name: &str, arguments: Value) -> Result<Value, String> 
 fn the_commands_play_a_file_of_the_client_change_its_volume_stop_it_and_say_the_state() {
     let (mut module, reg, mut source, engine) = module();
     let mut host = Host::default();
-    frame(&mut module, &mut host, false);
+    frame(&mut module, &mut host);
     assert_eq!(
         call(&reg, "audio.play", json!({ "file": "Sound\\Rain.wav" })),
         Err("no service vfs: the client's archives are not read".to_owned())
     );
     host.files = Some(Arc::new(Files));
-    frame(&mut module, &mut host, false);
+    frame(&mut module, &mut host);
     // Played looped, in the ambience at half: 0.5 of the file × 0.5 × 0.8 × 0.7.
     let played = call(
         &reg,
@@ -309,11 +326,75 @@ fn the_panel_says_the_device_or_why_none_and_the_module_stopped_stops_every_soun
     assert!(settled(&mut source).iter().all(|sample| sample.is_nan()));
     assert!(texts(&mut module, &mut host).contains(&"No sound: stopped.".to_owned()));
     // Without a device: why.
-    let mut silent = AudioModule::with_engine(Engine::with_output(Box::new(|| Err("no device here".to_owned()))));
+    let mut silent = AudioModule::with_engine(Engine::with_output(Box::new(|_| Err("no device here".to_owned()))));
     let since = Instant::now();
     while silent.engine.as_ref().unwrap().state() == State::Opening {
         assert!(since.elapsed() < Duration::from_secs(10));
         std::thread::yield_now();
     }
     assert!(texts(&mut silent, &mut host).contains(&"No sound: no device here.".to_owned()));
+}
+
+/// The client's files, whose reading of a sound says it began, then waits until the test lets it
+/// go on.
+struct Held {
+    reading: Mutex<mpsc::Sender<()>>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl Vfs for Held {
+    fn read(&self, path: &str) -> Result<Option<Vec<u8>>, String> {
+        self.reading.lock().unwrap().send(()).unwrap();
+        self.release
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|why| why.to_string())?;
+        Files.read(path)
+    }
+    fn exists(&self, path: &str) -> bool {
+        Files.exists(path)
+    }
+    fn files_under(&self, _folder: &str) -> Vec<String> {
+        Vec::new()
+    }
+    fn path_of(&self, _file_data_id: u32) -> Option<String> {
+        None
+    }
+    fn state(&self) -> VfsState {
+        Files.state()
+    }
+}
+
+#[test]
+fn a_file_played_is_read_and_decoded_without_holding_what_the_interface_thread_takes() {
+    let (mut module, reg, _source, engine) = module();
+    let (reading, read) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let mut host = Host {
+        files: Some(Arc::new(Held {
+            reading: Mutex::new(reading),
+            release: Mutex::new(released),
+        })),
+        ..Host::default()
+    };
+    frame(&mut module, &mut host);
+    let handler = match &reg
+        .commands
+        .iter()
+        .find(|command| command.name == "audio.play")
+        .unwrap()
+        .runs_on
+    {
+        RunsOn::Caller(handler) => handler.clone(),
+        _ => panic!("audio.play runs on the interface thread"),
+    };
+    let caller = std::thread::spawn(move || handler(json!({ "file": "Sound\\Rain.wav" })));
+    read.recv_timeout(Duration::from_secs(10)).unwrap();
+    // While the file is read on the calling thread, the frames of the interface thread go on.
+    assert!(module.files.try_lock().is_ok(), "the client's files not held");
+    frame(&mut module, &mut host);
+    release.send(()).unwrap();
+    let played = caller.join().unwrap().unwrap();
+    assert!(engine.playing(uniwow_api::audio::SoundId(played["sound"].as_u64().unwrap())));
 }

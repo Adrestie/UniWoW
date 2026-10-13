@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use rodio::mixer::{self, MixerSource};
 use rodio::{ChannelCount, SampleRate};
 
-use crate::{BLOCK, Category, Clip, Engine, Output, Sound, SoundId, State};
+use crate::{BLOCK, Category, Clip, Engine, Lost, Output, REOPEN, Sound, SoundId, State};
 
 /// A WAV of 16-bit PCM of `channels` channels at `rate`.
 pub fn wav(channels: u16, rate: u32, samples: &[i16]) -> Vec<u8> {
@@ -68,6 +68,16 @@ fn a_wav_and_an_mp3_are_decoded_and_what_is_not_a_sound_refused() {
     assert!(Clip::decode(wav(1, 8_000, &[])).is_err(), "no sample");
     assert!(Clip::new(0, 8_000, vec![0.0]).is_err());
     assert!(Clip::new(2, 8_000, vec![0.0; 3]).is_err(), "a frame cut short");
+    // Decoded whole within the longest it may play, refused past it.
+    let tenth = wav(1, 1_000, &[100; 100]);
+    assert_eq!(
+        Clip::decode_within(tenth.clone(), Duration::from_millis(100)).map(|clip| clip.samples().len()),
+        Ok(100)
+    );
+    assert_eq!(
+        Clip::decode_within(tenth, Duration::from_millis(99)),
+        Err("longer than 0 s, the most a sound is decoded whole".to_owned())
+    );
 }
 
 /// An engine playing into a mixer of one channel at 1,000 frames a second, read by the test, the
@@ -75,12 +85,13 @@ fn a_wav_and_an_mp3_are_decoded_and_what_is_not_a_sound_refused() {
 fn engine(held: bool) -> (Engine, MixerSource, mpsc::Sender<()>) {
     let (mixer, source) = mixer::mixer(ChannelCount::new(1).unwrap(), SampleRate::new(1_000).unwrap());
     let (release, wait) = mpsc::channel::<()>();
-    let engine = Engine::with_output(Box::new(move || {
+    let mut mixer = Some(mixer);
+    let engine = Engine::with_output(Box::new(move |_| {
         if held {
             wait.recv().map_err(|why| why.to_string())?;
         }
         Ok(Output {
-            mixer,
+            mixer: mixer.take().ok_or("opened once")?,
             device: "the test's".to_owned(),
             keep: Box::new(()),
         })
@@ -234,9 +245,9 @@ fn the_sounds_played_before_the_device_opens_play_once_it_is_and_none_without_on
     let played = take(&mut source, 2 * BLOCK);
     assert!(played.iter().all(|sample| near(*sample, 0.5)), "{:?}", &played[..4]);
     // Without a device: nothing played, the reason said, nothing waited for.
-    let silent = Engine::with_output(Box::new(|| Err("no device here".to_owned())));
+    let silent = Engine::with_output(Box::new(|_| Err("no device here".to_owned())));
     assert_eq!(settled(&silent), State::Silent("no device here".to_owned()));
-    let panicking = Engine::with_output(Box::new(|| panic!("a driver gone wrong")));
+    let panicking = Engine::with_output(Box::new(|_| panic!("a driver gone wrong")));
     assert_eq!(
         settled(&panicking),
         State::Silent("its opening failed (a driver gone wrong)".to_owned())
@@ -256,4 +267,49 @@ fn the_sounds_played_before_the_device_opens_play_once_it_is_and_none_without_on
     assert!(!engine.playing(after));
     assert!(take(&mut source, 4).iter().all(Option::is_none));
     engine.shutdown();
+}
+
+#[test]
+fn a_device_lost_while_it_plays_is_said_its_sounds_ended_then_opened_again() {
+    // Each opening a new mixer, which the test reads, with what tells the engine it is lost.
+    let (opened, opening) = mpsc::channel::<(MixerSource, Lost)>();
+    let engine = Engine::with_output(Box::new(move |lost| {
+        let (mixer, source) = mixer::mixer(ChannelCount::new(1).unwrap(), SampleRate::new(1_000).unwrap());
+        opened.send((source, lost)).map_err(|why| why.to_string())?;
+        Ok(Output {
+            mixer,
+            device: "the test's".to_owned(),
+            keep: Box::new(()),
+        })
+    }));
+    let (mut first, lost) = opening.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(settled(&engine), State::Playing("the test's".to_owned()));
+    let looped = engine.play(sound(&[0.5], Category::Ambience, 1.0, true, 0));
+    let once = engine.play(sound(&[0.5; 2_000], Category::Effects, 1.0, false, 0));
+    assert!(near(first.next(), 1.0));
+    // Lost: said, every sound ended, nothing played meanwhile; told twice, once.
+    lost.tell("unplugged");
+    lost.tell("unplugged");
+    let since = Instant::now();
+    while engine.state() != State::Silent("the audio device was lost (unplugged)".to_owned()) {
+        assert!(since.elapsed() < Duration::from_secs(10), "{:?}", engine.state());
+        std::thread::yield_now();
+    }
+    assert!(!engine.playing(looped) && !engine.playing(once));
+    assert_eq!(engine.count(), 0);
+    let meanwhile = engine.play(sound(&[0.5], Category::Ambience, 1.0, true, 0));
+    assert!(!engine.playing(meanwhile));
+    // Opened again after `REOPEN`: a sound played then heard on the new output.
+    let (mut second, _) = opening.recv_timeout(REOPEN * 5).unwrap();
+    assert!(since.elapsed() >= REOPEN - Duration::from_millis(50));
+    assert_eq!(settled(&engine), State::Playing("the test's".to_owned()));
+    let again = engine.play(sound(&[0.25], Category::Ambience, 1.0, true, 0));
+    assert!(engine.playing(again));
+    assert!(near(second.next(), 0.25));
+    // Shut down: not opened again, whatever it is told.
+    engine.shutdown();
+    lost.tell("unplugged");
+    std::thread::sleep(REOPEN + Duration::from_millis(500));
+    assert!(opening.try_recv().is_err());
+    assert_eq!(engine.state(), State::Silent("stopped".to_owned()));
 }

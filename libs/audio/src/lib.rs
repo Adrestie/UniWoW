@@ -3,8 +3,9 @@
 //! the audio device, mixed by rodio, each faded in and out over the time it is given, at a volume
 //! of its own times that of its category and the master volume, all silenced at once while muted.
 //! The device is opened by a thread of the engine, so that nothing waits for it; without one,
-//! nothing is played, which the log says once. The thread of the device never waits for a lock: a
-//! sound reads what changes of it from atomics, every `BLOCK` frames.
+//! nothing is played, which the log says once. A device lost while it plays is said once and opened
+//! again every `REOPEN`. The thread of the device never waits for a lock: a sound reads what changes
+//! of it from atomics, every `BLOCK` frames. A clip is decoded whole, `LONGEST` at most.
 
 #[cfg(test)]
 mod tests;
@@ -24,6 +25,11 @@ use rodio::{ChannelCount, Decoder, SampleRate, Source};
 /// How many frames a sound plays between two readings of what changes of it; the volumes of the
 /// categories and the master volume move to a new value over that many frames, without a click.
 pub const BLOCK: usize = 256;
+/// The longest a clip decoded whole may play: 2 minutes, some 46 MB of samples at most (48,000
+/// frames a second, two channels); a longer file is refused.
+pub const LONGEST: Duration = Duration::from_secs(120);
+/// How long the engine waits before opening its device again, once lost.
+pub const REOPEN: Duration = Duration::from_secs(2);
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -57,11 +63,25 @@ impl Clip {
         })
     }
 
-    /// The WAV (PCM or ADPCM) or MP3 file `bytes`, whatever its name says, decoded whole.
+    /// The WAV (PCM or ADPCM) or MP3 file `bytes`, whatever its name says, decoded whole;
+    /// refused when it plays longer than `LONGEST`.
     pub fn decode(bytes: Vec<u8>) -> Result<Clip, String> {
+        Clip::decode_within(bytes, LONGEST)
+    }
+
+    /// The same, refused when it plays longer than `longest`: nothing past it is decoded.
+    pub fn decode_within(bytes: Vec<u8>, longest: Duration) -> Result<Clip, String> {
         let decoder = Decoder::new(Cursor::new(bytes)).map_err(|why| format!("not a sound that can be read: {why}"))?;
         let (channels, rate) = (decoder.channels().get(), decoder.sample_rate().get());
-        Clip::new(channels, rate, decoder.collect())
+        let most = (longest.as_secs_f64() * f64::from(rate)) as usize * usize::from(channels);
+        let samples: Vec<f32> = decoder.take(most + 1).collect();
+        if samples.len() > most {
+            return Err(format!(
+                "longer than {} s, the most a sound is decoded whole",
+                longest.as_secs()
+            ));
+        }
+        Clip::new(channels, rate, samples)
     }
 
     pub fn channels(&self) -> u16 {
@@ -140,8 +160,26 @@ pub struct Output {
     pub keep: Box<dyn Any>,
 }
 
-/// What opens the output, on the thread of the engine.
-pub type Opener = Box<dyn FnOnce() -> Result<Output, String> + Send>;
+/// What opens the output, on the thread of the engine, again each time it is lost; it tells the
+/// engine through `Lost` that the output it opened is lost.
+pub type Opener = Box<dyn FnMut(Lost) -> Result<Output, String> + Send>;
+
+/// What the thread of the engine is told: to end, or that its output was lost, and why.
+enum Told {
+    Quit,
+    Lost(String),
+}
+
+/// What tells the engine that the output it opened was lost, as the device's errors do; from any
+/// thread.
+#[derive(Clone)]
+pub struct Lost(mpsc::Sender<Told>);
+
+impl Lost {
+    pub fn tell(&self, why: &str) {
+        let _ = self.0.send(Told::Lost(why.to_owned()));
+    }
+}
 
 /// The volumes every sound plays at besides its own, as the bits of their `f32`: the master volume
 /// and that of each category; and whether all are muted.
@@ -361,18 +399,77 @@ struct Shared {
     phase: Mutex<Phase>,
     sounds: Mutex<HashMap<SoundId, Arc<Control>>>,
     next: AtomicU64,
+    /// Whether the engine was shut down: its device never opened again.
+    stopped: AtomicBool,
+}
+
+impl Shared {
+    /// Every sound ended, as when the output they played on is lost.
+    fn end_all(&self) {
+        for (_, control) in lock(&self.sounds).drain() {
+            control.ended.store(true, Ordering::Release);
+        }
+    }
+
+    /// The output `output` taken: the sounds waiting for it played on it, those stopped meanwhile
+    /// never heard. When the engine is waiting for its first device, or has lost it; not once shut
+    /// down.
+    fn opened(&self, output: &Output) {
+        let mut phase = lock(&self.phase);
+        if self.stopped.load(Ordering::Acquire) {
+            return;
+        }
+        match &mut *phase {
+            Phase::Opening(waiting) => {
+                for mut voice in waiting.drain(..) {
+                    if voice.control.stopping.load(Ordering::Acquire) {
+                        voice.end();
+                    } else {
+                        output.mixer.add(voice);
+                    }
+                }
+            }
+            Phase::Silent(_) => {}
+            Phase::Open { .. } => return,
+        }
+        *phase = Phase::Open {
+            mixer: output.mixer.clone(),
+            device: output.device.clone(),
+        };
+    }
 }
 
 /// The engine of the sounds: shared between threads; what it is asked never waits for the device.
 pub struct Engine {
     shared: Arc<Shared>,
-    /// Dropped to end the thread of the engine, which closes the device.
-    quit: Mutex<Option<mpsc::Sender<()>>>,
+    /// Tells the thread of the engine to end, which closes the device.
+    quit: Mutex<Option<mpsc::Sender<Told>>>,
 }
 
-/// The default device of the system, as rodio opens it, trying the others if it cannot.
-fn open_default() -> Result<Output, String> {
-    let mut sink = rodio::DeviceSinkBuilder::open_default_sink().map_err(|why| why.to_string())?;
+/// `open` called on behalf of the engine, a panic in it, as of a driver gone wrong, taken as no
+/// device.
+fn guarded_open(open: &mut Opener, lost: &Lost) -> Result<Output, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| open(lost.clone()))).unwrap_or_else(|panic| {
+        let message = panic
+            .downcast_ref::<&str>()
+            .map(|text| (*text).to_owned())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        Err(format!("its opening failed ({message})"))
+    })
+}
+
+/// The default device of the system, in its own configuration or another it supports; its loss,
+/// or a configuration no longer valid, told through `lost`, its other errors only logged.
+fn open_default(lost: Lost) -> Result<Output, String> {
+    use rodio::cpal::StreamError;
+    let told = move |error: StreamError| match error {
+        StreamError::DeviceNotAvailable | StreamError::StreamInvalidated => lost.tell(&error.to_string()),
+        other => log::debug!("the audio device: {other}"),
+    };
+    let mut sink = rodio::DeviceSinkBuilder::from_default_device()
+        .and_then(|builder| builder.with_error_callback(told).open_sink_or_fallback())
+        .map_err(|why| why.to_string())?;
     sink.log_on_drop(false);
     let config = *sink.config();
     Ok(Output {
@@ -392,55 +489,66 @@ impl Engine {
         Engine::with_output(Box::new(open_default))
     }
 
-    /// The engine of the output `open` opens, on the thread of the engine.
-    pub fn with_output(open: Opener) -> Engine {
+    /// The engine of the output `open` opens, on the thread of the engine; opened again every
+    /// `REOPEN` once lost.
+    pub fn with_output(mut open: Opener) -> Engine {
         let shared = Arc::new(Shared {
             levels: Arc::new(Levels::new()),
             phase: Mutex::new(Phase::Opening(Vec::new())),
             sounds: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
+            stopped: AtomicBool::new(false),
         });
-        let (quit, quitting) = mpsc::channel::<()>();
+        let (quit, told) = mpsc::channel::<Told>();
+        let lost = Lost(quit.clone());
         let kept = shared.clone();
         let started = std::thread::Builder::new()
             .name("uniwow audio".to_owned())
             .spawn(move || {
-                // A device whose opening panics is no device.
-                let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(open)).unwrap_or_else(|panic| {
-                    let message = panic
-                        .downcast_ref::<&str>()
-                        .map(|text| (*text).to_owned())
-                        .or_else(|| panic.downcast_ref::<String>().cloned())
-                        .unwrap_or_default();
-                    Err(format!("its opening failed ({message})"))
-                });
-                let output = match opened {
-                    Ok(output) => output,
+                let mut output = match guarded_open(&mut open, &lost) {
+                    Ok(output) => Some(output),
                     Err(why) => {
                         log::warn!("no sound is played: {why}");
                         *lock(&kept.phase) = Phase::Silent(why);
                         return;
                     }
                 };
-                {
-                    let mut phase = lock(&kept.phase);
-                    if let Phase::Opening(waiting) = &mut *phase {
-                        // Those stopped meanwhile never heard.
-                        for mut voice in waiting.drain(..) {
-                            if voice.control.stopping.load(Ordering::Acquire) {
-                                voice.end();
-                            } else {
-                                output.mixer.add(voice);
+                if let Some(output) = &output {
+                    kept.opened(output);
+                }
+                // Open until the engine ends; once lost, opened again every `REOPEN`.
+                loop {
+                    let message = match output {
+                        Some(_) => told.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+                        None => told.recv_timeout(REOPEN),
+                    };
+                    match message {
+                        Ok(Told::Quit) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        // Told again of the same loss: nothing more.
+                        Ok(Told::Lost(_)) if output.is_none() => {}
+                        Ok(Told::Lost(why)) => {
+                            log::warn!(
+                                "the audio device was lost ({why}): opened again every {} s",
+                                REOPEN.as_secs()
+                            );
+                            output = None;
+                            {
+                                let mut phase = lock(&kept.phase);
+                                if !kept.stopped.load(Ordering::Acquire) {
+                                    *phase = Phase::Silent(format!("the audio device was lost ({why})"));
+                                }
+                            }
+                            kept.end_all();
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            if let Ok(again) = guarded_open(&mut open, &lost) {
+                                log::info!("the audio device is open again");
+                                kept.opened(&again);
+                                output = Some(again);
                             }
                         }
-                        *phase = Phase::Open {
-                            mixer: output.mixer.clone(),
-                            device: output.device.clone(),
-                        };
                     }
                 }
-                // Open until the engine ends.
-                let _ = quitting.recv();
                 drop(output);
             });
         if let Err(why) = started {
@@ -533,8 +641,14 @@ impl Engine {
             control.aim(0.0, Duration::ZERO);
             control.stopping.store(true, Ordering::Release);
         }
-        *lock(&self.shared.phase) = Phase::Silent("stopped".to_owned());
-        lock(&self.quit).take();
+        {
+            let mut phase = lock(&self.shared.phase);
+            self.shared.stopped.store(true, Ordering::Release);
+            *phase = Phase::Silent("stopped".to_owned());
+        }
+        if let Some(quit) = lock(&self.quit).take() {
+            let _ = quit.send(Told::Quit);
+        }
     }
 }
 

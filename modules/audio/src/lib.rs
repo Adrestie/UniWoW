@@ -1,9 +1,10 @@
 //! The sounds of the editor: the engine of the runtime (`uniwow_api::audio`), started as the module
 //! registers, its device opened by its own thread, given to the other modules through the service
 //! `audio`; the master volume and those of the categories from the settings of *Audio*, taken at
-//! each frame; every sound silenced while the editor is minimised, as the settings say. Named
-//! commands play a file of the client's archives for the modules of every language. Its panel says
-//! the device, or why there is none, and how many sounds play.
+//! each frame; every sound silenced while the editor is minimised, as the settings say, which the
+//! kernel tells even then (`MINIMISED_TOPIC`). Named commands play a file of the client's archives
+//! for the modules of every language. Its panel says the device, or why there is none, and how many
+//! sounds play.
 
 #[cfg(test)]
 mod tests;
@@ -14,7 +15,7 @@ use std::time::Duration;
 use uniwow_api::audio::{self, Category, Clip, Engine, Sound, SoundId, State};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::vfs::{self, Vfs, VfsState};
-use uniwow_api::{Context, DockArea, Module, Registrar, SettingSpec, egui};
+use uniwow_api::{Context, DockArea, Event, MINIMISED_TOPIC, Module, Registrar, SettingSpec, egui};
 
 /// The settings: the master volume and that of each category, in hundredths; whether every sound is
 /// silenced while the editor is minimised.
@@ -129,11 +130,20 @@ pub struct AudioModule {
     engine: Option<Arc<Engine>>,
     /// The client's files the commands read, as the frame last found them.
     files: Arc<Mutex<Option<Arc<dyn Vfs>>>>,
-    /// Whether the sounds are silenced, because the editor is minimised.
+    /// Whether the editor is out of sight, as the kernel told last, and so the sounds silenced.
+    minimised: bool,
     muted: bool,
 }
 
 impl AudioModule {
+    /// Every sound silenced while the editor is out of sight, when the settings say so.
+    fn mute(&mut self, ctx: &Context) {
+        self.muted = self.minimised && setting(ctx, MUTE_MINIMISED) == 1;
+        if let Some(engine) = &self.engine {
+            engine.set_muted(self.muted);
+        }
+    }
+
     /// The module playing through `engine`.
     pub fn with_engine(engine: Engine) -> Self {
         Self {
@@ -153,7 +163,8 @@ impl Module for AudioModule {
         let given: audio::Handle = engine.clone();
         reg.panel("audio", "Audio", DockArea::Right)
             .settings("Audio", settings())
-            .provide(audio::SERVICE, given);
+            .provide(audio::SERVICE, given)
+            .subscribe(MINIMISED_TOPIC);
         // The panel only tells where the output stands: shown when asked for.
         if let Some(panel) = reg.panels.last_mut() {
             panel.open_by_default = false;
@@ -162,7 +173,7 @@ impl Module for AudioModule {
         let playing = engine.clone();
         reg.command_on_caller(
             "audio.play",
-            "Plays the file file of the client's archives (WAV or MP3), decoded on the calling thread, in the category category (effects, the default, ambience or music) at the volume volume (from 0 to 1, 1 by default), looped when loop is true, faded in over fade seconds; the number of the sound. Nothing is heard without an audio device (audio.state).",
+            "Plays the file file of the client's archives (WAV or MP3, 2 minutes at most), read and decoded on the calling thread, which waits meanwhile: call it from a script or a job, never from the interface thread. In the category category (effects, the default, ambience or music) at the volume volume (from 0 to 1, 1 by default), looped when loop is true, faded in over fade seconds; the number of the sound. Nothing is heard without an audio device (audio.state).",
             json!({
                 "type": "object",
                 "properties": {
@@ -175,7 +186,12 @@ impl Module for AudioModule {
                 "required": ["file"],
             }),
             json!({ "type": "object", "properties": { "sound": { "type": "integer" } } }),
-            Arc::new(move |arguments| play(&playing, lock(&files).as_ref(), &arguments)),
+            // The client's files taken out of their lock, which the interface thread takes at each
+            // frame, before the file is read and decoded.
+            Arc::new(move |arguments| {
+                let files = lock(&files).clone();
+                play(&playing, files.as_ref(), &arguments)
+            }),
         );
         let changing = engine.clone();
         reg.command_on_caller(
@@ -221,7 +237,7 @@ impl Module for AudioModule {
         );
     }
 
-    fn windows_ui(&mut self, egui: &egui::Context, ctx: &mut Context) {
+    fn windows_ui(&mut self, _egui: &egui::Context, ctx: &mut Context) {
         // The only call at every frame, whatever panel is shown.
         let Some(engine) = self.engine.clone() else {
             return;
@@ -230,10 +246,17 @@ impl Module for AudioModule {
         for category in Category::ALL {
             engine.set_category(category, setting(ctx, key(category)) as f32 / 100.0);
         }
-        let minimised = egui.input(|input| input.viewport().minimized).unwrap_or(false);
-        self.muted = minimised && setting(ctx, MUTE_MINIMISED) == 1;
-        engine.set_muted(self.muted);
+        self.mute(ctx);
         *lock(&self.files) = ctx.service(vfs::SERVICE);
+    }
+
+    /// The editor out of sight or back, as the kernel tells it even while minimised, when
+    /// `windows_ui` is not called: the sounds silenced or heard again at once.
+    fn on_event(&mut self, event: &Event, ctx: &mut Context) {
+        if event.topic == MINIMISED_TOPIC {
+            self.minimised = event.payload.get("minimised").and_then(Value::as_bool) == Some(true);
+            self.mute(ctx);
+        }
     }
 
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, _ctx: &mut Context) {

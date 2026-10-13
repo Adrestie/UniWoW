@@ -127,7 +127,8 @@ Its behaviour is one type implementing the `Module` trait of `core/api`, exporte
 point macro:
 
 - **register**: declares what the module contributes (list below). Called once at load.
-- **init / shutdown**: start and stop, with access to core services.
+- **init / shutdown**: start and stop, with access to core services; `shutdown` when the editor
+  closes, or when the module stops running, failed or blocked.
 - **panel_ui, on_event, on_menu**: draw its panels, receive its events, handle its menu items.
 
 Extension points a module may contribute to:
@@ -152,7 +153,7 @@ Rules:
 | F1 | A module talks to another only through the core: commands, events, services by interface. Example: the quest editor issues "open creature 1234"; the module registered for creatures handles it. If no such module is loaded, the link is shown disabled. |
 | F2 | Every modification goes through an undoable command (single undo history). |
 | F3 | A module owns its project data section and its settings; no other module reads them directly. |
-| F4 | A missing required service: the module is not loaded and the reason is shown. A missing used service: the module loads without the parts that need it. A module that fails withdraws its services; requirements are checked again just before each `init`, so a module whose provider failed meanwhile is not initialised. |
+| F4 | A missing required service: the module is not loaded and the reason is shown. A missing used service: the module loads without the parts that need it. A module that fails withdraws its services, and is shut down first (`Module::shutdown`, a failure there only logged), so that it lets go of what it holds outside the kernel, such as its sounds; requirements are checked again just before each `init`, so a module whose provider failed meanwhile is not initialised. |
 | F5 | A module that runs code on behalf of another, such as the viewport drawing a layer, catches its failures and reports the culprit with `Context::report_failure`. The kernel disables the culprit as if it had panicked, naming the reporter. |
 | F6 | Every action a module offers to others is a named command. The kernel keeps their catalogue and routes the calls; the same catalogue serves every module and script (S1). A Rust module declares its commands itself; those of compiled, Lua and Python modules are declared on their behalf, by the kernel or by the module of their language: they are delegated. Once every module has registered, a name declared twice keeps the command declared directly over a delegated one, and the first registered between two of the same kind; each one set aside is logged with the one that wins. The choice is made among the modules running: the catalogue is made again whenever a module is blocked or fails, so that a command set aside comes back once the one that won stops, which the log tells; a command no running module offers is refused with the reason, its module not running. |
 
@@ -7561,11 +7562,15 @@ said where it is made, and what the game is to tell listed at the end.
   the headers of ALSA (`libasound2-dev`); on Windows, nothing. The runtime of Windows exports 23,989
   symbols with it, 3,682 more, 37% of the limit (counted on the build of MinGW here).
   - `Clip::decode`: a file of WAV or MP3, whatever its name says, decoded whole into its samples, in
-    a job (a loop of a minute takes a while); `Clip::new` for sounds made.
-  - `Engine`: started with a thread of its own (`uniwow audio`), which opens the default device,
-    rodio trying the others if it cannot, and holds it open; the sounds played meanwhile wait for it,
+    a job (a loop of a minute takes a while), two minutes at most (`LONGEST`, some 46 MB of samples
+    at 48,000 frames a second in two channels), a longer one refused; `Clip::new` for sounds made.
+  - `Engine`: started with a thread of its own (`uniwow audio`), which opens the default device, in
+    its own configuration or another it supports, and holds it open; the sounds played meanwhile wait for it,
     those stopped meanwhile never heard. Without a device, or when its opening panics, the reason is
-    logged once as a warning and kept (`State::Silent`), nothing is played, and nothing waits. A sound played (`Sound`: its clip,
+    logged once as a warning and kept (`State::Silent`), nothing is played, and nothing waits. A
+    device lost while it plays (its errors of a device gone or of a configuration no longer valid,
+    through the callback of errors the engine gives it) is said once, silent with the reason, its
+    sounds ended, and opened again every 2 seconds (`REOPEN`) until it comes back. A sound played (`Sound`: its clip,
     its category, its own volume, looped or once, faded in over a time) is added to the mixer of the
     device; nothing asked of the engine waits for the device. What changes of a sound (its volume and
     the time to reach it, its stop) is read from atomics every 256 frames (`BLOCK`), its own volume
@@ -7578,12 +7583,16 @@ said where it is made, and what the game is to tell listed at the end.
   stopped over a time, whether it still plays, where the output stands; given by the engine.
 - **The module `audio`** (Assets, `modules/audio`): starts the engine as it registers and gives it
   through the service; the category *Audio* of the settings: the master volume (80 by default), the
-  sounds (100), the ambience (70), the music (50), in hundredths, the editor's choices, and silence
-  while the editor is minimised (on), as egui tells it; taken at each frame. Stopping the module
-  stops every sound and closes the device. Commands for every language (S1, R9): `audio.play` (a
-  file of the client's archives, decoded on the calling thread, its category, volume, looping and
-  fade), `audio.volume`, `audio.stop`, `audio.state`. Its panel, closed by default (*Window*), says
-  the device or why there is none, the sounds playing, and the silence while minimised.
+  sounds (100), the ambience (70), the music (50), in hundredths, the editor's choices, taken at
+  each frame; and silence while the editor is out of sight (on): the kernel publishes
+  `kernel.minimised` (`MINIMISED_TOPIC`) from its `logic`, which eframe still runs while the window
+  is minimised, when the main window is minimised with no panel torn off from it showing, and when
+  it comes back. Stopping the module stops every sound and closes the device. Commands for every
+  language (S1, R9): `audio.play` (a file of the client's archives, read and decoded on the calling
+  thread, which waits meanwhile: from a script or a job, never the interface thread; its category,
+  volume, looping and fade), `audio.volume`, `audio.stop`, `audio.state`. Its panel, closed by
+  default (*Window*), says the device or why there is none, the sounds playing, and the silence
+  while minimised.
 - **The tables of the sounds** (`assets`, `Formats::weathers`, `Formats::sound_entries`):
   `Weather.dbc`, of 8 columns (its sound, the kind of what falls, `TransitionSkyBox`, its colour,
   its texture), and `SoundEntries.dbc`, of 30 (its type, its name, ten files and their weights, its
@@ -7612,7 +7621,8 @@ said where it is made, and what the game is to tell listed at the end.
   thunder whose file is still being read is missed. As the client's table says, the fog and the
   black rain play nothing, and the thunderstorm the ambience of the Dark Portal. The panel of
   *Weather* says what is heard, being read, or why nothing is (no service `audio`, no device, the
-  tables or a file not read), and the thunder. Nothing is sent to the server.
+  tables or a file not read), and the thunder. The service gone, or another one in its place, the
+  loop is stopped at once on the one it plays on. Nothing is sent to the server.
 - **Tested** (the GPU tests on the software adapter, llvmpipe here; no sound heard: the engine plays
   into a mixer the tests read as the device would, at one channel and 1,000 frames a second, the
   weather into a service of the tests that writes what it is asked). The lightning: the lightning
@@ -7661,8 +7671,9 @@ said where it is made, and what the game is to tell listed at the end.
   the test listened for the thunders of the storm before from its first step on.
 - **Not done**: the lightning drawn as a bolt in the sky (a model, or a line of light); the clouds
   lit apart from the ground, the clouds not being drawn yet; lightning in any weather but the
-  thunderstorm. The choice of the audio device in the settings (the default one of the system, as it
-  is when the editor starts: a device plugged in later is not taken); the sounds placed in the world
+  thunderstorm. The choice of the audio device in the settings (the default one of the system when the
+  editor starts, or when it is opened again after a loss: a device plugged in later is not taken
+  otherwise); a long file played as it is decoded rather than decoded whole; the sounds placed in the world
   (distances, left and right): none of the weather needs them. The volume of the loop by the
   intensity within a state; the weather muffled inside rather than silent; the colour and the
   `TransitionSkyBox` of `Weather.dbc`; its texture, which for the black rain is
@@ -7701,6 +7712,48 @@ said where it is made, and what the game is to tell listed at the end.
   4. With `UNIWOW_CLIENT` naming the client's folder, `cargo test -p uniwow-module-assets
      the_client_s_weathers` passes: the sounds of the weathers and of the thunder read from the
      archives and decoded.
+
+#### The lightning and the sounds of the weather, after its review
+
+An independent review of the branch found one severe point and four medium ones; each held, and is
+fixed as follows.
+
+1. **The command `audio.play` held what the interface thread takes**: the client's files, kept
+   under a lock the interface thread takes at each frame, were held through the reading and the
+   decoding of the file, so that a script playing an MP3 froze the editor meanwhile. Taken out of
+   their lock first. The command still reads and decodes on its calling thread, which its
+   description says: from a script or a job, never the interface thread.
+2. **Silent while minimised never was**: `windows_ui` runs only when the window is drawn, which
+   eframe does not do while it is minimised, running `logic` alone. The kernel now tells it from
+   `logic`: the topic `kernel.minimised` (`MINIMISED_TOPIC`), `{ "minimised": true }` when the main
+   window is minimised with no panel torn off from it showing, `false` when it comes back; the
+   module `audio` subscribes to it and silences or lets the sounds be heard at once.
+3. **A module that failed kept its sounds**: the kernel withdrew its services but never called its
+   `shutdown`, which only the closing of the editor did. `Shell::stop` now shuts down the module it
+   stops, failed or blocked, a failure there only logged (rule F4); the weather keeps the service it
+   played on, and stops its loop there at once when the service goes or another takes its place.
+4. **A device lost while it played went unnoticed**: rodio's callback of errors only printed them.
+   The engine opens the device with its own, which tells its thread of a device gone or a
+   configuration no longer valid: silent with the reason, its sounds ended (no longer counted as
+   playing, nothing kept for them), the device opened again every 2 seconds.
+5. **A file decoded whole had no limit**: two minutes at most now (`LONGEST`), a longer one refused
+   with the reason, nothing past it decoded.
+
+- **Tested**: a file played while the interface thread's frames go on, the client's files not held
+  meanwhile (with a reading of the tests waiting to be let go); the module silent once told the
+  editor is minimised, with no frame drawn, a frame meanwhile keeping it so, heard again once told
+  it is back; the kernel telling it in `logic` alone, once, then its return, once; a module that
+  fails shut down once, not again when the editor closes, a shutdown that panics logged, the module
+  failed all the same and the others working; the weather's loop stopped at once on the service it
+  played on when another takes its place, then played there, and when the service goes; a device
+  lost said, its sounds ended, told twice and said once, nothing played meanwhile, opened again
+  after 2 seconds and a sound heard on it, not again once shut down; a clip of 100 ms decoded
+  within 100 ms and refused within 99. 8 changes made on purpose, all caught (two of the kernel's,
+  by its tests run on Linux).
+- **To check by the user**: the editor minimised while the rain plays, silent, then heard again
+  once restored (that eframe runs `logic` as the window is minimised is to see); the headset or the
+  speakers unplugged while it plays: *Window > Audio* says the device was lost, then the sound
+  comes back within 2 seconds on the new default device.
 
 #### Tests
 

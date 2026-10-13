@@ -45,6 +45,12 @@ impl Shell {
         timed("kernel: what the threads reported", start);
         // A window torn off may show while the main window is minimised: frames are drawn for it.
         let minimised = ctx.input(|i| i.viewport().minimized.unwrap_or(false)) && self.torn.is_empty();
+        // Told to the modules, which draw nothing meanwhile, such as the sounds to silence.
+        if minimised != self.minimised {
+            self.minimised = minimised;
+            self.host
+                .publish(KERNEL, MINIMISED_TOPIC, serde_json::json!({ "minimised": minimised }));
+        }
         let budget = if minimised { MINIMISED_CALL_BUDGET } else { CALL_BUDGET };
         let start = Instant::now();
         if self.serve_calls(budget) {

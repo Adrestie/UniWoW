@@ -53,7 +53,9 @@ pub trait Module: Any {
     /// Receives the answer to a call made with `Context::call`.
     fn on_reply(&mut self, _call: CallId, _result: Result<serde_json::Value, String>, _ctx: &mut Context) {}
 
-    /// Called once when the editor closes.
+    /// Called once, when the editor closes or when the module stops running, failed or blocked, to
+    /// let go of what it holds outside the kernel (its sounds, its light, its layers); possibly
+    /// right after its own panic, or without `init` having run. A panic in it is only logged.
     fn shutdown(&mut self) {}
 }
 
