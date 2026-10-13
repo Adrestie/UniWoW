@@ -17,6 +17,7 @@ use uniwow_api::{bytemuck, egui_wgpu, journal, uploads, wgpu};
 
 use crate::clouds::SIDE;
 use crate::heavens::{self, Body};
+use crate::light;
 
 /// Floats of the shader's `Heavens`.
 pub const UNIFORM: usize = 80;
@@ -44,7 +45,7 @@ pub struct Glare {
 
 /// What the layers draw at a frame: the sun and the moon; how much of the sky they and the clouds
 /// are drawn over; the glare of each, and what its envelope goes towards before the share of its
-/// body in sight.
+/// body in sight; the flash of lightning lighting the clouds, from 0 to 1.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Heavens {
     pub sun: Body,
@@ -52,6 +53,7 @@ pub struct Heavens {
     pub share: f32,
     pub glares: [Glare; 2],
     pub flares: [f32; 2],
+    pub flash: f32,
 }
 
 /// What the module hands its layers: the heavens of the frame, none without the light of a map
@@ -69,7 +71,8 @@ pub struct Images(pub [Option<wgpu::TextureView>; 4]);
 
 /// The view of the frame as the shader's `Heavens`, with `heavens`, the seconds `seconds` since the
 /// frame before: the matrices, the axes of the camera, the bodies, their glares by how much the
-/// view looks onto them, and the envelopes; the direction a place on the screen is seen in from the
+/// view looks onto them, the envelopes, and the colour of a flash of lightning with how far it turns
+/// the clouds to it (`light::with_flash`, as it turns the sky); the direction a place on the screen is seen in from the
 /// eye by the inverse of what `view_proj` does to a direction, its columns of x, y and w without its
 /// translation, as the terrain finds it for its sky.
 pub fn values(view: &View, heavens: &Heavens, seconds: f32) -> [f32; UNIFORM] {
@@ -102,6 +105,8 @@ pub fn values(view: &View, heavens: &Heavens, seconds: f32) -> [f32; UNIFORM] {
     values[70..72].copy_from_slice(&heavens::FLARE_RISE);
     values[72] = heavens::FLARE_FALL;
     values[73] = seconds;
+    values[76..79].copy_from_slice(&light::FLASH_COLOUR);
+    values[79] = light::FLASH_SKY * heavens.flash.clamp(0.0, 1.0);
     values
 }
 

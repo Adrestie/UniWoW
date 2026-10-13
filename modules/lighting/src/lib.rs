@@ -554,6 +554,7 @@ impl LightingModule {
                 time,
                 share,
                 storm_weight,
+                flash,
                 in_room || immersion != Immersion::Dry,
             ),
             None => (None, 0.0),
@@ -582,14 +583,16 @@ impl LightingModule {
 
     /// The sun, the moon and their glares at `time` from the values of the light `values`, drawn over
     /// the share `share` of the sky, under a storm of weight `storm`, the glares none when
-    /// `sheltered`; the clouds made on as the time passed, given to the layers when they change; and
-    /// the density of the clouds. None while the sky is not drawn.
+    /// `sheltered`; the clouds made on as the time passed, given to the layers when they change, lit
+    /// by a flash of lightning of `flash`, which takes its colours from the light as they do; and the
+    /// density of the clouds. None while the sky is not drawn.
     fn heavens(
         &mut self,
         values: &light::Values,
         time: f32,
         share: f32,
         storm: f32,
+        flash: f32,
         sheltered: bool,
     ) -> (Option<sky::Heavens>, f32) {
         let band = |band: usize| values.colours[band].unwrap_or([0.0; 3]);
@@ -644,6 +647,7 @@ impl LightingModule {
                 },
             ],
             flares,
+            flash,
         };
         (Some(heavens), density)
     }

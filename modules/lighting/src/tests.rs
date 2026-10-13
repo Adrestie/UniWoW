@@ -1946,6 +1946,35 @@ fn the_flash_the_weather_gives_lights_the_view_but_in_a_liquid_lit_by_its_own_li
     assert_eq!(seen(&mut module, &mut host), dark);
 }
 
+#[test]
+fn the_flash_the_weather_gives_is_given_to_the_clouds_but_in_a_liquid_lit_by_its_own_light() {
+    let files = Arc::new(Files(Mutex::new(VfsState::Ready { archives: 1, files: 1 })));
+    let mut host = host(files);
+    let mut module = crate::LightingModule {
+        client: Some((1, 1)),
+        tables: Some(Ok(Arc::new(skied_with(0x2).with_liquids(&liquids())))),
+        layered: true,
+        ..Default::default()
+    };
+    let egui = egui::Context::default();
+    *host.editor.map.lock().unwrap() = json!({ "id": 0, "name": "Azeroth" });
+    *host.editor.camera.lock().unwrap() = Some([-5_000.0, 0.0, 600.0]);
+    let flash = |module: &mut crate::LightingModule, host: &mut Host| {
+        module.windows_ui(&egui, &mut Context::new(host, "lighting"));
+        crate::sky::lock(&module.drawn).heavens.unwrap().flash
+    };
+    *host.sent.0.lock().unwrap() = Some(Effect {
+        kind: Kind::Thunders,
+        intensity: 0.25,
+    });
+    assert_eq!(flash(&mut module, &mut host), 0.0);
+    *host.sent.1.lock().unwrap() = 0.5;
+    assert_eq!(flash(&mut module, &mut host), 0.5);
+    // In the magma, none.
+    *host.pond.liquid.lock().unwrap() = Some(3);
+    assert_eq!(flash(&mut module, &mut host), 0.0);
+}
+
 /// The texts the panel of `module` draws.
 fn panel(module: &mut crate::LightingModule, host: &mut Host) -> Vec<String> {
     let egui = egui::Context::default();

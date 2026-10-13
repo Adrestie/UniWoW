@@ -8078,6 +8078,25 @@ fixed as follows.
   speakers unplugged while it plays: *Window > Audio* says the device was lost, then the sound
   comes back within 2 seconds on the new default device.
 
+#### The flash of lightning in the clouds, after the merge
+
+The flash of lightning (`light::with_flash`) and the clouds of 9.7f were built apart: the flash
+turned the light given to the view, the sky among it, but the clouds take their colours from the
+bands 10 to 12 of the light, before it; under a thunderstorm, whose params of storm weigh whole from
+an intensity of a quarter, its dense dark clouds stayed dark and the flash lit only the sky between
+them. Once both were merged, the flash is given to the layers of the sky with the heavens
+(`sky::Heavens::flash`, none in a liquid lit by its own light, as for the light), and the shader of
+the heavens turns the colour of the clouds, in gamma, towards the colour of the flash by the share
+it turns the sky by, 0.7 of itself (`FLASH_COLOUR`, `FLASH_SKY`, passed in the last four floats of
+its uniform), their alpha kept. A choice of the editor, as the flash itself.
+
+- **Tested**: drawn on the software adapter, grey clouds wholly covering the top of the sky, their
+  grey without a flash, turned halfway by half a flash and whole by a whole one, each channel to its
+  own; the module giving the flash of the weather with the heavens, none without one nor in the
+  magma. 6 changes made on purpose, all caught.
+- **To check by the user**: a thunderstorm (`.wchange 86 0.8`) by night in Elwynn Forest, looking up
+  into the clouds: the clouds, not only the sky between them, lit by each flash.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

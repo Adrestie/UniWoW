@@ -25,6 +25,8 @@ struct Heavens {
     flare: vec4<f32>,
     // How fast an envelope falls, a second; the seconds since the frame before.
     fall: vec4<f32>,
+    // The colour of a flash of lightning, in gamma, and how far it turns the clouds to it.
+    lightning: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> heavens: Heavens;
 
@@ -121,7 +123,8 @@ fn on_dome(towards: vec3<f32>) -> vec3<f32> {
 @group(0) @binding(4) var sky_sampler: sampler;
 
 // The sun, the moon over it and the clouds over both, mixed in gamma as the client blends them,
-// faded by the share of the sky they are drawn over; given premultiplied, made linear.
+// faded by the share of the sky they are drawn over; given premultiplied, made linear. The clouds
+// turned to the colour of a flash of lightning as the sky is.
 @fragment
 fn fs_heavens(in: ScreenOut) -> @location(0) vec4<f32> {
     let towards = normalize((heavens.sky_from_screen * vec4<f32>(in.screen, 1.0, 0.0)).xyz);
@@ -142,9 +145,10 @@ fn fs_heavens(in: ScreenOut) -> @location(0) vec4<f32> {
     let dome = on_dome(towards);
     let texel = textureSampleLevel(clouds_texture, sky_sampler, dome.xy, 0.0);
     let cloud_alpha = texel.a * dome.z;
+    let cloud = mix(texel.rgb, heavens.lightning.rgb, heavens.lightning.a);
     var colour = sun;
     colour = moon + colour * (1.0 - moon.a);
-    colour = vec4<f32>(texel.rgb * cloud_alpha, cloud_alpha) + colour * (1.0 - cloud_alpha);
+    colour = vec4<f32>(cloud * cloud_alpha, cloud_alpha) + colour * (1.0 - cloud_alpha);
     colour = colour * heavens.across.w;
     if colour.a <= 0.0 {
         return vec4<f32>(0.0);

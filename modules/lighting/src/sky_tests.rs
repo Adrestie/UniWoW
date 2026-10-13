@@ -12,6 +12,7 @@ use uniwow_api::{bytemuck, egui, egui_wgpu, wgpu};
 
 use crate::clouds::{self, Field, Palette, SIDE};
 use crate::heavens::{self, Body};
+use crate::light;
 use crate::sky::{self, Drawn, Glare, GlareLayer, Heavens, HeavensLayer, Images};
 
 /// The height of `towards` over the horizon, in degrees.
@@ -541,6 +542,7 @@ fn heavens(sun: [f32; 3], moon: [f32; 3]) -> Heavens {
         share: 1.0,
         glares: [Glare::default(); 2],
         flares: [0.0; 2],
+        flash: 0.0,
     }
 }
 
@@ -720,6 +722,39 @@ fn the_moon_is_drawn_over_the_sun_and_the_clouds_over_both() {
     sky::lock(&drawn).clouds = Some((1, Arc::new(vec![[0, 0, 0, 0]; SIDE * SIDE])));
     let pixels = render(&gpu, &mut layer, &view, 0.0);
     assert!(near(pixel(&pixels, 2, 2)[2], 188, 4));
+}
+
+#[test]
+fn a_flash_of_lightning_turns_the_clouds_to_its_colour_as_it_turns_the_sky() {
+    let Some(gpu) = device() else {
+        eprintln!("skipped: no software adapter");
+        return;
+    };
+    let drawn = Arc::new(Mutex::new(Drawn::default()));
+    let (mut layer, _, _) = layers(&gpu, &drawn);
+    let down = [0.0, 0.0, -1.0];
+    {
+        let mut drawn = sky::lock(&drawn);
+        drawn.images = Some((1, images(&gpu)));
+        drawn.heavens = Some(heavens(down, down));
+        drawn.clouds = Some((1, Arc::new(vec![[64, 64, 64, 255]; SIDE * SIDE])));
+    }
+    // Looking up into dark grey clouds wholly covering the top of the sky: their grey, then turned
+    // in gamma to the colour of the flash by its share of the sky, a half then whole.
+    let view = view_towards(Vec3::Z, 0.0);
+    for flash in [0.0, 0.5, 1.0] {
+        sky::lock(&drawn).heavens.as_mut().unwrap().flash = flash;
+        let middle = pixel(&render(&gpu, &mut layer, &view, 0.0), SIZE / 2, SIZE / 2);
+        for channel in 0..3 {
+            let grey = 64.0 / 255.0;
+            let turned = grey + (light::FLASH_COLOUR[channel] - grey) * light::FLASH_SKY * flash;
+            let wanted = (turned * 255.0).round() as i32;
+            assert!(
+                near(middle[channel], wanted, 2),
+                "flash {flash}, channel {channel}: {middle:?} against {wanted}"
+            );
+        }
+    }
 }
 
 /// A pyramid of one level of `SIZE` × `SIZE` texels on `gpu`, at infinity (0) but where `covered`
