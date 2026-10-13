@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 
-use uniwow_api::formats::{LightBand, LightParamsRecord, LightRecord, LiquidTypeRecord, TILE, ZoneLightRecord};
+use uniwow_api::formats::{
+    FogBand, LightBand, LightParamsRecord, LightRecord, LiquidTypeRecord, TILE, ZoneLightRecord,
+};
 use uniwow_api::viewport::{Fog, MapLight, Sun, Water};
 
 /// A day, in half-minutes.
@@ -620,6 +622,40 @@ fn curve(start: f32, end: f32, far: f32) -> f32 {
         1.5 + 5.5 * (1.0 - (end - start) / span)
     } else {
         1.5
+    }
+}
+
+/// How far into a room of a building, from its nearest portal, the fog of the building is whole over
+/// that of the light, in yards (WebWowViewerCpp, `distToExit * 0.04`).
+pub const WHOLE_INSIDE: f32 = 25.0;
+
+/// The light `given` of the map in a room of a building whose fog at the eye is `fog`, weighing
+/// `weight` over that of the light, as the public implementation WebWowViewerCpp mixes the fog of a
+/// building into that of the lights (`blendWmoFogIntoFogResult`, read for its facts): the colour of
+/// the fog mixed in gamma; the fog of the game, when it is drawn, the building's prepared as the
+/// fog of a light is on the map `map` (`prepared_fog`), within the far clip `far`, twice as steep on
+/// the curved maps when the eye is `immersed` in a liquid, its start, end and rate mixed by the same
+/// weight. The sky is left as it is.
+pub fn with_building_fog(given: MapLight, fog: FogBand, weight: f32, map: u32, immersed: bool, far: f32) -> MapLight {
+    let weight = weight.clamp(0.0, 1.0);
+    let colour: [f32; 3] = std::array::from_fn(|channel| {
+        let kept = gamma(given.fog_colour[channel]);
+        linear(mix(kept, f32::from(fog.colour[channel]) / 255.0, weight))
+    });
+    let fog = given.fog.map(|kept| {
+        let [end, share, rate] = prepared_fog(fog.end, fog.start, map, far);
+        let end = end.min(far);
+        let rate = match immersed && map >= CURVED_FROM {
+            true => rate * STEEPER_UNDER,
+            false => rate,
+        };
+        let building = [share * end, end, rate];
+        std::array::from_fn(|at| mix(kept[at], building[at], weight))
+    });
+    MapLight {
+        fog_colour: colour,
+        fog,
+        ..given
     }
 }
 

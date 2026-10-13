@@ -17,7 +17,7 @@ use uniwow_api::viewport::{self, MapLight};
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, PropertyValue, Registrar, SettingSpec, egui, log};
 use uniwow_api::{buildings, formats, liquids};
 
-use light::{COLOURS, DAY, Immersion, Mixed, NUMBERS, Tables};
+use light::{COLOURS, DAY, Immersion, Mixed, NUMBERS, Tables, WHOLE_INSIDE};
 
 /// The settings: the hour, in minutes from midnight; how many minutes of the game pass in a second;
 /// whether the zones of light and the local lights are mixed in; whether the fog is the game's or
@@ -93,8 +93,9 @@ fn half_minutes(from: f64, speed: i64, seconds: f64) -> f32 {
 type Read = (Arc<Tables>, Option<String>, Option<String>);
 
 /// What the panel says of the light last computed: the map, by its id and name, the place, the hour
-/// in half-minutes, the liquid the eye is in and where that puts it, and the light, none when the
-/// tables give none, with what the view was given.
+/// in half-minutes, the liquid the eye is in and where that puts it, how much the fog of the
+/// building whose room the eye is in weighs, and the light, none when the tables give none, with
+/// what the view was given.
 struct Shown {
     map: u32,
     name: String,
@@ -102,6 +103,7 @@ struct Shown {
     time: f32,
     liquid: Option<u16>,
     immersion: Immersion,
+    building_fog: Option<f32>,
     light: Option<Mixed>,
     given: Option<MapLight>,
 }
@@ -229,10 +231,35 @@ impl LightingModule {
         };
         let immersion = tables.immersion(liquid);
         let light = tables.light_in(map, place, time, local == 1, immersion);
-        let given = light.as_ref().map(|light| {
+        let mut given = light.as_ref().map(|light| {
             let game_fog = (fog == 1).then(|| tables.fog_of_the_game(light, map, immersion, time, far as f32));
             light::map_light(&light.values, time, game_fog.flatten(), immersion != Immersion::Dry)
         });
+        // In a room of a building, the fog of the building weighing by how far the eye is from its
+        // portals, whole 25 yards in; under the water, its fog under the water; in a liquid with a
+        // light of its own, the light of the liquid alone (WebWowViewerCpp leaves the fog of the
+        // building out in most liquids).
+        let room = among
+            .as_ref()
+            .and_then(|eye| eye.group.as_ref())
+            .filter(|group| group.room())
+            .and_then(|group| Some((group.exit, group.fog?)));
+        let mut building_fog = None;
+        if let (Some(kept), Some((exit, [air, water]))) = (given, room)
+            && !matches!(immersion, Immersion::Lit(_))
+        {
+            let weight = (exit / WHOLE_INSIDE).clamp(0.0, 1.0);
+            let band = if immersion == Immersion::Under { water } else { air };
+            given = Some(light::with_building_fog(
+                kept,
+                band,
+                weight,
+                map,
+                immersion != Immersion::Dry,
+                far as f32,
+            ));
+            building_fog = Some(weight);
+        }
         self.shown = Some(Shown {
             map,
             name,
@@ -240,6 +267,7 @@ impl LightingModule {
             time,
             liquid,
             immersion,
+            building_fog,
             light,
             given,
         });
@@ -348,6 +376,11 @@ impl Module for LightingModule {
             (None, _) => {
                 ui.label(format!("Lights mixed, by their weights: {}", used.join(", ")));
             }
+        }
+        if let Some(weight) = shown.building_fog {
+            ui.label(format!(
+                "In a room of a building: the fog of the building weighing {weight:.2} over that of the light"
+            ));
         }
         if let Some(reason) = &self.zones_unread {
             ui.colored_label(ui.visuals().warn_fg_color, format!("No zones of light: {reason}"));

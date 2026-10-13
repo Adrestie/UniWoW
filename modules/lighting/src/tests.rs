@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use uniwow_api::formats::{
     AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef,
-    Formats, GameObjectDisplay, HairGeoset, LightBand, LightParamsRecord, LightRecord, LiquidTypeRecord, MapRecord,
-    Model, Texture, Tile, Wdl, Wdt, Wmo, ZoneLightRecord,
+    FogBand, Formats, GameObjectDisplay, HairGeoset, LightBand, LightParamsRecord, LightRecord, LiquidTypeRecord,
+    MapRecord, Model, Texture, Tile, Wdl, Wdt, Wmo, ZoneLightRecord,
 };
 use uniwow_api::liquids::{Liquids, Surfaces};
 use uniwow_api::serde_json::{Value, json};
@@ -20,7 +20,9 @@ use uniwow_api::{
     PropertyValue, Registrar, egui, egui_wgpu,
 };
 
-use crate::light::{Immersion, Tables, colour_at, map_light, night_glow, number_at, prepared_fog, sun_direction};
+use crate::light::{
+    Immersion, Tables, colour_at, map_light, night_glow, number_at, prepared_fog, sun_direction, with_building_fog,
+};
 
 /// A band of numbers of `keys`.
 fn numbers(id: u32, keys: &[(u32, f32)]) -> LightBand<f32> {
@@ -755,6 +757,58 @@ fn the_fog_of_the_game_is_that_of_the_lights_mixed_within_the_far_clip() {
 }
 
 #[test]
+fn the_fog_of_a_building_is_mixed_into_that_of_the_light_by_its_weight() {
+    let given = MapLight {
+        fog_colour: [0.0; 3],
+        fog: Some([125.0, 500.0, 1.0]),
+        ..map_light(
+            &tables().light_at(0, [-5_000.0, 0.0], 0.0, 0, true).unwrap().values,
+            0.0,
+            None,
+            false,
+        )
+    };
+    // A grey fog of a building from a fifth of 100 yards.
+    let fog = FogBand {
+        end: 100.0,
+        start: 0.2,
+        colour: [102, 102, 102, 255],
+    };
+    // Whole: its colour, made linear, and its fog, straight before Outland, the rest of the light
+    // kept.
+    let whole = with_building_fog(given, fog, 1.0, 0, false, 1_277.0);
+    let grey = |value: f32| (value - 0.1329).abs() < 1e-3;
+    assert!(
+        whole.fog_colour.iter().all(|channel| grey(*channel)),
+        "{:?}",
+        whole.fog_colour
+    );
+    assert_eq!(whole.fog, Some([20.0, 100.0, 1.0]));
+    assert_eq!((whole.sun, whole.sky, whole.night), (given.sun, given.sky, given.night));
+    // Half: halfway in gamma, from black to 0.4, and halfway along the fogs.
+    let half = with_building_fog(given, fog, 0.5, 0, false, 1_277.0);
+    assert!(
+        half.fog_colour.iter().all(|channel| (channel - 0.0331).abs() < 1e-3),
+        "{:?}",
+        half.fog_colour
+    );
+    assert_eq!(half.fog, Some([72.5, 300.0, 1.0]));
+    // None: the light's; the weight held within 0 and 1.
+    assert_eq!(with_building_fog(given, fog, 0.0, 0, false, 1_277.0), given);
+    assert_eq!(with_building_fog(given, fog, -1.0, 0, false, 1_277.0), given);
+    // From Outland on, curved to the far clip, twice as steep in a liquid.
+    let curved = with_building_fog(given, fog, 1.0, 571, false, 600.0).fog.unwrap();
+    let rate = 1.5 + 5.5 * (1.0 - 80.0 / 400.0);
+    assert_eq!(curved, [120.0, 600.0, rate]);
+    let immersed = with_building_fog(given, fog, 1.0, 571, true, 600.0).fog.unwrap();
+    assert_eq!(immersed, [120.0, 600.0, rate * 2.0]);
+    // The fog of the editor drawn: none still, the colour mixed alone.
+    let editor = with_building_fog(MapLight { fog: None, ..given }, fog, 1.0, 0, false, 1_277.0);
+    assert_eq!(editor.fog, None);
+    assert!(editor.fog_colour.iter().all(|channel| grey(*channel)));
+}
+
+#[test]
 fn the_hour_set_turns_at_its_speed_past_midnight() {
     assert_eq!(crate::half_minutes(720.0, 0, 100.0), 1440.0, "still");
     assert_eq!(crate::half_minutes(720.0, 60, 2.0), 1680.0, "two hours in two seconds");
@@ -1308,6 +1362,83 @@ fn the_light_is_that_of_the_map_shown_at_the_camera_s_place_on_it() {
     assert!(host.seen.0.lock().unwrap().is_some());
     module.shutdown();
     assert!(host.seen.0.lock().unwrap().is_none());
+}
+
+#[test]
+fn the_fog_of_the_building_whose_room_the_eye_is_in_weighs_by_how_far_it_is_from_its_portals() {
+    let files = Arc::new(Files(Mutex::new(VfsState::Ready { archives: 1, files: 1 })));
+    let mut host = host(files);
+    let mut module = crate::LightingModule {
+        client: Some((1, 1)),
+        tables: Some(Ok(Arc::new(tables().with_liquids(&liquids())))),
+        ..Default::default()
+    };
+    let egui = egui::Context::default();
+    *host.editor.map.lock().unwrap() = json!({ "id": 0, "name": "Azeroth" });
+    // The global light alone, its fog from a quarter of 500 yards.
+    *host.editor.camera.lock().unwrap() = Some([-5_000.0, 0.0, 600.0]);
+    let given = |module: &mut crate::LightingModule, host: &mut Host| {
+        module.windows_ui(&egui, &mut Context::new(host, "lighting"));
+        host.seen.0.lock().unwrap().expect("given")
+    };
+    let outside = given(&mut module, &mut host);
+    assert_eq!(outside.fog, Some([125.0, 500.0, 1.0]));
+    let band = |end: f32, grey: u8| FogBand {
+        end,
+        start: 0.2,
+        colour: [grey, grey, grey, 255],
+    };
+    let [air, water] = [band(100.0, 102), band(50.0, 51)];
+    let group = |flags: u32, exit: f32| uniwow_api::buildings::EyeGroup {
+        flags,
+        fog: Some([air, water]),
+        exit,
+        skybox: None,
+    };
+    // In a room, 12.5 yards from its portals: half of the fog of the building, said in the panel.
+    host.rooms.0.lock().unwrap().group = Some(group(0x2000, 12.5));
+    let half = given(&mut module, &mut host);
+    assert_eq!(half.fog, Some([72.5, 300.0, 1.0]));
+    assert_eq!(half, with_building_fog(outside, air, 0.5, 0, false, 1_277.0));
+    assert_eq!(module.shown.as_ref().unwrap().building_fog, Some(0.5));
+    assert!(
+        panel(&mut module, &mut host)
+            .iter()
+            .any(|text| text.contains("the fog of the building weighing 0.50"))
+    );
+    // Deep in it: the building's whole.
+    host.rooms.0.lock().unwrap().group = Some(group(0x2000, 40.0));
+    assert_eq!(given(&mut module, &mut host).fog, Some([20.0, 100.0, 1.0]));
+    // Under the water of the room: its fog under the water, over that of the lights there.
+    *host.pond.liquid.lock().unwrap() = Some(5);
+    host.rooms.0.lock().unwrap().group = None;
+    let under = given(&mut module, &mut host);
+    host.rooms.0.lock().unwrap().group = Some(group(0x2000, 40.0));
+    assert_eq!(
+        given(&mut module, &mut host),
+        with_building_fog(under, water, 1.0, 0, true, 1_277.0)
+    );
+    // In a liquid with a light of its own: that light alone.
+    *host.pond.liquid.lock().unwrap() = Some(3);
+    host.rooms.0.lock().unwrap().group = None;
+    let lit = given(&mut module, &mut host);
+    host.rooms.0.lock().unwrap().group = Some(group(0x2000, 40.0));
+    assert_eq!(given(&mut module, &mut host), lit);
+    assert_eq!(module.shown.as_ref().unwrap().building_fog, None);
+    *host.pond.liquid.lock().unwrap() = None;
+    // In a street lit as outside, or a room whose building has no fog: the light's.
+    host.rooms.0.lock().unwrap().group = Some(group(0x40, 40.0));
+    assert_eq!(given(&mut module, &mut host), outside);
+    host.rooms.0.lock().unwrap().group = Some(uniwow_api::buildings::EyeGroup {
+        fog: None,
+        ..group(0x2000, 40.0)
+    });
+    assert_eq!(given(&mut module, &mut host), outside);
+    assert!(
+        !panel(&mut module, &mut host)
+            .iter()
+            .any(|text| text.contains("the fog of the building"))
+    );
 }
 
 /// The texts the panel of `module` draws.
