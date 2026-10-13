@@ -1,13 +1,16 @@
 //! The Jobs and Commands panels of the kernel.
 
 use uniwow_api::serde_json::{self, Value};
+use uniwow_api::theme::{self, icon};
 use uniwow_api::{EditorBackend, egui};
 
 use crate::jobs::Pool;
 use crate::router::{Bridge, ReplyTo, Request};
 
+/// The jobs running, each with a spinner and the bar of its progress, which slides while the job
+/// has told none yet.
 pub fn jobs_panel(ui: &mut egui::Ui, pool: &Pool) {
-    ui.label(format!("{} worker threads", pool.threads()));
+    ui.weak(format!("{}  {} worker threads", icon::JOBS, pool.threads()));
     ui.separator();
     if pool.running().is_empty() {
         ui.weak("No job running.");
@@ -20,12 +23,15 @@ pub fn jobs_panel(ui: &mut egui::Ui, pool: &Pool) {
         ui.end_row();
         for job in pool.running() {
             ui.label(&job.owner);
-            ui.label(&job.label);
-            ui.add(
-                egui::ProgressBar::new(job.progress())
-                    .desired_width(160.0)
-                    .show_percentage(),
-            );
+            ui.horizontal(|ui| {
+                theme::spinner(ui, 13.0);
+                ui.label(&job.label);
+            });
+            ui.horizontal(|ui| {
+                let progress = job.progress();
+                theme::progress_bar(ui, (progress > 0.0).then_some(progress), 160.0);
+                ui.weak(format!("{:.0} %", progress * 100.0));
+            });
             ui.label(format!("{:.1} s", job.started.elapsed().as_secs_f32()));
             if job.is_cancelled() {
                 ui.weak("cancelling…");

@@ -74,11 +74,10 @@ impl Shell {
                 }
                 ui.horizontal_top(|ui| {
                     ui.vertical(|ui| {
+                        ui.set_width(150.0);
+                        ui.spacing_mut().item_spacing.y = 2.0;
                         for category in &categories {
-                            if ui
-                                .selectable_label(shown.as_ref() == Some(&category.title), &category.title)
-                                .clicked()
-                            {
+                            if theme::choice(ui, shown.as_ref() == Some(&category.title), &category.title).clicked() {
                                 chosen = Some(category.title.clone());
                             }
                         }
@@ -92,26 +91,30 @@ impl Shell {
                             return;
                         };
                         ui.heading(&category.title);
-                        egui::Grid::new("settings").num_columns(3).show(ui, |ui| {
-                            for (module, spec) in &category.settings {
-                                let mut value = spec.value(host.setting(module, &spec.key).as_ref());
-                                ui.label(&spec.label);
-                                if ui
-                                    .add(egui::Slider::new(&mut value, spec.range[0]..=spec.range[1]))
-                                    .changed()
-                                {
-                                    changes.push((module.clone(), spec.key.clone(), value));
+                        ui.add_space(4.0);
+                        egui::Grid::new("settings")
+                            .num_columns(3)
+                            .spacing([12.0, 8.0])
+                            .show(ui, |ui| {
+                                for (module, spec) in &category.settings {
+                                    let mut value = spec.value(host.setting(module, &spec.key).as_ref());
+                                    ui.label(&spec.label);
+                                    if ui
+                                        .add(egui::Slider::new(&mut value, spec.range[0]..=spec.range[1]))
+                                        .changed()
+                                    {
+                                        changes.push((module.clone(), spec.key.clone(), value));
+                                    }
+                                    if ui
+                                        .add_enabled(value != spec.default, egui::Button::new("Default"))
+                                        .on_hover_text(spec.default.to_string())
+                                        .clicked()
+                                    {
+                                        changes.push((module.clone(), spec.key.clone(), spec.default));
+                                    }
+                                    ui.end_row();
                                 }
-                                if ui
-                                    .add_enabled(value != spec.default, egui::Button::new("Default"))
-                                    .on_hover_text(spec.default.to_string())
-                                    .clicked()
-                                {
-                                    changes.push((module.clone(), spec.key.clone(), spec.default));
-                                }
-                                ui.end_row();
-                            }
-                        });
+                            });
                     });
                 });
             });

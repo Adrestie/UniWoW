@@ -1,5 +1,5 @@
-//! Dock layout: the default arrangement, and the restoration of a saved one when modules have
-//! come or gone since.
+//! Dock layout: the default arrangement, the panels torn off into windows of their own, and the
+//! restoration of a saved one when modules have come or gone since.
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -34,6 +34,80 @@ pub struct PanelEntry {
     pub title: String,
     pub area: Area,
     pub open_by_default: bool,
+}
+
+/// A panel torn off into a window of its own, outside the main window: which panel, and where its
+/// window was last seen.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(crate = "uniwow_api::serde")]
+pub struct TornOff {
+    pub tab: Tab,
+    /// The top left corner of its window on the screens, its frame included, in pixels: points
+    /// would differ between screens of different scales. The system places a window that has none.
+    #[serde(default)]
+    pub position: Option<[f32; 2]>,
+    /// The size of what its window shows, in points.
+    #[serde(default = "torn_size")]
+    pub size: [f32; 2],
+}
+
+/// The size of a window torn off when nothing tells it.
+pub const TORN_SIZE: [f32; 2] = [520.0, 380.0];
+/// The smallest a window torn off is.
+pub const TORN_LEAST: [f32; 2] = [240.0, 160.0];
+
+fn torn_size() -> [f32; 2] {
+    TORN_SIZE
+}
+
+impl TornOff {
+    /// `tab` in a window at `position`, of `size` kept within `TORN_LEAST` and what can be
+    /// meant; `TORN_SIZE` when it is not.
+    pub fn new(tab: Tab, position: Option<[f32; 2]>, size: [f32; 2]) -> Self {
+        let size = if size.iter().all(|side| side.is_finite() && *side > 0.0) {
+            [
+                size[0].clamp(TORN_LEAST[0], 8192.0),
+                size[1].clamp(TORN_LEAST[1], 8192.0),
+            ]
+        } else {
+            TORN_SIZE
+        };
+        let position = position.filter(|corner| corner.iter().all(|value| value.is_finite()));
+        Self { tab, position, size }
+    }
+}
+
+/// The windows saved, without those of absent panels or of panels closed, each panel once and
+/// within the sizes a window can have.
+pub fn restore_windows(saved: &[TornOff], entries: &[PanelEntry], closed: &BTreeSet<String>) -> Vec<TornOff> {
+    let mut seen = HashSet::new();
+    saved
+        .iter()
+        .filter(|window| entries.iter().any(|entry| entry.tab == window.tab))
+        .filter(|window| !closed.contains(&window.tab.key()))
+        .filter(|window| seen.insert(window.tab.clone()))
+        .map(|window| TornOff::new(window.tab.clone(), window.position, window.size))
+        .collect()
+}
+
+/// The dock and the torn-off windows of the last session, as `restore` and `restore_windows` keep
+/// them: a panel in a window of its own is not in the dock.
+pub fn restore_all(
+    saved: Option<serde_json::Value>,
+    windows: &[TornOff],
+    entries: &[PanelEntry],
+    closed: &BTreeSet<String>,
+) -> (DockState<Tab>, Vec<TornOff>) {
+    let windows = restore_windows(windows, entries, closed);
+    let mut elsewhere = closed.clone();
+    elsewhere.extend(windows.iter().map(|window| window.tab.key()));
+    let mut dock = restore(saved, entries, &elsewhere);
+    for window in &windows {
+        if let Some(path) = dock.find_tab(&window.tab) {
+            dock.remove_tab(path);
+        }
+    }
+    (dock, windows)
 }
 
 /// The saved layout without the panels of absent modules, plus the panels of modules that came
@@ -173,7 +247,7 @@ mod tests {
     use uniwow_api::egui_dock::DockState;
     use uniwow_api::{DockArea as Area, serde_json};
 
-    use super::{PanelEntry, Tab, default_layout, is_consistent, restore};
+    use super::{PanelEntry, TORN_LEAST, TORN_SIZE, Tab, TornOff, default_layout, is_consistent, restore, restore_all};
 
     /// The layout egui_dock's `retain_tabs` produced in the first acceptance run: a split root whose
     /// children are empty, with the only remaining leaf orphaned below them.
@@ -278,5 +352,70 @@ mod tests {
         let dock = restore(None, &all(), &closed);
         assert!(!tabs(&dock).contains(&Tab::new("sample-cube", "cube")));
         assert_eq!(tabs(&dock).len(), all().len() - 1);
+    }
+
+    #[test]
+    fn a_torn_off_panel_comes_back_in_its_window_and_not_in_the_dock() {
+        let view = Tab::new("viewport", "view");
+        let before = default_layout(&all(), &BTreeSet::new());
+        let windows = [TornOff::new(view.clone(), Some([1800.0, 120.0]), [800.0, 600.0])];
+        let (dock, restored) = restore_all(saved(&before), &windows, &all(), &BTreeSet::new());
+        assert_eq!(restored, windows, "where it was, of its size");
+        assert!(dock.find_tab(&view).is_none(), "not in the dock as well");
+        assert!(is_consistent(dock.main_surface()));
+        let mut expected = expected(&all());
+        expected.remove(&view);
+        assert_eq!(tabs(&dock), expected);
+    }
+
+    #[test]
+    fn the_windows_of_absent_or_closed_panels_and_the_same_panel_twice_are_left_out() {
+        let cube = Tab::new("sample-cube", "cube");
+        let windows = [
+            TornOff::new(Tab::new("third", "main"), None, TORN_SIZE),
+            TornOff::new(cube.clone(), None, [300.0, 200.0]),
+            TornOff::new(cube.clone(), Some([0.0, 0.0]), [900.0, 700.0]),
+            TornOff::new(Tab::new("kernel", "log"), None, TORN_SIZE),
+        ];
+        let closed = BTreeSet::from(["kernel/log".to_owned()]);
+        let (dock, restored) = restore_all(None, &windows, &all(), &closed);
+        assert_eq!(
+            restored,
+            [TornOff::new(cube.clone(), None, [300.0, 200.0])],
+            "the first kept"
+        );
+        assert!(dock.find_tab(&cube).is_none());
+        assert!(
+            dock.find_tab(&Tab::new("kernel", "log")).is_none(),
+            "closed stays closed"
+        );
+        assert_eq!(tabs(&dock).len(), all().len() - 2);
+    }
+
+    #[test]
+    fn every_panel_torn_off_leaves_an_empty_dock() {
+        let windows: Vec<TornOff> = all()
+            .iter()
+            .map(|e| TornOff::new(e.tab.clone(), None, TORN_SIZE))
+            .collect();
+        let (dock, restored) = restore_all(None, &windows, &all(), &BTreeSet::new());
+        assert_eq!(restored.len(), all().len());
+        assert_eq!(dock.iter_all_tabs().count(), 0);
+    }
+
+    #[test]
+    fn a_window_is_kept_within_the_sizes_it_can_have() {
+        let tab = Tab::new("kernel", "log");
+        assert_eq!(TornOff::new(tab.clone(), None, [10.0, 10.0]).size, TORN_LEAST);
+        assert_eq!(TornOff::new(tab.clone(), None, [f32::NAN, 300.0]).size, TORN_SIZE);
+        assert_eq!(
+            TornOff::new(tab.clone(), Some([f32::INFINITY, 0.0]), TORN_SIZE).position,
+            None
+        );
+        // A window saved before its size was known is read with the default one.
+        let read: TornOff =
+            serde_json::from_value(serde_json::json!({ "tab": { "module": "kernel", "panel": "log" } }))
+                .expect("a window without size");
+        assert_eq!((read.position, read.size), (None, TORN_SIZE));
     }
 }

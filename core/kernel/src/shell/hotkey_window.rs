@@ -70,7 +70,9 @@ impl Shell {
                 self.hotkeys.bind(index, keys, &mut self.host.settings.hotkeys);
                 self.host.settings_changed = true;
                 log::info!("hotkey '{}' bound to {keys}", entry.id());
+                let text = format!("{}: {keys}", entry.label);
                 self.hotkey_window.awaiting = None;
+                self.notify("hotkeys", Level::Success, "Hotkey bound", &text);
             }
         }
         hotkey::suspend(ctx, self.hotkey_window.awaiting.is_some());

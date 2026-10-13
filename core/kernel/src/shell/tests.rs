@@ -42,13 +42,29 @@ impl Harness {
 
     /// As `with_slots`, on a GPU of `gpu_memory` bytes of its own.
     fn on_gpu(slots: Vec<Slot>, gpu_memory: Option<u64>) -> Self {
-        let ctx = egui::Context::default();
-        let (bridge, requests) = Bridge::new(Some(ctx.clone()));
-        let pool = Pool::new(2, Some(ctx.clone()), Some(bridge.clone()));
         let settings = Settings {
             in_memory: true,
             ..Settings::default()
         };
+        Self::started(slots, gpu_memory, settings)
+    }
+
+    /// As `with_slots`, with `settings` as the editor found them, kept in memory.
+    fn with_settings(slots: Vec<Slot>, settings: Settings) -> Self {
+        Self::started(
+            slots,
+            None,
+            Settings {
+                in_memory: true,
+                ..settings
+            },
+        )
+    }
+
+    fn started(slots: Vec<Slot>, gpu_memory: Option<u64>, settings: Settings) -> Self {
+        let ctx = egui::Context::default();
+        let (bridge, requests) = Bridge::new(Some(ctx.clone()));
+        let pool = Pool::new(2, Some(ctx.clone()), Some(bridge.clone()));
         let mut host = KernelHost::new(None, settings, pool, bridge);
         host.gpu_memory = gpu_memory;
         let shell = Shell::start(host, requests, slots, None, PathBuf::new());
@@ -70,20 +86,36 @@ impl Harness {
             .unwrap_or_default()
     }
 
-    /// A frame with the window shown on a screen of 1280 × 800, as `frame`, at `input`'s events;
-    /// the texts drawn, with their rectangles.
-    fn frame_texts(&mut self, events: Vec<egui::Event>) -> Vec<(String, egui::Rect)> {
+    /// A frame as `frame`, giving all that egui gives back.
+    fn frame_output(&mut self, input: RawInput) -> egui::FullOutput {
         let shell = &mut self.shell;
-        let input = RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))),
-            events,
-            ..RawInput::default()
-        };
         let mut output = self.ctx.run_ui(input, |ui| {
             shell.logic_pass(ui.ctx());
             shell.ui_pass(ui);
         });
         output.textures_delta.clear();
+        output
+    }
+
+    /// A frame with the window shown on a screen of 1280 × 800, as `frame`, at `input`'s events;
+    /// the texts drawn, with their rectangles.
+    fn frame_texts(&mut self, events: Vec<egui::Event>) -> Vec<(String, egui::Rect)> {
+        self.frame_texts_at(events, None)
+    }
+
+    /// As `frame_texts`, the window's content at `origin` on the screens when one is given.
+    fn frame_texts_at(&mut self, events: Vec<egui::Event>, origin: Option<egui::Pos2>) -> Vec<(String, egui::Rect)> {
+        let size = egui::vec2(1280.0, 800.0);
+        let mut input = RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            events,
+            ..RawInput::default()
+        };
+        if let Some(origin) = origin {
+            input.viewports.entry(ViewportId::ROOT).or_default().inner_rect =
+                Some(egui::Rect::from_min_size(origin, size));
+        }
+        let output = self.frame_output(input);
         output
             .shapes
             .iter()
@@ -1797,4 +1829,285 @@ fn a_module_is_told_the_memory_of_the_gpu_when_it_registers() {
     let told = Arc::new(Mutex::new(None));
     Harness::on_gpu(vec![Slot::loaded("told", Box::new(Told(told.clone())))], Some(8 << 30));
     assert_eq!(*lock(&told), Some(Some(8 << 30)));
+}
+
+/// A module with one panel on the right, which writes `.0` in it.
+struct Paneled(&'static str);
+
+impl Module for Paneled {
+    fn register(&mut self, reg: &mut Registrar) {
+        reg.panel("main", "Main", uniwow_api::DockArea::Right);
+    }
+
+    fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, _ctx: &mut Context) {
+        ui.label(self.0);
+    }
+}
+
+fn drawn(texts: &[(String, egui::Rect)], text: &str) -> bool {
+    texts.iter().any(|(drawn, _)| drawn == text)
+}
+
+#[test]
+fn a_panel_torn_off_shows_in_its_window_is_docked_back_and_both_are_saved_and_restored() {
+    let main = Tab::new("p", "main");
+    let mut harness = Harness::new(vec![("p", Box::new(Paneled("inside the panel")))]);
+    assert!(harness.shell.dock.find_tab(&main).is_some(), "in the dock at first");
+    harness
+        .shell
+        .tear_off(main.clone(), Some([1500.0, 120.0]), [640.0, 480.0]);
+    assert!(harness.shell.dock.find_tab(&main).is_none(), "out of the dock");
+    assert!(harness.shell.is_torn(&main));
+    // Drawn in its window: here inside the main one, egui opening none without a system.
+    harness.frame_texts(Vec::new());
+    let texts = harness.frame_texts(Vec::new());
+    assert!(drawn(&texts, "inside the panel"), "{texts:?}");
+    // Saved with the layout, then restored in its window, opened where it was.
+    harness.shell.keep_layout();
+    let kept = &harness.shell.host.settings;
+    assert_eq!(
+        kept.windows,
+        [TornOff::new(main.clone(), Some([1500.0, 120.0]), [640.0, 480.0])]
+    );
+    let saved = Settings {
+        layout: kept.layout.clone(),
+        windows: kept.windows.clone(),
+        ..Settings::default()
+    };
+    let slots = vec![Slot::loaded("p", Box::new(Paneled("inside the panel")))];
+    let mut again = Harness::with_settings(slots, saved);
+    assert!(again.shell.is_torn(&main), "torn off again at start");
+    assert!(
+        again.shell.dock.find_tab(&main).is_none(),
+        "and not in the dock as well"
+    );
+    assert_eq!(again.shell.torn[0].opened.position, Some([1500.0, 120.0]));
+    // Its button puts it back in the dock, where the panels of its area go.
+    again.frame_texts(Vec::new());
+    let texts = again.frame_texts(Vec::new());
+    again.click_text(&texts, theme::icon::DOCK_BACK);
+    assert!(!again.shell.is_torn(&main));
+    assert!(again.shell.dock.find_tab(&main).is_some(), "back in the dock");
+    again.shell.keep_layout();
+    assert!(again.shell.host.settings.windows.is_empty(), "no window saved any more");
+    // Closed from the Window menu while torn off, it goes with its window, and comes back docked.
+    again.shell.tear_off(main.clone(), None, layout::TORN_SIZE);
+    again.shell.set_panel_open(&main, false);
+    assert!(!again.shell.is_torn(&main) && again.shell.dock.find_tab(&main).is_none());
+    again.shell.set_panel_open(&main, true);
+    assert!(again.shell.dock.find_tab(&main).is_some());
+}
+
+#[test]
+fn a_floating_window_of_the_dock_becomes_a_window_of_its_own_where_it_floated() {
+    let main = Tab::new("p", "main");
+    let mut harness = Harness::new(vec![("p", Box::new(Paneled("inside the panel")))]);
+    harness.shell.native_windows = Some(true);
+    // As the dock does when the tab is dropped outside of its parts, or sent away from its menu.
+    let rect = egui::Rect::from_min_size(egui::pos2(200.0, 100.0), egui::vec2(500.0, 400.0));
+    let path = harness.shell.dock.find_tab(&main).expect("docked");
+    harness.shell.dock.detach_tab(path, rect);
+    harness
+        .shell
+        .take_floating(Some(egui::pos2(1000.0, 50.0)), 1.0, |_| None);
+    assert!(harness.shell.is_torn(&main));
+    assert_eq!(
+        harness
+            .shell
+            .dock
+            .iter_surfaces()
+            .filter(|s| s.node_tree().is_some())
+            .count(),
+        1,
+        "the main one only"
+    );
+    let window = &harness.shell.torn[0].opened;
+    assert_eq!(
+        window.position,
+        Some([1200.0, 150.0]),
+        "at the same place on the screens"
+    );
+    assert_eq!(window.size, [400.0, 320.0], "at the size the dock gave it");
+    // Its place kept in pixels, the main window drawn at two pixels a point.
+    harness.shell.dock_back(0);
+    let path = harness.shell.dock.find_tab(&main).expect("docked back");
+    harness.shell.dock.detach_tab(path, rect);
+    harness
+        .shell
+        .take_floating(Some(egui::pos2(1000.0, 50.0)), 2.0, |_| None);
+    assert_eq!(harness.shell.torn[0].opened.position, Some([2400.0, 300.0]));
+    // Through a frame, the window drawn once by the dock first.
+    harness.shell.dock_back(0);
+    let path = harness.shell.dock.find_tab(&main).expect("docked back");
+    harness.shell.dock.detach_tab(path, rect);
+    harness.frame_texts_at(Vec::new(), Some(egui::pos2(1000.0, 50.0)));
+    assert!(harness.shell.is_torn(&main), "taken in the frame");
+    let at = harness.shell.torn[0].opened.position.expect("its place");
+    assert!((at[0] - 1200.0).abs() < 40.0 && (at[1] - 150.0).abs() < 40.0, "{at:?}");
+    // Without windows of the system, the floating windows of the dock stay as they are.
+    harness.shell.native_windows = Some(false);
+    harness.shell.dock_back(0);
+    let path = harness.shell.dock.find_tab(&main).expect("docked back");
+    harness.shell.dock.detach_tab(path, rect);
+    harness.frame_texts(Vec::new());
+    assert!(!harness.shell.is_torn(&main));
+    assert!(
+        harness
+            .shell
+            .dock
+            .find_tab(&main)
+            .is_some_and(|path| !path.surface.is_main())
+    );
+}
+
+#[test]
+fn a_tab_dragged_out_of_the_main_window_is_torn_off_where_it_is_dropped() {
+    let main = Tab::new("p", "main");
+    let mut harness = Harness::new(vec![("p", Box::new(Paneled("inside the panel")))]);
+    harness.shell.native_windows = Some(true);
+    let origin = Some(egui::pos2(300.0, 200.0));
+    let texts = harness.frame_texts_at(Vec::new(), origin);
+    let at = texts
+        .iter()
+        .find(|(text, _)| text == "Main")
+        .map(|(_, rect)| rect.center())
+        .expect("its tab");
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let outside = egui::pos2(1400.0, 300.0);
+    harness.frame_texts_at(vec![egui::Event::PointerMoved(at), button(at, true)], origin);
+    harness.frame_texts_at(vec![egui::Event::PointerMoved(at + egui::vec2(40.0, 10.0))], origin);
+    harness.frame_texts_at(vec![egui::Event::PointerMoved(outside)], origin);
+    assert!(!harness.shell.is_torn(&main), "not while it is dragged");
+    harness.frame_texts_at(vec![button(outside, false)], origin);
+    assert!(harness.shell.is_torn(&main), "torn off once dropped outside");
+    assert!(harness.shell.dock.find_tab(&main).is_none());
+    let window = &harness.shell.torn[0].opened;
+    assert_eq!(
+        window.position,
+        Some([300.0 + 1400.0 - 90.0, 200.0 + 300.0 - 14.0]),
+        "its title under the pointer"
+    );
+}
+
+/// A module telling the user, in a notice, what it did.
+struct Telling;
+
+impl Module for Telling {
+    fn register(&mut self, reg: &mut Registrar) {
+        reg.command("tell.saved", "Says it saved", json!({}), json!({}));
+    }
+
+    fn on_command(&mut self, _name: &str, _arguments: Value, ctx: &mut Context) -> Result<Value, String> {
+        ctx.notify(Level::Success, "Sequence 'intro' saved");
+        Ok(json!({}))
+    }
+}
+
+#[test]
+fn undo_a_module_failing_and_a_module_telling_are_shown_in_notices_over_the_window() {
+    let (module, _) = counter("a");
+    let mut harness = Harness::new(vec![("a", module), ("tell", Box::new(Telling))]);
+    let last = |shell: &Shell| shell.toasts.list().last().cloned().expect("a notice");
+    harness.call("a", "a.add", json!({})).unwrap();
+    harness.shell.undo();
+    let toast = last(&harness.shell);
+    assert_eq!(
+        (toast.level, toast.title.as_str(), toast.text.as_str()),
+        (Level::Info, "Undone", "add 1")
+    );
+    harness.shell.redo();
+    assert_eq!(last(&harness.shell).title, "Redone");
+    assert_eq!(
+        harness.shell.toasts.list().len(),
+        1,
+        "one notice for the history, taken again"
+    );
+    // A module failing: its name, and why.
+    assert!(harness.call("a", "a.panic", json!({})).is_err());
+    let toast = last(&harness.shell);
+    assert_eq!((toast.level, toast.title.as_str()), (Level::Error, "a failed"));
+    assert!(toast.text.contains("the counter breaks"), "{}", toast.text);
+    harness.frame_texts(Vec::new());
+    let texts = harness.frame_texts(Vec::new());
+    assert!(drawn(&texts, "a failed"), "drawn over the window: {texts:?}");
+    // The errors logged, one notice for each source, the same text counted.
+    let error = |source: &str, message: &str| logger::LogLine {
+        seconds: 0.0,
+        level: log::Level::Error,
+        source: source.to_owned(),
+        message: message.to_owned(),
+    };
+    harness.shell.notice_errors(vec![
+        error("tell", "the file is locked"),
+        error("tell", "the file is locked"),
+        error("kernel", "GPU error"),
+        error("wgpu_hal", "device lost"),
+    ]);
+    let titles: Vec<(String, u32)> = harness
+        .shell
+        .toasts
+        .list()
+        .iter()
+        .filter(|toast| toast.title.starts_with("Error in"))
+        .map(|toast| (toast.title.clone(), toast.count))
+        .collect();
+    assert_eq!(
+        titles,
+        [
+            ("Error in tell".to_owned(), 2),
+            ("Error in the editor".to_owned(), 1),
+            ("Error in wgpu_hal".to_owned(), 1)
+        ]
+    );
+    // A module telling what it did, under its name, the times counted.
+    harness.call("kernel", "tell.saved", json!({})).unwrap();
+    harness.call("kernel", "tell.saved", json!({})).unwrap();
+    harness.frame(RawInput::default());
+    let toast = last(&harness.shell);
+    assert_eq!(
+        (toast.level, toast.title.as_str(), toast.text.as_str(), toast.count),
+        (Level::Success, "tell", "Sequence 'intro' saved", 2)
+    );
+}
+
+fn repaint_delay(output: &egui::FullOutput) -> Duration {
+    output.viewport_output[&ViewportId::ROOT].repaint_delay
+}
+
+#[test]
+fn an_idle_editor_asks_for_no_frame_and_a_job_running_for_the_frames_of_its_indicators() {
+    let mut harness = Harness::new(vec![("p", Box::new(Paneled("inside the panel")))]);
+    // What moves at first, such as the line of the tab shown growing, ends within a few frames.
+    for _ in 0..40 {
+        harness.frame_output(RawInput::default());
+    }
+    let idle = harness.frame_output(RawInput::default());
+    assert_eq!(repaint_delay(&idle), Duration::MAX, "nothing moves, no frame asked for");
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    harness.shell.host.spawn(
+        "p",
+        "waits",
+        Box::new(move |_| {
+            let _ = wait.recv_timeout(Duration::from_secs(10));
+            Box::new(())
+        }),
+    );
+    let busy = harness.frame_output(RawInput::default());
+    assert!(repaint_delay(&busy) <= theme::time::TICK, "{:?}", repaint_delay(&busy));
+    let texts = harness.frame_texts(Vec::new());
+    assert!(drawn(&texts, "1 job"), "the status bar tells it: {texts:?}");
+    release.send(()).unwrap();
+    harness.until("the job's end", |shell| shell.host.pool.running().is_empty());
+    for _ in 0..40 {
+        harness.frame_output(RawInput::default());
+    }
+    let idle = harness.frame_output(RawInput::default());
+    assert_eq!(repaint_delay(&idle), Duration::MAX, "idle again");
+    let texts = harness.frame_texts(Vec::new());
+    assert!(drawn(&texts, "No job running"));
 }

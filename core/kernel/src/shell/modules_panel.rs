@@ -1,16 +1,37 @@
 //! The Modules panel: every module found, its state and its commands.
 
+use uniwow_api::theme::{Palette, Toggle};
+
 use super::*;
+
+/// The colour of a module's state, and whether its dot pulses: a module running a job too long.
+fn state_colour(state: &State, stuck: bool) -> (egui::Color32, bool) {
+    let p = theme::palette();
+    match state {
+        State::Running if stuck => (p.warning, true),
+        State::Running => (p.success, false),
+        State::Disabled => (p.text_weak, false),
+        State::Ignored(_) => (p.warning, false),
+        _ => (p.error, false),
+    }
+}
 
 impl Viewer<'_> {
     pub(super) fn modules_panel(&mut self, ui: &mut egui::Ui) {
+        let p = theme::palette();
         ui.horizontal(|ui| {
-            ui.label(format!("Runtime {}", short(self.runtime)));
+            ui.label(
+                egui::RichText::new(format!("{}  Runtime {}", theme::icon::STACK, short(self.runtime)))
+                    .color(p.text_weak),
+            );
             ui.separator();
-            ui.label(self.modules_dir.display().to_string());
+            ui.label(egui::RichText::new(self.modules_dir.display().to_string()).color(p.text_weak));
         });
         if *self.restart_needed {
-            ui.colored_label(ui.visuals().warn_fg_color, "Restart UniWoW to apply the changes.");
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!("{}  Restart UniWoW to apply the changes.", theme::icon::WARNING),
+            );
         }
         ui.separator();
         egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
@@ -22,7 +43,7 @@ impl Viewer<'_> {
                 let mut disable = None;
                 for (index, slot) in self.slots.iter().enumerate() {
                     let mut enabled = !self.host.settings.disabled_modules.contains(&slot.id);
-                    let toggle = ui.add_enabled(slot.manifest.is_some(), egui::Checkbox::without_text(&mut enabled));
+                    let toggle = ui.add_enabled(slot.manifest.is_some(), Toggle(&mut enabled));
                     if toggle.changed() {
                         if enabled {
                             self.host.settings.disabled_modules.remove(&slot.id);
@@ -53,6 +74,8 @@ impl Viewer<'_> {
                     match stuck {
                         Some(running) if slot.state.is_running() => {
                             ui.horizontal(|ui| {
+                                let (colour, pulsing) = state_colour(&slot.state, true);
+                                theme::status_dot(ui, colour, pulsing);
                                 ui.colored_label(
                                     ui.visuals().warn_fg_color,
                                     format!("not responding: busy for {} s", running.as_secs()),
@@ -71,13 +94,16 @@ impl Viewer<'_> {
                             });
                         }
                         _ => {
-                            let color = match slot.state {
-                                State::Running => egui::Color32::from_rgb(90, 170, 90),
-                                State::Disabled => ui.visuals().weak_text_color(),
-                                State::Ignored(_) => ui.visuals().warn_fg_color,
-                                _ => ui.visuals().error_fg_color,
-                            };
-                            ui.colored_label(color, state_text(&slot.state));
+                            let (colour, pulsing) = state_colour(&slot.state, false);
+                            ui.horizontal(|ui| {
+                                theme::status_dot(ui, colour, pulsing);
+                                let text = if matches!(slot.state, State::Running) {
+                                    colour
+                                } else {
+                                    Palette::mix(colour, p.text, 0.25)
+                                };
+                                ui.colored_label(text, state_text(&slot.state));
+                            });
                         }
                     }
                     let error = ui.visuals().error_fg_color;

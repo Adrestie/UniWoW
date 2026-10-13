@@ -10,6 +10,8 @@ mod menus;
 mod modules_panel;
 mod settings_window;
 mod tabs;
+mod toasts;
+mod windows;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -18,7 +20,8 @@ use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
 use uniwow_api::egui_dock::tab_viewer::OnCloseResponse;
-use uniwow_api::egui_dock::{DockArea, DockState, Style, TabViewer};
+use uniwow_api::egui_dock::{self, DockArea, DockState, TabViewer};
+use uniwow_api::theme::{self, Level, Theme};
 use uniwow_api::{
     CallId, CommandHandler, CommandInfo, CommandSpec, Context, DIALOG_ANSWERED_TOPIC, DIALOG_COMMAND, DockArea as Area,
     Event, Host, MODULE_FAILED_TOPIC, Module, PropertyInfo, Registrar, RunsOn, eframe, egui, log, name_error,
@@ -32,7 +35,7 @@ use crate::history::{self, History};
 use crate::host::{KernelHost, Service};
 use crate::hotkeys::Hotkeys;
 use crate::jobs::Pool;
-use crate::layout::{self, PanelEntry, Tab};
+use crate::layout::{self, PanelEntry, Tab, TornOff};
 use crate::loader::{self, Slot, State};
 use crate::logger;
 use crate::order;
@@ -49,6 +52,8 @@ use menus::MenuAction;
 use modules_panel::{short, state_text};
 use settings_window::SettingsWindow;
 use tabs::{Viewer, log_panel};
+use toasts::Toasts;
+use windows::TornWindow;
 
 #[cfg(test)]
 mod tests;
@@ -95,6 +100,18 @@ pub struct Shell {
     /// The commands each module declared, by owner, in the order registered: the catalogue is made
     /// of those of the modules running.
     declared: Vec<(String, CommandSpec)>,
+    /// The notices over the window.
+    toasts: Toasts,
+    /// egui's clock at the last frame, in seconds: when a notice comes.
+    clock: f64,
+    /// The panels torn off into windows of their own.
+    torn: Vec<TornWindow>,
+    /// Whether panels open in windows of the system, when the tests say; egui tells otherwise.
+    native_windows: Option<bool>,
+    /// Whether the main window was told to draw its frame dark.
+    themed: bool,
+    /// The style of the dock, made from the theme once.
+    dock_style: egui_dock::Style,
 }
 
 /// Where the closing of the editor stands while modules have unsaved changes.
@@ -122,6 +139,8 @@ impl Shell {
             .and_then(|p| p.parent().map(Path::to_path_buf))
             .unwrap_or_default();
         uniwow_api::journal::mark_interface_thread();
+        Theme::DARK.apply(&cc.egui_ctx);
+        logger::wake(&cc.egui_ctx);
         let (bridge, requests) = Bridge::new(Some(cc.egui_ctx.clone()));
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
         let pool = Pool::new(threads, Some(cc.egui_ctx.clone()), Some(bridge.clone()));
@@ -180,16 +199,25 @@ impl Shell {
             hotkey_window: HotkeyWindow::default(),
             settings_window: SettingsWindow::default(),
             declared: Vec::new(),
+            toasts: Toasts::default(),
+            clock: 0.0,
+            torn: Vec::new(),
+            native_windows: None,
+            themed: false,
+            dock_style: Theme::DARK.dock_style(),
         };
         shell.register_all();
         shell.resolve_requirements();
         shell.sync_running();
         shell.init_all();
         // A damaged saved layout must never prevent the editor from starting.
-        shell.dock = guarded(|| shell.restore_layout()).unwrap_or_else(|message| {
+        let (dock, windows) = guarded(|| shell.restore_layout()).unwrap_or_else(|message| {
             log::warn!("saved layout discarded: {message}");
-            layout::default_layout(&shell.panel_entries(), &shell.host.settings.closed_panels)
+            let dock = layout::default_layout(&shell.panel_entries(), &shell.host.settings.closed_panels);
+            (dock, Vec::new())
         });
+        shell.dock = dock;
+        shell.torn = windows.into_iter().map(TornWindow::new).collect();
         shell.apply_pending();
         shell.apply_reported();
         shell.log_summary();
@@ -499,9 +527,21 @@ impl Shell {
         entries
     }
 
-    fn restore_layout(&self) -> DockState<Tab> {
+    fn restore_layout(&self) -> (DockState<Tab>, Vec<TornOff>) {
         let settings = &self.host.settings;
-        layout::restore(settings.layout.clone(), &self.panel_entries(), &settings.closed_panels)
+        layout::restore_all(
+            settings.layout.clone(),
+            &settings.windows,
+            &self.panel_entries(),
+            &settings.closed_panels,
+        )
+    }
+
+    /// Keeps the layout in the settings: the dock, and the windows torn off where they were last
+    /// seen.
+    fn keep_layout(&mut self) {
+        self.host.settings.layout = serde_json::to_value(&self.dock).ok();
+        self.host.settings.windows = self.torn.iter().map(|window| window.seen.clone()).collect();
     }
 
     /// Disables the modules that another module reported as failed.
@@ -518,8 +558,13 @@ impl Shell {
     /// Disables a module that failed, withdraws its services, drops its history entries and
     /// tells the others.
     fn fail(&mut self, index: usize, message: String) {
+        // The errors it logged before, such as its panic, shown first: its failure takes their place.
+        self.collect_notices();
         let slot = &mut self.slots[index];
-        log::error!("module '{}' failed: {message}", slot.id);
+        log::error!(target: logger::NOTIFIED, "module '{}' failed: {message}", slot.id);
+        let (key, title) = (format!("source/{}", slot.id), format!("{} failed", slot.name()));
+        self.notify(&key, Level::Error, &title, &message);
+        let slot = &mut self.slots[index];
         // What it had not saved can no longer be: at least the log says what.
         if let Some(module) = slot.module.as_deref()
             && let Ok(lost) = guarded(|| module.unsaved())
@@ -593,6 +638,7 @@ impl Shell {
             self.host.settings.closed_panels.remove(&tab.key());
             let entries = self.panel_entries();
             if self.dock.find_tab(tab).is_none()
+                && !self.is_torn(tab)
                 && let Some(entry) = entries.iter().find(|e| &e.tab == tab)
             {
                 layout::place(&mut self.dock, &entries, entry);
@@ -602,6 +648,7 @@ impl Shell {
             if let Some(path) = self.dock.find_tab(tab) {
                 self.dock.remove_tab(path);
             }
+            self.torn.retain(|window| window.seen.tab != *tab);
         }
         self.host.settings_changed = true;
     }

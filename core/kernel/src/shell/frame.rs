@@ -18,8 +18,13 @@ impl eframe::App for Shell {
                 log::error!("module '{}' failed in shutdown: {message}", slot.id);
             }
         }
-        self.host.settings.layout = serde_json::to_value(&self.dock).ok();
+        self.keep_layout();
         self.host.save_settings();
+    }
+
+    /// What shows where nothing is drawn, such as a window being resized: the lowest level.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        theme::palette().base.to_normalized_gamma_f32()
     }
 }
 
@@ -28,6 +33,7 @@ impl Shell {
     /// minimised whenever a repaint is requested, as other threads do when they need the kernel.
     pub(super) fn logic_pass(&mut self, ctx: &egui::Context) {
         self.frames.start(self.host.pool.running().len());
+        self.clock = ctx.input(|input| input.time);
         let timed = |part: &str, start: Instant| uniwow_api::journal::spent(part, start.elapsed());
         // Before the calls and jobs: an event a thread published before a call is delivered
         // before the events that call causes.
@@ -35,8 +41,10 @@ impl Shell {
         self.collect_from_threads();
         self.apply_pending();
         self.apply_reported();
+        self.collect_notices();
         timed("kernel: what the threads reported", start);
-        let minimised = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+        // A window torn off may show while the main window is minimised: frames are drawn for it.
+        let minimised = ctx.input(|i| i.viewport().minimized.unwrap_or(false)) && self.torn.is_empty();
         let budget = if minimised { MINIMISED_CALL_BUDGET } else { CALL_BUDGET };
         let start = Instant::now();
         if self.serve_calls(budget) {
@@ -101,20 +109,57 @@ impl Shell {
 
     /// Draws the window and handles what the user did in it; the rest waits for `logic`.
     pub(super) fn ui_pass(&mut self, ui: &mut egui::Ui) {
-        self.await_keys(ui.ctx());
+        let ctx = ui.ctx().clone();
+        if !self.themed {
+            // The frame of the main window, drawn by the system, dark as the rest.
+            ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
+            self.themed = true;
+        }
+        self.await_keys(&ctx);
+        let theme = theme::current();
         let mut actions = Vec::new();
-        egui::Panel::top("menu_bar").show(ui, |ui| actions = self.menu_bar(ui));
-        egui::Panel::bottom("status_bar").show(ui, |ui| self.status_bar(ui));
+        egui::Panel::top("menu_bar")
+            .frame(theme.bar_frame())
+            .show(ui, |ui| actions = self.menu_bar(ui));
+        let status = egui::Panel::bottom("status_bar")
+            .frame(theme.bar_frame())
+            .show(ui, |ui| self.status_bar(ui, &mut actions));
+        let status_height = status.response.rect.height();
 
         // Every registered panel, so that the tab of a module that failed keeps its title.
         let mut titles: Vec<(Tab, String)> = self.panel_entries().into_iter().map(|e| (e.tab, e.title)).collect();
         for slot in self.slots.iter().filter(|s| !s.state.is_running()) {
             titles.extend(slot.panels.iter().map(|p| (Tab::new(&slot.id, &p.id), p.title.clone())));
         }
+        // Where the main window's content starts on the screens, for the windows torn off.
+        let native = self.native_windows(&ctx);
+        let origin = ctx.input(|input| input.viewport().inner_rect).map(|rect| rect.min);
+        let dragged_out = if native { self.dragged_out(&ctx, origin) } else { None };
+        let eject = if native {
+            format!("{}  Tear off into its own window", theme::icon::TEAR_OFF)
+        } else {
+            egui_dock::Translations::english().tab_context_menu.eject_button
+        };
+        if self.dock.translations.tab_context_menu.eject_button != eject {
+            self.dock.translations.tab_context_menu.eject_button = eject;
+        }
+        let active: HashSet<Tab> = self
+            .dock
+            .iter_leaves()
+            .filter_map(|(_, leaf)| leaf.tabs.get(leaf.active.0).cloned())
+            .collect();
+        let focused = self
+            .dock
+            .focused_leaf()
+            .and_then(|path| self.dock.leaf(path).ok())
+            .and_then(|leaf| leaf.tabs.get(leaf.active.0).cloned());
+        let restart_needed = self.restart_needed;
         let mut viewer = Viewer {
             slots: &mut self.slots,
             host: &mut self.host,
             titles: &titles,
+            shown: &active,
+            focused: focused.as_ref(),
             failures: Vec::new(),
             closed: Vec::new(),
             runtime: self.runtime_fingerprint.as_deref(),
@@ -124,31 +169,42 @@ impl Shell {
         };
         let mut shown = Ok(());
         let panels = Instant::now();
-        egui::CentralPanel::default().show(ui, |ui| {
-            if let PanelsHealth::Broken(reason) = &self.panels {
-                ui.colored_label(
-                    ui.visuals().error_fg_color,
-                    format!("The panels cannot be displayed: {reason}. The log follows."),
-                );
-                ui.separator();
-                log_panel(ui);
-                return;
-            }
-            shown = guarded(|| {
-                DockArea::new(&mut self.dock)
-                    .style(Style::from_egui(ui.style()))
-                    .show_inside(ui, &mut viewer);
+        let dock_style = &self.dock_style;
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(theme.palette.base)
+                    .inner_margin(egui::Margin::symmetric(4, 2)),
+            )
+            .show(ui, |ui| {
+                if let PanelsHealth::Broken(reason) = &self.panels {
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        format!("The panels cannot be displayed: {reason}. The log follows."),
+                    );
+                    ui.separator();
+                    log_panel(ui);
+                    return;
+                }
+                shown = guarded(|| {
+                    DockArea::new(&mut self.dock)
+                        .id(egui::Id::new(windows::DOCK_ID))
+                        .style(dock_style.clone())
+                        .show_inside(ui, &mut viewer);
+                });
             });
-        });
-        let Viewer { failures, closed, .. } = viewer;
         uniwow_api::journal::spent("kernel: panels", panels.elapsed());
-        let ctx = ui.ctx().clone();
+        let torn_off = Instant::now();
+        let torn = windows::torn_windows_ui(&mut self.torn, &ctx, &mut viewer, &self.hotkeys);
+        uniwow_api::journal::spent("kernel: windows torn off", torn_off.elapsed());
+        let Viewer { failures, closed, .. } = viewer;
         // A layout egui_dock cannot draw would otherwise stop the editor at every start. The reset is
         // tried once; a panel that panics at every frame then leaves a fixed message instead.
         if let Err(message) = shown {
             match self.panels {
                 PanelsHealth::Drawn => {
-                    log::error!("the panels could not be drawn, the layout was reset: {message}");
+                    log::error!(target: logger::NOTIFIED, "the panels could not be drawn, the layout was reset: {message}");
+                    self.notify("layout", Level::Warning, "The layout was reset", &message);
                     self.dock = layout::default_layout(&self.panel_entries(), &self.host.settings.closed_panels);
                     self.panels = PanelsHealth::Reset;
                 }
@@ -157,6 +213,26 @@ impl Shell {
                     self.panels = PanelsHealth::Broken(message);
                 }
             }
+        }
+        if self.restart_needed && !restart_needed {
+            self.notify(
+                "restart",
+                Level::Info,
+                "Restart UniWoW to apply the changes",
+                "A module enabled or disabled starts or stops at the next start.",
+            );
+        }
+        // The panels torn off this frame, and those docked back.
+        for index in torn.docked.into_iter().rev() {
+            self.dock_back(index);
+        }
+        if let Some((tab, position, size)) = dragged_out {
+            self.tear_off(tab, position, size);
+        }
+        if native {
+            self.take_floating(origin, ctx.pixels_per_point(), |surface| {
+                ctx.memory(|memory| memory.area_rect(windows::floating_id(surface)))
+            });
         }
 
         for (index, message) in failures {
@@ -200,6 +276,7 @@ impl Shell {
             if self.hotkeys.redo.pressed(&ctx) {
                 actions.push(MenuAction::Redo);
             }
+            actions.extend(torn.keys);
         }
         for action in actions {
             match action {
@@ -212,6 +289,11 @@ impl Shell {
                     }
                 }
                 MenuAction::SetPanelOpen(tab, open) => self.set_panel_open(&tab, open),
+                MenuAction::DockAllBack => {
+                    while !self.torn.is_empty() {
+                        self.dock_back(self.torn.len() - 1);
+                    }
+                }
                 MenuAction::Hotkeys => self.hotkey_window.open = true,
                 MenuAction::Settings => self.settings_window.open = true,
                 MenuAction::Module(index, action) => {
@@ -225,6 +307,7 @@ impl Shell {
             }
         }
 
+        self.toasts_ui(&ctx, status_height);
         // What the panels and menus queued is applied by `logic` at the next frame.
         let host = &self.host;
         if !host.pending.is_empty()
@@ -232,6 +315,7 @@ impl Shell {
             || !host.reported.is_empty()
             || !host.events.is_empty()
             || host.settings_changed
+            || !host.notices.is_empty()
         {
             ctx.request_repaint();
         }

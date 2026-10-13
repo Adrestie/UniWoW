@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use uniwow_api::serde::{Deserialize, Serialize};
 use uniwow_api::{log, serde_json};
 
+use crate::layout::TornOff;
+
 /// User settings, in `%APPDATA%\UniWoW\settings.json` (or `UNIWOW_SETTINGS_DIR` when set).
 #[derive(Default, Serialize, Deserialize)]
 #[serde(crate = "uniwow_api::serde")]
@@ -17,6 +19,9 @@ pub struct Settings {
     /// Dock layout of the last session.
     #[serde(default)]
     pub layout: Option<serde_json::Value>,
+    /// The panels torn off into windows of their own in the last session, and where they were.
+    #[serde(default)]
+    pub windows: Vec<TornOff>,
     /// Settings of each module, by module id then key.
     #[serde(default)]
     pub modules: BTreeMap<String, BTreeMap<String, serde_json::Value>>,

@@ -6,6 +6,9 @@ pub(super) struct Viewer<'a> {
     pub(super) slots: &'a mut [Slot],
     pub(super) host: &'a mut KernelHost,
     pub(super) titles: &'a [(Tab, String)],
+    /// The tabs shown in their part of the dock, and that of the part focused.
+    pub(super) shown: &'a HashSet<Tab>,
+    pub(super) focused: Option<&'a Tab>,
     pub(super) failures: Vec<(usize, String)>,
     pub(super) closed: Vec<Tab>,
     pub(super) runtime: Option<&'a str>,
@@ -61,6 +64,48 @@ impl TabViewer for Viewer<'_> {
     fn on_close(&mut self, tab: &mut Tab) -> OnCloseResponse {
         self.closed.push(tab.clone());
         OnCloseResponse::Close
+    }
+
+    /// The pointer lights a tab in `time::HOVER`, and the tab shown takes a line of the accent along
+    /// its bottom, growing from its middle in `time::OPEN`, full in the part of the dock focused.
+    fn on_tab_button(&mut self, tab: &mut Tab, response: &egui::Response) {
+        let p = theme::palette();
+        let ctx = &response.ctx;
+        let painter = ctx.layer_painter(response.layer_id).with_clip_rect(response.rect);
+        let lit = ctx.animate_bool_with_time_and_easing(
+            response.id.with("uniwow hover"),
+            response.hovered(),
+            theme::time::HOVER,
+            egui::emath::easing::cubic_out,
+        );
+        let shown = self.shown.contains(tab);
+        if lit > 0.0 && !shown {
+            painter.rect_filled(
+                response.rect,
+                egui::CornerRadius::ZERO,
+                theme::Palette::alpha(p.hover_tint(), lit),
+            );
+        }
+        let grown = ctx.animate_bool_with_time_and_easing(
+            response.id.with("uniwow shown"),
+            shown,
+            theme::time::OPEN,
+            egui::emath::easing::cubic_out,
+        );
+        if grown > 0.0 {
+            let colour = if self.focused == Some(&*tab) {
+                p.accent
+            } else {
+                theme::Palette::mix(p.border, p.accent, 0.45)
+            };
+            let rect = response.rect;
+            let half = rect.width() / 2.0 * grown;
+            let line = egui::Rect::from_min_max(
+                egui::pos2(rect.center().x - half, rect.bottom() - 2.0),
+                egui::pos2(rect.center().x + half, rect.bottom()),
+            );
+            painter.rect_filled(line, egui::CornerRadius::same(1), colour);
+        }
     }
 }
 
