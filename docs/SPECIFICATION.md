@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, proposed and waiting for the user's validation, the next in the order of work; milestones 10 to 14 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and the next in the order of work, not built yet; milestones 10 to 14 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -279,12 +279,12 @@ fills it, or *not planned* when no milestone does yet.
 | The client's files, read from its archives, and their formats | The services `vfs` and `formats` of the module `assets` — step 9.1 | — not planned yet | — | — |
 | The live world: entities of the server around a point, their moves | The commands `live-world.state` and `live-world.entities`, the event `live-world.changed` (step 9.3b); the client of the observer, `uniwow_api::server_link` | The same commands and event, through `call` and `subscribe` | The same, through `call` and `subscribe` | Lua: the same, through `uniwow.call` and `uniwow.subscribe` (checked in step 9.3b); Python: milestone 11 |
 | Splitting work over the cores, `parallel_for` | `uniwow_api::parallel_for` (step 9.2a) | — not planned; compiled modules run threads of their own (T7) | — | — |
-| Picking in the 3D view, the selection shown in 3D | — designed in milestone 9, proposed in milestone 15 | — milestone 15, proposed: `scene.pick`, `viewport.ray`, `scene.select` | — | — |
+| Picking in the 3D view, the selection shown in 3D | — designed in milestone 9; milestone 15, validated, not built | — milestone 15: `scene.pick`, `viewport.ray`, `scene.select` | — | — |
 | The terrain of a map shown in the 3D view, with its horizon | The module `terrain` (steps 9.2c, 9.2e, 9.2f) | — not planned yet | — | — |
 | The statistics of the 3D view: the times of the frames, of the interface thread and of the GPU, what each layer drew | `Layer::stats`; shown over the view (step 9.2e) | — not planned yet | — | — |
 | Hotkeys: declared, read, bound to other keys by the user in *Edit > Hotkey* | `Registrar::hotkey`, `Hotkey::pressed`, `held` (step 9.2d) | — not planned yet | — | — |
 | The memory of the GPU the editor draws with | `Context::gpu_memory` (step 9.2d) | — not planned yet | — | — |
-| Editing the world: terrain, painting, objects and creatures placed | — designed in milestone 9; the objects and creatures proposed in milestone 15, the terrain later | — milestone 15, proposed: the commands `scene.*`, the components declared by every language | — | — |
+| Editing the world: terrain, painting, objects and creatures placed | — designed in milestone 9; the objects and creatures in milestone 15 (validated, not built), the terrain later | — milestone 15: the commands `scene.*`, the components declared by every language | — | — |
 | Unsaved changes, asked about when the editor closes | `Module::unsaved`, `save_unsaved` | — not planned | — | — |
 | Notices over the window (the outcome of what the user asked, a problem) | `Context::notify`; the errors logged become notices for every language | — not planned yet; the errors logged (`log`) show as notices | The same, through the log | The same, through the log |
 | The theme: its palette, its sizes, the widgets showing work under way | `uniwow_api::theme` (the interface redesigned) | — not planned yet; the interface objects are drawn with it | — | — |
@@ -404,14 +404,14 @@ the same runtime.
 | Commands and history | Undo, redo, unsaved-changes tracking. When a module fails, all its entries leave the history, done and undone, with a warning in the log; the others stay valid since a command only changes its own module's state (F3). A document closed without saving takes its changes out of the history (`Context::forget_document`) |
 | Events | Publish and subscribe, typed by serialisation: the topic is a string and the payload JSON, written with `Context::publish_as` and read with `Event::decode` into a type each module declares on its own side. No Rust type is shared between modules. Events may be published from any thread; they are delivered on the interface thread |
 | Services | Registry of interface implementations provided by modules |
-| Selection | Current selection, any type. Milestone 15 proposes it as the service `scene` of a module, its contract in `core/api` |
+| Selection | Current selection, any type. Milestone 15 (validated) makes it the service `scene` of a module, its contract in `core/api` |
 | Animatable properties | Registry of the properties modules let be animated: path, type, range, reading and writing; written without history during playback (milestone 6). A property whose range is not two numbers, the lowest first, or whose name is empty or holds a `/` or a space (its path is `<module>/<name>`), is refused with the reason |
-| Project | Open, save; its folder, its file and the sections of the modules proposed in milestone 15 |
+| Project | Open, save; its folder, its file and the sections of the modules set by milestone 15 (validated) |
 | Settings | Global, per project, per module. Written atomically (temporary file, then rename), at most once per second and at exit |
 | Hotkeys | Registry of the keys the kernel and the modules act on (`Registrar::hotkey`), with their keys by default; *Edit > Hotkey* binds them to others, kept in the settings (step 9.2d) |
 | Jobs | Pool of worker threads, one per processor core: background jobs with progress and cancel (T2) |
 | Log | Log panel shared by all modules. GPU errors captured by no module are logged instead of stopping the editor |
-| Inspector host | Shows the selection with the inspector registered for its type. Milestone 15 proposes the Inspector as a module, the selection shown as components |
+| Inspector host | Shows the selection with the inspector registered for its type. Milestone 15 (validated) makes the Inspector a module, the selection shown as components |
 
 The 3D view is not a core service: it is the `viewport` module (section 7).
 
@@ -527,7 +527,7 @@ milestone 9 takes up those that concern it.
 Each line is one Rust module of this project. The list is open: new modules, of any kind, are
 added through section 4 without touching the core.
 
-Milestone 9 built `placement` as two modules, `doodads` and `buildings`. Milestone 15 (proposed)
+Milestone 9 built `placement` as two modules, `doodads` and `buildings`. Milestone 15 (validated)
 adds `scene` (the entities, their places, the selection, groups and prefabs), `scene-tools` (the
 selection in the 3D view and the gizmos), `hierarchy` (the window *Hierarchy*), `notes`, `spawns`
 and the connection of `world-db`, and grows `properties` into the Inspector.
@@ -7525,11 +7525,13 @@ On the user's machine, with the client and the server on it:
 | A dungeon, and a zone with phases | Its instance's entities only; entities of other phases told apart |
 | Tests, `cargo xtask check`, CI | Green |
 
-### Milestone 15: the world edited: the scene, its hierarchy and its inspector (proposed)
+### Milestone 15: the world edited: the scene, its hierarchy and its inspector (validated)
 
 *Proposed from the user's request and decisions, checked against the code at e9d24f4, against
 the sources of AzerothCore at the commit of the user's server (bc9198ce7) and against WoWDBDefs;
-waiting for the user's validation: no code is written before it (decision 31).*
+validated by the user (decision 31), with his answers to the points the proposal left to decide
+(*Decided by the user after the proposal*); its technical specification written once validated, at
+his request. Not built yet.*
 
 The world of milestone 9, shown, becomes a world the user edits as a scene of Unity: a window
 *Hierarchy* left of the 3D view lists what is loaded around the camera, by the places of the game;
@@ -7660,6 +7662,29 @@ written here, after milestone 9, for that reason.
 30. The tools of the terrain (sculpting, painting, holes) are not part of this work; a later one
     builds on it.
 31. The user validates this specification before any code is written.
+
+#### Decided by the user after the proposal
+
+1. **E for Rotate and E to fly up**: the flying keys up and down move to other keys, W, E and R
+   choosing the gizmos. Proposed: Space up and C down (Ctrl being the key of the snapping and of the
+   selection, Space playing the timeline only over its panel), checked against every hotkey in
+   15.1; *Edit > Hotkey* says besides two hotkeys of different modules bound to the same keys when
+   they act over the same panel.
+2. **The changes in memory at close**: kept in the project as lists of changes, readable, a section a
+   module (the entities created, moved, changed, deleted, with their values), read again when the
+   project opens; still nothing written to the game's files or the database.
+3. **A lock and the Hierarchy**: a locked entity is not picked in the 3D view but can be chosen in
+   the Hierarchy, as Unity.
+4. **The summoned live creatures and game objects** (no spawn): in *Live* with the players, read
+   only.
+5. **The water locked by default**, as the terrain, so that a click over a lake picks what is under
+   it.
+6. **The relative values**: `+n`, `-=n`, `*n`, `/n` change each value; `-n` alone is a value.
+7. **The component *Quests* built in 15.11c**, read and changed in memory, as the first drawing of a
+   module's own and the server component that 15.14 needs; the other components of decision 20 in
+   later works.
+8. **The scope by default**: 2 tiles around the camera listed, whatever the modules hold at their
+   distances; a setting widens it.
 
 #### Checked before proposing
 
@@ -7884,8 +7909,9 @@ saying it is out of reach, with *Frame* to fly back.
    surfaces (`Liquids::surfaces`); the live entities and what has no model by their boxes. A
    module of another language gives boxes only, its entities picked by them.
 
-A click is answered by a job in a frame or two; a rectangle selects the entities, of the types
-its filter leaves, whose origin falls in it, in front of the eye and within their reach. The
+A click is answered by the thread of `scene` at the next frame; a rectangle selects the entities,
+of the types its filter leaves, whose origin falls in it, in front of the eye and within their reach
+(the threads, the grids and the budgets: *Technical specification*). The
 viewport offers the ray under a point (`viewport.ray`, from the view of the last frame) to every
 language; `scene.pick` takes a ray.
 
@@ -7895,18 +7921,18 @@ service gives every provider the entities highlighted, each with the options tha
 the entities hidden by an eye, a snapshot with a version read at each frame without a copy; each
 provider shows them in what it draws. No module reads another's settings (F3).
 
-- **The bounding box**: drawn by `scene-tools` over the image of the view, the corners of each box
-  projected, as the labels are written (`Layer::labels`), at most 2,000 boxes, the box of all of
-  them beyond.
+- **The bounding box**: drawn by a layer of `scene-tools`, one draw of instanced lines, its buffer
+  written once the selection changes; never as shapes of egui, which 10,000 shapes would keep busy
+  for 9.4 ms a frame (milestone 5).
 - **The tint**: a flag of highlight in each instance (`models::Instance::highlight`, changed without
   placing the instances again by `Models::mark(owner, ids, flags)`) and in each placement of the
   buildings; their shaders mix the colour of the selection into what they draw.
 - **The outline (orange)**: the viewport gains a pass of the selection after the frame: each layer
   draws its highlighted items into a mask of one byte a pixel (`Layer::draw_mask`, nothing by
   default), and a pass over the image draws the colour where the mask has an edge, two pixels
-  wide; the whole outline, the hidden parts dimmed by the depth of the frame where the device lets
-  it be read (to measure). Its colour a setting, orange by default, which `scene` gives the
-  viewport as the light is given (`Viewport::set_outline`).
+  wide; the whole outline, the hidden parts dimmed by the first level of the pyramid of the depth
+  where the device makes one (*Technical specification*). Its colour a setting, orange by default,
+  which `scene` gives the viewport as the light is given (`Viewport::set_outline`).
 - **A chunk selected is framed** whatever the boxes: the terrain draws its sides in the colour of
   the selection, as its overlays were foreseen (point 5 of *Preparing the editing to come*), by a
   flag of the chunk in the codes its tile already gives its shader.
@@ -7962,12 +7988,12 @@ and no pitch, nor scale).
 | list | rows of fields of their own, added, removed, ordered (the quests of an NPC, the layers of a chunk) | new |
 
 - **Reads**: the values of a component for a set of entities, as JSON, by the command its module
-  names (`doodads.read`, on the calling thread, from its own snapshot). The Inspector reads the
-  selection's values again when `scene.changed` names one of them, by `Context::call`, its answer at
-  a later frame: a Rust module answers on the calling thread, a module of another language on its
-  own, never holding the interface.
+  names (`doodads.read`, on the calling thread, from its own snapshot), or their summary for
+  several entities. The Inspector reads the selection's values again when `scene.changed` names one
+  of them, from a job of its own (*Technical specification*), never holding the interface.
 - **Writes**: by the command its module names (`doodads.write`, on the interface thread), with the
-  entities, the field, the change and whether it is done. The change is a value, or relative to
+  entities (a set, such as the selection of a generation, or a short list), the field, the change
+  and whether it is done: one call a module and a gesture. The change is a value, or relative to
   each entity's own: `+n`, `-=n`, `*n`, `/n` (decision 15; `-n` is the value −n, not a change);
   for a vector, its numbers one by one. Under way (a drag) the module shows it at once and records
   nothing; done, it records one undoable command from the values before the gesture began, as the
@@ -8065,7 +8091,7 @@ it, then the tree.
   of a note (decision 20); the live sign. Selected rows in the colour of the selection; a selection
   made elsewhere unfolds the path to the active entity and brings its row in sight.
 - **Only the rows in sight are drawn**: the tree is made by a job from the snapshot of the registry,
-  again when a piece changes, the places whose pieces changed alone, at most every 100 ms; each node
+  again when a piece changes, the places whose pieces changed alone, one job at a time; each node
   keeps the count of the rows unfolded under it, so that the row at a given line is found by going
   down from the root, and folding a node changes the counts up its chain only. Nothing is made
   again at each frame.
@@ -8170,7 +8196,7 @@ of each (template or spawn) is in *Checked before proposing*.
 | `scene.components`, `scene.read` | Calling | The components common to entities, their fields; their values |
 | `scene.write`, `scene.add_component`, `scene.remove_component`, `scene.reset`, `scene.enable` | Interface | Changes, routed to the providers, one undo entry |
 | `scene.create`, `scene.duplicate`, `scene.delete`, `scene.rename`, `scene.hide`, `scene.lock`, `scene.group`, `scene.prefab`, `scene.apply`, `scene.revert` | Interface | As named, each one undo entry |
-| `scene.declare`; `scene.publish`, `scene.withdraw` | Interface; calling | A module's kinds and component types; its entities |
+| `scene.declare`; `scene.publish`, `scene.withdraw`, `scene.resolve` | Interface; calling | A module's kinds and component types; its entities; its own keys of a set written to |
 | `scene.changed`, `scene.selection_changed`, `scene.declared` | Events | Batched, once a frame at most |
 | `project.section`, `project.set_section`; `world-db.query` | Calling; interface; calling | A module's section of the project; a read of the database |
 
@@ -8208,6 +8234,9 @@ the runtime's fingerprint once):
   Hierarchy as a returning panel's area is made again.
 - The kernel draws another module's interface object inside a panel (`Host::draw_object`), its
   lock taken as for the module's own panels.
+- For speed (*Technical specification*): `Arena::try_write`; `Command::bytes` and the limit of the
+  history; `journal::count` and its column in the journal of the frames; `scene::Preview` and
+  `Scene::live_delta`; the command `cargo xtask bench`.
 
 **Where the work is done:**
 
@@ -8215,21 +8244,24 @@ the runtime's fingerprint once):
 |---|---|---|
 | A provider's piece of entities made and published | The provider's job (a tile read) | The registry's, the time of a swap |
 | The indexes of the registry (places, chunks, keys, names) | A job of `scene`, again for the pieces changed | None: the pieces are shared |
-| A view's tree made, a search, the filter *on screen* | Jobs of `hierarchy` and `scene`, at most every 100 ms; on screen four times a second | None |
+| A view's tree made | A job of `hierarchy`, one at a time a view, the changes gathered meanwhile | None |
+| A search, the filter *on screen* (four times a second at most), a smart selection | The thread of `scene`, with `parallel_for` | None |
 | The rows of a view drawn, a fold | Interface: the rows in sight, the counts up one chain | The tree of the view, shared |
-| A click or a rectangle picked | A job (`Priority::FIRST`), the providers' `Picker` on it | Their snapshots, briefly |
-| The values of the selection read | The calling thread of the call (a Rust module), or a module's own thread | None on the interface thread |
-| A change typed or dragged | Interface: the gesture's calls; a change under way at each frame | The providers' own |
-| The gizmos and boxes painted, the tools' pointer | Interface, within the view's panel | None |
+| A click or a rectangle picked | The thread of `scene`, its own, never queued behind the pool's jobs; the providers' `Picker` on it | Their snapshots, briefly |
+| The values of the selection read | A job of the Inspector, the read commands on its thread | None on the interface thread |
+| A change typed or dragged | Interface: the gesture's calls at its end; a drag previewed at each frame through the providers' fast path | The providers' own; the arena's by `try_lock` |
+| The gizmos painted, the tools' pointer | Interface, within the view's panel | None |
+| The boxes of the selection | A layer of `scene-tools`, its buffer written when the selection changes | — |
 | The highlight changed (`Models::mark`) | The provider's thread placing its instances | The arena of the instances |
 | The outline | Interface records the pass; the GPU draws it | — |
-| A query of the database | A job, or the connection's thread | The connection's |
+| A query of the database | A thread of its own (`spawn_thread`, work that waits), never a worker of the pool | The connection's |
 | The project written | A job, from the sections given on the interface thread | None |
 
 **Targets**, measured on the user's machine in Northrend at the distances by default and in
 Dalaran: 500,000 entities registered; a tile's piece of 3,576 doodads merged in under 5 ms by a
-job; a view's tree made again in under 100 ms; the Hierarchy and the Inspector under 0.5 ms of the
-interface thread a frame, flying or still, whatever the entities; a click answered within 2 frames;
+job; a view's tree made again in under 100 ms; the Hierarchy and the Inspector under 0.3 ms each of
+the interface thread a frame, flying or still, whatever the entities; a click answered within 2
+frames;
 `+10` typed for 10,000 doodads selected, one undo entry, the change shown within 3 frames; the
 outline under 0.3 ms of the GPU for a view of 2560 × 1440 pixels; no frame of the interface thread
 past 33 ms, as milestone 9.
@@ -8254,27 +8286,460 @@ work, which will also check the ids given); the tools of the terrain (decision 3
 of decision 20 but *Quests* and the notes; prefabs within prefabs; the 3D view drawn by other
 languages (step 8.3); any command to the running server.
 
+#### Technical specification: speed, efficiency, threads
+
+Asked by the user once the milestone was validated: the technical specification, speed and
+efficiency first, and so the threads. It fits what exists, checked in the code at ee819cf; every
+figure says whether it was **measured** (where, by whom) or is **estimated** (from what), and each
+estimate is replaced by its measure when the step that builds it runs its benchmark.
+
+**What exists and is used as it is:**
+
+- **The pool of the kernel** (`core/kernel/src/jobs.rs`): a worker a core, below the normal
+  priority (T2); the slices of `parallel_for` taken before any job (`core/api/src/parallel.rs`), so
+  that a caller of `parallel_for` waits for no job but those already running; then the jobs by their
+  rank, `Priority::FIRST` before all, the others by their distance less a yard for each 2 ms they
+  waited (`YARD_EVERY_MS`); `Context::spawn_with_priority`, `Context::cancel` and
+  `JobContext::is_cancelled`. A job is never pre-empted: one queued behind long jobs waits for the
+  first of them to end.
+- **The hand-back**: the jobs ended are handed back to their modules for 3 ms a frame at most
+  (`JOBS_BUDGET`, one at least, 80 ms minimised), the calls of other threads served for 4 ms
+  (`CALL_BUDGET`) (`core/kernel/src/shell/mod.rs`, `calls.rs`).
+- **The budget of the uploads** (`core/api/src/uploads.rs`): 32 MB a frame by default, passed by a
+  job before it takes any lock; the interface thread never held back nor counted. **`Arena`**
+  (`core/api/src/arena.rs`): a range put passes the budget, then the lock of the holes; an arena
+  `not_held_back` (the instances of `models`, put by the doodads under the lock of their module)
+  never waits for it; `Arena::write` writes a range in place under the lock of the holes, never held
+  back.
+- **`journal::lock`** (`core/api/src/journal.rs`): a lock taken by the interface thread is timed when
+  it had to wait, under its name, in the journal of the frames (`UNIWOW_SLOW_FRAMES`,
+  `core/kernel/src/shell/frames.rs`), with each part's time on that thread, the bytes sent to the
+  GPU, the arenas grown and the jobs the budget held back.
+- **Snapshots swapped under a brief lock**: the pattern of the code already, a `Mutex<Arc<T>>` whose
+  `Arc` is cloned to read and replaced to publish: the live world (`live-world/src/link.rs`,
+  `Shared::world`), the owners of `models` (`groups.rs`, `Slot::published`), the buildings placed
+  (`buildings/src/layer.rs`, `Scene::placed: Arc<[Placed]>`).
+- **The instances of `models`**: 64 bytes each on the GPU (`InstanceGpu`: three rows of the
+  transform, then `extra`, the alpha, the two colours of the light inside packed, and whether
+  inside), an owner's in one range of the arena of the instances; `Slot::update` sorts the owner's
+  instances by look, tile and id, converts and writes them all, in place when the places of its
+  groups stay.
+- **Events** delivered on the interface thread at the end of the frame they were published in, a
+  subscription closed after 4,096 unread; **services** by `Arc`, shared between threads (T3); **the
+  history**: entries of parts of several modules (`core/kernel/src/history.rs`), without a limit
+  today.
+- **The interface**: egui 0.36 and egui_dock 0.21; the kernel's tables and its log draw only the rows
+  in sight (`ScrollArea::show_rows`); a panel torn off is drawn by `show_viewport_immediate` in the
+  frame of the main window, on the interface thread, so that its cost is that frame's.
+
+**Measured, and what they say of the size of the work** (the user's machine, milestone 9):
+
+| Measure | Where | What follows |
+|---|---|---|
+| 302,497 doodads placed in Northrend's tiles, 3,576 on its densest tile; 167,168 in Azeroth (*Step 9.6, proposed*) | Probes over the client | At the distances by default (45 tiles), a continent's doodads are held: the registry is sized for 500,000 entities |
+| 73,061 doodads within 4 tiles of the densest area of Northrend (*Step 9.6b, as built*) | In the editor | A scope of 4 tiles lists some 70,000 rows |
+| Stormwind at 2 tiles: 62 buildings (36 files), 1,012,906 vertices, 980,521 triangles, 8,831 doodads of their sets; Dalaran at 4 tiles: 345 buildings (150 files), 1,789,460 vertices, 1,853,866 triangles, 11,331 doodads (*Step 9.6d, proposed*) | Probes | The triangles to keep for picking the buildings: below |
+| `models prepare` 9 to 10 ms of the interface thread moving in a crowded view, before it was lightened (*The frames measured while the camera moves, after 9.6f2*) | The journal of the frames | The interface thread has no room for work that grows with the entities |
+| 1,000 shapes drawn again at each frame 0.9 ms, 10,000 9.4 ms (milestone 5) | egui 0.36 | The rows and fields in sight only; the boxes of the selection drawn by the GPU, not by egui |
+| 154 to 167 full tiles at a distance of 64 (*Step 9.2f*) | In the editor | About 41,000 chunks held in full, which are entities |
+| `Formats::placements` 4.2 ms a tile on 16 threads (*Step 9.6b, as built*) | Over the client | The ids of a whole map read in about 0.3 s |
+
+And counted for this specification in the base SQL of AzerothCore at bc9198ce7 (its dumps of
+`creature` and `gameobject`, before the updates of 2026, which were not read; the user's database
+may differ): **149,879 creatures**, 33,806 in Northrend (571), 31,076 in Outland, 30,282 in Kalimdor,
+30,173 in the Eastern Kingdoms; **96,624 game objects**, 25,315, 24,146, 20,589 and 19,817 in the
+Eastern Kingdoms, Outland, Northrend and Kalimdor; 3,510 to 3,946 templates of creatures and 2,863
+to 4,177 of game objects named by the spawns of each continent; 737 creatures with a second or
+third template; within 1,066 yards (2 tiles) of the middle of Stormwind 2,492 creatures and 3,121
+game objects, of Dalaran 1,462 and 2,258. `creature` is indexed by `map` (`idx_map`) and `id1`;
+**`gameobject` by its `guid` only** (*Checked before proposing*).
+
+**The sizes this specification is built for** (estimated from those counts): Northrend at the
+distances by default, about 292,000 doodads (302,497 placements less those listed by several
+tiles), 1,528 buildings, some 10,000 rooms and 60,000 to 100,000 doodads of their sets, about
+41,000 chunks held in full, 54,395 spawns: some 460,000 to 500,000 entities; Azeroth about
+265,000. Listed by the scope by default (2 tiles): about 27,000 around Stormwind (6,400 chunks,
+some 5,500 doodads of the tiles at Azeroth's 222 a tile, 62 buildings and their rooms, 8,831
+doodads of their sets, 5,613 spawns).
+
+**Threads and ownership.** The interface thread (T1) never blocks and never walks the registry: it
+reads snapshots that jobs publish, a handful a frame, and draws what is in sight.
+
+| Thread | Owns | Does |
+|---|---|---|
+| Interface (T1) | The selection as the user makes it, the expansion of each view, the Inspector's values typed and not confirmed, the tools' gestures, every module's state (T1) | Takes the snapshots (an `Arc` cloned each); draws the rows and fields in sight; the gizmos' arithmetic and the preview of a drag (below); applies the undoable commands; hands jobs back |
+| A job of the provider (pool) | Nothing shared while it runs | Reads a tile as today and, from what it decoded, builds the tile's piece; publishes it |
+| The index job of `scene` (pool, `FIRST`, one at a time) | — | Takes the pieces published since, indexes them, makes and swaps the snapshot of the registry |
+| The tree jobs of `hierarchy` (pool, `FIRST`, one at a time a view) | — | Makes a view's tree again for the places changed, swaps it |
+| The thread of `scene` (`spawn_thread`, its own, waiting for requests 100 ms at a time) | — | Picks, rectangles, smart selections, the filter *on screen*, searches: never queued behind the pool's jobs; uses `parallel_for`, whose slices the workers take before any job |
+| The Inspector's job (pool, `FIRST`) | — | Reads the values of the selection and reduces them |
+| The threads of `world-db` (`spawn_thread`, work that waits, T2) | The connections | Run the queries; never a worker of the pool, which computes |
+| The connection thread of `live-world` (existing) | Its world | Gives the scene the entities that appear and leave |
+| The writer of the project (pool) | — | Writes the file |
+
+- **Publication**: a piece, or a snapshot, is built whole by its job and never changed after; it is
+  published by replacing the `Arc` in a `Mutex<Arc<T>>` taken through `journal::lock` (the time of
+  a pointer copy), and its generation (`AtomicU64`) raised. Readers clone the `Arc` under the same
+  lock and read without any. Chosen over the crate `arc-swap`: the pattern is the code's already,
+  the reads are a few a frame and the writes a few dozen a second at most, and an uncontended lock
+  of Windows (`SRWLOCK`) and an atomic increment take some tens of nanoseconds (estimated), against
+  a crate added to the runtime and its fingerprint; the journal names every wait of T1 on these
+  locks, which would show it otherwise.
+- **Generations**: the registry, each piece, the selection, the states (eyes, locks, highlight), each
+  view's expansion and tree, the Inspector's reads: a counter each. A request carries the
+  generations it was made from; a newer request cancels the job of the older (`Context::cancel`),
+  which checks `is_cancelled` between its slices; an answer whose generations are no longer the
+  latest is dropped when it is handed back. A tree holds the snapshot of the registry it was made
+  from, so that its rows name pieces that still exist.
+- **The hand-offs**: a job swaps what it made itself, then ends; T1 learns it by `on_job`, within the
+  3 ms of the hand-back, and only then publishes `scene.changed` (one event a frame at most) or
+  starts the next job of what changed meanwhile. A burst of tiles makes one index job and one tree
+  job at a time, the publications gathered while they run.
+
+**The locks** added, taken in this order and never otherwise:
+
+| Lock | Guards | Taken by | Held |
+|---|---|---|---|
+| 1. The providers' own (`doodads` placed, `buildings` keeping…), as today | Their state | Their jobs, T1 | As today |
+| 2. `scene pending` | The pieces published and not yet indexed | A provider's job (push), the index job (take all) | The time of a push or a swap of the vector |
+| 3. `scene registry`, `scene selection`, `scene states`, `hierarchy tree`, `scene live` | Each an `Arc` of a snapshot, or the live entities' map | Any thread | The time of a pointer copy or of the delta of one message of the observer |
+| 4. `models owners` → `models published` → `arena holes` → `arena buffer`, as today | — | — | — |
+
+The locks of rows 2 and 3 are leaves: nothing is taken, called, published or waited for while one
+is held. No job waits for the budget of the uploads, the database, `parallel_for` or a command while
+holding a lock of `scene` or `hierarchy`, nor holds one while it calls a provider. T1 takes `arena
+holes` only by `try_lock` for a preview (below), never waiting for a job that grows the arena. The
+connections of the database are taken by their threads alone, with a limit of 10 s, never with any
+other lock held.
+
+**The registry's data.** A piece is one tile of one provider (one building with its rooms and
+doodads for `buildings`, the live entities for `live-world`), its entities in columns, one boxed
+slice a column, no heap allocation an entity:
+
+```rust
+struct Piece {
+    provider: u16, map: u16, tile: TileId, generation: u64,
+    labels: Box<[Arc<str>]>,   // the piece's names of models, templates, liquids, interned in it
+    key: Box<[u64]>,           // 8 B: unique id; building << 16 | group or MODD place; guid; GUID
+    kind: Box<[u8]>,           // 1 B
+    flags: Box<[u16]>,         // 2 B: client, server, live, read only, merged, has children
+    chunk: Box<[u8]>,          // 1 B: the chunk of the tile under its origin, 0 to 255
+    parent: Box<[u32]>,        // 4 B: the row of its game parent in the piece, u32::MAX for none
+    label: Box<[u32]>,         // 4 B: into `labels`; the name is the label and the key's number
+    extra: Box<[u32]>,         // 4 B: its look, its template, its type of liquid
+    origin: Box<[[f32; 3]]>,   // 12 B
+    bounds: Box<[[f32; 6]]>,   // 24 B: least and greatest corner in the world
+    version: Box<[u32]>,       // 4 B
+    components: Box<[u16]>,    // 2 B: into the provider's table of sets of components
+}                              // 66 B an entity
+```
+
+The registry adds for each piece, in its index job, its areas (`u16` an entity), a grid of 16 × 16
+cells over the piece's bounds (257 offsets, then the rows of each cell: some 5 bytes an entity, an
+entity counted in each cell it reaches), and its rows in the map of the stable ids (`kind`, `map`,
+`key` → piece and row: some 24 bytes an entity in a table of the standard library); the trees add
+8 bytes a leaf.
+**About 105 bytes an entity in all (estimated): 53 MB at 500,000, 28 MB for Azeroth's 265,000,
+3 MB for the 27,000 listed around Stormwind.** The names given by the user, the components added and
+the notes are sparse maps by stable id, kept by their modules.
+
+- **Built from what the providers decode already**: the job of `doodads` that reads a tile's
+  placements and makes its instances fills the piece in the same pass (the unique ids, the stems of
+  the models interned in the piece's own table, the transforms it computed, the looks); `buildings`
+  from the file it reads once for its placements (the groups' names and bounds, the doodads of the
+  sets it places); `terrain` from the chunks it writes (their bounds from the heights it already
+  walks), for its full tiles only; `liquids` from the layers it meshes; `spawns` from the rows of the
+  database. Nothing is read or decoded twice for the scene. Bounds not known yet, a doodad's whose
+  look `models` has not loaded, are a box of a yard around the origin; the index job takes the
+  extents of the looks (`Models::extent`) once the looks drawn change, over the doodad pieces with
+  `parallel_for` (300,000 boxes in some 2 ms, estimated).
+- **Swapped whole**: a tile republished replaces its piece; the snapshot of the registry is a slice
+  of the `Arc`s of the pieces (some 1,500 for a continent), made again by the index job, a copy of
+  12 KB; the pieces untouched are shared, never copied.
+
+**The places.** `Formats::areas` reads the 256 areas of a tile from the headers of its `MCNK`, from
+the files of the tiles the archives keep for the last read (`assets/src/recent.rs`, 96 MB), which the
+terrain, the doodads and the buildings read at the same moment: a fraction of a millisecond a tile
+(estimated), once a tile a map, 512 bytes (`u16`, the ids of `AreaTable.dbc` checked to fit in
+15.1). The snapshot holds a table of the 4,096 tiles of the map, each an `Arc<[u16; 256]>` or none:
+from an origin, the tile and the chunk by two divisions, as `terrain.area` finds them, then the area
+by two indexings, O(1). `AreaTable.dbc` (2,307 areas, measured in 9.1b) is made once a client into a
+table by id: the parent, the zone, the depth, the name's place in the order of the locale (about
+65 KB).
+
+**The views.** A view's tree is made by a job of `hierarchy` from a snapshot of the registry, its
+states and the view's expansion:
+
+```rust
+struct Tree { generation: u64, registry: Arc<Snapshot>, nodes: Box<[Node]>, leaves: Arc<[Leaves]> }
+struct Node { parent: u32, children: Range<u32>, leaves: u32, label: u32, kind: u8, entity: u64 } // 32 B
+type Leaves = Arc<[(u32, u32)]>; // a place's leaves, (piece, row), in their order: 8 B a leaf
+```
+
+- **Made again where it changed**: a piece swapped makes dirty the places its entities lie in, before
+  and after; the job sorts again those places' leaves and shares the others' `Arc`s; the nodes (the
+  areas, the buildings, the rooms, the groups: some 20,000) are a slice copied whole, about 640 KB.
+- **The order**: a key a leaf, 64 bits, the rank of its label in the order of the client's locale,
+  then its number: a label's rank is made once when interned (its text in lower case, the accented
+  Latin letters folded by a table of the runtime for enUS, enGB, frFR, deDE, esES and esMX; ruRU,
+  koKR, zhCN and zhTW by code point; numbers compared by their value); the leaves then sort as
+  integers, the places of a burst over `parallel_for`, a place a slice.
+- **What is drawn**: each node keeps the count of the rows shown under it for the expansion the job
+  saw; T1 keeps a copy of those counts (20,000 × 4 bytes, copied when a tree comes, some 10 µs) and
+  changes them up the chain of a node folded or unfolded, at once. The row at a line is found by
+  going down from the root, the children of a node scanned by their counts and its leaves indexed
+  directly: some microseconds a row, for the 40 rows in sight of a fixed height (22 points, the
+  height of the widgets of the theme), drawn by `ScrollArea::show_rows`. The rows are not made into
+  a flat list: a fold would then wait for a job, and the counts give the same rows at once.
+- **Expansion, eyes, locks**: sets of the stable ids of the nodes unfolded (a few hundred), of the
+  entities and branches hidden and locked (sparse); the job turns them into bits of each piece (one
+  bit an entity, 62.5 KB for 500,000), published in the states, read by the providers (hidden) and
+  the picking (locked).
+- **Budgets**: the panel's drawing **0.3 ms** of T1 at most for the rows in sight (estimated from the
+  milestone 5 measure: some 160 shapes); a tile changed shown within **2 frames** (its places sorted
+  again in **under 5 ms**, estimated); a whole tree of 500,000 in **under 100 ms** of the job.
+
+**Search and filters.** A scan over the columns on the thread of `scene`, with `parallel_for` by
+slices of 16,384 rows: the labels matching the text found once among the few thousand of the map,
+then each entity tested by its label's bit, and its number only when the text holds digits; the
+type, the model, the component and the zone are columns already. Some 1 to 3 ms for 500,000
+(estimated); a newer text cancels the scan by its generation; the matches are published by slices,
+the first thousand at once. **No index of trigrams**: the names are a label and a number, the labels
+a few thousand a map, so the scan reads a bit an entity; such an index would take some 30 MB at
+500,000 names (15 trigrams of 4 bytes each, estimated) and be made again with every piece, for a scan
+already within a frame. The names given by the user are scanned apart, in their sparse map.
+
+**Picking.**
+
+- A click becomes a ray on T1 (the view of the frame and the pointer), sent to the thread of `scene`
+  with the generations of the registry and of the states.
+- **Broad phase**: the ray against the bounds of each piece (1,500 tests), then through the cells of
+  the grids it meets (a 2D walk of 32 cells at most a piece), the boxes of their entities that are
+  neither locked nor hidden, by the distance where the ray enters them. The grids are made by the
+  index job when a piece is published.
+- **Narrow phase**, by the providers' `Picker`, nearest box first, until the nearest exact hit is
+  nearer than the next box: the terrain by the heights of its full tiles, read where the terrain
+  keeps them (its tiles' models held from now on in an `Arc`, made writable again by `Arc::make_mut`
+  when edited: nothing copied); the models by the triangles at rest of their finest skin, kept for
+  each look drawn, positions in 16 bits within the bounds of the look and indices in 16 bits, some
+  12 bytes a vertex and a triangle: **30 to 60 MB for the 1,361 to 1,450 looks drawn in the densest
+  area of Northrend** (estimated from measured counts and a typical doodad; measured in 15.1), or
+  rebuilt from the archive for the look hit, kept in 16 MB, if the memory says so; the buildings by
+  the BSP tree of each group over its vertices, the trees and cells already kept for the groups
+  inside (28 to 46 MB, measured in 9.6d2) and **some 33 MB for Dalaran at 4 tiles in all** (its
+  1,789,460 vertices of 12 bytes and 1,853,866 triangles of 6, measured counts); the live entities
+  by their boxes in `live-world`'s snapshot, a few hundred.
+- **Budget**: **2 ms** on the thread of `scene` for a click (estimated: the broad phase some
+  0.1 ms, a model's triangles some tens of microseconds each); the selection changed at the frame
+  after the click, the next hand-back. The thread of its own keeps a click from waiting behind the
+  pool's jobs, which are never pre-empted (a building's file took 174 ms to read, *Step 9.6c, as
+  built*).
+- **A rectangle**: the origins projected by the view, each tested against the rectangle and the
+  kinds of the filter, over `parallel_for` by slices of 16,384: **5 ms for 500,000** (estimated).
+- **The selection**: its stable ids sorted (16 bytes each), the active one, its bounds and middle,
+  and for the generation of the registry it was resolved against, a bit set each piece; resolved
+  again by a job when the registry changes. **Smart selections** are scans of a column (the label,
+  the template, the kind and the area), or, for *the same texture*, of the looks whose textures hold
+  it, a table of the looks made once by `models`: some milliseconds (estimated).
+
+**The selection shown in 3D.**
+
+- **The tint and the outline**, flags of the instance written into the arena of the instances
+  `models` keeps: the last float of `extra`, today 0 or 1 for an instance inside, becomes a small
+  integer (inside, tint, outline, following the gizmo), read as bits by the shaders: the 64 bytes of
+  an instance stay. `Models::mark(owner, ids, bits)` changes the flags of the owner's instances kept
+  and writes its range again in place by `Arena::write` (not held back), without sorting them again,
+  from the provider's job: a tile of 3,576 doodads is 229 KB; **10,000 doodads selected over some
+  ten tiles, 2.3 MB and about 1 ms of the job** (estimated). The buildings flag their placements'
+  entries, which their layer writes in `prepare` once they change (some hundreds of buildings).
+- **The outline**: the choice of `models` on the GPU, which tests every instance already, adds the
+  outlined instances in sight to an indirect list of their own; after the second pass of the frame,
+  each layer draws its outlined items into a mask of one byte a pixel, one sample
+  (`Layer::draw_mask`), their fragments tested against the first level of the pyramid of the depth
+  (the farthest of the samples of each pixel, *Step 9.6f1*): 1 seen, a half hidden; then a pass over
+  the colour resolved, one triangle over the view, draws the colour of the outline where the mask is
+  empty and a neighbour within 2 pixels is not, at that neighbour's strength. The mask is not
+  multisampled: an outline 2 pixels wide needs no edge smoothed, and a mask of 4 samples would take
+  14.7 MB at 2560 × 1440 and a resolve. **Some 0.3 ms of the GPU** at 2560 × 1440 for up to 2
+  million triangles outlined (estimated from the throughput of the user's GPU), its outlines for the
+  first 4,096 instances outlined in sight, the active entity always; where the device makes no
+  pyramid, the outline is drawn whole, undimmed.
+- **The boxes**: a layer of `scene-tools`, one draw of instanced lines (a box 24 bytes, its 12 edges
+  made by the vertex shader), its buffer written once the selection changes, in the last blended
+  phase of the second pass, tested against the depth; never shapes of egui (10,000 shapes 9.4 ms,
+  milestone 5).
+- **The order of a frame**: the first pass (opaque), the pyramid, the tests of the layers, the second
+  pass (revealed, beyond, water, near; the boxes in it), the colour resolved, the mask, the outline,
+  then the image to egui.
+
+**The gizmos and the edits live.** A drag shows no lag: T1 computes the gizmo's change (a few matrix
+products) and writes the transforms previewed of the selected instances straight into their buffers,
+through a fast path the providers of Rust give the scene (`scene::Preview`):
+
+- `models`: the rows of the instances' transforms (48 bytes each) written in place by a new
+  `Arena::try_write`, its lock taken by `try_lock`: when a job holds the holes of the arena, the
+  preview of that owner waits for the next frame (counted in the journal). A few instances of an
+  owner are written each by itself; more than 64 of an owner, its whole range from the copy `models`
+  keeps.
+- `buildings`: the layer given a new list of placements with the dragged transforms (406 kept at
+  most, measured in Dalaran at 4 tiles).
+- **Costs (estimated)**: 1 entity, some microseconds; 100, under 0.1 ms; 4,096, about 0.2 MB and
+  0.3 ms of T1; past 4,096 instances or 1 MB a frame, the preview is the GPU's: the instances are
+  flagged *following the gizmo* when the drag starts (as the tint), and the shaders of `models`, the
+  choice included, apply to them the gizmo's change given in the camera's buffer (a translation, a
+  rotation and a scale about each origin or about the middle, *Pivot* or *Center*): 64 bytes a frame,
+  whatever the count. The snapping to the ground, which needs each object's own height, is then
+  applied when the drag ends.
+- **Released**: the change is committed once, as one gesture: the writes name the selection by its
+  generation, never its ids one by one (*The Inspector*, below); each provider records its command on
+  T1 (some 2 ms for 10,000, estimated), then places its instances again by its jobs, the preview
+  showing the same values meanwhile. Until then an instance moved far keeps its owner's bounds of
+  before: the layer of `models` takes the owners of a preview as in sight.
+- The modules of other languages have no fast path: their entities, drawn by none of their own,
+  show their boxes moving.
+
+**The Inspector.**
+
+- **Reads**: a job of the Inspector calls the read commands by `Editor::call`, a Rust module's
+  running on the calling thread (T4), a compiled module's too (milestone 3); for more than one
+  entity, the module gives a summary (each field's value common to all, or *mixed*), computed over
+  its columns with `parallel_for`, rather than a value an entity: **3 ms for 10,000** (estimated).
+  Kept by the generations of the selection and of the entities' versions; read again when
+  `scene.changed` names one of them.
+- **Writes, batched**: a write names its entities by a set (`{"set": "selection", "generation": 41}`,
+  or a list for a few), and the change once (`+10` for all, a value, or the gizmo's change); the
+  provider resolves the set through the service (a module of another language by `scene.resolve`, its
+  own keys back in one call). One call a provider and a gesture, whatever the count, through the C
+  interface as through Rust: never a call an entity.
+- **Shown at once**: a value typed is shown by the Inspector as the property grid shows a change
+  under way, marked, until the provider's next publication of those entities or its answer; a
+  refusal puts the value back and says why.
+
+**The history.** A change keeps, for each entity and field, the old and the new values: a Transform
+of a doodad 26 bytes each way (a position, a rotation, a scale in 1024ths) and its key, **60 bytes an
+entity: 600 KB for an entry of 10,000**. The kernel gains `Command::bytes` (what a command holds, 64
+bytes by default) and a limit of the history, 256 MB by default (a setting): the oldest entries go
+first, said in the log. Measured with the gestures of 15.5.
+
+**The project.**
+
+- **Written by a job**: the sections given by the modules on T1 (`serde_json::Value`s already made),
+  the file serialized and written by a job into a temporary file renamed over the last, as the
+  settings; T1 never writes. Some 100 to 160 bytes a change (an id, a position, a rotation, a scale,
+  a file for one created): **10,000 changes, 1.0 to 1.6 MB, written in some 20 ms** (estimated).
+- **Saved by itself** every 60 seconds while something changed (a setting, 0 for never), into
+  `uniwow-project.autosave.json`, offered at the next opening when it is newer than the project.
+- **Read at opening**: the file parsed by a job, the sections handed to their modules on T1 as
+  values, each module turning its own into its data in a job of its own, all at once.
+
+**The database** (`libs/db` on the crate `mysql`, `world-db`):
+
+- **Threads of their own**: a query waits for the network, so it runs on a thread of
+  `Context::spawn_thread` (T2: work that waits), never on a worker of the pool; the connections in a
+  pool of the crate (`mysql::Pool`, one to three connections: one for the reads of a map, one for the
+  Inspector, one spare), taken with a limit of 10 s. Never a query on T1: the service says it in the
+  log in debug, as `formats` does.
+- **What is read, a map at a time**: `creature` by `map` (`idx_map`); `gameobject` by `map` too,
+  which no index serves in the base SQL (a scan of its 96,624 rows, estimated well under a second);
+  then the templates named, by lists of 1,000 entries (the key `entry`), their names in the client's
+  locale (`*_template_locale`, keyed by `entry` and `locale`), the looks of
+  `creature_template_model`; *Quests*'s relations (keyed by `id` and `quest`) for the template
+  shown. Nothing is read by tile: the rows of a map are few. The editor adds no index (E1); the user
+  may.
+- **Streamed**: the rows decoded as they come (`exec_iter`), by batches of 4,096, into columns.
+- **Kept**: some 90 bytes a creature and 76 a game object in columns, 100 a template: **Northrend
+  about 5.4 MB** (estimated from the base SQL's counts). Read again when the map changes, or when the
+  user asks.
+- **The password**: asked at each start, held in a buffer overwritten with zeros once the session
+  ends, given to the crate when connecting, never formatted into a text.
+
+**The live world merged.** The connection thread of `live-world` gives the scene, at each message of
+the observer (10 to 20 a second), the entities that appeared and those that left
+(`Scene::live_delta`), under `scene live`: a map of GUIDs (some 40 bytes an entity) to the spawn each
+names or to its row of *Live*. The rows of the views change only then; the places moving are read
+from `live-world`'s snapshot by the Inspector and the picking, never copied into the registry. **Some
+tens of microseconds a message** (estimated, a few dozen entities appearing or leaving).
+
+**Budgets of a frame on T1** (estimated, measured at each step with the journal of the frames):
+
+| Work | Budget | From |
+|---|---|---|
+| The snapshots taken | 0.01 ms | 4 to 6 locks uncontended, some 50 ns each |
+| The Hierarchy's rows in sight | 0.3 ms | Milestone 5: 1,000 shapes 0.9 ms, some 160 here |
+| The Inspector's fields in sight | 0.3 ms | The same |
+| The tools: the gizmo painted (under 200 shapes), its arithmetic | 0.2 ms | The same |
+| The preview of a drag | 0.3 ms up to 4,096 instances; 0.01 past them (the GPU's) | 48 bytes an instance written; one buffer |
+| Applying a gesture of 10,000 | 2 ms, once at the release | The deltas copied, the overlays changed |
+| What all of it adds | 1 ms flying, 1.5 ms dragging | Against 16.7 ms a frame |
+
+The jobs and threads (estimated, measured by the benchmarks):
+
+| Work | Budget |
+|---|---|
+| A piece of 3,576 doodads built in the provider's job | 1 ms |
+| Its index (areas, grid, ids) | 1 ms |
+| The registry of 500,000 indexed from nothing | 150 ms of processor, 30 ms on 16 threads |
+| A tile's places sorted again in the tree | 5 ms; shown within 2 frames |
+| A whole tree of 500,000 | 100 ms |
+| A search over 500,000 | 3 ms |
+| A click picked | 2 ms |
+| A rectangle or a smart selection over 500,000 | 5 ms |
+| The Inspector's summary of 10,000 | 3 ms |
+| 10,000 doodads marked | 1 ms |
+| The project of 10,000 changes written | 20 ms |
+| A continent's spawns and templates read | 2 s on its thread (the user's database, measured in 15.1) |
+
+**Measured, at each step:**
+
+- **The journal of the frames** gains a column, *counted by the modules* (`journal::count(name, n)`):
+  the pieces published, the jobs of the scene dropped as superseded, the previews put off by a lock,
+  the bytes of preview written by T1; and parts of T1 of their own (`scene: snapshots`,
+  `hierarchy: rows`, `inspector: fields`, `scene-tools: tools`, `scene-tools: preview`).
+- **Benchmarks**: `cargo xtask bench scene` runs, in release, the tests marked ignored of `scene`,
+  `hierarchy` and `properties` named `bench_…`, on synthetic worlds of 50,000 and 500,000 entities
+  made from a seed (pieces of 3,576 like the densest tile, buildings of 286 rooms like Stormwind's):
+  the registry built, a tile republished, a view's tree whole and for a tile, a search, 1,000 clicks,
+  100 rectangles, a smart selection, a summary and an entry of the history of 10,000, the project of
+  10,000 changes. It writes a table the user runs on his machine; the spec records it at each step.
+- **Concurrency under stress**, seeded so that a failure replays, as the groups of S4 were tested:
+  eight threads republishing pieces at random while the index and tree jobs run, the selection
+  changes and readers take snapshots; checked: every snapshot whole (its pieces and their indexes of
+  one generation), no entity lost or doubled, the generations rising, the answers of an older
+  generation dropped, no lock of the scene held while waiting (a test hook that fails if one is).
+
+**Set aside, for speed:**
+
+| Alternative | Why not |
+|---|---|
+| An ECS crate (`bevy_ecs`, `hecs`) | The providers own their data (F3); the registry is a read-mostly index of what they publish, read by many threads at once, which an ECS world shares only behind a lock or by double buffering; its scheduler would be another pool. The pieces in columns give the same scans. A large crate in the runtime (its fingerprint and symbols) for that |
+| Picking by the GPU, ids written by the layers, revisited for speed | Not faster: the ids read back are a frame or two late, where the processor answers at the next frame; every pipeline of every layer would write an id; it would serve the 3D view only. Kept as the remedy for the foliage keyed by alpha |
+| `rayon` | A second pool fighting the kernel's for the cores (the reason it was taken out of the copy of `wow-mpq` in milestone 9); `parallel_for` gives the fork-join, its slices before the jobs |
+| `arc-swap` | Above: the brief lock is the code's pattern already, measured by the journal |
+| Persistent maps (`im`) for the registry | The pieces are already shared by `Arc`; the snapshot copies 12 KB of pointers |
+| A flat list of the visible rows | A fold would wait for a job; the counts give the same rows at once |
+| A query by tile | The rows of a continent are some tens of thousands, read in one go |
+
 #### Steps
 
 Each step is built, tested, reviewed and checked by the user before the next one, as in milestone
 9; each says what it adds to the table of capabilities.
 
-| Step | Content |
-|---|---|
-| 15.1 | Verified first, by probes not kept: the depth of the chains of `AreaTable.dbc`; the unique ids listed twice with other data, over the four continents; the memory the triangles at rest of the models and the trees of every group would take in Dalaran and Northrend; `mysql` in the runtime (its crates, the symbols, the fingerprint) and its connection to the user's MySQL (its version, its authentication without TLS); the rows of `creature` and `gameobject` of each continent and the time to read them; the hotkeys (*Decided by the user after the proposal*, point 1) |
-| 15.2 | The entities and the registry |
-| 15.3 | The selection, picking and the selection shown in 3D |
-| 15.4 | The Hierarchy, its main view |
-| 15.5 | The Inspector: Transform, raw data, several objects; the groups of a gesture |
-| 15.6 | The gizmos |
-| 15.7 | The project |
-| 15.8 | Create, duplicate, delete |
-| 15.9 | Groups and prefabs |
-| 15.10 | The views *Files* and *By type* |
-| 15.11 | The world database, the server objects, the live world merged, *Quests* (in three parts) |
-| 15.12 | Components of every language |
-| 15.13 | Materials and the Inspector of a chunk |
-| 15.14 | A doodad made a game object |
+| Step | Content | Speed: its benchmarks and budgets |
+|---|---|---|
+| 15.1 | Verified first, by probes not kept: the depth of the chains of `AreaTable.dbc`; the unique ids listed twice with other data, over the four continents; the memory the triangles at rest of the models and the trees of every group would take in Dalaran and Northrend; `mysql` in the runtime (its crates, the symbols, the fingerprint) and its connection to the user's MySQL (its version, its authentication without TLS); the rows of `creature` and `gameobject` of each continent and the time to read them; the hotkeys (*Decided by the user after the proposal*, point 1) | Measured, by the probes: the bytes of the pick meshes of the looks drawn in Dalaran and in the densest area of Northrend (30 to 60 MB estimated), of the trees and vertices of the buildings (33 MB estimated in Dalaran at 4 tiles); the reading of a continent's spawns and templates from the user's database, its rows and its time (2 s budget); `Formats::areas` a tile (under 1 ms); the crates and exported symbols `mysql` adds |
+| 15.2 | The entities and the registry | Benchmarks: a piece of 3,576 built (1 ms) and indexed (1 ms); 500,000 indexed from nothing (30 ms on 16 threads); the bytes an entity (105 estimated). Stress: eight threads republishing while snapshots are read. The journal: `scene: snapshots` under 0.01 ms, flying over Northrend at the distances by default, the interface thread no slower than the commit before |
+| 15.3 | The selection, picking and the selection shown in 3D | Benchmarks: 1,000 clicks (2 ms each), 100 rectangles and a smart selection over 500,000 (5 ms); 10,000 marked (1 ms of the job, 2.3 MB). On the software adapter, then the user's GPU: the outline under 0.3 ms at 2560 × 1440 for 2 million triangles, the boxes one draw. The selection changed at the frame after the click |
+| 15.4 | The Hierarchy, its main view | Benchmarks: a tree of 500,000 (100 ms), a tile's places sorted again (5 ms), a search (3 ms). The journal: `hierarchy: rows` under 0.3 ms, torn off or docked; a tile loaded shown within 2 frames |
+| 15.5 | The Inspector: Transform, raw data, several objects; the groups of a gesture | Benchmarks: a summary of 10,000 (3 ms); an entry of 10,000 in the history (600 KB) and the limit of the history. Stress: the groups of a gesture among those of S4. The journal: `inspector: fields` under 0.3 ms; a gesture of 10,000 applied in 2 ms at the release |
+| 15.6 | The gizmos | The journal while dragging 1, 100 and 4,096 doodads (`scene-tools: preview` 0.3 ms at most, no frame late), then 10,000 by the GPU's preview; the previews put off by the lock of the arena counted |
+| 15.7 | The project | Benchmarks: 10,000 changes written (20 ms of a job, 1.0 to 1.6 MB) and read again; the autosave never on the interface thread (the journal) |
+| 15.8 | Create, duplicate, delete | The highest unique id of a map read over every tile (some 0.3 s for Northrend, from 9.6b); 1,000 duplicated in one gesture |
+| 15.9 | Groups and prefabs | A group of 1,000 dragged (the same budgets as 15.6); a prefab of 50 objects changed with 100 instances, one gesture |
+| 15.10 | The views *Files* and *By type* | Their trees of 500,000, as 15.4 |
+| 15.11 | The world database, the server objects, the live world merged, *Quests* (in three parts) | A continent's spawns read on threads of their own, never a worker of the pool nor the interface (the journal); their columns (5.4 MB estimated for Northrend); a message of the observer applied in some tens of microseconds |
+| 15.12 | Components of every language | A write of 10,000 entities by a C# module in one call; a declaration and its reads through the C interface, timed |
+| 15.13 | Materials and the Inspector of a chunk | The previews of the textures made by jobs, at most 2 ms of the interface thread to show them |
+| 15.14 | A doodad made a game object | One gesture; nothing beyond the budgets of 15.5 |
 
 **15.2, the entities and the registry.**
 
@@ -8412,10 +8877,11 @@ Left to the steps, which answer them by measure or by reading:
    whether that is close enough, or the GPU's ids are needed (*Set aside*).
 2. The memory of the triangles kept for picking (15.1), and whether they are read again from the
    archives on demand instead.
-3. The outline of the hidden parts: the depth of the frame is multisampled; a copy resolved, or the
-   whole outline without depth.
-4. The object dragged follows the gizmo a frame late (a change goes through a call served at the
-   next pass of the kernel); whether it shows at 60 frames a second.
+3. The outline of the hidden parts, dimmed by the first level of the pyramid, made from the
+   opaque of the first pass only (*Technical specification*): whether what the second pass reveals
+   is told right, to see.
+4. The drag previewed by the providers' fast path, or by the GPU past 4,096 instances: the
+   instances whose arena a job holds wait a frame; how often, counted by the journal.
 5. The chains of `AreaTable.dbc` deeper than a zone and a subzone, and the areas of chunks that
    name another map's area.
 6. The unique ids listed twice with other data: kept as two entities by the tile listing them; what
@@ -8431,9 +8897,10 @@ Left to the steps, which answer them by measure or by reading:
     question.
 12. The scale of a building: the 3.3.5a client has none; whether the modern tiles of WarcraftXL read
     the flag 0x4 (`modfUseScale`) is to read in its sources.
-13. The cost of `Models::mark` when 10,000 doodads are selected at once, over many owners.
-14. The trees of the views made again while flying fast at 90 tiles, each tile changing its piece;
-    the 100 ms between two trees, or more.
+13. The cost of `Models::mark` when 10,000 doodads are selected at once, over many owners: 1 ms
+    and 2.3 MB estimated, to measure.
+14. The trees of the views made again while flying fast at 90 tiles, each tile changing its piece:
+    one job at a time, whether the places sorted again keep within a frame or two.
 15. The lock of another module's objects drawn inside the Inspector, against the rule that no lock is
     held while the kernel calls a module.
 16. The water: whether its surface is picked (locked by default here, as the terrain) and how a
@@ -8455,31 +8922,18 @@ Left to the steps, which answer them by measure or by reading:
 - **The prefabs linked** are the largest part of this work (overrides, apply, revert, instances made
   again); nested prefabs are left out for that reason.
 - **The database**: the authentication of the user's MySQL without TLS (15.1); a query that is slow
-  on a large table holds a job, never the interface; a session read only also by its user's rights,
-  which the user can make so (a user with `SELECT` only).
-
-#### Decided by the user after the proposal
-
-1. **E for Rotate and E to fly up**: the flying keys up and down move to other keys, W, E and R
-   choosing the gizmos. Proposed: Space up and C down (Ctrl being the key of the snapping and of the
-   selection, Space playing the timeline only over its panel), checked against every hotkey in
-   15.1; *Edit > Hotkey* says besides two hotkeys of different modules bound to the same keys when
-   they act over the same panel.
-2. **The changes in memory at close**: kept in the project as lists of changes, readable, a section a
-   module (the entities created, moved, changed, deleted, with their values), read again when the
-   project opens; still nothing written to the game's files or the database.
-3. **A lock and the Hierarchy**: a locked entity is not picked in the 3D view but can be chosen in
-   the Hierarchy, as Unity.
-4. **The summoned live creatures and game objects** (no spawn): in *Live* with the players, read
-   only.
-5. **The water locked by default**, as the terrain, so that a click over a lake picks what is under
-   it.
-6. **The relative values**: `+n`, `-=n`, `*n`, `/n` change each value; `-n` alone is a value.
-7. **The component *Quests* built in 15.11c**, read and changed in memory, as the first drawing of a
-   module's own and the server component that 15.14 needs; the other components of decision 20 in
-   later works.
-8. **The scope by default**: 2 tiles around the camera listed, whatever the modules hold at their
-   distances; a setting widens it.
+  on a large table holds a thread of its own, never the pool nor the interface; a session read only
+  also by its user's rights, which the user can make so (a user with `SELECT` only); `gameobject`
+  has no index on `map` in the base SQL, so a map's game objects are a scan of the table.
+- **The speed estimated** (*Technical specification*): every budget there not yet measured is an
+  estimate; a benchmark that misses its budget by more than half stops its step for a review of
+  the design, before the next step builds on it.
+- **The memory added**: some 53 MB for 500,000 entities, 30 to 60 MB of pick meshes of the models
+  and some 33 MB of the buildings' in Dalaran at 4 tiles, all estimated; the private memory of the
+  process already reaches 6 to 8 GB in Dalaran at 4 tiles (*Step 9.6d1, its review points as
+  built*), the pick meshes rebuilt on demand where it says so.
+- **The arena of the instances**: a preview that finds its lock held by a job waits a frame, so that
+  a drag over tiles still loading may stutter; counted by the journal from 15.6.
 
 ### Milestone 10: Lua modules (outline)
 
@@ -8541,7 +8995,7 @@ the frames; each change one undo entry. Built on the engine and widgets of miles
 - Project model: what a project contains, where it is stored, how it maps to a WoW-mods module.
   Settled in part by the user for milestone 15 (decision 28): a folder the user chooses, holding a
   project file of readable text (groups, prefabs, names, the eyes and locks, notes), later also the
-  files changed before they are exported; its form is proposed there (*The project*). Still open:
+  files changed before they are exported; its form is set there (*The project*). Still open:
   how a project maps to a WoW-mods module, and its settings of its own.
 - Installations targeted: client with WXL, server, database connection. Milestone 9 settles part of it:
   the client's folder, and the observer on the same machine (address, port, token); milestone 15
