@@ -7564,8 +7564,8 @@ said where it is made, and what the game is to tell listed at the end.
     a job (a loop of a minute takes a while); `Clip::new` for sounds made.
   - `Engine`: started with a thread of its own (`uniwow audio`), which opens the default device,
     rodio trying the others if it cannot, and holds it open; the sounds played meanwhile wait for it,
-    those stopped meanwhile never heard. Without a device, the reason is logged once as a warning and
-    kept (`State::Silent`), nothing is played, and nothing waits. A sound played (`Sound`: its clip,
+    those stopped meanwhile never heard. Without a device, or when its opening panics, the reason is
+    logged once as a warning and kept (`State::Silent`), nothing is played, and nothing waits. A sound played (`Sound`: its clip,
     its category, its own volume, looped or once, faded in over a time) is added to the mixer of the
     device; nothing asked of the engine waits for the device. What changes of a sound (its volume and
     the time to reach it, its stop) is read from atomics every 256 frames (`BLOCK`), its own volume
@@ -7635,8 +7635,8 @@ said where it is made, and what the game is to tell listed at the end.
   muted and heard again, the volumes held within 0 and 1; faded in, then to another volume, then
   stopped over its fade and gone, a sound unknown asked nothing; a clip ended or looped, two sounds
   added; played before the device opens and heard once it is, one stopped meanwhile never heard;
-  without a device the reason said, nothing playing, nothing waited for; shut down, every sound
-  stopped and nothing played after. The module: the service, the category and its defaults, its
+  without a device, or its opening panicking, the reason said, nothing playing, nothing waited
+  for; shut down, every sound stopped and nothing played after. The module: the service, the category and its defaults, its
   panel closed by default; the volumes of the settings taken at the next frame, silent while
   minimised and heard again, not when the setting says otherwise; the commands playing a file of the
   client's archives looped in the ambience at its volume, its volume changed, stopped, once and
@@ -7656,8 +7656,8 @@ said where it is made, and what the game is to tell listed at the end.
   moment, of one of its three files, at 0.8 times the loudness of the strike, three at most missed
   while their files are read; none in a room, its loop faded out; none with the lightning off, its
   loop back; the black rain playing nothing, the loop before faded out; the loop stopped at once
-  when the module stops; why nothing is heard without a device and without the service. 29 changes
-  made on purpose (10 of the lightning, 9 of the runtime, 10 of the weather), all caught, one once
+  when the module stops; why nothing is heard without a device and without the service. 30 changes
+  made on purpose (10 of the lightning, of the runtime and of the weather), all caught, one once
   the test listened for the thunders of the storm before from its first step on.
 - **Not done**: the lightning drawn as a bolt in the sky (a model, or a line of light); the clouds
   lit apart from the ground, the clouds not being drawn yet; lightning in any weather but the

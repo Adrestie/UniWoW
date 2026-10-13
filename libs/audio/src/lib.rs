@@ -405,7 +405,16 @@ impl Engine {
         let started = std::thread::Builder::new()
             .name("uniwow audio".to_owned())
             .spawn(move || {
-                let output = match open() {
+                // A device whose opening panics is no device.
+                let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(open)).unwrap_or_else(|panic| {
+                    let message = panic
+                        .downcast_ref::<&str>()
+                        .map(|text| (*text).to_owned())
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_default();
+                    Err(format!("its opening failed ({message})"))
+                });
+                let output = match opened {
                     Ok(output) => output,
                     Err(why) => {
                         log::warn!("no sound is played: {why}");

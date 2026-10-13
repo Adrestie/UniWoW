@@ -236,6 +236,11 @@ fn the_sounds_played_before_the_device_opens_play_once_it_is_and_none_without_on
     // Without a device: nothing played, the reason said, nothing waited for.
     let silent = Engine::with_output(Box::new(|| Err("no device here".to_owned())));
     assert_eq!(settled(&silent), State::Silent("no device here".to_owned()));
+    let panicking = Engine::with_output(Box::new(|| panic!("a driver gone wrong")));
+    assert_eq!(
+        settled(&panicking),
+        State::Silent("its opening failed (a driver gone wrong)".to_owned())
+    );
     let id = silent.play(sound(&[0.5], Category::Effects, 1.0, true, 0));
     assert!(!silent.playing(id));
     assert_eq!(silent.count(), 0);
