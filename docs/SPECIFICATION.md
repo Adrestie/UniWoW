@@ -6162,7 +6162,13 @@ section.
     of the terrain; the buffers and the textures of the looks of their own of `models`, and the
     tables of its choice. Not passed: what a frame needs at once, the per-frame tables of the
     layers, the bones the thread of the animations writes, and a range of an arena written again
-    in place, as the instances an owner moves.
+    in place, as the instances an owner moves; nor the instances of the owners of `models`, an
+    arena not held back (`Arena::not_held_back`): they are few, and the jobs of the doodads put
+    them under the lock of their module, which the interface thread takes when the map changes. A
+    job must never wait for the budget holding a lock the interface thread waits for: the budget is
+    given again only once that thread draws its frame, the time apart. For the same reason the
+    panel of the buildings no longer waits for the lock of the doodads placed, the count of the
+    frame before shown while a job holds it.
   - The journal of the frames says, in a column of its own, how many jobs the budget held back in
     a frame and how long they waited in all.
   - **Tested**: nothing held back before the first frame, then the budget of each frame given

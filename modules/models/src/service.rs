@@ -92,20 +92,25 @@ impl Service {
             .clone()
     }
 
-    /// The arena of the owners' instances; none before the view has its device.
+    /// The arena of the owners' instances; none before the view has its device. Not held back by
+    /// the budget of the uploads of a frame: an owner's instances are few and what the next frame
+    /// shows, and the job placing them may hold the lock of its module, as the doodads do.
     pub fn instances(&self) -> Option<&Arc<Arena>> {
         let (device, queue) = self.gpu.get()?;
         Some(self.instances.get_or_init(|| {
-            Arc::new(Arena::new(
-                device,
-                queue,
-                "models instances",
-                // Read as the vertices of the instances, and by the choice and the shaders of the
-                // pool where each owner's are.
-                wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE,
-                size_of::<InstanceGpu>() as u64,
-                1 << 12,
-            ))
+            Arc::new(
+                Arena::new(
+                    device,
+                    queue,
+                    "models instances",
+                    // Read as the vertices of the instances, and by the choice and the shaders of the
+                    // pool where each owner's are.
+                    wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE,
+                    size_of::<InstanceGpu>() as u64,
+                    1 << 12,
+                )
+                .not_held_back(),
+            )
         }))
     }
 }

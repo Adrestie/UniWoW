@@ -7,7 +7,8 @@
 //! Its jobs write a range by `Queue::write_buffer`, under the lock of its holes, without a buffer of
 //! their own; the frame reads the buffer and the bytes held without that lock. A range put, and the
 //! copy of a growth, first pass the budget of the uploads of a frame (`uploads`), before that lock:
-//! the interface thread takes it to give a range back.
+//! the interface thread takes it to give a range back; but in an arena not held back by it
+//! (`Arena::not_held_back`).
 
 use std::fmt;
 use std::ops::Range;
@@ -198,6 +199,8 @@ pub struct Arena {
     held: AtomicU64,
     used: AtomicU64,
     given: AtomicU64,
+    /// Whether what is put passes the budget of the uploads of a frame.
+    held_back: bool,
 }
 
 impl Arena {
@@ -228,6 +231,23 @@ impl Arena {
             held: AtomicU64::new(0),
             used: AtomicU64::new(0),
             given: AtomicU64::new(0),
+            held_back: true,
+        }
+    }
+
+    /// The arena, what is put in it not held back by the budget of the uploads of a frame: for
+    /// small ranges put by a job holding a lock the interface thread may wait for, such as the
+    /// instances of an owner of `models`, put by the job of the doodads placing them under the lock
+    /// of its module.
+    pub fn not_held_back(mut self) -> Self {
+        self.held_back = false;
+        self
+    }
+
+    /// Waits for the turn of `bytes` at the budget of the uploads of a frame, where held back.
+    fn pass(&self, bytes: u64) {
+        if self.held_back {
+            uploads::pass(bytes);
         }
     }
 
@@ -237,7 +257,7 @@ impl Arena {
     pub fn put(&self, data: &[u8]) -> Result<Range<u64>, NoRoom> {
         debug_assert_eq!(data.len() as u64 % self.unit, 0);
         let length = data.len() as u64 / self.unit;
-        uploads::pass(data.len() as u64);
+        self.pass(data.len() as u64);
         let mut holes = journal::lock(&self.holes, "arena holes");
         let mut copy_passed = false;
         let range = loop {
@@ -245,10 +265,10 @@ impl Arena {
                 break range;
             }
             let copied = self.held.load(Ordering::Acquire);
-            if !copy_passed && copied > 0 {
+            if self.held_back && !copy_passed && copied > 0 {
                 // Another job may grow it meanwhile: its holes are looked at again.
                 drop(holes);
-                uploads::pass(copied);
+                self.pass(copied);
                 copy_passed = true;
                 holes = journal::lock(&self.holes, "arena holes");
                 continue;

@@ -156,6 +156,8 @@ struct BuildingsModule {
     refusals: VecDeque<String>,
     /// Whether the buildings drawn changed since the scene was last given them.
     changed: bool,
+    /// The buildings whose doodads are placed, as the panel last read it.
+    doodads_placed: usize,
     told_budget: Option<Demand>,
     /// The last frame signal seen, and the camera then.
     frame: u64,
@@ -641,7 +643,11 @@ impl Module for BuildingsModule {
                 FileState::Refused => refused += 1,
             }
         }
-        let doodads = lock(&self.owners).placed();
+        // A job placing doodads holds the lock: the count of the frame before then.
+        if let Ok(owners) = self.owners.try_lock() {
+            self.doodads_placed = owners.placed();
+        }
+        let doodads = self.doodads_placed;
         let bytes = self.shared.as_ref().map_or(0, |shared| shared.bytes());
         ui.label(format!(
             "{map}: {} tiles held, {} reading; {} buildings, of {ready} files read, {loading} reading, {waiting} \
