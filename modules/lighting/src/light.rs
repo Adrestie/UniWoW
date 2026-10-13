@@ -507,6 +507,26 @@ pub fn sun_direction(time: f32) -> [f32; 3] {
     [across, across, -angle.cos()]
 }
 
+/// The keys of the glow at night of the materials of the buildings, in half-minutes from midnight,
+/// and its value at each: whole until 6 h, nothing from 7 h to 20 h 30, whole again from 21 h 30.
+const NIGHT_KEYS: [(f32, f32); 4] = [(720.0, 1.0), (840.0, 0.0), (2460.0, 0.0), (2580.0, 1.0)];
+
+/// How much the materials of the buildings that glow at night (their flag 0x10) add their emissive
+/// colour at `time`, in half-minutes, from 0 to 1: as Wow.exe 12340 reads its table of four keys
+/// (`DayNight::SetColors`, 0x7F3230, its table at 0xAF4C80, as the comment of Noggit Red gives it,
+/// read for the facts only), linearly between them, whole from 21 h 30 to 6 h.
+pub fn night_glow(time: f32) -> f32 {
+    let time = time.rem_euclid(DAY);
+    let after = NIGHT_KEYS.iter().position(|(key, _)| time < *key);
+    match after {
+        Some(0) | None => 1.0,
+        Some(at) => {
+            let ((from, a), (to, b)) = (NIGHT_KEYS[at - 1], NIGHT_KEYS[at]);
+            mix(a, b, (time - from) / (to - from))
+        }
+    }
+}
+
 /// The linear value of a value in gamma, as an sRGB target encodes it back.
 fn linear(gamma: f32) -> f32 {
     if gamma <= 0.04045 {
@@ -530,8 +550,9 @@ fn gamma(linear: f32) -> f32 {
 /// linear (the fixed one where it has none); the fog of the game `game_fog`, where it starts and
 /// ends and its rate, when it is drawn (`Tables::fog_of_the_game`); its sky, the bands 2 to 7 in
 /// gamma, the colour of its fog where it has none, or that colour all over when the eye is
-/// `immersed` in a liquid, the client drawing no sky then (0x79ACAF); and the light of its water, its
-/// bands black where it has none, as Noggit reads them, with the alphas of its params.
+/// `immersed` in a liquid, the client drawing no sky then (0x79ACAF); the light of its water, its
+/// bands black where it has none, as Noggit reads them, with the alphas of its params; and the glow
+/// at night of the buildings at that hour (`night_glow`).
 pub fn map_light(values: &Values, time: f32, game_fog: Option<[f32; 3]>, immersed: bool) -> MapLight {
     let fixed = Sun::default();
     let fog = values.colours[7].unwrap_or(Fog::default().colour.map(gamma));
@@ -557,6 +578,7 @@ pub fn map_light(values: &Values, time: f32, game_fog: Option<[f32; 3]>, immerse
             ocean: [with(14, values.ocean_alphas[0]), with(15, values.ocean_alphas[1])],
             sun: band(9),
         },
+        night: night_glow(time),
     }
 }
 

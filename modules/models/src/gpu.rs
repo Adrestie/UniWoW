@@ -56,7 +56,8 @@ pub fn moving_radius(model: &formats::Model) -> f32 {
         .fold(model.radius, |radius, sequence| radius.max(sequence.radius))
 }
 
-/// An instance as the shader reads it: the rows of its transform, then its alpha.
+/// An instance as the shader reads it: the rows of its transform, then its alpha and its light
+/// inside a building (`groups::as_gpu`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct InstanceGpu {

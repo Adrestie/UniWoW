@@ -1,9 +1,10 @@
 //! The doodads of the buildings through the service `models`, an owner for the doodads a building's
 //! groups hold together (`buildings/<map>/<unique id>/<groups>`), each drawn while one of those
 //! groups is seen: its set 0 always, and the set its placement names when that is another, each at
-//! the transform of the building times its own. What the jobs placing them and those taking them
-//! away share is kept under a lock, so that a building's doodads are placed only while it is kept,
-//! and taken away once it is not.
+//! the transform of the building times its own, a doodad of the rooms lit by its colour (`MODD`) as
+//! the client lights it. What the jobs placing them and those taking them away share is kept under
+//! a lock, so that a building's doodads are placed only while it is kept, and taken away once it is
+//! not.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -11,7 +12,16 @@ use std::sync::atomic::AtomicBool;
 
 use uniwow_api::formats::{DoodadSet, FileRef, WmoDoodad, WmoGroup};
 use uniwow_api::glam::{Mat4, Quat, Vec3};
-use uniwow_api::models::{Geosets, Instance, Look, Models, Motion};
+use uniwow_api::models::{Geosets, Instance, Interior, Look, Models, Motion};
+
+/// The flags of a group: outside, lit as outside, inside.
+const OUTSIDE: u32 = 0x8;
+const LIT_OUTSIDE: u32 = 0x40;
+const INSIDE: u32 = 0x2000;
+/// The least the diffuse of a doodad inside is brightened to, and the most its light everywhere is
+/// darkened to, in 255ths of its brightest channel.
+const LEAST_DIFFUSE: f32 = 112.0 / 255.0;
+const MOST_AMBIENT: f32 = 96.0 / 255.0;
 
 /// The doodads of a building that its groups `.0` hold, drawn while the flag `.1` is set.
 pub type Part = (Vec<u16>, Arc<AtomicBool>);
@@ -42,15 +52,57 @@ pub fn holders(groups: &[WmoGroup], doodads: usize) -> Vec<Vec<u16>> {
     holders
 }
 
+/// Whether each doodad, held by the groups `holders` of `groups`, is lit as the rooms are: held by a
+/// group, and by none lit as outside (outside, lit as outside, or not inside), as the public
+/// implementation WebWowViewerCpp decides it (`loadDoodads`, `getDoodad`, read for its facts); one
+/// no group holds is lit by the light of the view.
+pub fn lit_inside(groups: &[WmoGroup], holders: &[Vec<u16>]) -> Vec<bool> {
+    let outside = |group: &u16| {
+        groups
+            .get(usize::from(*group))
+            .is_none_or(|group| group.flags & (OUTSIDE | LIT_OUTSIDE) != 0 || group.flags & INSIDE == 0)
+    };
+    holders
+        .iter()
+        .map(|held| !held.is_empty() && !held.iter().any(outside))
+        .collect()
+}
+
+/// The light of a doodad of the rooms of the colour `colour` (`MODD`, red first; its alpha left
+/// out), as WebWowViewerCpp gives it to a doodad without flags (`applyLightingParamsToDoodad`, its
+/// `fixDirectColor` and `fixAmbient1`): its diffuse the colour brightened, its brightest channel
+/// raised to 112 of 255 at least, its hue kept; its light everywhere the colour darkened, its
+/// brightest channel lowered to 96 of 255 at most.
+pub fn interior(colour: [u8; 4]) -> Interior {
+    let [r, g, b, _] = colour.map(|channel| f32::from(channel) / 255.0);
+    let rgb = [r, g, b];
+    let brightest = r.max(g).max(b).max(1.0 / 255.0);
+    let scaled = |by: f32| rgb.map(|channel| (channel * by).min(1.0));
+    Interior {
+        diffuse: if brightest < LEAST_DIFFUSE {
+            scaled(LEAST_DIFFUSE / brightest)
+        } else {
+            rgb
+        },
+        ambient: if brightest > MOST_AMBIENT {
+            scaled(MOST_AMBIENT / brightest)
+        } else {
+            rgb
+        },
+    }
+}
+
 /// The instances of the doodads of a building at `transform`, of its sets `sets` and its doodads
-/// `doodads`, held by the groups `holders`, its placement naming the set `named`: by the groups
-/// holding them, each by its place among the doodads.
+/// `doodads`, held by the groups `holders`, those of the rooms `inside` lit by their colour, its
+/// placement naming the set `named`: by the groups holding them, each by its place among the
+/// doodads.
 pub fn instances(
     models: &dyn Models,
     transform: &Mat4,
     sets: &[DoodadSet],
     doodads: &[WmoDoodad],
     holders: &[Vec<u16>],
+    inside: &[bool],
     named: u16,
 ) -> Vec<(Vec<u16>, Vec<Instance>)> {
     let mut chosen = vec![0usize];
@@ -83,6 +135,11 @@ pub fn instances(
                     transform: *transform * own,
                     alpha: 1.0,
                     motion: Motion::Standing,
+                    interior: inside
+                        .get(index)
+                        .copied()
+                        .unwrap_or(false)
+                        .then(|| interior(doodad.colour)),
                 });
         }
     }

@@ -20,8 +20,22 @@ pub fn is_water(kind: u32) -> bool {
     kind != MAGMA && kind != SLIME
 }
 
+/// The bit of the slot of a vertex of a liquid of a room of a building.
+pub const IN_ROOM: u32 = 0x80;
+
+/// The bits a vertex of a liquid in a room lit by `light` adds to the slot of its type: `IN_ROOM`,
+/// and the light in 255ths to the nearest in the three high bytes; none outside.
+pub fn in_room(light: Option<[f32; 3]>) -> u32 {
+    light.map_or(0, |light| {
+        let [r, g, b] = light.map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u32);
+        IN_ROOM | r << 8 | g << 16 | b << 24
+    })
+}
+
 /// A vertex of a liquid: its place in the world, its coordinates of texture, its depth from 0 to
-/// 1, and the slot of its type in the table of the shader.
+/// 1, and the slot of its type in the table of the shader in its low byte, under `IN_ROOM`; with
+/// `IN_ROOM` set for a liquid of a room of a building, the light of the room in its three high
+/// bytes, red first (`in_room`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vertex {
@@ -213,6 +227,7 @@ pub fn placed(placed: &Placed, kind: impl Fn(u16) -> Option<(u32, bool)>) -> Mes
     let Some((slot, water)) = kind(placed.liquid) else {
         return meshes;
     };
+    let slot = slot | in_room(placed.room);
     meshes.vertices = placed
         .positions
         .iter()

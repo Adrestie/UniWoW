@@ -1,8 +1,8 @@
 //! The light of the map the terrain shows, at the place of the camera on it and at the hour of the
 //! settings, from the tables of the client and the zones of light of its Wow.exe (`light`), the eye
-//! in a liquid or not as the service `liquids` says: computed at each frame, given to the view
-//! (`Viewport::set_light`) and said in the panel; taken back when the module stops. They are read
-//! by a job once the client's archives are open, and again whenever they change.
+//! in a liquid or not as the services `buildings` and `liquids` say: computed at each frame, given
+//! to the view (`Viewport::set_light`) and said in the panel; taken back when the module stops.
+//! They are read by a job once the client's archives are open, and again whenever they change.
 
 mod light;
 #[cfg(test)]
@@ -15,7 +15,7 @@ use uniwow_api::serde_json::json;
 use uniwow_api::vfs::{self, VfsState};
 use uniwow_api::viewport::{self, MapLight};
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, PropertyValue, Registrar, SettingSpec, egui, log};
-use uniwow_api::{formats, liquids};
+use uniwow_api::{buildings, formats, liquids};
 
 use light::{COLOURS, DAY, Immersion, Mixed, NUMBERS, Tables};
 
@@ -219,9 +219,14 @@ impl LightingModule {
             return self.shown.as_ref().and_then(|shown| shown.given);
         };
         let place = [x as f32, y as f32];
-        let liquid = ctx
-            .service(liquids::SERVICE)
-            .and_then(|liquids| liquids.liquid_at([x as f32, y as f32, z as f32]));
+        // The liquid the eye is in as the buildings decide it, the terrain's otherwise (0x790920).
+        let among = ctx.service(buildings::SERVICE).map(|buildings| buildings.eye());
+        let liquid = match among.as_ref().and_then(|eye| eye.liquid) {
+            Some(decided) => decided,
+            None => ctx
+                .service(liquids::SERVICE)
+                .and_then(|liquids| liquids.liquid_at([x as f32, y as f32, z as f32])),
+        };
         let immersion = tables.immersion(liquid);
         let light = tables.light_in(map, place, time, local == 1, immersion);
         let given = light.as_ref().map(|light| {
@@ -299,8 +304,9 @@ impl Module for LightingModule {
                 None => "the editor's".to_owned(),
             };
             ui.label(format!(
-                "Given to the view: the sun {:.0}° high; the fog {fog}",
-                given.sun.direction[2].asin().to_degrees()
+                "Given to the view: the sun {:.0}° high; the fog {fog}; the glow at night of the buildings {:.2}",
+                given.sun.direction[2].asin().to_degrees(),
+                given.night
             ));
         }
         let Some(light) = &shown.light else {

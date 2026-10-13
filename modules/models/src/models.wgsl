@@ -25,7 +25,7 @@ struct VertexIn {
     @location(1) normal: vec3<f32>,
     @location(2) uv1: vec2<f32>,
     @location(3) uv2: vec2<f32>,
-    // The instance: the rows of its transform, then its alpha.
+    // The instance: the rows of its transform, then its alpha and its light inside a building.
     @location(4) row0: vec4<f32>,
     @location(5) row1: vec4<f32>,
     @location(6) row2: vec4<f32>,
@@ -43,6 +43,8 @@ struct VertexOut {
     @location(3) @interpolate(flat) colour: vec4<f32>,
     @location(4) world: vec3<f32>,
     @location(5) alpha: f32,
+    // Its instance's alpha and its light inside a building (`instance_light`).
+    @location(6) @interpolate(flat) extra: vec4<f32>,
 };
 
 @vertex
@@ -63,6 +65,7 @@ fn vs_main(in: VertexIn, @builtin(instance_index) index: u32) -> VertexOut {
     }
     out.world = placed.world;
     out.alpha = in.extra.x;
+    out.extra = in.extra;
     return out;
 }
 
@@ -74,5 +77,5 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let two = textureSample(second, second_sampler, in.uv_two);
     let element = in.colour.a * in.alpha;
     let combined = combine(batch.combine.x, vec4<f32>(in.colour.rgb, element), one, two);
-    return shade(combined, element, batch.flags, in.normal, in.world);
+    return shade(combined, element, batch.flags, instance_light(in.normal, in.extra), in.world);
 }

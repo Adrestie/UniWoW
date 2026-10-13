@@ -335,12 +335,15 @@ fn the_doodads_of_a_building_are_those_of_its_set_0_and_of_the_set_it_names() {
             .flat_map(|(_, instances)| instances.iter().map(|instance| instance.id))
             .collect::<Vec<_>>()
     };
-    let only_first = doodads::instances(&models, &transform, &sets, &doodads, &holders, 0);
+    let inside = vec![false; doodads.len()];
+    let only_first = doodads::instances(&models, &transform, &sets, &doodads, &holders, &inside, 0);
     assert_eq!(ids(&only_first), [0], "the empty name left out");
-    let named = doodads::instances(&models, &transform, &sets, &doodads, &holders, 2);
+    let named = doodads::instances(&models, &transform, &sets, &doodads, &holders, &inside, 2);
     assert_eq!(ids(&named), [0, 3]);
     assert_eq!(
-        ids(&doodads::instances(&models, &transform, &sets, &doodads, &holders, 9)),
+        ids(&doodads::instances(
+            &models, &transform, &sets, &doodads, &holders, &inside, 9
+        )),
         [0],
         "a set it lacks"
     );
@@ -359,6 +362,59 @@ fn the_doodads_of_a_building_are_those_of_its_set_0_and_of_the_set_it_names() {
     );
     let looks = models.looks.lock().unwrap().clone();
     assert_eq!(looks[named[1].look.0 as usize].model, FileRef::Path("c.mdx".to_owned()));
+}
+
+#[test]
+fn a_doodad_of_the_rooms_is_lit_by_its_colour_as_the_client_lights_it() {
+    // Held by groups inside only: lit inside; by one outside, lit as outside or not inside, or by
+    // none: by the light of the view.
+    let group = |flags: u32| WmoGroup {
+        flags,
+        ..WmoGroup::default()
+    };
+    let groups = [group(0x2000), group(0x2000 | 0x40), group(0x8), group(0x2000), group(0)];
+    let holders = [vec![0], vec![0, 3], vec![0, 1], vec![2], vec![], vec![4], vec![9]];
+    assert_eq!(
+        doodads::lit_inside(&groups, &holders),
+        [true, true, false, false, false, false, false]
+    );
+    // A dim warm colour: its diffuse brightened to 112 of 255 in its brightest channel, its hue
+    // kept; its light everywhere as it is, under 96.
+    let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-5);
+    let dim = doodads::interior([56, 28, 14, 255]);
+    assert!(
+        close(dim.diffuse, [112.0 / 255.0, 56.0 / 255.0, 28.0 / 255.0]),
+        "{dim:?}"
+    );
+    assert!(
+        close(dim.ambient, [56.0 / 255.0, 28.0 / 255.0, 14.0 / 255.0]),
+        "{dim:?}"
+    );
+    // A bright one: its diffuse as it is, its light everywhere darkened to 96 of 255.
+    let bright = doodads::interior([200, 100, 0, 7]);
+    assert!(close(bright.diffuse, [200.0 / 255.0, 100.0 / 255.0, 0.0]), "{bright:?}");
+    assert!(close(bright.ambient, [96.0 / 255.0, 48.0 / 255.0, 0.0]), "{bright:?}");
+    // Black stays black.
+    let black = doodads::interior([0, 0, 0, 255]);
+    assert_eq!((black.diffuse, black.ambient), ([0.0; 3], [0.0; 3]));
+    // Given to the instances of those of the rooms only.
+    let models = FakeModels::default();
+    let mut coloured = doodad("a.mdx", [0.0; 3]);
+    coloured.colour = [56, 28, 14, 255];
+    let parts = doodads::instances(
+        &models,
+        &Mat4::IDENTITY,
+        &[set(0, 2)],
+        &[coloured.clone(), coloured],
+        &[vec![0], vec![2]],
+        &[true, false],
+        0,
+    );
+    let interiors: Vec<_> = parts
+        .iter()
+        .flat_map(|(_, instances)| instances.iter().map(|instance| (instance.id, instance.interior)))
+        .collect();
+    assert_eq!(interiors, [(0, Some(dim)), (1, None)]);
 }
 
 #[test]
@@ -383,6 +439,7 @@ fn the_doodads_of_a_building_are_placed_while_it_is_kept_and_taken_away_after() 
         &[set(0, 1)],
         &[doodad("a.mdx", [0.0; 3])],
         &[vec![2, 5]],
+        &[false],
         0,
     );
     owners.want(&models, "Map", HashSet::from([1]));
@@ -406,6 +463,7 @@ fn the_doodads_of_a_building_are_placed_while_it_is_kept_and_taken_away_after() 
         &[set(0, 1)],
         &[doodad("a.mdx", [0.0; 3])],
         &[Vec::new()],
+        &[false],
         0,
     );
     assert!(owners.place(&models, "Map", 1, &moved));
@@ -489,6 +547,19 @@ impl Formats for NoFiles {
                 format: TextureFormat::Rgba8,
                 levels: vec![[255, 255, 255, 0].repeat(16)],
             }),
+            // Grey and opaque; green and opaque.
+            FileRef::Path(path) if path == "grey.blp" => Ok(Texture {
+                width: 4,
+                height: 4,
+                format: TextureFormat::Rgba8,
+                levels: vec![[128, 128, 128, 255].repeat(16)],
+            }),
+            FileRef::Path(path) if path == "green.blp" => Ok(Texture {
+                width: 4,
+                height: 4,
+                format: TextureFormat::Rgba8,
+                levels: vec![[0, 64, 0, 255].repeat(16)],
+            }),
             _ => Err("none".to_owned()),
         }
     }
@@ -561,6 +632,7 @@ pub(crate) fn view(eye: Vec3) -> View {
         sun: Default::default(),
         sky: None,
         water: None,
+        night: 0.0,
     }
 }
 
@@ -846,25 +918,82 @@ fn outside_a_face_is_lit_in_gamma_by_the_ambient_light_turned_and_the_diffuse_th
     }
 }
 
+/// A sun of the view facing +X, its diffuse 0.2 and its ambient light 0.4: a face facing it lit
+/// 1.1 times the ambient light plus the diffuse, 0.64.
+fn facing_sun() -> uniwow_api::viewport::Sun {
+    uniwow_api::viewport::Sun {
+        direction: [1.0, 0.0, 0.0],
+        colour: [0.2; 3],
+        ambient: [0.4; 3],
+    }
+}
+
+/// How much the light everywhere of a face facing +X is turned towards the light of the insides,
+/// (0.30822, 0.30822, 0.9): 0.9 plus 0.2 times its cosine.
+const TURNED_INSIDE: f32 = 0.9 + 0.2 * 0.30822;
+
+/// Whether `pixel` is `expected`, from 0 to 1 in gamma, within two 255ths on each channel.
+fn near(pixel: [u8; 4], expected: [f32; 3]) -> bool {
+    pixel[..3]
+        .iter()
+        .zip(expected)
+        .all(|(value, expected)| (f32::from(*value) - expected.clamp(0.0, 1.0) * 255.0).abs() <= 2.0)
+}
+
 #[test]
-fn inside_a_building_is_lit_by_its_vertex_colours() {
+fn inside_a_building_is_lit_by_its_ambient_colour_and_its_vertex_colours_turned_to_the_light_inside() {
     let Some(gpu) = device() else {
         return;
     };
     let front = Vec3::new(5.0, 0.0, 0.0);
-    // A red vertex colour inside: wholly the light inside.
-    let Some(mut red) = bench(&gpu, square(material(0, 0), true, Some([200, 0, 0, 0]))) else {
+    // A red vertex colour inside, halved by the fix and doubled back, its ambient colour taken out of
+    // it by the fix and added again: 200 in red, the ambient colour in green and blue; turned towards
+    // the light of the insides by 0.96, the sun of the view no part of it.
+    let mut wmo = square(material(0, 0), true, Some([200, 0, 0, 0]));
+    wmo.ambient = [30, 60, 90, 255];
+    let Some(mut red) = bench(&gpu, wmo.clone()) else {
         return;
     };
-    let lit = middle(&gpu, &mut red, front);
-    assert!(lit[0] > 100 && lit[1] < 10 && lit[2] < 10, "{lit:?}");
-    // Outside, lit by the sun of the view whatever its colours.
-    let mut outside = bench(&gpu, square(material(0, 0), false, Some([200, 0, 0, 0]))).unwrap();
-    let sunlit = middle(&gpu, &mut outside, front);
-    assert!(
-        sunlit[0] == sunlit[1] && sunlit[1] == sunlit[2] && sunlit[0] > 50,
-        "{sunlit:?}"
-    );
+    let mut seen = view(front);
+    seen.sun = facing_sun();
+    let lit = row_of(&gpu, &mut red, &seen, &Phase::ALL)[16];
+    let expected = [200.0, 60.0, 90.0].map(|value: f32| value / 255.0 * TURNED_INSIDE);
+    assert!(near(lit, expected), "{lit:?} against {expected:?}");
+    // A floor, facing up: 1.08 times.
+    for group in &mut wmo.groups {
+        group.normals = vec![[0.0, 0.0, 1.0]; 4];
+    }
+    let mut floor = bench(&gpu, wmo).unwrap();
+    let lit = row_of(&gpu, &mut floor, &seen, &Phase::ALL)[16];
+    let expected = [200.0, 60.0, 90.0].map(|value: f32| value / 255.0 * (0.9 + 0.2 * 0.9));
+    assert!(near(lit, expected), "{lit:?} against {expected:?}");
+}
+
+#[test]
+fn outside_a_building_is_lit_by_the_view_its_vertex_colours_added_to_the_ambient_light() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    let front = Vec3::new(5.0, 0.0, 0.0);
+    // A group outside of red vertex colours, made 200 again: added to the ambient light of the view
+    // turned to the sun, 1.1 times, plus the diffuse.
+    let Some(mut outside) = bench(&gpu, square(material(0, 0), false, Some([200, 0, 0, 0]))) else {
+        return;
+    };
+    let mut seen = view(front);
+    seen.sun = facing_sun();
+    let lit = row_of(&gpu, &mut outside, &seen, &Phase::ALL)[16];
+    assert!(near(lit, [1.0, 0.64, 0.64]), "{lit:?}");
+    // A group inside lit as outside (0x40), as the streets of a city open to the sky: the same.
+    let mut street = square(material(0, 0), true, Some([200, 0, 0, 0]));
+    street.groups[0].flags |= 0x40;
+    let mut street = bench(&gpu, street).unwrap();
+    let lit = row_of(&gpu, &mut street, &seen, &Phase::ALL)[16];
+    assert!(near(lit, [1.0, 0.64, 0.64]), "{lit:?}");
+    // Without colours, the light of the view alone.
+    let mut plain = bench(&gpu, square(material(0, 0), false, None)).unwrap();
+    let lit = row_of(&gpu, &mut plain, &seen, &Phase::ALL)[16];
+    assert!(near(lit, [0.64; 3]), "{lit:?}");
 }
 
 #[test]
@@ -943,14 +1072,24 @@ fn a_batch_outside_in_a_group_inside_is_lit_by_the_sun() {
         return;
     };
     let front = Vec3::new(5.0, 0.0, 0.0);
-    // The outer wall of a room: a group inside, its batch outside, its vertex colours red.
+    // The outer wall of a room: a group inside, its batch outside, its vertex colours red, left out.
     let mut wall = square(material(0, 0), true, Some([200, 0, 0, 255]));
     wall.groups[0].batch_counts = [0, 0, 1];
-    let Some(mut layer) = bench(&gpu, wall) else {
+    let Some(mut layer) = bench(&gpu, wall.clone()) else {
         return;
     };
     let lit = middle(&gpu, &mut layer, front);
     assert!(lit[0] == lit[1] && lit[1] == lit[2] && lit[0] > 50, "{lit:?}");
+    let mut seen = view(front);
+    seen.sun = facing_sun();
+    let lit = row_of(&gpu, &mut layer, &seen, &Phase::ALL)[16];
+    assert!(near(lit, [0.64; 3]), "{lit:?}");
+    // A material lit as outside (0x8), whatever its batch: the same.
+    let mut lit_outside = square(material(0x8, 0), true, Some([200, 0, 0, 0]));
+    lit_outside.groups[0].batch_counts = [0, 1, 0];
+    let mut layer = bench(&gpu, lit_outside).unwrap();
+    let lit = row_of(&gpu, &mut layer, &seen, &Phase::ALL)[16];
+    assert!(near(lit, [0.64; 3]), "{lit:?}");
     // Of a transition: blended by the alpha of its colours, here wholly inside.
     let mut door = square(material(0, 0), true, Some([200, 0, 0, 0]));
     door.groups[0].batch_counts = [1, 0, 0];
@@ -1005,28 +1144,94 @@ fn a_building_lit_as_one_is_lit_as_outside_whatever_its_batches() {
 }
 
 #[test]
-fn a_transition_adds_the_light_outside_by_its_alpha_to_its_colours() {
+fn a_transition_mixes_the_light_inside_and_outside_by_the_alpha_of_its_colours() {
     let Some(gpu) = device() else {
         return;
     };
     let front = Vec3::new(5.0, 0.0, 0.0);
-    // Wholly outside: its red colour darkened to nothing by the fix, lit by the sun alone.
+    let mut seen = view(front);
+    seen.sun = facing_sun();
+    // Wholly outside: its red colour darkened to nothing by the fix, lit by the view alone.
     let mut door = square(material(0, 0), true, Some([200, 0, 0, 255]));
     door.groups[0].batch_counts = [1, 0, 0];
     let Some(mut layer) = bench(&gpu, door) else {
         return;
     };
-    let outside = middle(&gpu, &mut layer, front);
-    assert!(outside[0] == outside[1] && outside[0] > 50, "{outside:?}");
-    // Half: its colour as the fix left it, whole, and half the sun added, grey.
+    let lit = row_of(&gpu, &mut layer, &seen, &Phase::ALL)[16];
+    assert!(near(lit, [0.64; 3]), "{lit:?}");
+    // Half: its colour as the fix left it, darkened by half, doubled back, in both lights; inside
+    // turned to the light of the insides, outside added to the ambient light of the view turned to
+    // the sun, with its diffuse; mixed by its alpha.
     let mut half = square(material(0, 0), true, Some([200, 0, 0, 128]));
     half.groups[0].batch_counts = [1, 0, 0];
     let mut fixed = half.groups[0].clone();
     colours::fix(&mut fixed, half.flags, half.ambient);
-    let left = (f32::from(fixed.colours[0][0][0]) * 2.0 / 255.0).min(1.0);
+    let [red, _, _, alpha] = fixed.colours[0][0];
+    let vertex = f32::from(red) * 2.0 / 255.0;
+    let share = f32::from(alpha) / 255.0;
+    let inside = [vertex * TURNED_INSIDE, 0.0, 0.0];
+    let outside = [(0.4 + vertex) * 1.1 + 0.2, 0.64, 0.64];
+    let expected: [f32; 3] = std::array::from_fn(|at| inside[at] + (outside[at] - inside[at]) * share);
     let mut layer = bench(&gpu, half).unwrap();
-    let blended = middle(&gpu, &mut layer, front);
-    assert!(blended[1] > 20, "{blended:?}");
+    let lit = row_of(&gpu, &mut layer, &seen, &Phase::ALL)[16];
+    assert!(near(lit, expected), "{lit:?} against {expected:?}");
+}
+
+#[test]
+fn a_material_glowing_at_night_adds_its_emissive_colour_by_how_much_it_is_night() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    let front = Vec3::new(5.0, 0.0, 0.0);
+    // Outside, white, in a dim light: 0.11 of it; its emissive colour green.
+    let mut glowing = material(0x10, 0);
+    glowing.emissive = [0, 100, 0, 255];
+    let Some(mut layer) = bench(&gpu, square(glowing.clone(), false, None)) else {
+        return;
+    };
+    let mut seen = view(front);
+    seen.sun = uniwow_api::viewport::Sun {
+        colour: [0.0; 3],
+        ambient: [0.1; 3],
+        ..facing_sun()
+    };
+    for (night, green) in [(0.0, 0.11), (0.5, 0.11 + 50.0 / 255.0), (1.0, 0.11 + 100.0 / 255.0)] {
+        seen.night = night;
+        let lit = row_of(&gpu, &mut layer, &seen, &Phase::ALL)[16];
+        assert!(near(lit, [0.11, green, 0.11]), "night {night}: {lit:?}");
+    }
+    // Without the flag, its emissive colour left out.
+    glowing.flags = 0;
+    let mut dark = bench(&gpu, square(glowing, false, None)).unwrap();
+    let lit = row_of(&gpu, &mut dark, &seen, &Phase::ALL)[16];
+    assert!(near(lit, [0.11; 3]), "{lit:?}");
+}
+
+#[test]
+fn the_environment_is_added_after_the_light() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    let front = Vec3::new(5.0, 0.0, 0.0);
+    // A grey texture of the shader environment (3), green on the environment, in a dim light: the
+    // grey lit, then the green added whole by the alpha of the grey; for the environment metal (5),
+    // the green times the grey too.
+    let environment = |shader| {
+        let mut material = material(0, 0);
+        material.shader = shader;
+        material.textures[0] = Some(FileRef::Path("grey.blp".to_owned()));
+        material.textures[1] = Some(FileRef::Path("green.blp".to_owned()));
+        square(material, false, None)
+    };
+    let Some(mut layer) = bench(&gpu, environment(3)) else {
+        return;
+    };
+    let mut seen = view(front);
+    seen.sun = uniwow_api::viewport::Sun {
+        colour: [0.0; 3],
+        ambient: [0.1; 3],
+        ..facing_sun()
+    };
     let linear = |gamma: f32| {
         if gamma <= 0.04045 {
             gamma / 12.92
@@ -1034,13 +1239,20 @@ fn a_transition_adds_the_light_outside_by_its_alpha_to_its_colours() {
             ((gamma + 0.055) / 1.055).powf(2.4)
         }
     };
-    let [red, green] = [blended[0], blended[1]].map(|value| linear(f32::from(value) / 255.0));
-    assert!(
-        (red - green - linear(left)).abs() < 0.02,
-        "{blended:?}: {} against {}",
-        red - green,
-        linear(left)
-    );
+    let gamma = |linear: f32| {
+        if linear <= 0.003_130_8 {
+            linear * 12.92
+        } else {
+            1.055 * linear.powf(1.0 / 2.4) - 0.055
+        }
+    };
+    let grey = gamma(linear(128.0 / 255.0) * linear(0.11));
+    let lit = row_of(&gpu, &mut layer, &seen, &Phase::ALL)[16];
+    assert!(near(lit, [grey, grey + 64.0 / 255.0, grey]), "{lit:?}");
+    let mut metal = bench(&gpu, environment(5)).unwrap();
+    let lit = row_of(&gpu, &mut metal, &seen, &Phase::ALL)[16];
+    let added = 128.0 / 255.0 * 64.0 / 255.0;
+    assert!(near(lit, [grey, grey + added, grey]), "{lit:?}");
 }
 
 #[test]

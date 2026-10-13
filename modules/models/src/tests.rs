@@ -128,6 +128,7 @@ pub fn instance(id: u64, look: u32, at: Vec3, scale: f32) -> Instance {
         transform: Mat4::from_scale_rotation_translation(Vec3::splat(scale), Default::default(), at),
         alpha: 1.0,
         motion: Motion::Standing,
+        interior: None,
     }
 }
 
@@ -946,6 +947,7 @@ pub fn render(bench: &mut Bench, eye: Vec3, look: Vec3) -> Vec<u8> {
         sun: bench.sun,
         sky: None,
         water: None,
+        night: 0.0,
     };
     bench.layer.prepare(&gpu, &view);
     let in_pass = bench.layer.drawing() == Drawing::Pass;

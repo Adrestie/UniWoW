@@ -46,6 +46,7 @@ macro_rules! numbered {
 }
 
 pub mod arena;
+pub mod buildings;
 mod command;
 mod commands;
 mod context;

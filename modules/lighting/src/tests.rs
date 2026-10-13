@@ -20,7 +20,7 @@ use uniwow_api::{
     PropertyValue, Registrar, egui, egui_wgpu,
 };
 
-use crate::light::{Immersion, Tables, colour_at, map_light, number_at, prepared_fog, sun_direction};
+use crate::light::{Immersion, Tables, colour_at, map_light, night_glow, number_at, prepared_fog, sun_direction};
 
 /// A band of numbers of `keys`.
 fn numbers(id: u32, keys: &[(u32, f32)]) -> LightBand<f32> {
@@ -503,6 +503,38 @@ fn the_sun_turns_once_a_day_by_noggit_s_table_to_the_north_west() {
 }
 
 #[test]
+fn the_buildings_glow_at_night_by_the_four_keys_of_the_client() {
+    let at = |hour: f32| night_glow(hour * 120.0);
+    // Whole until 6 h, falling to nothing at 7 h, nothing until 20 h 30, rising to whole at 21 h 30.
+    for (hour, glow) in [
+        (0.0, 1.0),
+        (5.99, 1.0),
+        (6.0, 1.0),
+        (6.5, 0.5),
+        (7.0, 0.0),
+        (12.0, 0.0),
+        (20.5, 0.0),
+        (20.75, 0.25),
+        (21.5, 1.0),
+        (23.9, 1.0),
+        (24.0, 1.0),
+        (30.5, 0.5),
+        (-3.25, 0.25),
+    ] {
+        assert!((at(hour) - glow).abs() < 1e-5, "{hour} h: {}", at(hour));
+    }
+    // Given to the view with the light of the hour.
+    let tables = tables();
+    let values = tables.light_at(0, [0.0; 2], 0.0, 0, true).unwrap().values;
+    assert_eq!(map_light(&values, 1440.0, None, false).night, 0.0, "noon");
+    assert_eq!(map_light(&values, 0.0, None, false).night, 1.0, "midnight");
+    assert!(
+        (map_light(&values, 780.0, None, false).night - 0.5).abs() < 1e-5,
+        "6 h 30"
+    );
+}
+
+#[test]
 fn the_light_of_the_water_is_that_of_its_bands_with_the_alphas_of_its_params() {
     let lights = [light(1, [0.0; 2], [0.0; 2], [1, 0])];
     // The bands 9, 14, 15 and 17 of the params 1; the band 16 lacking.
@@ -954,13 +986,25 @@ impl Liquids for Pond {
     }
 }
 
-/// A host offering `formats`, `vfs`, `viewport` and `liquids`, counting the jobs started, kept
-/// unrun for the test to run them, and those cancelled, its editor `editor`.
+/// Buildings where the eye stands as the test sets it.
+#[derive(Default)]
+struct Rooms(Mutex<uniwow_api::buildings::Eye>);
+
+impl uniwow_api::buildings::Buildings for Rooms {
+    fn eye(&self) -> uniwow_api::buildings::Eye {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// A host offering `formats`, `vfs`, `viewport`, `liquids` and `buildings`, counting the jobs
+/// started, kept unrun for the test to run them, and those cancelled, its editor `editor`.
 struct Host {
     formats: Arc<dyn Formats>,
     files: Arc<dyn Vfs>,
     pond: Arc<Pond>,
     liquids: uniwow_api::liquids::Handle,
+    rooms: Arc<Rooms>,
+    buildings: uniwow_api::buildings::Handle,
     view: viewport::Handle,
     seen: Arc<View>,
     started: Vec<String>,
@@ -973,9 +1017,12 @@ struct Host {
 fn host(files: Arc<Files>) -> Host {
     let seen = Arc::new(View::default());
     let pond = Arc::new(Pond::default());
+    let rooms = Arc::new(Rooms::default());
     Host {
         liquids: pond.clone(),
         pond,
+        buildings: rooms.clone(),
+        rooms,
         formats: Arc::new(TestFormats {
             zones: Err("none".to_owned()),
             liquids: Ok(liquids()),
@@ -1004,6 +1051,7 @@ impl uniwow_api::Host for Host {
             "vfs" => Some(&self.files),
             "viewport" => Some(&self.view),
             "liquids" => Some(&self.liquids),
+            "buildings" => Some(&self.buildings),
             _ => None,
         }
     }
@@ -1207,6 +1255,20 @@ fn the_light_is_that_of_the_map_shown_at_the_camera_s_place_on_it() {
             .iter()
             .any(|text| text.contains("The eye in the liquid 3: the light of its params 4"))
     );
+    // The buildings decide first: in a room, its liquid alone, none over the water of the terrain;
+    // in the magma of a building over dry ground; leaving it to the terrain, its water.
+    *host.pond.liquid.lock().unwrap() = Some(5);
+    host.rooms.0.lock().unwrap().liquid = Some(None);
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert_eq!(module.shown.as_ref().unwrap().immersion, Immersion::Dry);
+    *host.pond.liquid.lock().unwrap() = None;
+    host.rooms.0.lock().unwrap().liquid = Some(Some(3));
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert_eq!(module.shown.as_ref().unwrap().immersion, Immersion::Lit(4));
+    *host.pond.liquid.lock().unwrap() = Some(5);
+    host.rooms.0.lock().unwrap().liquid = None;
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert_eq!(module.shown.as_ref().unwrap().immersion, Immersion::Under);
     *host.pond.liquid.lock().unwrap() = None;
     module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
     assert_eq!(module.shown.as_ref().unwrap().immersion, Immersion::Dry);

@@ -1187,6 +1187,7 @@ fn render_lit(
         sun: Default::default(),
         sky,
         water: None,
+        night: 0.0,
     };
     layer.prepare(gpu, &view);
     // A bundle for each phase, run in their order.
@@ -1510,6 +1511,7 @@ fn the_sky_is_seen_from_the_screen_as_precisely_far_from_the_middle_of_the_world
             sun: Default::default(),
             sky: None,
             water: None,
+            night: 0.0,
         };
         let values = crate::layer::camera_values(&view);
         let sky_from_screen = Mat4::from_cols_slice(&values[40..56]);

@@ -9,7 +9,7 @@ struct Instance {
     row0: vec4<f32>,
     row1: vec4<f32>,
     row2: vec4<f32>,
-    // Its alpha.
+    // Its alpha and its light inside a building (`instance_light`).
     extra: vec4<f32>,
 };
 
@@ -56,6 +56,7 @@ struct VertexOut {
     @location(4) world: vec3<f32>,
     @location(5) alpha: f32,
     @location(6) @interpolate(flat) material: u32,
+    @location(7) @interpolate(flat) extra: vec4<f32>,
 };
 
 @vertex
@@ -80,6 +81,7 @@ fn vs_main(in: VertexIn, @builtin(instance_index) drawn: u32) -> VertexOut {
     out.world = placed.world;
     out.alpha = instance.extra.x;
     out.material = entry.y;
+    out.extra = instance.extra;
     return out;
 }
 
@@ -117,5 +119,5 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let two = texel(material.textures.y, (material.textures.z >> 2u) & 3u, material.sizes.zw, uv_two, ddx_two, ddy_two);
     let element = in.colour.a * in.alpha;
     let combined = combine(material.combine.x, vec4<f32>(in.colour.rgb, element), one, two);
-    return shade(combined, element, material.flags, in.normal, in.world);
+    return shade(combined, element, material.flags, instance_light(in.normal, in.extra), in.world);
 }

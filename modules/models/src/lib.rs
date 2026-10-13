@@ -456,6 +456,7 @@ fn preview(
                 ),
                 alpha,
                 motion: Motion::Standing,
+                interior: None,
             }
         })
         .collect();

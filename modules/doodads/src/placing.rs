@@ -30,6 +30,7 @@ pub fn instances(placements: &Placements, models: &dyn Models) -> Vec<Instance> 
             transform: placement(doodad.position, doodad.rotation, doodad.scale),
             alpha: 1.0,
             motion: Motion::Standing,
+            interior: None,
         })
         .collect()
 }

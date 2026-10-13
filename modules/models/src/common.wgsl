@@ -26,6 +26,27 @@ struct Camera {
 // alpha key is not drawn.
 const LEAST_RADIUS: f32 = 1.0;
 const LEAST_ALPHA: f32 = 1.0 / 255.0;
+// Towards the light of the insides of the buildings, the opposite of the direction the client gives
+// it, (-0.30822, -0.30822, -0.9) in the axes of the world (WebWowViewerCpp, `uInteriorSunDir`).
+const TOWARDS_INSIDE_LIGHT: vec3<f32> = vec3<f32>(0.30822, 0.30822, 0.9);
+
+// A colour packed by `groups::packed`: its 255ths of red, green and blue, red the lowest byte.
+fn unpacked(value: f32) -> vec3<f32> {
+    let bits = u32(value + 0.5);
+    return vec3<f32>(f32(bits & 255u), f32((bits >> 8u) & 255u), f32((bits >> 16u) & 255u)) / 255.0;
+}
+
+// The light of a face of `normal` of an instance whose `extra` is read as `groups::as_gpu` writes
+// it, in linear: by the light of the view (`light`); or, inside a building, by its own light
+// everywhere from 0.9 to 1.1 times as the face turns to the light of the insides, plus its diffuse
+// by the angle, in gamma, made linear once, as the client lights the doodads of the rooms.
+fn instance_light(normal: vec3<f32>, extra: vec4<f32>) -> vec3<f32> {
+    if extra.w < 0.5 {
+        return light(normal);
+    }
+    let facing = clamp(dot(normalize(normal), TOWARDS_INSIDE_LIGHT), 0.0, 1.0);
+    return linear(unpacked(extra.y) * (0.9 + 0.2 * facing) + unpacked(extra.z) * facing);
+}
 
 // The coordinates of the environment, as WotLK maps them (wowdev, M2/.skin): the position and the
 // normal in the space of the camera, its depth growing away from the eye.
@@ -161,10 +182,10 @@ fn combine(shader: u32, colour: vec4<f32>, one: vec4<f32>, two: vec4<f32>) -> ve
 
 // The pixel of a batch whose textures are `combined` in gamma, `element` the alpha of the batch and
 // its instance; `flags` its alpha key (0 for none), whether unlit and unfogged, and the colour of its
-// fog (0 the view's, 1 black, 2 white, 3 grey for mod2x). Not drawn under its alpha as WotLK tests
-// it: the alpha key times `element`, or 1/255; nor, unfogged, beyond the end of the fog of the game,
-// which would not hide it.
-fn shade(combined: vec4<f32>, element: f32, flags: vec4<f32>, normal: vec3<f32>, world: vec3<f32>) -> vec4<f32> {
+// fog (0 the view's, 1 black, 2 white, 3 grey for mod2x); `lit` its light in linear
+// (`instance_light`). Not drawn under its alpha as WotLK tests it: the alpha key times `element`,
+// or 1/255; nor, unfogged, beyond the end of the fog of the game, which would not hide it.
+fn shade(combined: vec4<f32>, element: f32, flags: vec4<f32>, lit: vec3<f32>, world: vec3<f32>) -> vec4<f32> {
     let alpha = clamp(combined.a, 0.0, 1.0);
     let reference = select(LEAST_ALPHA, flags.x * element, flags.x > 0.0);
     if alpha < reference || (flags.z > 0.5 && beyond_fog(world)) {
@@ -180,7 +201,7 @@ fn shade(combined: vec4<f32>, element: f32, flags: vec4<f32>, normal: vec3<f32>,
     // In the linear space of the view, as the terrain: lit, then fogged as the view mixes its fog.
     var rgb = linear(clamp(combined.rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
     if flags.y < 0.5 {
-        rgb = rgb * light(normal);
+        rgb = rgb * lit;
     }
     return vec4<f32>(fog_mix(rgb, fog_colour(flags.w), fog), alpha);
 }

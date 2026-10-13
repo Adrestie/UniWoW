@@ -4,12 +4,14 @@
 //! by state, the blended ones from the farthest group, and drawn in the pass, a
 //! `multi_draw_indexed_indirect` for each run of one state. The doodads and the liquid of a group
 //! are shown while it is seen through the portals, read by `models` and `liquids` at the frame
-//! after.
+//! after; where the eye stands among the buildings (`buildings::Eye`) is found on the way, read by
+//! the service `buildings` until the next frame.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use uniwow_api::buildings::{Eye, EyeGroup};
 use uniwow_api::glam::{Mat4, Vec3, Vec4};
 use uniwow_api::journal;
 use uniwow_api::liquids::{self, Surfaces};
@@ -44,6 +46,8 @@ pub struct Scene {
     pub cpu: u64,
     /// The time the module spent steering at its last frame.
     pub steering: Duration,
+    /// Where the eye stood among the buildings at the last frame prepared.
+    pub eye: Eye,
 }
 
 /// The bounds in the world of `bounds` moved by `transform`: those of its eight corners.
@@ -90,18 +94,34 @@ pub(crate) struct Listed {
     pub entry: [u32; 4],
 }
 
-/// The groups of `building`, its bounds in the world `bounds`, seen from `eye` through its portals
-/// within the sides of the view `planes`, when `eye` is in one of its groups inside.
-pub fn seen_inside(building: &Placed, eye: Vec3, planes: &[Vec4; 5], bounds: &[Vec3; 2]) -> Option<Vec<bool>> {
+/// Where `eye` stands in `building`, its bounds in the world `bounds`, when they hold it: in the axes
+/// of the building, and the group inside it is in, if one.
+pub fn inside(building: &Placed, eye: Vec3, bounds: &[Vec3; 2]) -> Option<(Vec3, Option<usize>)> {
     if eye.cmplt(bounds[0]).any() || eye.cmpgt(bounds[1]).any() {
         return None;
     }
     let local = building.transform.inverse().transform_point3(eye);
-    let start = building.wmo.cells.holding(local)?;
+    Some((local, building.wmo.cells.holding(local)))
+}
+
+/// The groups of `building` seen from `eye`, `local` in its axes, in its group inside `start`,
+/// through its portals within the sides of the view `planes`.
+pub fn seen_from(building: &Placed, local: Vec3, start: usize, planes: &[Vec4; 5]) -> Vec<bool> {
     // A plane of the world, in the axes of the building.
     let turned = building.transform.transpose();
     let local_planes: Vec<Vec4> = planes.iter().map(|plane| turned * *plane).collect();
-    Some(building.wmo.cells.seen(local, &local_planes, start))
+    building.wmo.cells.seen(local, &local_planes, start)
+}
+
+/// The group of `building` the eye is in, `local` in its axes, as the light of the map takes it.
+fn eye_group(building: &Placed, local: Vec3, group: usize) -> EyeGroup {
+    let lights = &building.wmo.lights;
+    EyeGroup {
+        flags: lights.groups.get(group).map_or(0, |group| group.flags),
+        fog: lights.fog(group, local),
+        exit: crate::eye::exit(&building.wmo.cells, group, local),
+        skybox: lights.skybox(group),
+    }
 }
 
 /// Shows the doodads of `parts` held by a group `seen` says is seen, and those no group holds; all
@@ -130,7 +150,7 @@ fn show_liquids(liquids: Option<&Poured>, seen: Option<&[bool]>) {
 /// opaque ones by state, the blended ones from the farthest, those beyond the surface of the water
 /// from the eye apart from those on its side; how many placements and groups are in sight, how
 /// many placements hold the camera in a group inside, and how many groups those see through their
-/// portals.
+/// portals; and where the eye stands among them.
 #[derive(Default)]
 pub(crate) struct Listing {
     pub opaque: Vec<Listed>,
@@ -140,6 +160,7 @@ pub(crate) struct Listing {
     pub groups: usize,
     pub inside: usize,
     pub through: usize,
+    pub eye: Eye,
 }
 
 /// What the frame draws of `placed` seen in `view`, a blended group by the centre of its bounds
@@ -158,10 +179,27 @@ pub(crate) fn list(placed: &[Placed], view: &View, surfaces: Option<&Surfaces>) 
             continue;
         }
         listing.buildings += 1;
-        let seen = seen_inside(building, view.eye, &planes, &bounds);
+        let holding = inside(building, view.eye, &bounds);
+        let seen = holding.and_then(|(local, start)| Some(seen_from(building, local, start?, &planes)));
         if let Some(seen) = &seen {
             listing.inside += 1;
             listing.through += seen.iter().filter(|seen| **seen).count();
+        }
+        // Where the eye stands: the first group inside it is in, that group's liquid alone; else
+        // the liquid of a group outside holding it, the terrain's otherwise.
+        match holding {
+            Some((local, Some(group))) if listing.eye.group.is_none() => {
+                listing.eye = Eye {
+                    group: Some(eye_group(building, local, group)),
+                    liquid: Some(building.wmo.lights.liquid(group, local)),
+                };
+            }
+            Some((local, None)) if listing.eye.liquid.is_none() => {
+                if let Some(liquid) = building.wmo.lights.liquid_outside(&building.wmo.cells, local) {
+                    listing.eye.liquid = Some(Some(liquid));
+                }
+            }
+            _ => {}
         }
         show(building.parts.as_ref(), seen.as_deref());
         show_liquids(building.liquids.as_ref(), seen.as_deref());
@@ -350,7 +388,9 @@ impl Layer for BuildingsLayer {
             groups,
             inside,
             through,
+            eye,
         } = list(&placed, view, surfaces.as_deref());
+        journal::lock(&self.scene, "buildings scene").eye = eye;
         spent("buildings prepare: the listing");
         let listed: Vec<&Listed> = opaque.iter().chain(&beyond).chain(&near).collect();
         let commands: Vec<[u32; 5]> = listed

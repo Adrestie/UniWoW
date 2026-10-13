@@ -315,6 +315,13 @@ fn the_ramps_of_the_water_are_written_as_the_client_writes_them() {
     assert_eq!([buildings[0], buildings[63]], [[74, 8, 99, 64], [74, 8, 99, 189]]);
 }
 
+/// A water of the buildings, of the type 13, black, taking the ramp of the buildings.
+fn wmo_water() -> LiquidTypeRecord {
+    let mut water = record(13, 1, 1, r"XTextures\river\lake_a.blp");
+    water.textures[1] = "proceduralWmoWaterTex".to_owned();
+    water
+}
+
 /// The formats of the tests: the frames of the procedural water black, those of `glint` brown and
 /// half clear, the magma red.
 struct Liquid;
@@ -327,6 +334,7 @@ impl Formats for Liquid {
         Ok(Arc::new(vec![
             record(5, 1, 3, r"XTextures\procWater\basicReflectionMap.blp"),
             record(7, 2, 2, r"XTextures\lava\magma0.blp"),
+            wmo_water(),
         ]))
     }
     /// A slow water at 2.5 over the first chunk of the tile, flat.
@@ -530,6 +538,7 @@ fn view(eye: Vec3, target: Vec3) -> View {
         sun: Default::default(),
         sky: None,
         water: None,
+        night: 0.0,
     }
 }
 
@@ -943,6 +952,7 @@ fn square_placed(liquid: u16, height: f32) -> Placed {
         coordinates: vec![[0.0, 0.0]; 4],
         depths: vec![0.0; 4],
         triangles: vec![0, 1, 2, 0, 2, 3, 0, 1, 9],
+        room: None,
     }
 }
 
@@ -980,6 +990,68 @@ fn a_liquid_placed_is_drawn_as_given_its_water_under_the_surfaces() {
     );
     service.clear("buildings/Azeroth/7");
     assert!(service.placed.lock().unwrap()["buildings/Azeroth/7"].is_none());
+}
+
+#[test]
+fn a_liquid_in_a_room_of_a_building_is_white_lit_by_the_room_alone() {
+    // The light of the room in the three high bytes of the slot of each vertex, with its bit.
+    assert_eq!(mesh::in_room(None), 0);
+    assert_eq!(mesh::in_room(Some([1.0, 0.5, 0.0])), 0x80 | 255 << 8 | 128 << 16);
+    let mut room = square_placed(13, 0.0);
+    room.room = Some([0.2, 0.4, 0.6]);
+    let meshes = mesh::placed(&room, |_| Some((3, true)));
+    assert!(
+        meshes
+            .vertices
+            .iter()
+            .all(|vertex| vertex.slot == (3 | mesh::in_room(room.room)))
+    );
+    let Some(gpu) = device() else {
+        eprintln!("skipped: no software adapter for a device");
+        return;
+    };
+    // Under the light of a map, seen from above: the black water of the buildings, opaque; its ramp
+    // white in the room, lit by the room's light alone, no sun reflected; plus the glint of its
+    // opaque texel, a quarter.
+    let mut seen = view(Vec3::new(0.0, 0.0, 20.0), Vec3::new(0.0, 0.0, -30.0));
+    seen.sun = Sun {
+        direction: [0.0, 0.6, 0.8],
+        colour: [0.5; 3],
+        ambient: [0.2; 3],
+    };
+    seen.water = Some(Water {
+        river: [[0.0, 0.0, 0.0, 1.0], [0.4, 0.2, 0.0, 1.0]],
+        ocean: [[0.0; 4]; 2],
+        sun: [0.8, 0.0, 0.0],
+    });
+    let shared = Arc::new(Shared::new(&gpu, &TARGET).expect("the liquids on the device"));
+    let drawn = |placed: Placed| {
+        let pour = [(placed, Arc::new(AtomicBool::new(true)))];
+        let poured = crate::pour(&Liquid, &shared, &pour).unwrap();
+        let scene = Arc::new(Mutex::new(Scene {
+            placed: poured.liquids,
+            ..Scene::default()
+        }));
+        let mut layer = LiquidsLayer::new(shared.clone(), scene);
+        middle(&gpu, &mut layer, &seen, None)
+    };
+    let near = |pixel: [u8; 4], expected: [f32; 3]| {
+        pixel[..3]
+            .iter()
+            .zip(expected)
+            .all(|(drawn, expected)| (f32::from(*drawn) - expected.min(1.0) * 255.0).abs() <= 2.0)
+    };
+    let inside = drawn(room);
+    assert!(near(inside, [0.45, 0.65, 0.85]), "{inside:?}");
+    // Outside, the deep colour of the river all along its ramp, lit by the sun and its ambient light,
+    // the red sun reflected.
+    let outside = drawn(square_placed(13, 0.0));
+    assert!(outside[0] > outside[1] && outside[1] > outside[2], "{outside:?}");
+    let lit = 0.2 + 0.8 * 0.5;
+    assert!(
+        (f32::from(outside[1]) - (lit * 0.2 + 0.25) * 255.0).abs() <= 2.0,
+        "{outside:?}"
+    );
 }
 
 #[test]
