@@ -66,11 +66,14 @@ pub enum Motion {
 /// The light of an instance inside a building, in gamma, in place of the light of the view: its
 /// light everywhere, turned towards the light of the insides as the light of the view is turned
 /// towards the sun, and its diffuse from that light, as the client lights the doodads of the rooms
-/// of a building (WebWowViewerCpp, `uInteriorAmbientColor`, `uInteriorDirectColor`).
+/// of a building (WebWowViewerCpp, `uInteriorAmbientColor`, `uInteriorDirectColor`); towards that
+/// light, a unit direction in the axes of the world, none for the light of the insides of the
+/// client, `(0.30822, 0.30822, 0.9)`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Interior {
     pub ambient: [f32; 3],
     pub diffuse: [f32; 3],
+    pub towards: Option<[f32; 3]>,
 }
 
 /// An instance an owner places.

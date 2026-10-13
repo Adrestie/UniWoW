@@ -303,6 +303,7 @@ fn an_instance_inside_a_building_is_lit_by_its_own_light_turned_to_the_light_of_
     let interior = Interior {
         ambient: [0.2, 0.4, 0.0],
         diffuse: [0.4, 0.0, 0.2],
+        towards: None,
     };
     let facing = 0.30822;
     let expected = [0.2, 0.4, 0.0]
@@ -318,6 +319,31 @@ fn an_instance_inside_a_building_is_lit_by_its_own_light_turned_to_the_light_of_
     // Without it, the light of the view, grey.
     let seen = drawn(&gpu, &model, &textures, 0.0);
     assert!(seen[0] == seen[1] && seen[1] == seen[2], "{seen:?}");
+    // Its light from another direction: from +X, the face lit whole, its light everywhere 1.1 times;
+    // from −X, not at all, 0.9 times; from 60° off +X under the horizon, by the cosine.
+    for (towards, facing) in [
+        ([1.0, 0.0, 0.0], 1.0),
+        ([-1.0, 0.0, 0.0], 0.0),
+        ([0.5, 0.0, -(0.75f32).sqrt()], 0.5),
+    ] {
+        let turned = Interior {
+            towards: Some(towards),
+            ..interior
+        };
+        let expected = [0.2, 0.4, 0.0]
+            .iter()
+            .zip([0.4, 0.0, 0.2])
+            .map(|(ambient, diffuse)| (ambient * (0.9 + 0.2 * facing) + diffuse * facing) * 255.0)
+            .collect::<Vec<f32>>();
+        let expected = [expected[0], expected[1], expected[2]];
+        for slots in [Some(pool::SLOTS), None] {
+            let seen = drawn_lit(&gpu, &model, &textures, 0.0, slots, Some(turned));
+            assert!(
+                near(seen, expected, 3.0),
+                "{towards:?} {slots:?}: {seen:?} against {expected:?}"
+            );
+        }
+    }
 }
 
 /// Whether each colour of `pixel` is within `margin` of `wanted`.

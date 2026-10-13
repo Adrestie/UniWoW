@@ -1,17 +1,17 @@
 //! The doodads of the buildings through the service `models`, an owner for the doodads a building's
 //! groups hold together (`buildings/<map>/<unique id>/<groups>`), each drawn while one of those
 //! groups is seen: its set 0 always, and the set its placement names when that is another, each at
-//! the transform of the building times its own, a doodad of the rooms lit by its colour (`MODD`) as
-//! the client lights it. What the jobs placing them and those taking them away share is kept under
-//! a lock, so that a building's doodads are placed only while it is kept, and taken away once it is
-//! not.
+//! the transform of the building times its own, a doodad of the rooms lit by its colour (`MODD`) and
+//! by the lights of the building its groups name (`MOLR`) as the client lights it. What the jobs
+//! placing them and those taking them away share is kept under a lock, so that a building's doodads
+//! are placed only while it is kept, and taken away once it is not.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use uniwow_api::formats::{DoodadSet, FileRef, WmoDoodad, WmoGroup};
-use uniwow_api::glam::{Mat4, Quat, Vec3};
+use uniwow_api::formats::{DoodadSet, FileRef, WmoDoodad, WmoGroup, WmoLight};
+use uniwow_api::glam::{Mat3, Mat4, Quat, Vec3};
 use uniwow_api::models::{Geosets, Instance, Interior, Look, Models, Motion};
 
 /// The flags of a group: outside, lit as outside, inside.
@@ -72,7 +72,7 @@ pub fn lit_inside(groups: &[WmoGroup], holders: &[Vec<u16>]) -> Vec<bool> {
 /// out), as WebWowViewerCpp gives it to a doodad without flags (`applyLightingParamsToDoodad`, its
 /// `fixDirectColor` and `fixAmbient1`): its diffuse the colour brightened, its brightest channel
 /// raised to 112 of 255 at least, its hue kept; its light everywhere the colour darkened, its
-/// brightest channel lowered to 96 of 255 at most.
+/// brightest channel lowered to 96 of 255 at most; from the light of the insides.
 pub fn interior(colour: [u8; 4]) -> Interior {
     let [r, g, b, _] = colour.map(|channel| f32::from(channel) / 255.0);
     let rgb = [r, g, b];
@@ -89,13 +89,107 @@ pub fn interior(colour: [u8; 4]) -> Interior {
         } else {
             rgb
         },
+        towards: None,
+    }
+}
+
+/// A light of the building on a doodad: towards it from the doodad, in the axes of the building, and
+/// its colour there, in gamma.
+pub type Lamp = ([f32; 3], [f32; 3]);
+
+/// The kind of a light of a building that lights the doodads: a point (`omni`).
+const POINT: u8 = 0;
+
+/// Towards the light of the insides of the client, in the axes of the world (`models`).
+const TOWARDS_INSIDE_LIGHT: Vec3 = Vec3::new(0.30822, 0.30822, 0.9);
+
+/// The lights of the building each of `doodads`, held by the groups `holders` of `groups`, is lit by,
+/// as the public implementation benilla reads the client 1.12.1 (`0x695c00`, `0x69e1c0`, read for
+/// its facts): the points of `lights` the groups holding it name (`MOLR`), each weighing whole within
+/// its first distance of the place of the doodad, nothing from its second, linearly between; its
+/// colour times its intensity times that weight, towards it from that place; none weighing
+/// nothing, nor at the doodad's place.
+pub fn lamps(groups: &[WmoGroup], lights: &[WmoLight], doodads: &[WmoDoodad], holders: &[Vec<u16>]) -> Vec<Vec<Lamp>> {
+    doodads
+        .iter()
+        .zip(holders.iter().chain(std::iter::repeat(&Vec::new())))
+        .map(|(doodad, held)| {
+            let mut named: Vec<u16> = held
+                .iter()
+                .filter_map(|group| groups.get(usize::from(*group)))
+                .flat_map(|group| group.light_refs.iter().copied())
+                .collect();
+            named.sort_unstable();
+            named.dedup();
+            named
+                .into_iter()
+                .filter_map(|at| lights.get(usize::from(at)))
+                .filter(|light| light.kind == POINT)
+                .filter_map(|light| {
+                    let offset = Vec3::from(light.position) - Vec3::from(doodad.position);
+                    let distance = offset.length();
+                    let [start, end] = light.attenuation;
+                    let weight = if distance <= start {
+                        1.0
+                    } else if distance >= end || end <= start {
+                        0.0
+                    } else {
+                        1.0 - (distance - start) / (end - start)
+                    };
+                    let [red, green, blue, _] = light.colour.map(|channel| f32::from(channel) / 255.0);
+                    let colour = [red, green, blue].map(|channel| channel * light.intensity.max(0.0) * weight);
+                    (weight > 0.0 && distance > 1e-4 && colour.iter().any(|channel| *channel > 0.0))
+                        .then(|| ((offset / distance).to_array(), colour))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// `interior` lit also by the lights `lamps`, their directions turned to the world by `turn`: its
+/// diffuse and the light of the insides it comes from, and each light, folded into one light, from
+/// the mean of their directions weighed by the brightness of each, of the sum of each colour by how
+/// much it faces that mean, each channel at most 1 (a choice of the editor: the client lights by up
+/// to three of them, or by a probe of all, where a model of the editor takes one light); as it is
+/// without lights.
+pub fn lit_by(interior: Interior, lamps: &[Lamp], turn: Mat3) -> Interior {
+    if lamps.is_empty() {
+        return interior;
+    }
+    let brightness = |colour: [f32; 3]| colour.iter().sum::<f32>() / 3.0;
+    let lobes: Vec<(Vec3, [f32; 3])> = std::iter::once((TOWARDS_INSIDE_LIGHT, interior.diffuse))
+        .chain(
+            lamps
+                .iter()
+                .map(|(towards, colour)| ((turn * Vec3::from(*towards)).normalize_or_zero(), *colour)),
+        )
+        .collect();
+    let mean: Vec3 = lobes
+        .iter()
+        .map(|(towards, colour)| *towards * brightness(*colour))
+        .sum();
+    let Some(mean) = mean.try_normalize() else {
+        return interior;
+    };
+    let mut diffuse = [0.0; 3];
+    for (towards, colour) in &lobes {
+        let facing = towards.dot(mean).max(0.0);
+        for (sum, channel) in diffuse.iter_mut().zip(colour) {
+            *sum += channel * facing;
+        }
+    }
+    Interior {
+        diffuse: diffuse.map(|channel| channel.min(1.0)),
+        towards: Some(mean.to_array()),
+        ..interior
     }
 }
 
 /// The instances of the doodads of a building at `transform`, of its sets `sets` and its doodads
-/// `doodads`, held by the groups `holders`, those of the rooms `inside` lit by their colour, its
-/// placement naming the set `named`: by the groups holding them, each by its place among the
-/// doodads.
+/// `doodads`, held by the groups `holders`, those of the rooms `inside` lit by their colour and by
+/// the lights `lamps` of each (`lamps`), its placement naming the set `named`: by the groups holding
+/// them, each by its place among the doodads.
+#[allow(clippy::too_many_arguments)]
 pub fn instances(
     models: &dyn Models,
     transform: &Mat4,
@@ -103,8 +197,10 @@ pub fn instances(
     doodads: &[WmoDoodad],
     holders: &[Vec<u16>],
     inside: &[bool],
+    lamps: &[Vec<Lamp>],
     named: u16,
 ) -> Vec<(Vec<u16>, Vec<Instance>)> {
+    let turn = Mat3::from_mat4(*transform);
     let mut chosen = vec![0usize];
     if named != 0 && usize::from(named) < sets.len() {
         chosen.push(usize::from(named));
@@ -135,11 +231,10 @@ pub fn instances(
                     transform: *transform * own,
                     alpha: 1.0,
                     motion: Motion::Standing,
-                    interior: inside
-                        .get(index)
-                        .copied()
-                        .unwrap_or(false)
-                        .then(|| interior(doodad.colour)),
+                    interior: inside.get(index).copied().unwrap_or(false).then(|| {
+                        let lit = lamps.get(index).map(Vec::as_slice).unwrap_or_default();
+                        lit_by(interior(doodad.colour), lit, turn)
+                    }),
                 });
         }
     }

@@ -258,6 +258,7 @@ pub fn read(
             &mut group,
             materials.len(),
             doodads.len(),
+            lights.len(),
             portal_refs.len(),
             &mut |fault| {
                 faults.push(format!("group {index}: {fault}"));
@@ -390,6 +391,7 @@ fn read_group(bytes: &[u8]) -> Result<WmoGroup, String> {
                 })?
             }
             b"MODR" => group.doodad_refs = records(data, 2, |index| u16_at(index, 0))?,
+            b"MOLR" => group.light_refs = records(data, 2, |index| u16_at(index, 0))?,
             b"MOBN" => {
                 group.bsp = records(data, 16, |node| {
                     Ok(BspNode {
@@ -433,14 +435,15 @@ fn liquid(data: &[u8]) -> Result<WmoLiquid, String> {
     })
 }
 
-/// Checks what `group` refers to, within a building of `materials`, `doodads` and `portal_refs`:
-/// a batch out of its triangles or vertices, or of a material it does not have, drawn as nothing;
-/// a triangle of a material it does not have, only collided with; a doodad it does not have, left
-/// out. Each fault said once by `fault`.
+/// Checks what `group` refers to, within a building of `materials`, `doodads`, `lights` and
+/// `portal_refs`: a batch out of its triangles or vertices, or of a material it does not have, drawn
+/// as nothing; a triangle of a material it does not have, only collided with; a doodad or a light it
+/// does not have, left out. Each fault said once by `fault`.
 fn check_group(
     group: &mut WmoGroup,
     materials: usize,
     doodads: usize,
+    lights: usize,
     portal_refs: usize,
     fault: &mut dyn FnMut(String),
 ) {
@@ -503,6 +506,14 @@ fn check_group(
         fault(format!(
             "{} of its doodads past the {doodads} of the building",
             held - group.doodad_refs.len()
+        ));
+    }
+    let named = group.light_refs.len();
+    group.light_refs.retain(|light| usize::from(*light) < lights);
+    if group.light_refs.len() != named {
+        fault(format!(
+            "{} of its lights past the {lights} of the building",
+            named - group.light_refs.len()
         ));
     }
     let [first, count] = group.portals.map(usize::from);

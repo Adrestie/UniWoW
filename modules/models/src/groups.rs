@@ -82,12 +82,36 @@ pub fn packed(colour: [f32; 3]) -> f32 {
     (r | g << 8 | b << 16) as f32
 }
 
+/// The steps of each of the two coordinates of a direction folded on an octahedron (`towards`).
+const OCTAHEDRON: f32 = 2047.0;
+
+/// A unit direction in one float the shader reads back (`towards_inside`): folded on an octahedron,
+/// its two coordinates in 2048 steps each, the first in the low 11 bits, plus 2, under 2^24.
+pub fn towards(direction: [f32; 3]) -> f32 {
+    let [x, y, z] = direction;
+    let sum = (x.abs() + y.abs() + z.abs()).max(1e-6);
+    let (x, y, z) = (x / sum, y / sum, z / sum);
+    let sign = |value: f32| if value < 0.0 { -1.0 } else { 1.0 };
+    let (u, v) = if z < 0.0 {
+        ((1.0 - y.abs()) * sign(x), (1.0 - x.abs()) * sign(y))
+    } else {
+        (x, y)
+    };
+    let step = |value: f32| ((value.clamp(-1.0, 1.0) * 0.5 + 0.5) * OCTAHEDRON).round() as u32;
+    (2 + (step(u) | step(v) << 11)) as f32
+}
+
 /// `instance` as the shader reads it: the rows of its transform, then its alpha and its light inside
-/// a building, its light everywhere and its diffuse packed, and 1; 0 for the light of the view.
+/// a building, its light everywhere and its diffuse packed, and 1 for the light of the insides of the
+/// client, the direction of its light (`towards`) otherwise; 0 for the light of the view.
 pub fn as_gpu(instance: &Instance) -> InstanceGpu {
     let transform = instance.transform;
     let [ambient, diffuse, inside] = match instance.interior {
-        Some(interior) => [packed(interior.ambient), packed(interior.diffuse), 1.0],
+        Some(interior) => [
+            packed(interior.ambient),
+            packed(interior.diffuse),
+            interior.towards.map_or(1.0, towards),
+        ],
         None => [0.0; 3],
     };
     InstanceGpu {

@@ -13,9 +13,9 @@ use uniwow_api::arena::Refusal;
 use uniwow_api::formats::{
     AnimationRecord, AreaRecord, Building, CharSection, CreatureDisplay, CreatureLook, CreatureModel, DoodadSet,
     FacialHair, FileRef, Formats, GameObjectDisplay, HairGeoset, MapRecord, Model, ORIGIN, Texture, TextureFormat,
-    Tile, TileId, Wdl, Wdt, Wmo, WmoBatch, WmoDoodad, WmoGroup, WmoLiquid, WmoMaterial,
+    Tile, TileId, Wdl, Wdt, Wmo, WmoBatch, WmoDoodad, WmoGroup, WmoLight, WmoLiquid, WmoMaterial,
 };
-use uniwow_api::glam::{Mat4, Quat, Vec3};
+use uniwow_api::glam::{Mat3, Mat4, Quat, Vec3};
 use uniwow_api::liquids::{Liquids, Surfaces};
 use uniwow_api::models::{Extent, Instance, Look, LookId, LookState, Models};
 use uniwow_api::viewport::{Layer, Phase, Pyramid, Target, View};
@@ -346,13 +346,20 @@ fn the_doodads_of_a_building_are_those_of_its_set_0_and_of_the_set_it_names() {
             .collect::<Vec<_>>()
     };
     let inside = vec![false; doodads.len()];
-    let only_first = doodads::instances(&models, &transform, &sets, &doodads, &holders, &inside, 0);
+    let only_first = doodads::instances(&models, &transform, &sets, &doodads, &holders, &inside, &[], 0);
     assert_eq!(ids(&only_first), [0], "the empty name left out");
-    let named = doodads::instances(&models, &transform, &sets, &doodads, &holders, &inside, 2);
+    let named = doodads::instances(&models, &transform, &sets, &doodads, &holders, &inside, &[], 2);
     assert_eq!(ids(&named), [0, 3]);
     assert_eq!(
         ids(&doodads::instances(
-            &models, &transform, &sets, &doodads, &holders, &inside, 9
+            &models,
+            &transform,
+            &sets,
+            &doodads,
+            &holders,
+            &inside,
+            &[],
+            9
         )),
         [0],
         "a set it lacks"
@@ -418,6 +425,7 @@ fn a_doodad_of_the_rooms_is_lit_by_its_colour_as_the_client_lights_it() {
         &[coloured.clone(), coloured],
         &[vec![0], vec![2]],
         &[true, false],
+        &[],
         0,
     );
     let interiors: Vec<_> = parts
@@ -425,6 +433,118 @@ fn a_doodad_of_the_rooms_is_lit_by_its_colour_as_the_client_lights_it() {
         .flat_map(|(_, instances)| instances.iter().map(|instance| (instance.id, instance.interior)))
         .collect();
     assert_eq!(interiors, [(0, Some(dim)), (1, None)]);
+}
+
+/// A light of a building of the kind `kind` at `position`, white at the intensity `intensity`,
+/// fading out from `attenuation[0]` to `attenuation[1]` yards.
+fn lamp(kind: u8, position: [f32; 3], intensity: f32, attenuation: [f32; 2]) -> WmoLight {
+    WmoLight {
+        kind,
+        attenuated: true,
+        colour: [255, 128, 0, 255],
+        position,
+        intensity,
+        attenuation,
+    }
+}
+
+#[test]
+fn a_doodad_of_the_rooms_is_lit_too_by_the_lights_its_groups_name_folded_into_its_light() {
+    // The group 0 names the light 0, the group 1 the lights 1 and 0, the group 2 the lights 2 and 3;
+    // the doodad 0, held by the groups 0 and 1, at the origin; the doodad 1 by the group 2, the
+    // doodad 2 by none.
+    let named = |refs: Vec<u16>| WmoGroup {
+        flags: 0x2000,
+        light_refs: refs,
+        ..WmoGroup::default()
+    };
+    let groups = [named(vec![0]), named(vec![1, 0]), named(vec![2, 3])];
+    let lights = [
+        // 4 yards over the origin, whole within 5: whole.
+        lamp(0, [0.0, 0.0, 4.0], 2.0, [5.0, 10.0]),
+        // 6 yards along +X, fading from 2 to 10: weighing a half.
+        lamp(0, [6.0, 0.0, 0.0], 1.0, [2.0, 10.0]),
+        // A spot, which lights no doodad.
+        lamp(1, [0.0, 0.0, 1.0], 1.0, [5.0, 10.0]),
+        // Past its second distance: nothing.
+        lamp(0, [0.0, 20.0, 0.0], 1.0, [5.0, 10.0]),
+    ];
+    let doodads = [
+        doodad("a.mdx", [0.0; 3]),
+        doodad("b.mdx", [0.0; 3]),
+        doodad("c.mdx", [0.0; 3]),
+    ];
+    let holders = [vec![0, 1], vec![2], vec![]];
+    let lamps = doodads::lamps(&groups, &lights, &doodads, &holders);
+    assert_eq!(lamps.len(), 3);
+    assert_eq!(
+        lamps[0],
+        [
+            ([0.0, 0.0, 1.0], [2.0, 256.0 / 255.0, 0.0]),
+            ([1.0, 0.0, 0.0], [0.5, 64.0 / 255.0, 0.0]),
+        ],
+        "each light named once, by its weight"
+    );
+    assert!(lamps[1].is_empty() && lamps[2].is_empty());
+    // Folded into its light: its diffuse and each light, from the mean of their directions weighed
+    // by their brightness, each by how much it faces that mean, each channel at most 1.
+    let base = doodads::interior([56, 28, 14, 255]);
+    let lit = doodads::lit_by(base, &lamps[0], Mat3::IDENTITY);
+    let towards = Vec3::from(lit.towards.expect("a light of its own"));
+    let brightness = |colour: [f32; 3]| colour.iter().sum::<f32>() / 3.0;
+    let mean = (Vec3::new(0.30822, 0.30822, 0.9) * brightness(base.diffuse)
+        + Vec3::Z * brightness(lamps[0][0].1)
+        + Vec3::X * brightness(lamps[0][1].1))
+    .normalize();
+    assert!(towards.abs_diff_eq(mean, 1e-5), "{towards} {mean}");
+    let facing = |direction: Vec3| direction.dot(mean).max(0.0);
+    let red =
+        (base.diffuse[0] * facing(Vec3::new(0.30822, 0.30822, 0.9)) + 2.0 * facing(Vec3::Z) + 0.5 * facing(Vec3::X))
+            .min(1.0);
+    let green = base.diffuse[1] * facing(Vec3::new(0.30822, 0.30822, 0.9))
+        + 256.0 / 255.0 * facing(Vec3::Z)
+        + 64.0 / 255.0 * facing(Vec3::X);
+    assert!(
+        (lit.diffuse[0] - red).abs() < 1e-5 && (lit.diffuse[1] - green.min(1.0)).abs() < 1e-5,
+        "{lit:?}"
+    );
+    assert_eq!(lit.diffuse[0], 1.0, "bounded to 1");
+    assert_eq!(lit.ambient, base.ambient, "its light everywhere as it is");
+    // Turned with the building: a quarter turn about the vertical, the light along +X now along +Y.
+    let turned = doodads::lit_by(base, &lamps[0][1..], Mat3::from_rotation_z(std::f32::consts::FRAC_PI_2));
+    assert!(turned.towards.unwrap()[1] > 0.5, "{turned:?}");
+    // A light from behind the mean of the others adds nothing, rather than taking away.
+    let behind = [([1.0, 0.0, 0.0], [0.5; 3]), ([-1.0, 0.0, 0.0], [0.2; 3])];
+    let backed = doodads::lit_by(base, &behind, Mat3::IDENTITY);
+    let mean = Vec3::from(backed.towards.unwrap());
+    let facing = |direction: Vec3| direction.dot(mean).max(0.0);
+    let blue = base.diffuse[2] * facing(Vec3::new(0.30822, 0.30822, 0.9)) + 0.5 * facing(Vec3::X);
+    assert!((backed.diffuse[2] - blue).abs() < 1e-5, "{backed:?}");
+    // Without lights, as it is.
+    assert_eq!(doodads::lit_by(base, &[], Mat3::IDENTITY), base);
+    // Given to its instance.
+    let models = FakeModels::default();
+    let parts = doodads::instances(
+        &models,
+        &Mat4::IDENTITY,
+        &[set(0, 3)],
+        &doodads,
+        &holders,
+        &[true, true, false],
+        &lamps,
+        0,
+    );
+    let interiors: Vec<_> = parts
+        .iter()
+        .flat_map(|(_, instances)| instances.iter().map(|instance| (instance.id, instance.interior)))
+        .collect();
+    let plain = doodads::interior([0, 0, 0, 0]);
+    assert!(
+        interiors.contains(&(0, Some(doodads::lit_by(plain, &lamps[0], Mat3::IDENTITY)))),
+        "{interiors:?}"
+    );
+    assert!(interiors.contains(&(1, Some(plain))));
+    assert!(interiors.contains(&(2, None)));
 }
 
 #[test]
@@ -450,6 +570,7 @@ fn the_doodads_of_a_building_are_placed_while_it_is_kept_and_taken_away_after() 
         &[doodad("a.mdx", [0.0; 3])],
         &[vec![2, 5]],
         &[false],
+        &[],
         0,
     );
     owners.want(&models, "Map", HashSet::from([1]));
@@ -474,6 +595,7 @@ fn the_doodads_of_a_building_are_placed_while_it_is_kept_and_taken_away_after() 
         &[doodad("a.mdx", [0.0; 3])],
         &[Vec::new()],
         &[false],
+        &[],
         0,
     );
     assert!(owners.place(&models, "Map", 1, &moved));

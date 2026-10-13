@@ -56,9 +56,11 @@ pub struct WmoFile {
     pub gpu: Arc<WmoGpu>,
     pub sets: Vec<DoodadSet>,
     pub doodads: Vec<WmoDoodad>,
-    /// The groups holding each doodad, and whether each is lit as the rooms are.
+    /// The groups holding each doodad, whether each is lit as the rooms are, and the lights of the
+    /// building on each (`doodads::lamps`).
     pub holders: Vec<Vec<u16>>,
     pub inside: Vec<bool>,
+    pub lamps: Vec<Vec<doodads::Lamp>>,
     pub liquids: Vec<liquid::GroupLiquid>,
 }
 
@@ -82,7 +84,12 @@ impl WmoFile {
                     .iter()
                     .map(|held| size_of::<Vec<u16>>() + held.len() * 2)
                     .sum::<usize>()
-                + self.inside.len()) as u64
+                + self.inside.len()
+                + self
+                    .lamps
+                    .iter()
+                    .map(|lit| size_of::<Vec<doodads::Lamp>>() + lit.len() * size_of::<doodads::Lamp>())
+                    .sum::<usize>()) as u64
     }
 }
 
@@ -253,6 +260,7 @@ impl BuildingsModule {
             let (sets, doodads) = (wmo.doodad_sets.clone(), wmo.doodads.clone());
             let holders = doodads::holders(&wmo.groups, doodads.len());
             let inside = doodads::lit_inside(&wmo.groups, &holders);
+            let lamps = doodads::lamps(&wmo.groups, &wmo.lights, &doodads, &holders);
             let liquids = liquid::liquids(&wmo);
             if !wmo.faults.is_empty() {
                 log::warn!("{read:?}: {} faults, the first {}", wmo.faults.len(), wmo.faults[0]);
@@ -264,6 +272,7 @@ impl BuildingsModule {
                 doodads,
                 holders,
                 inside,
+                lamps,
                 liquids,
             })
         });
@@ -608,6 +617,7 @@ impl BuildingsModule {
                     &file.doodads,
                     &file.holders,
                     &file.inside,
+                    &file.lamps,
                     named,
                 );
                 lock(&owners).place(&*models, &map, id, &parts);

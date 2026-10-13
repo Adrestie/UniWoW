@@ -36,15 +36,31 @@ fn unpacked(value: f32) -> vec3<f32> {
     return vec3<f32>(f32(bits & 255u), f32((bits >> 8u) & 255u), f32((bits >> 16u) & 255u)) / 255.0;
 }
 
+// Towards the light inside a building of an instance whose `extra.w` is `inside`: that of the insides
+// for 1, the direction `groups::towards` folds on an octahedron otherwise.
+fn towards_inside(inside: f32) -> vec3<f32> {
+    if inside < 1.5 {
+        return TOWARDS_INSIDE_LIGHT;
+    }
+    let bits = u32(inside - 2.0 + 0.5);
+    let folded = vec2<f32>(f32(bits & 2047u), f32(bits >> 11u)) / 2047.0 * 2.0 - vec2<f32>(1.0);
+    var direction = vec3<f32>(folded, 1.0 - abs(folded.x) - abs(folded.y));
+    if direction.z < 0.0 {
+        let signs = select(vec2<f32>(-1.0), vec2<f32>(1.0), direction.xy >= vec2<f32>(0.0));
+        direction = vec3<f32>((vec2<f32>(1.0) - abs(direction.yx)) * signs, direction.z);
+    }
+    return normalize(direction);
+}
+
 // The light of a face of `normal` of an instance whose `extra` is read as `groups::as_gpu` writes
 // it, in linear: by the light of the view (`light`); or, inside a building, by its own light
-// everywhere from 0.9 to 1.1 times as the face turns to the light of the insides, plus its diffuse
-// by the angle, in gamma, made linear once, as the client lights the doodads of the rooms.
+// everywhere from 0.9 to 1.1 times as the face turns to its light (`towards_inside`), plus its
+// diffuse by the angle, in gamma, made linear once, as the client lights the doodads of the rooms.
 fn instance_light(normal: vec3<f32>, extra: vec4<f32>) -> vec3<f32> {
     if extra.w < 0.5 {
         return light(normal);
     }
-    let facing = clamp(dot(normalize(normal), TOWARDS_INSIDE_LIGHT), 0.0, 1.0);
+    let facing = clamp(dot(normalize(normal), towards_inside(extra.w)), 0.0, 1.0);
     return linear(unpacked(extra.y) * (0.9 + 0.2 * facing) + unpacked(extra.z) * facing);
 }
 

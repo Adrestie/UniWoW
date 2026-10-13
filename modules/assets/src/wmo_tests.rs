@@ -127,6 +127,7 @@ fn group_one(modern: bool) -> Vec<u8> {
     let flags = if modern { 0x2 } else { 0 };
     inside.extend(tagged(b"MOBA", &batch(0, 6, [0, 3], flags, material)));
     inside.extend(tagged(b"MODR", &halves(&[1])));
+    inside.extend(tagged(b"MOLR", &halves(&[0])));
     // Its tree: cut across X at 0.5, a triangle on each side.
     inside.extend(tagged(
         b"MOBN",
@@ -439,6 +440,7 @@ fn a_building_of_3_3_5a_reads_its_root_and_its_groups_beside_it() {
         }]
     );
     assert_eq!(one.doodad_refs, [1]);
+    assert_eq!(one.light_refs, [0]);
     let leaf = |first| BspNode {
         flags: 0x4,
         children: [-1, -1],
@@ -523,7 +525,7 @@ fn a_modern_building_names_its_groups_doodads_and_textures_by_file_data_id() {
 #[test]
 fn what_a_building_lacks_is_said_and_left_out() {
     // A batch past its triangles, a triangle and a batch of a material it does not have, a doodad
-    // it does not have, a BSP tree whose root has a child past its nodes, a set past its doodads, a
+    // and lights it does not have, a BSP tree whose root has a child past its nodes, a set past its doodads, a
     // portal reference to a group it does not have, and a group missing.
     let mut inside = group_header(0x8, [1, 4], [0, 0, 3]);
     inside.extend(tagged(b"MOPY", &[0, 9]));
@@ -541,6 +543,7 @@ fn what_a_building_lacks_is_said_and_left_out() {
         .concat(),
     ));
     inside.extend(tagged(b"MODR", &halves(&[1, 5])));
+    inside.extend(tagged(b"MOLR", &halves(&[0, 1, 2])));
     inside.extend(tagged(b"MOBN", &bsp_node(0, [-1, 5], 0, 0, 0.0)));
     inside.extend(tagged(b"MOBR", &halves(&[0])));
     let mut group = tagged(b"MVER", &words(&[17]));
@@ -565,6 +568,7 @@ fn what_a_building_lacks_is_said_and_left_out() {
     );
     assert_eq!(one.faces[0].material, None);
     assert_eq!(one.doodad_refs, [1]);
+    assert_eq!(one.light_refs, [0]);
     assert!(one.bsp.is_empty() && one.bsp_faces.is_empty());
     assert_eq!(wmo.doodad_sets[0].count, 2);
     let two = &wmo.groups[1];
@@ -579,6 +583,7 @@ fn what_a_building_lacks_is_said_and_left_out() {
         "group 0: its batch 1",
         "group 0: its batch 2",
         "group 0: 1 of its doodads past the 2 of the building",
+        "group 0: 2 of its lights past the 1 of the building",
         "group 0: its portals 1 to 5 past the 2 references",
         "group 0: its BSP tree left out: its node 0 of 1 has the child 5",
         r"group 1 (world\wmo\test_001.wmo): world\wmo\test_001.wmo: not written",
@@ -587,7 +592,7 @@ fn what_a_building_lacks_is_said_and_left_out() {
     ] {
         assert!(said.contains(fault), "{fault} not in {said}");
     }
-    assert_eq!(wmo.faults.len(), 9, "{said}");
+    assert_eq!(wmo.faults.len(), 10, "{said}");
 }
 
 #[test]
