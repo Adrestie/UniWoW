@@ -1,7 +1,8 @@
 //! Interface of the "weather" service: the weather the view is drawn under, as the module `weather`
 //! applies it, the server's or one chosen in the editor; read by the light of the map, which mixes
-//! in the params of storm of its lights by its intensity. And the weathers of the server as
-//! AzerothCore names them (`WeatherState`), which its observer sends.
+//! in the params of storm of its lights by its intensity and adds the flashes of the lightning of a
+//! thunderstorm. And the weathers of the server as AzerothCore names them (`WeatherState`), which
+//! its observer sends.
 
 use std::sync::Arc;
 
@@ -16,6 +17,12 @@ pub type Handle = Arc<dyn Weather>;
 pub trait Weather: Send + Sync {
     /// The weather drawn now; none for fine weather.
     fn current(&self) -> Option<Effect>;
+
+    /// How much a flash of lightning lights the scene now, from 0 to 1: none but in a thunderstorm
+    /// whose lightning is drawn, and none where nothing falls on the eye. None by default.
+    fn flash(&self) -> f32 {
+        0.0
+    }
 }
 
 /// A weather: its kind and its intensity, from 0 to 1, the grade the server sends with it.
@@ -76,6 +83,12 @@ impl Kind {
     pub fn foggy(self) -> bool {
         matches!(self, Kind::Fog | Kind::Sandstorm)
     }
+
+    /// Whether lightning flashes in it: the thunderstorm alone, a choice of the editor (the client of
+    /// 3.3.5a names no lightning in its tables).
+    pub fn flashes(self) -> bool {
+        self == Kind::Thunders
+    }
 }
 
 /// The states of the weather AzerothCore sends its players (`WeatherState`, `Weather.h`): fine (0),
@@ -114,6 +127,29 @@ impl Effect {
         };
         let intensity = if grade.is_finite() { grade.clamp(0.0, 1.0) } else { 0.0 };
         Some(Effect { kind, intensity })
+    }
+
+    /// The state AzerothCore sends for a weather of its kind and intensity, as
+    /// `Weather::GetWeatherState` cuts the grade (light below 0.40, medium below 0.70, heavy from
+    /// it), the id of its row of `Weather.dbc`; below 0.27, where AzerothCore sends fine weather,
+    /// that of the lightest, the weather chosen in the editor falling all the same.
+    pub fn state(&self) -> u32 {
+        let [light, medium, heavy] = match self.kind {
+            Kind::Fog => return state::FOG,
+            Kind::Thunders => return state::THUNDERS,
+            Kind::BlackRain => return state::BLACK_RAIN,
+            Kind::BlackSnow => return state::BLACK_SNOW,
+            Kind::Rain => [state::LIGHT_RAIN, state::MEDIUM_RAIN, state::HEAVY_RAIN],
+            Kind::Snow => [state::LIGHT_SNOW, state::MEDIUM_SNOW, state::HEAVY_SNOW],
+            Kind::Sandstorm => [state::LIGHT_SANDSTORM, state::MEDIUM_SANDSTORM, state::HEAVY_SANDSTORM],
+        };
+        if self.intensity < 0.40 {
+            light
+        } else if self.intensity < 0.70 {
+            medium
+        } else {
+            heavy
+        }
     }
 
     /// The name of the state `state` of AzerothCore, in words; none for a state unknown.
@@ -169,5 +205,33 @@ mod tests {
         assert_eq!(Effect::state_name(2), None);
         assert!(Kind::Rain.falls() && Kind::Rain.stormy() && !Kind::Rain.foggy());
         assert!(!Kind::Fog.falls() && Kind::Fog.foggy() && Kind::Sandstorm.foggy());
+        assert_eq!(
+            Kind::ALL.iter().filter(|kind| kind.flashes()).collect::<Vec<_>>(),
+            [&Kind::Thunders]
+        );
+    }
+
+    #[test]
+    fn a_weather_gives_the_state_azerothcore_sends_for_its_kind_and_grade() {
+        let state = |kind, intensity| Effect { kind, intensity }.state();
+        assert_eq!(state(Kind::Rain, 0.1), state::LIGHT_RAIN, "below 0.27, the lightest");
+        assert_eq!(state(Kind::Rain, 0.39), state::LIGHT_RAIN);
+        assert_eq!(state(Kind::Rain, 0.40), state::MEDIUM_RAIN);
+        assert_eq!(state(Kind::Rain, 0.69), state::MEDIUM_RAIN);
+        assert_eq!(state(Kind::Rain, 0.70), state::HEAVY_RAIN);
+        assert_eq!(state(Kind::Snow, 0.5), state::MEDIUM_SNOW);
+        assert_eq!(state(Kind::Sandstorm, 0.3), state::LIGHT_SANDSTORM);
+        assert_eq!(state(Kind::Sandstorm, 0.9), state::HEAVY_SANDSTORM);
+        assert_eq!(state(Kind::Thunders, 0.1), state::THUNDERS);
+        assert_eq!(state(Kind::BlackRain, 1.0), state::BLACK_RAIN);
+        assert_eq!(state(Kind::BlackSnow, 0.5), state::BLACK_SNOW);
+        assert_eq!(state(Kind::Fog, 0.5), state::FOG);
+        // Read back as the same weather, for every state but those below 0.27.
+        for kind in Kind::ALL {
+            for intensity in [0.3, 0.5, 0.9] {
+                let effect = Effect { kind, intensity };
+                assert_eq!(Effect::of_state(effect.state(), intensity), Some(effect));
+            }
+        }
     }
 }

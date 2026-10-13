@@ -7,7 +7,7 @@ use std::sync::{Arc, OnceLock};
 use uniwow_api::formats::{
     AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair,
     GameObjectDisplay, HairGeoset, LightBand, LightParamsRecord, LightRecord, LightSkyboxRecord, LiquidTypeRecord,
-    MapRecord,
+    MapRecord, SoundEntryRecord, WeatherRecord,
 };
 
 use crate::chain::Chain;
@@ -101,6 +101,8 @@ pub struct Tables {
     objects: Rows<GameObjectDisplay>,
     sections: Rows<CharSection>,
     animations: Rows<AnimationRecord>,
+    weathers: Rows<WeatherRecord>,
+    sounds: Rows<SoundEntryRecord>,
     liquids: Rows<LiquidTypeRecord>,
     lights: Rows<LightRecord>,
     light_params: Rows<LightParamsRecord>,
@@ -126,6 +128,8 @@ impl Tables {
             objects: OnceLock::new(),
             sections: OnceLock::new(),
             animations: OnceLock::new(),
+            weathers: OnceLock::new(),
+            sounds: OnceLock::new(),
             liquids: OnceLock::new(),
             lights: OnceLock::new(),
             light_params: OnceLock::new(),
@@ -260,6 +264,48 @@ impl Tables {
         };
         self.animations
             .get_or_init(|| read(chain, "AnimationData.dbc", 8, row, |animation| animation.id))
+            .clone()
+    }
+
+    pub fn weathers(&self, chain: &Chain) -> Result<Arc<Vec<WeatherRecord>>, String> {
+        let row = |dbc: &Dbc, row| {
+            Ok(WeatherRecord {
+                id: dbc.u32(row, 0),
+                sound: dbc.u32(row, 1),
+                effect: dbc.u32(row, 2),
+                transition_sky: dbc.f32(row, 3),
+                colour: [dbc.f32(row, 4), dbc.f32(row, 5), dbc.f32(row, 6)],
+                texture: dbc.string(row, 7)?,
+            })
+        };
+        self.weathers
+            .get_or_init(|| read(chain, "Weather.dbc", 8, row, |weather| weather.id))
+            .clone()
+    }
+
+    /// The sounds, each with its files named, their weights beside them.
+    pub fn sound_entries(&self, chain: &Chain) -> Result<Arc<Vec<SoundEntryRecord>>, String> {
+        let row = |dbc: &Dbc, row| {
+            let mut files = Vec::new();
+            for at in 0..10 {
+                let file = dbc.string(row, 3 + at)?;
+                if !file.is_empty() {
+                    files.push((file, dbc.u32(row, 13 + at)));
+                }
+            }
+            Ok(SoundEntryRecord {
+                id: dbc.u32(row, 0),
+                kind: dbc.u32(row, 1),
+                name: dbc.string(row, 2)?,
+                files,
+                directory: dbc.string(row, 23)?,
+                volume: dbc.f32(row, 24),
+                flags: dbc.u32(row, 25),
+                distances: [dbc.f32(row, 26), dbc.f32(row, 27)],
+            })
+        };
+        self.sounds
+            .get_or_init(|| read(chain, "SoundEntries.dbc", 30, row, |sound| sound.id))
             .clone()
     }
 

@@ -2,10 +2,14 @@
 //! the live world (`live-world.weather`), or one chosen in the panel, applied in the editor alone,
 //! nothing sent to the server. Given through the service `weather`, by which the light of the map
 //! mixes in the params of storm of its lights and thickens its fog, and drawn falling around the
-//! eye (`fall`). The zone of the camera is the zone of the area of the chunk of terrain under it
-//! (`terrain.area`), by `AreaTable.dbc`, read by a job once the client's archives are open.
+//! eye (`fall`); in a thunderstorm, its lightning (`storm`), whose flashes the service gives the
+//! light; heard through the service `audio` (`sound`): the loop the client names for it, and the
+//! thunder of each strike. The zone of the camera is the zone of the area of the chunk of terrain
+//! under it (`terrain.area`), by `AreaTable.dbc`, read by a job once the client's archives are open.
 
 mod fall;
+mod sound;
+mod storm;
 #[cfg(test)]
 mod tests;
 
@@ -23,12 +27,17 @@ use uniwow_api::{
 };
 
 use fall::{FallLayer, Falling, Gpu};
+use sound::{Heard, Sounds};
+use storm::Storm;
 
 /// The settings: whether the weather is none (0), the server's (1) or the one chosen (2); the
-/// one chosen, by its place in `Kind::ALL`, and its intensity, in hundredths.
+/// one chosen, by its place in `Kind::ALL`, and its intensity, in hundredths; whether lightning
+/// flashes in a thunderstorm, and the row of `SoundEntries.dbc` of its thunder.
 const MODE: &str = "mode";
 const KIND: &str = "kind";
 const INTENSITY: &str = "intensity";
+const LIGHTNING: &str = "lightning";
+const THUNDER: &str = "thunder_sound";
 
 const NONE: i64 = 0;
 const SERVER: i64 = 1;
@@ -63,6 +72,18 @@ fn settings() -> Vec<SettingSpec> {
             "Intensity of the weather chosen, in hundredths",
             [0, 100],
             50,
+        ),
+        SettingSpec::integer(
+            LIGHTNING,
+            "Lightning in a thunderstorm: none (0) or flashes (1), the editor's",
+            [0, 1],
+            1,
+        ),
+        SettingSpec::integer(
+            THUNDER,
+            "Thunder after a flash: its row of SoundEntries.dbc (0 for none)",
+            [0, 65_535],
+            i64::from(sound::THUNDER),
         ),
     ]
 }
@@ -128,6 +149,10 @@ impl weather::Weather for Applied {
     fn current(&self) -> Option<Effect> {
         lock(&self.0).effect
     }
+
+    fn flash(&self) -> f32 {
+        lock(&self.0).flash
+    }
 }
 
 /// Where the camera is: its area and its zone, none where the terrain has none under it.
@@ -153,6 +178,13 @@ struct WeatherModule {
     place: Option<Place>,
     /// The weather of the server of the zone of the camera, its zone, and when it was asked.
     server: Option<(u32, ServerWeather, Instant)>,
+    /// The lightning of a thunderstorm, its time counted from `started`, and why nothing falls on
+    /// the eye, if so.
+    storm: Storm,
+    started: Option<Instant>,
+    sheltered: Option<&'static str>,
+    /// What is heard of the weather.
+    sounds: Sounds,
 }
 
 impl WeatherModule {
@@ -171,6 +203,7 @@ impl WeatherModule {
             }
             self.client = client;
             self.areas = None;
+            self.sounds.reset(ctx);
         }
         self.client?;
         match &self.areas {
@@ -195,15 +228,13 @@ impl WeatherModule {
     }
 
     /// Where the camera is on the map the terrain shows; none without a map or a camera.
-    fn locate(&mut self, ctx: &mut Context) -> Option<Place> {
+    fn locate(&mut self, ctx: &mut Context, eye: Option<[f32; 3]>) -> Option<Place> {
         let areas = self.read_areas(ctx);
         ctx.editor()
             .call("terrain.map", json!({}))
             .ok()
             .filter(|map| !map.is_null())?;
-        let Ok(PropertyValue::Vector([x, y, _])) = ctx.read_property("viewport/camera_position") else {
-            return None;
-        };
+        let [x, y, _] = eye?;
         let area = ctx
             .editor()
             .call("terrain.area", json!({ "x": x, "y": y }))
@@ -250,9 +281,20 @@ impl WeatherModule {
     }
 
     /// At each frame: where the camera is, the weather of the server there, and the weather applied
-    /// as the settings say, given to the service and the layer with what shelters the eye.
+    /// as the settings say, given to the service and the layer with what shelters the eye; the
+    /// lightning of a thunderstorm at the time the module has run.
     fn steer(&mut self, ctx: &mut Context) {
-        self.place = self.locate(ctx);
+        let now = self.started.get_or_insert_with(Instant::now).elapsed().as_secs_f64();
+        self.steer_at(ctx, now);
+    }
+
+    /// The same, `now` seconds after the module started.
+    fn steer_at(&mut self, ctx: &mut Context, now: f64) {
+        let eye = match ctx.read_property("viewport/camera_position") {
+            Ok(PropertyValue::Vector(eye)) => Some(eye.map(|value| value as f32)),
+            _ => None,
+        };
+        self.place = self.locate(ctx, eye);
         let zone = self
             .place
             .as_ref()
@@ -262,15 +304,41 @@ impl WeatherModule {
         if zone.is_none() {
             self.server = None;
         }
-        let effect = match Self::setting(ctx, MODE) {
+        let mode = Self::setting(ctx, MODE);
+        let effect = match mode {
             NONE => None,
             CHOSEN => Some(Self::chosen(ctx)).filter(|effect| effect.intensity > 0.0),
             _ => server.as_ref().and_then(ServerWeather::effect),
         };
-        let mut falling = lock(&self.falling);
-        falling.effect = effect;
-        falling.liquids = ctx.service(liquids::SERVICE);
-        falling.buildings = ctx.service(buildings::SERVICE);
+        // The row of `Weather.dbc` of the weather: the state the server sent, or that it would send.
+        let row = match (mode, &server) {
+            (SERVER, Some(ServerWeather::Known { state, .. })) => effect.map(|_| *state),
+            _ => effect.map(|effect| effect.state()),
+        };
+        let (liquids, buildings) = (ctx.service(liquids::SERVICE), ctx.service(buildings::SERVICE));
+        self.sheltered = eye.and_then(|eye| fall::sheltered(liquids.as_ref(), buildings.as_ref(), eye).0);
+        // The lightning of a thunderstorm when the settings draw it, its flashes unseen where nothing
+        // falls on the eye.
+        let storm = effect
+            .filter(|effect| effect.kind.flashes() && Self::setting(ctx, LIGHTNING) == 1)
+            .map(|effect| effect.intensity);
+        let (flash, thunder) = self.storm.step(now, storm);
+        {
+            let mut falling = lock(&self.falling);
+            falling.effect = effect;
+            falling.flash = if self.sheltered.is_some() { 0.0 } else { flash };
+            falling.liquids = liquids;
+            falling.buildings = buildings;
+        }
+        // Heard once the client's archives are open, silent where nothing falls on the eye.
+        if self.client.is_some() {
+            let thunder_sound = Self::setting(ctx, THUNDER) as u32;
+            self.sounds
+                .steer(ctx, row, self.sheltered.is_some(), thunder, thunder_sound);
+        } else {
+            self.sounds.stop(sound::CHANGE);
+            self.sounds.heard = Some(Heard::Unheard("the client's archives are not open".to_owned()));
+        }
     }
 }
 
@@ -376,34 +444,60 @@ impl Module for WeatherModule {
                 ctx.set_setting(INTENSITY, json!(intensity));
             }
         }
-        // Taken out of the lock before the services are asked.
-        let (effect, liquids, buildings) = {
-            let falling = lock(&self.falling);
-            (falling.effect, falling.liquids.clone(), falling.buildings.clone())
-        };
+        let effect = lock(&self.falling).effect;
         match effect {
             Some(effect) => {
                 ui.label(format!("Applied: {} at {:.2}.", effect.kind.name(), effect.intensity));
-                if let Some(eye) = ctx
-                    .read_property("viewport/camera_position")
-                    .ok()
-                    .and_then(|value| match value {
-                        PropertyValue::Vector(eye) => Some(eye.map(|value| value as f32)),
-                        _ => None,
-                    })
-                    && let (Some(why), _) = fall::sheltered(liquids.as_ref(), buildings.as_ref(), eye)
-                {
+                if let Some(why) = self.sheltered {
                     ui.label(format!("Nothing falls: {why}."));
+                }
+                if effect.kind.flashes() {
+                    let mut lightning = Self::setting(ctx, LIGHTNING) == 1;
+                    if ui.checkbox(&mut lightning, "Lightning, the editor's").changed() {
+                        ctx.set_setting(LIGHTNING, json!(i64::from(lightning)));
+                    }
+                    if lightning {
+                        let mean = storm::LONGEST + (storm::SHORTEST - storm::LONGEST) * effect.intensity;
+                        ui.label(format!(
+                            "A strike every {mean:.0} s or so, its thunder up to {:.0} s after.",
+                            storm::FARTHEST / storm::SOUND
+                        ));
+                        match &self.sounds.thunder {
+                            Some(Ok(name)) => {
+                                ui.label(format!("Thunder: {name}."));
+                            }
+                            Some(Err(why)) => {
+                                ui.colored_label(ui.visuals().warn_fg_color, format!("No thunder: {why}."));
+                            }
+                            None => {}
+                        }
+                    }
                 }
             }
             None => {
                 ui.label("Applied: none.");
             }
         }
+        match &self.sounds.heard {
+            Some(Heard::Playing(name, path)) => {
+                ui.label(format!("Heard: {name}, {path}."));
+            }
+            Some(Heard::Loading(name, path)) => {
+                ui.label(format!("Reading {name}, {path}…"));
+            }
+            Some(Heard::Unheard(why)) => {
+                ui.colored_label(ui.visuals().warn_fg_color, format!("Nothing heard: {why}."));
+            }
+            Some(Heard::Nothing) | None => {}
+        }
         ui.weak("In the editor alone: nothing is sent to the server.");
     }
 
     fn on_job(&mut self, job: JobId, outcome: JobOutcome, _ctx: &mut Context) {
+        if Some(job) != self.setup && Some(job) != self.reading {
+            self.sounds.on_job(job, outcome);
+            return;
+        }
         if Some(job) == self.setup {
             self.setup = None;
             match outcome {
@@ -430,8 +524,10 @@ impl Module for WeatherModule {
     }
 
     fn shutdown(&mut self) {
+        self.sounds.stop(std::time::Duration::ZERO);
         let mut falling = lock(&self.falling);
         falling.effect = None;
+        falling.flash = 0.0;
         falling.liquids = None;
         falling.buildings = None;
     }

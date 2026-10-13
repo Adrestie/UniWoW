@@ -7,7 +7,7 @@
 //! placed at the eye through the service `models`, which draws them around it, the stars first. The
 //! sun, the moon and the clouds are drawn by layers of its own (`sky`), over the models of the sky,
 //! and their glare over everything. The weather the service `weather` gives mixes in the params of
-//! storm of the lights and brings the fog nearer.
+//! storm of the lights and brings the fog nearer; its flashes of lightning light the scene.
 
 mod clouds;
 mod heavens;
@@ -206,8 +206,9 @@ struct Shown {
     /// The hour of the server, when asked for: none when it was taken, why not otherwise.
     server_hour: Option<Result<(), String>>,
     /// The weather applied, the weight the params of storm were mixed in by, if they were, and the
-    /// share of its distances the fog of the game kept.
+    /// share of its distances the fog of the game kept; the flash of lightning added.
     weather: Option<(Effect, Option<f32>, Option<f32>)>,
+    flash: f32,
     building_fog: Option<f32>,
     light: Option<Mixed>,
     given: Option<MapLight>,
@@ -417,7 +418,8 @@ impl LightingModule {
         // The weather the module `weather` applies: one that brings a storm mixes in the params of
         // storm of the lights by its intensity (their third slot, the fourth under the water), but
         // in a liquid lit by its own light; the fog or a sandstorm brings the fog of the game nearer.
-        let effect = ctx.service(weather::SERVICE).and_then(|weather| weather.current());
+        let weather_given = ctx.service(weather::SERVICE);
+        let effect = weather_given.as_ref().and_then(|weather| weather.current());
         // Their weight four times the intensity, whole from a quarter, as the client weighs them
         // (`heavens::storm_share`).
         let storm = effect
@@ -484,6 +486,17 @@ impl LightingModule {
                 far as f32,
             ));
             building_fog = Some(weight);
+        }
+        // A flash of lightning the weather gives lights the scene, but in a liquid lit by its own
+        // light.
+        let flash = match immersion {
+            Immersion::Lit(_) => 0.0,
+            _ => weather_given
+                .as_ref()
+                .map_or(0.0, |weather| weather.flash().clamp(0.0, 1.0)),
+        };
+        if flash > 0.0 {
+            given = given.map(|given| light::with_flash(given, flash));
         }
         // The models of the sky the lights name, then the building's, over them, when the group
         // the eye is in shows it (its flag 0x40000), as WebWowViewerCpp adds it to the models of
@@ -555,6 +568,7 @@ impl LightingModule {
             immersion,
             server_hour: server_hour.map(|hour| hour.map(|_| ())),
             weather,
+            flash,
             building_fog,
             light,
             given,
@@ -789,6 +803,9 @@ impl Module for LightingModule {
             }
             if let Some(kept) = thinned {
                 said.push(format!("the fog of the game {kept:.2} times as far"));
+            }
+            if shown.flash > 0.0 {
+                said.push(format!("a flash of lightning of {:.2}", shown.flash));
             }
             ui.label(format!("Weather: {}.", said.join("; ")));
         }

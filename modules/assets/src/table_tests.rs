@@ -1096,6 +1096,159 @@ fn the_tables_of_the_lights_read_their_lights_params_bands_and_skies() {
 }
 
 #[test]
+fn the_weathers_and_the_sounds_read_their_rows_files_and_weights() {
+    use Cell::*;
+    let tables = vec![
+        (
+            "Weather.dbc",
+            dbc(
+                8,
+                &[
+                    &[
+                        (0, Int(86)),
+                        (1, Int(4_994)),
+                        (2, Int(1)),
+                        (3, Float(1.0)),
+                        (4, Float(1.0)),
+                        (5, Float(0.5)),
+                        (6, Float(0.25)),
+                    ],
+                    &[(0, Int(90)), (2, Int(1)), (7, Text("Particles\\LeafBrown.blp"))],
+                ],
+            ),
+        ),
+        (
+            "SoundEntries.dbc",
+            dbc(
+                30,
+                &[
+                    &[
+                        (0, Int(13_021)),
+                        (1, Int(25)),
+                        (2, Text("StormPeaksLightning")),
+                        (3, Text("SilverMystLightningbolt01var1.wav")),
+                        (5, Text("SilverMystLightningbolt01var3.wav")),
+                        (13, Int(1)),
+                        (14, Int(7)),
+                        (15, Int(2)),
+                        (23, Text("Sound\\Doodad")),
+                        (24, Float(0.8)),
+                        (25, Int(0x200)),
+                        (26, Float(8.0)),
+                        (27, Float(45.0)),
+                    ],
+                    &[
+                        (0, Int(8_535)),
+                        (1, Int(50)),
+                        (2, Text("Weather - RainHeavy")),
+                        (3, Text("RainHeavyLoop.wav")),
+                        (13, Int(1)),
+                        (23, Text("Sound\\Ambience\\Weather")),
+                        (24, Float(0.69)),
+                    ],
+                ],
+            ),
+        ),
+    ];
+    let (_folder, chain) = tables_chain("sounds", &tables);
+    let tables = Tables::new("enUS");
+    let weathers = tables.weathers(&chain).unwrap();
+    assert_eq!(weathers.iter().map(|weather| weather.id).collect::<Vec<_>>(), [86, 90]);
+    let thunders = &weathers[0];
+    assert_eq!(
+        (
+            thunders.sound,
+            thunders.effect,
+            thunders.transition_sky,
+            thunders.colour
+        ),
+        (4_994, 1, 1.0, [1.0, 0.5, 0.25])
+    );
+    assert_eq!(
+        (weathers[1].sound, weathers[1].texture.as_str()),
+        (0, "Particles\\LeafBrown.blp")
+    );
+    let sounds = tables.sound_entries(&chain).unwrap();
+    assert_eq!(
+        sounds.iter().map(|sound| sound.id).collect::<Vec<_>>(),
+        [8_535, 13_021],
+        "by id"
+    );
+    let bolt = &sounds[1];
+    assert_eq!((bolt.kind, bolt.name.as_str()), (25, "StormPeaksLightning"));
+    // The empty names left out, each file with its weight.
+    assert_eq!(
+        bolt.files,
+        [
+            ("SilverMystLightningbolt01var1.wav".to_owned(), 1),
+            ("SilverMystLightningbolt01var3.wav".to_owned(), 2)
+        ]
+    );
+    assert_eq!(
+        (bolt.directory.as_str(), bolt.volume, bolt.flags, bolt.distances),
+        ("Sound\\Doodad", 0.8, 0x200, [8.0, 45.0])
+    );
+    assert_eq!(
+        sounds[0].path(0).as_deref(),
+        Some("Sound\\Ambience\\Weather\\RainHeavyLoop.wav")
+    );
+    // A table of another layout refused, with its name.
+    let (_folder, chain) = tables_chain("sounds refused", &[("Weather.dbc", dbc(7, &[&[(0, Int(3))]]))]);
+    let refused = Tables::new("enUS").weathers(&chain).unwrap_err();
+    assert!(
+        refused.starts_with("DBFilesClient\\Weather.dbc: 7 columns"),
+        "{refused}"
+    );
+}
+
+#[test]
+fn the_client_s_weathers_name_their_sounds_and_the_files_decode() {
+    let Some((_folder, locale, chain)) = client() else {
+        return;
+    };
+    let tables = Tables::new(&locale);
+    let weathers = tables.weathers(&chain).unwrap();
+    let sounds = tables.sound_entries(&chain).unwrap();
+    let sound_of = |state: u32| {
+        let weather = weathers.iter().find(|weather| weather.id == state).unwrap();
+        sounds.iter().find(|sound| sound.id == weather.sound)
+    };
+    // As the probes of the weather read them: the rows of the states of AzerothCore.
+    for (state, name) in [
+        (3, "Weather - RainLight"),
+        (5, "Weather - RainHeavy"),
+        (6, "Weather - SnowLight"),
+        (8, "Weather - SnowHeavy"),
+        (22, "Weather - SandstormHeavy"),
+        (41, "Weather - SandstormLight"),
+        (86, "DarkPortal"),
+        (106, "Weather - SandstormLight"),
+    ] {
+        assert_eq!(sound_of(state).map(|sound| sound.name.as_str()), Some(name), "{state}");
+    }
+    assert!(
+        sound_of(1).is_none() && sound_of(90).is_none(),
+        "the fog and the black rain"
+    );
+    // Their files, and those of the thunder of the editor, in the client and decoded.
+    let thunder = sounds.iter().find(|sound| sound.id == 13_021).unwrap();
+    assert_eq!(thunder.name, "StormPeaksLightning");
+    let mut paths: Vec<String> = [3, 4, 5, 6, 7, 8, 22, 41, 42, 86]
+        .iter()
+        .filter_map(|state| sound_of(*state)?.path(0))
+        .collect();
+    paths.extend((0..thunder.files.len() as u32).filter_map(|pick| thunder.path(pick)));
+    for path in paths {
+        let bytes = chain
+            .read(&path)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{path} not in the client"));
+        let clip = uniwow_api::audio::Clip::decode(bytes).unwrap_or_else(|why| panic!("{path}: {why}"));
+        assert!(clip.duration().as_secs_f32() > 0.1, "{path}");
+    }
+}
+
+#[test]
 fn the_client_s_tables_read_as_the_client_shows_them() {
     let Some((folder, locale, chain)) = client() else {
         return;

@@ -237,10 +237,11 @@ pub fn create(device: &wgpu::Device, target: &Target) -> Gpu {
 }
 
 /// What the module hands the layer: the weather applied, and the services that tell where the eye
-/// is sheltered from it.
+/// is sheltered from it; and to the service, the flash of lightning now.
 #[derive(Default)]
 pub struct Falling {
     pub effect: Option<Effect>,
+    pub flash: f32,
     pub liquids: Option<liquids::Handle>,
     pub buildings: Option<buildings::Handle>,
 }

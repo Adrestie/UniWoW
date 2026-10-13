@@ -41,7 +41,8 @@ use std::thread::ThreadId;
 use uniwow_api::formats::{
     self, AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef,
     Formats, GameObjectDisplay, HairGeoset, LightBand, LightParamsRecord, LightRecord, LightSkyboxRecord, LiquidLayer,
-    LiquidTypeRecord, MapRecord, Model, Placements, Texture, Tile, Wdl, Wdt, Wmo, ZoneLightRecord,
+    LiquidTypeRecord, MapRecord, Model, Placements, SoundEntryRecord, Texture, Tile, Wdl, Wdt, WeatherRecord, Wmo,
+    ZoneLightRecord,
 };
 use uniwow_api::vfs::{self, Vfs, VfsState};
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, Registrar, egui, log, rfd, serde_json};
@@ -394,6 +395,18 @@ impl Formats for Files {
         self.check_thread("AnimationData.dbc");
         let client = self.client()?;
         client.tables.animations(&client.chain)
+    }
+
+    fn weathers(&self) -> Result<Arc<Vec<WeatherRecord>>, String> {
+        self.check_thread("Weather.dbc");
+        let client = self.client()?;
+        client.tables.weathers(&client.chain)
+    }
+
+    fn sound_entries(&self) -> Result<Arc<Vec<SoundEntryRecord>>, String> {
+        self.check_thread("SoundEntries.dbc");
+        let client = self.client()?;
+        client.tables.sound_entries(&client.chain)
     }
 
     fn liquid_types(&self) -> Result<Arc<Vec<LiquidTypeRecord>>, String> {

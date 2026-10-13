@@ -127,7 +127,8 @@ Its behaviour is one type implementing the `Module` trait of `core/api`, exporte
 point macro:
 
 - **register**: declares what the module contributes (list below). Called once at load.
-- **init / shutdown**: start and stop, with access to core services.
+- **init / shutdown**: start and stop, with access to core services; `shutdown` when the editor
+  closes, or when the module stops running, failed or blocked.
 - **panel_ui, on_event, on_menu**: draw its panels, receive its events, handle its menu items.
 
 Extension points a module may contribute to:
@@ -152,7 +153,7 @@ Rules:
 | F1 | A module talks to another only through the core: commands, events, services by interface. Example: the quest editor issues "open creature 1234"; the module registered for creatures handles it. If no such module is loaded, the link is shown disabled. |
 | F2 | Every modification goes through an undoable command (single undo history). |
 | F3 | A module owns its project data section and its settings; no other module reads them directly. |
-| F4 | A missing required service: the module is not loaded and the reason is shown. A missing used service: the module loads without the parts that need it. A module that fails withdraws its services; requirements are checked again just before each `init`, so a module whose provider failed meanwhile is not initialised. |
+| F4 | A missing required service: the module is not loaded and the reason is shown. A missing used service: the module loads without the parts that need it. A module that fails withdraws its services, and is shut down first (`Module::shutdown`, a failure there only logged), so that it lets go of what it holds outside the kernel, such as its sounds; requirements are checked again just before each `init`, so a module whose provider failed meanwhile is not initialised. |
 | F5 | A module that runs code on behalf of another, such as the viewport drawing a layer, catches its failures and reports the culprit with `Context::report_failure`. The kernel disables the culprit as if it had panicked, naming the reporter. |
 | F6 | Every action a module offers to others is a named command. The kernel keeps their catalogue and routes the calls; the same catalogue serves every module and script (S1). A Rust module declares its commands itself; those of compiled, Lua and Python modules are declared on their behalf, by the kernel or by the module of their language: they are delegated. Once every module has registered, a name declared twice keeps the command declared directly over a delegated one, and the first registered between two of the same kind; each one set aside is logged with the one that wins. The choice is made among the modules running: the catalogue is made again whenever a module is blocked or fails, so that a command set aside comes back once the one that won stops, which the log tells; a command no running module offers is refused with the reason, its module not running. |
 
@@ -278,6 +279,7 @@ fills it, or *not planned* when no milestone does yet.
 | Drawing in the 3D view | The service `viewport`: its layers (`prepare`, a version to keep their bundle, their statistics with `stats`, the texts they write over the view with `labels`) and its frame signal (`wait_frame`) | — not planned (an other 3D access of step 8.3) | — | — |
 | The client's files, read from its archives, and their formats | The services `vfs` and `formats` of the module `assets` — step 9.1 | — not planned yet | — | — |
 | The live world: entities of the server around a point, their moves | The commands `live-world.state` and `live-world.entities`, the event `live-world.changed` (step 9.3b); the client of the observer, `uniwow_api::server_link` | The same commands and event, through `call` and `subscribe` | The same, through `call` and `subscribe` | Lua: the same, through `uniwow.call` and `uniwow.subscribe` (checked in step 9.3b); Python: milestone 11 |
+| Sounds played: a file of the client, its category of volume, its volume and fades, looped or once | The service `audio` of the module `audio` (`Clip::decode`, `Audio::play`, `set_volume`, `stop`; *The lightning and the sounds of the weather, as built*) | The commands `audio.play`, `audio.volume`, `audio.stop`, `audio.state` through `call` | The same, through `call` | Scripts: the same, through `uniwow.call` |
 | Splitting work over the cores, `parallel_for` | `uniwow_api::parallel_for` (step 9.2a) | — not planned; compiled modules run threads of their own (T7) | — | — |
 | Picking in the 3D view, the selection shown in 3D | — designed in milestone 9, not built | — | — | — |
 | The terrain of a map shown in the 3D view, with its horizon | The module `terrain` (steps 9.2c, 9.2e, 9.2f) | — not planned yet | — | — |
@@ -519,6 +521,7 @@ milestone 9 takes up those that concern it.
 | server-link | The client of the observer `mod-uniwow-observer` and a fake observer for the tests (step 9.3b); the SOAP client and the control of the server process: later |
 | client-link | Protocol with the WXL client module |
 | ids | Id range allocation per module |
+| audio | The playback of sounds (`uniwow-audio`, on rodio): WAV and MP3 decoded, played by the thread of the audio device, faded, by categories of volume under a master volume; offered to the modules through the service `audio` of the module of that name (*The lightning and the sounds of the weather, as built*) |
 
 ---
 
@@ -537,7 +540,7 @@ added through section 4 without touching the core.
 | liquids | Draws and edits water, lava, slime: create, heights, types |
 | placement | Draws M2 doodads and WMOs in tiles; place, move, rotate, scale, with gizmos and snapping |
 | lighting | Light and sky of the maps (Light tables, skyboxes), from step 9.7 |
-| weather | The weather in the viewport: the server's in the zone of the camera, through the live world and its observer, or one chosen in the editor alone; falling around the eye (rain, snow, sand) and given through the service `weather` to the light of the map, which mixes in the params of storm and brings its fog nearer (step 9.7, *The weather, as built*) |
+| weather | The weather in the viewport: the server's in the zone of the camera, through the live world and its observer, or one chosen in the editor alone; falling around the eye (rain, snow, sand) and given through the service `weather` to the light of the map, which mixes in the params of storm and brings its fog nearer; in a thunderstorm, its lightning, whose flashes light the scene; heard through the service `audio`, the loop the client's `Weather.dbc` names for it and the thunder of each strike (step 9.7, *The weather, as built*; *The lightning and the sounds of the weather, as built*) |
 | environment | Zone music and ambience |
 | spawns | Server creatures and game objects placed in the viewport, waypoints, formations |
 | server-map-data | Regenerate .map, vmaps and mmaps for changed tiles (AzerothCore extractors), in the background |
@@ -562,6 +565,7 @@ added through section 4 without touching the core.
 | Id | Module |
 |---|---|
 | assets | Browse the virtual file system (archives and project), search, preview. Holds the reading of the formats and archives of WoW and offers it through the services `vfs` and `formats` (milestone 9) |
+| audio | The sounds of the editor: the engine of the runtime (`libs/audio`) started and given to the other modules through the service `audio`; the master volume and those of the sounds, the ambience and the music in the settings of *Audio*, silent while the editor is minimised; commands playing a file of the client for every language (*The lightning and the sounds of the weather, as built*) |
 | textures | BLP view, PNG to BLP and back, format and size checks |
 | models | M2 and WMO viewer (animations, textures, attachments), import of new models. Provides the `models` service: M2 and WMO loaded in jobs, kept on the GPU, and instances drawn for the modules giving them (milestone 9) |
 | retail-import | Fetch modern assets through the wow.export bridge |
@@ -7287,7 +7291,8 @@ observer's part written against the headers of AzerothCore and not built; each c
   blended on the eye's side of the water after it (`Phase::Near`), tested against the depth, writing
   none. Nothing falls while the eye is under the water, in a room of a building (a group inside, not
   lit as outside) or in a liquid of a building, nor under the surface of the water under the eye.
-  Neither the lightning of the thunderstorm nor the sounds are made.
+  Neither the lightning of the thunderstorm nor the sounds are made (made since: *The lightning and
+  the sounds of the weather, as built*).
 - **In the light** (`lighting`, through the service): a weather that falls mixes in the params of
   storm of the lights by its intensity (their third slot, the fourth under the water: `Light.dbc`
   gives each light clear, clear under the water, storm and storm under the water params), its values
@@ -7809,6 +7814,269 @@ highlight of the sun on the materials of the shaders specular (1), metal (2) and
      3.3.5a take that of later clients).
   3. The same materials inside a room (the halls of Dalaran, the throne room of Stormwind): no
      highlight here; whether the game shows one.
+
+#### The lightning and the sounds of the weather, as built
+
+Asked by the user ("finish the light and the weather") after *The weather, as built*, which left
+out the lightning of the thunderstorm and the sounds. Built as it was, the user away, without a
+client nor captures here: what the client holds is taken from its tables of 12340, read for their
+facts and kept nowhere in the repository (marked *client*), and from public sources read for their
+facts only, never copied (*WoWDBDefs*, the sources of *AzerothCore* and of *CMaNGOS*); each choice
+said where it is made, and what the game is to tell listed at the end.
+
+- **Checked first**:
+  - `Weather.dbc` of 3.3.5a (*WoWDBDefs*: its id, a sound `AmbienceID` of `SoundEntries.dbc`, the
+    kind of what falls `EffectType`, `TransitionSkyBox`, a colour `EffectColor`, a texture
+    `EffectTexture`) holds 32 rows (*client*), one of them for each state AzerothCore sends: the
+    state of the server (`WeatherState`) is the id of a row of this table, which the packet calls
+    `WeatherID` (`WorldPackets::Misc::Weather`, *AzerothCore*). Its kinds: 0 nothing falls (the
+    fog, 1), 1 rain, 2 snow, 3 sand. Its sounds (*client*): the rains 3, 4 and 5 the rows 8,533,
+    8,534 and 8,535 of `SoundEntries.dbc` (`Weather - RainLight`, `- RainMedium`, `- RainHeavy`),
+    the snows 6, 7 and 8 the rows 8,536 to 8,538 (`Weather - SnowLight`…), the sandstorms 22, 41
+    and 42 the rows 8,558, 8,556 and 8,557 (`Weather - SandstormHeavy`, `- SandstormLight`,
+    `- SandstormMedium`: the state AzerothCore calls light takes the heavy sound, the medium the
+    light, the heavy the medium), the thunders 86 the row 4,994 (`DarkPortal`, a loop of
+    `Sound\Ambience\ZoneAmbience`), the black rain 90 none (its texture
+    `Particles\LeafBrown.blp`, falling leaves), the black snow 106 the row 8,556; the fog none. The
+    rows of the weather are each one WAV file of `Sound\Ambience\Weather` (`RainLightLoop.wav`,
+    `SnowLight.wav`…), of the volume 0.69 and of the type 50 (ambience); the 12,941 rows of the
+    table name 23,543 WAV files and 2,195 MP3, the music.
+  - The servers of 1.12 named the same rows in their packet of the weather (*CMaNGOS*, classic,
+    `Weather::GetSound`: 8,533 to 8,538 and 8,556 to 8,558, the grade cut at 0.27, 0.40 and 0.70
+    as for the states): 3.3.5a takes them from `Weather.dbc` by the state.
+  - No lightning: `Weather.dbc` of 3.3.5a has no field for it; the table `Lightning` (the
+    brightness and the colour of a flash, the interval between strikes, the strike and its fade,
+    its thunder) and the field `LightningID` of `Weather` come with 8.0.1 (*WoWDBDefs*); and no row
+    of `SoundEntries.dbc` is the thunder of a weather (*client*): those named of lightning are
+    doodads of the Blasted Lands, Netherstorm, the Storm Peaks (`StormPeaksLightning`, 13,021),
+    Tempest Keep and Ulduar, and spells. By its tables, the thunderstorm of 3.3.5a is a rain whose
+    sound is that of the Dark Portal. The lightning below is the editor's, asked for; whether the
+    game flashes is to check.
+- **The lightning** (`modules/weather/src/storm.rs`), in a weather of the kind thunderstorm alone
+  (`Kind::flashes`) and while the setting `lightning` of *Weather* says so (on by default, held in
+  the panel too): strikes at intervals drawn between half and one and a half times a mean that goes
+  from 24 seconds at the lowest intensity to 6 at the highest, the first one interval after the
+  storm begins; each strike one to three flashes 0.13 s apart, each lit in 0.04 s and out in 0.3 s,
+  the second at 0.65 of the first and the third at 0.4; the strike as bright as it is near, from
+  0.4 at 1,600 yards to whole at 200; its thunder as late as the sound takes from there, at 375
+  yards a second (from 0.5 to 4.3 s), and as loud as it is near (from 0.35 to 1). Every number is
+  the editor's, after the fields of the later table `Lightning`. Drawn from a seed (SplitMix64):
+  the same seed and the same moments give the same storm, which the tests replay; its state a few
+  numbers, four thunders waiting at most, nothing allocated as it runs; stepped at each frame by the
+  time since the module started. The flash goes through the service `weather` (`Weather::flash`, 0
+  by default for another provider of it): none where nothing falls on the eye (under the water, in
+  a room or in a liquid of a building, the reasons of what falls), none once the storm ends, its
+  thunders still waiting forgotten.
+- **In the light** (`lighting`, `light::with_flash`): the flash, from 0 to 1, adds its colour
+  (0.85, 0.9, 1 in gamma, a white turned to blue) times 0.9 to the ambient light, each channel
+  bounded to 1, so that every face is lit, much by night and little at noon, the sun kept; it turns
+  the sky, the colour of the fog (in gamma, then made linear) and the colours of the water towards
+  it by 0.7 of itself, their alphas kept; nothing in a liquid lit by its own light. The panel of
+  *Lighting* says it. Its colour and shares are the editor's; no bolt is drawn, the tables of
+  3.3.5a telling of none.
+- **The sounds of the runtime** (`libs/audio`, the crate `uniwow-audio`, a normal dependency of
+  `uniwow-api` as every library): **rodio** 0.22 (RustAudio, MIT or Apache 2.0), chosen for its
+  output through cpal (WASAPI on Windows, ALSA on Linux) and its mixer, which converts the rate and
+  the channels of each sound to the device's, with only its features of playback and its decoders of
+  WAV (PCM and ADPCM) and MP3, through symphonia (MPL 2.0, pure Rust): the formats of the sounds of
+  the client, its other formats and its recording left out. Not chosen: kira, whose tweens and
+  tracks the editor does not need yet; cpal with decoders and a mixer written here; rodio 0.23, two
+  days old, which its authors call a minimal release before a bigger one. Building on Linux needs
+  the headers of ALSA (`libasound2-dev`); on Windows, nothing. The runtime of Windows exports 23,989
+  symbols with it, 3,682 more, 37% of the limit (counted on the build of MinGW here).
+  - `Clip::decode`: a file of WAV or MP3, whatever its name says, decoded whole into its samples, in
+    a job (a loop of a minute takes a while), two minutes at most (`LONGEST`, some 46 MB of samples
+    at 48,000 frames a second in two channels), a longer one refused; `Clip::new` for sounds made.
+  - `Engine`: started with a thread of its own (`uniwow audio`), which opens the default device, in
+    its own configuration or another it supports, and holds it open; the sounds played meanwhile wait for it,
+    those stopped meanwhile never heard. Without a device, or when its opening panics, the reason is
+    logged once as a warning and kept (`State::Silent`), nothing is played, and nothing waits. A
+    device lost while it plays (its errors of a device gone or of a configuration no longer valid,
+    through the callback of errors the engine gives it) is said once, silent with the reason, its
+    sounds ended, and opened again every 2 seconds (`REOPEN`) until it comes back. A sound played (`Sound`: its clip,
+    its category, its own volume, looped or once, faded in over a time) is added to the mixer of the
+    device; nothing asked of the engine waits for the device. What changes of a sound (its volume and
+    the time to reach it, its stop) is read from atomics every 256 frames (`BLOCK`), its own volume
+    moving by a straight line over the time given, the volumes of the categories and the master
+    volume over one block, without a click: the thread of the device never takes a lock. A sound
+    stopped fades out, then ends; `shutdown` stops all at once and closes the device.
+  - The categories of volume of the options of the client: the sounds (effects), the ambience and
+    the music, under the master volume, all silenced at once while muted.
+- **The service `audio`** (`core/api/src/audio.rs`): a sound played, taken to a volume over a time,
+  stopped over a time, whether it still plays, where the output stands; given by the engine.
+- **The module `audio`** (Assets, `modules/audio`): starts the engine as it registers and gives it
+  through the service; the category *Audio* of the settings: the master volume (80 by default), the
+  sounds (100), the ambience (70), the music (50), in hundredths, the editor's choices, taken at
+  each frame; and silence while the editor is out of sight (on): the kernel publishes
+  `kernel.minimised` (`MINIMISED_TOPIC`) from its `logic`, which eframe still runs while the window
+  is minimised, when the main window is minimised with no panel torn off from it showing, and when
+  it comes back. Stopping the module stops every sound and closes the device. Commands for every
+  language (S1, R9): `audio.play` (a file of the client's archives, read and decoded on the calling
+  thread, which waits meanwhile: from a script or a job, never the interface thread; its category,
+  volume, looping and fade), `audio.volume`, `audio.stop`, `audio.state`. Its panel, closed by
+  default (*Window*), says the device or why there is none, the sounds playing, and the silence
+  while minimised.
+- **The tables of the sounds** (`assets`, `Formats::weathers`, `Formats::sound_entries`):
+  `Weather.dbc`, of 8 columns (its sound, the kind of what falls, `TransitionSkyBox`, its colour,
+  its texture), and `SoundEntries.dbc`, of 30 (its type, its name, ten files and their weights, its
+  folder, its volume, its flags, two distances), as WoWDBDefs places them for 12340, each read once
+  by the first thread asking for it; `SoundEntryRecord::path`, the file of a sound chosen by a number
+  drawn, by the weights of its files (a weight of 0 counted as 1), below its folder.
+  `Effect::state`: the state AzerothCore would send for a kind and an intensity, as
+  `Weather::GetWeatherState` cuts the grade, for the weather chosen in the editor; below 0.27, where
+  AzerothCore sends fine weather, the lightest, the weather chosen falling all the same.
+- **The sounds of the weather** (the module `weather`, `sound.rs`, using `audio`): the row of
+  `Weather.dbc` of the weather applied, the state the server sent whatever its grade says, or the
+  one it would send for the weather chosen; its sound (`AmbienceID`), its first file, looped in the
+  ambience at the volume of its row of `SoundEntries.dbc` (0.69 for those of the weather), not by the
+  intensity within a state, the states stepping already from light to heavy (a choice: how the
+  client sets its volume is not known); faded in over 3 seconds, the one before faded out over 3
+  seconds as the weather changes or ends (a choice, the client's times not found); faded to
+  silence over a second where nothing falls on the eye (under the water, in a room or in a liquid of
+  a building) and back once out (a choice: whether the client silences its weather inside is to
+  check). The tables and the files read and decoded by jobs once the client's archives are open,
+  again once they change; a file that cannot be read, or is no sound, said in the panel and not read
+  again. The thunder of each strike heard at its time, once, but where nothing falls on the eye: a
+  file of the row the setting *Thunder after a flash* of *Weather* names, by default 13,021
+  (`StormPeaksLightning`, three bolts of `Sound\Doodad`: of the rows of the client, the nearest by
+  its name to the thunder of a storm; a choice, the client naming none for its weathers), chosen by
+  the number drawn with the strike, at the volume of its row times the loudness of the strike; a
+  thunder whose file is still being read is missed. As the client's table says, the fog and the
+  black rain play nothing, and the thunderstorm the ambience of the Dark Portal. The panel of
+  *Weather* says what is heard, being read, or why nothing is (no service `audio`, no device, the
+  tables or a file not read), and the thunder. The service gone, or another one in its place, the
+  loop is stopped at once on the one it plays on. Nothing is sent to the server.
+- **Tested** (the GPU tests on the software adapter, llvmpipe here; no sound heard: the engine plays
+  into a mixer the tests read as the device would, at one channel and 1,000 frames a second, the
+  weather into a service of the tests that writes what it is asked). The lightning: the lightning
+  seeded, the same seed giving the same strikes and thunders, another other strikes; at full
+  intensity a strike every 4.5 to 7.5 s on average over ten minutes, each interval between 3 and 9
+  s, the first after one interval; at the lowest every 18 to 30 s; one to three flashes, one thunder
+  each, as late as its strike is far and as loud as it is near, heard at the step it is due; a
+  strike lit at once then fading, each flash dimmer than the one before, dark once out; nothing
+  without a storm or at an intensity of 0, the thunders waiting forgotten when it ends, the first
+  strike of a storm come back one interval on; the module giving through the service the flash of
+  its storm at each moment, none in a room (said in the panel), none with the setting off, none in
+  the rain, none once stopped; the panel saying how often it strikes. The light lit by a flash: its
+  ambient light bounded, its sun kept, its sky, its fog in gamma and its water turned to it, their
+  alphas, the distances of the fog and the glow at night kept, half a flash halfway; given to the
+  view by the module and said in its panel, none in the magma, none without the service. The sounds
+  of the runtime: a WAV of one channel and of two decoded to its values, interleaved; an MP3 of
+  silent frames the tests write decoded; what is not a sound, a WAV without a sample and a frame cut
+  short refused; a sound at its volume times its category and the master volume, a category or the
+  master changed moving there over one block by a straight line, another category left as it was,
+  muted and heard again, the volumes held within 0 and 1; faded in, then to another volume, then
+  stopped over its fade and gone, a sound unknown asked nothing; a clip ended or looped, two sounds
+  added; played before the device opens and heard once it is, one stopped meanwhile never heard;
+  without a device, or its opening panicking, the reason said, nothing playing, nothing waited
+  for; shut down, every sound stopped and nothing played after. The module: the service, the category and its defaults, its
+  panel closed by default; the volumes of the settings taken at the next frame, silent while
+  minimised and heard again, not when the setting says otherwise; the commands playing a file of the
+  client's archives looped in the ambience at its volume, its volume changed, stopped, once and
+  faded in, the state said, a file absent, one not a sound, a category unknown and no file refused
+  with the reason, nothing without the service `vfs`; its panel saying the device, the sounds
+  playing, the module stopped and why there is no device. The sounds of the weather: the weathers
+  and the sounds read from tables the tests write, the empty names of files left out, their weights,
+  a table of another layout refused with its name; on the client's own when `UNIWOW_CLIENT` names
+  its folder, the rows of the states named as the probes read them, none for the fog and the black
+  rain, and every file of the weathers and of the thunder in the archives and decoded; the file of a
+  sound chosen by its weights below its folder; the state of a weather by its kind and grade, read
+  back as the same weather. The module: nothing heard in fine weather, nothing read; the tables,
+  then the file, read by jobs and said in the panel; the loop of the heavy rain of the server faded
+  in, once; a lighter rain cross-faded, by the state the server sent whatever its grade; faded out
+  in a room and back; a file that is no sound said and not read again; the loop of the Dark Portal
+  in a thunderstorm, then over two minutes a thunder at each strike of its storm and at no other
+  moment, of one of its three files, at 0.8 times the loudness of the strike, three at most missed
+  while their files are read; none in a room, its loop faded out; none with the lightning off, its
+  loop back; the black rain playing nothing, the loop before faded out; the loop stopped at once
+  when the module stops; why nothing is heard without a device and without the service. 30 changes
+  made on purpose (10 of the lightning, of the runtime and of the weather), all caught, one once
+  the test listened for the thunders of the storm before from its first step on.
+- **Not done**: the lightning drawn as a bolt in the sky (a model, or a line of light); the clouds
+  lit apart from the ground, the clouds not being drawn yet; lightning in any weather but the
+  thunderstorm. The choice of the audio device in the settings (the default one of the system when the
+  editor starts, or when it is opened again after a loss: a device plugged in later is not taken
+  otherwise); a long file played as it is decoded rather than decoded whole; the sounds placed in the world
+  (distances, left and right): none of the weather needs them. The volume of the loop by the
+  intensity within a state; the weather muffled inside rather than silent; the colour and the
+  `TransitionSkyBox` of `Weather.dbc`; its texture, which for the black rain is
+  `Particles\LeafBrown.blp` (falling leaves, which the editor still draws as black streaks); the
+  ambience and the music of the zones (`SoundAmbience`, `ZoneMusic`, the module `environment`).
+- **To check by the user**:
+  1. A thunderstorm where a zone has weather (`.wchange 86 0.8` in Elwynn Forest, the weather the
+     server's in the editor), at 00:00 and at 12:00 (the setting *Hour* of *Light*, the speed 0):
+     whether the game flashes at all. If it does not, the setting *Lightning in a thunderstorm* of
+     *Weather* at 0, and its default to change; if it does, how often at 0.3 and at 1
+     (`.wchange 86 0.3`), how bright and of what colour, the sky alone or the ground too, a bolt
+     drawn or not, against the editor's.
+  2. The sounds, none of which could be heard here: *Window > Audio* says *Playing on the default
+     device…*; with no output device (every one disabled in the sound settings of Windows), the
+     editor starts and works, the panel and the log saying once why nothing is played. In the Lua
+     console, `uniwow.call("audio.play", {file = "Sound\\Ambience\\Weather\\RainHeavyLoop.wav",
+     category = "ambience", loop = true})` heard, then `uniwow.call("audio.stop", {sound = <its
+     number>, fade = 2})` fading out over two seconds; an MP3, `uniwow.call("audio.play", {file =
+     "Sound\\Music\\CityMusic\\Stormwind\\stormwind_intro-moment.mp3", category = "music"})`; the
+     volumes of *Edit > Settings > Audio* moved while it plays, heard at once and without a click;
+     the editor minimised, silent, then heard again once restored.
+  3. The weather heard, with a character in Elwynn Forest and the weather the server's in the
+     editor: `.wchange 1 0.3`, `.wchange 1 0.5`, `.wchange 1 0.9` (light, medium and heavy rain): the
+     panel of *Weather* says *Heard: Weather - RainLight, Sound\Ambience\Weather\RainLightLoop.wav*,
+     then the medium and the heavy; each loop against the game's at the same moment, the game's
+     ambience and the editor's (*Edit > Settings > Audio*) at the same volume; how fast it comes and
+     goes as the weather changes (the editor: 3 seconds); into the inn of Goldshire, whether the
+     game's rain goes silent or only quieter (the editor: silent within a second). `.wchange 2 0.8`
+     in Dun Morogh, `.wchange 3 0.3` and `.wchange 3 0.9` in Tanaris: by its table, the state 22
+     that AzerothCore calls light takes the heavy sandstorm's sound and 42 the medium's; which the
+     game plays. `.wchange 86 0.8`: whether the game plays the ambience of the Dark Portal, and a
+     thunder; the editor's thunders after its flashes (`StormPeaksLightning`), and if they sound
+     wrong, another row in *Weather > Thunder after a flash* (9843 `NetherstormLightningStrikes`,
+     8439 `LightningBolt - ZulGurub`), or 0 for none. `.wchange 90 0.8`: whether the game shows black
+     rain or falling leaves (its table names `Particles\LeafBrown.blp`), and plays nothing.
+  4. With `UNIWOW_CLIENT` naming the client's folder, `cargo test -p uniwow-module-assets
+     the_client_s_weathers` passes: the sounds of the weathers and of the thunder read from the
+     archives and decoded.
+
+#### The lightning and the sounds of the weather, after its review
+
+An independent review of the branch found one severe point and four medium ones; each held, and is
+fixed as follows.
+
+1. **The command `audio.play` held what the interface thread takes**: the client's files, kept
+   under a lock the interface thread takes at each frame, were held through the reading and the
+   decoding of the file, so that a script playing an MP3 froze the editor meanwhile. Taken out of
+   their lock first. The command still reads and decodes on its calling thread, which its
+   description says: from a script or a job, never the interface thread.
+2. **Silent while minimised never was**: `windows_ui` runs only when the window is drawn, which
+   eframe does not do while it is minimised, running `logic` alone. The kernel now tells it from
+   `logic`: the topic `kernel.minimised` (`MINIMISED_TOPIC`), `{ "minimised": true }` when the main
+   window is minimised with no panel torn off from it showing, `false` when it comes back; the
+   module `audio` subscribes to it and silences or lets the sounds be heard at once.
+3. **A module that failed kept its sounds**: the kernel withdrew its services but never called its
+   `shutdown`, which only the closing of the editor did. `Shell::stop` now shuts down the module it
+   stops, failed or blocked, a failure there only logged (rule F4); the weather keeps the service it
+   played on, and stops its loop there at once when the service goes or another takes its place.
+4. **A device lost while it played went unnoticed**: rodio's callback of errors only printed them.
+   The engine opens the device with its own, which tells its thread of a device gone or a
+   configuration no longer valid: silent with the reason, its sounds ended (no longer counted as
+   playing, nothing kept for them), the device opened again every 2 seconds.
+5. **A file decoded whole had no limit**: two minutes at most now (`LONGEST`), a longer one refused
+   with the reason, nothing past it decoded.
+
+- **Tested**: a file played while the interface thread's frames go on, the client's files not held
+  meanwhile (with a reading of the tests waiting to be let go); the module silent once told the
+  editor is minimised, with no frame drawn, a frame meanwhile keeping it so, heard again once told
+  it is back; the kernel telling it in `logic` alone, once, then its return, once; a module that
+  fails shut down once, not again when the editor closes, a shutdown that panics logged, the module
+  failed all the same and the others working; the weather's loop stopped at once on the service it
+  played on when another takes its place, then played there, and when the service goes; a device
+  lost said, its sounds ended, told twice and said once, nothing played meanwhile, opened again
+  after 2 seconds and a sound heard on it, not again once shut down; a clip of 100 ms decoded
+  within 100 ms and refused within 99. 8 changes made on purpose, all caught (two of the kernel's,
+  by its tests run on Linux).
+- **To check by the user**: the editor minimised while the rain plays, silent, then heard again
+  once restored (that eframe runs `logic` as the window is minimised is to see); the headset or the
+  speakers unplugged while it plays: *Window > Audio* says the device was lost, then the sound
+  comes back within 2 seconds on the new default device.
 
 #### Tests
 

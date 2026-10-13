@@ -1,6 +1,6 @@
 [package]
 name = "uniwow-module-weather"
-description = "The weather in the 3D view: the server's in the zone of the camera, or one chosen in the editor, falling around the eye and darkening the light"
+description = "The weather in the 3D view: the server's in the zone of the camera, or one chosen in the editor, falling around the eye, darkening the light, flashing and heard"
 version.workspace = true
 edition.workspace = true
 
@@ -19,4 +19,4 @@ name = "Weather"
 category = "World"
 # Services the module cannot work without, and services it uses when present.
 requires = []
-uses = ["viewport", "vfs", "formats", "liquids", "buildings"]
+uses = ["viewport", "vfs", "formats", "liquids", "buildings", "audio"]

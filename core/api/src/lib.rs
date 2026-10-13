@@ -18,6 +18,9 @@ pub use miniz_oxide;
 pub use rfd;
 pub use serde;
 pub use serde_json;
+/// The playback of sounds (`libs/audio`, rodio), part of the runtime, which the service `audio`
+/// offers.
+pub use uniwow_audio::rodio;
 /// Lua 5.1 (`libs/lua`), part of the runtime.
 pub use uniwow_lua::mlua;
 /// The client of the observer of the server (`libs/server-link`), part of the runtime.
@@ -46,6 +49,7 @@ macro_rules! numbered {
 }
 
 pub mod arena;
+pub mod audio;
 pub mod buildings;
 mod command;
 mod commands;
@@ -92,6 +96,12 @@ pub use service::ServiceKey;
 
 /// Topic published by the kernel when a module fails while running. Payload: `{ "id": <module id> }`.
 pub const MODULE_FAILED_TOPIC: &str = "kernel.module_failed";
+
+/// Topic published by the kernel when the editor goes out of sight, its main window minimised with
+/// no panel torn off from it showing, and when it comes back. Payload: `{ "minimised": <bool> }`.
+/// Delivered while it is minimised too, when neither `Module::windows_ui` nor the panels are
+/// called.
+pub const MINIMISED_TOPIC: &str = "kernel.minimised";
 
 /// Command opening a modal window, offered by a module when one runs. Arguments:
 /// `{ "title", "text", "buttons": [{ "id", "label" }], "escape": <id of a button>, "first": <bool> }`,

@@ -15,7 +15,7 @@ use uniwow_api::liquids::{Liquids, Surfaces};
 use uniwow_api::models::{self, Geosets, Instance, Look, LookId, LookState, Models, Motion};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::vfs::{Vfs, VfsState};
-use uniwow_api::viewport::{self, MapLight, Sun};
+use uniwow_api::viewport::{self, MapLight, Sun, Water};
 use uniwow_api::weather::{Effect, Kind, Weather};
 use uniwow_api::{
     CallId, CommandInfo, Context, Editor, EditorBackend, Event, JobContext, JobFn, JobId, JobOutcome, Module,
@@ -23,8 +23,8 @@ use uniwow_api::{
 };
 
 use crate::light::{
-    Immersion, Skybox, Tables, colour_at, fog_share, map_light, mix_values, night_glow, number_at, prepared_fog,
-    storm_slot, sun_direction, with_building_fog,
+    FLASH_AMBIENT, FLASH_COLOUR, FLASH_SKY, Immersion, Skybox, Tables, colour_at, fog_share, map_light, mix_values,
+    night_glow, number_at, prepared_fog, storm_slot, sun_direction, with_building_fog, with_flash,
 };
 
 /// A band of numbers of `keys`.
@@ -1206,13 +1206,16 @@ impl Models for Sky {
     }
 }
 
-/// The weather the test sets.
+/// The weather the test sets, and its flash of lightning.
 #[derive(Default)]
-struct Sent(Mutex<Option<Effect>>);
+struct Sent(Mutex<Option<Effect>>, Mutex<f32>);
 
 impl Weather for Sent {
     fn current(&self) -> Option<Effect> {
         *self.0.lock().unwrap()
+    }
+    fn flash(&self) -> f32 {
+        *self.1.lock().unwrap()
     }
 }
 
@@ -1841,6 +1844,106 @@ fn the_weather_given_mixes_in_the_params_of_storm_and_brings_the_fog_nearer() {
     host.weather = None;
     assert_eq!(seen(&mut module, &mut host), (100.0, [125.0, 500.0, 1.0]));
     assert!(module.shown.as_ref().unwrap().weather.is_none());
+}
+
+#[test]
+fn a_flash_of_lightning_lights_every_face_and_turns_the_sky_the_fog_and_the_water_to_its_colour() {
+    let given = MapLight {
+        sun: Sun {
+            direction: [0.0, 0.6, 0.8],
+            colour: [0.5, 0.4, 0.3],
+            ambient: [0.2, 0.3, 0.05],
+        },
+        fog_colour: [0.1, 0.2, 0.3],
+        fog: Some([10.0, 100.0, 2.0]),
+        sky: [[0.1, 0.2, 0.3]; 6],
+        water: Water {
+            river: [[0.1, 0.2, 0.3, 0.5]; 2],
+            ocean: [[0.0, 0.1, 0.2, 0.75]; 2],
+            sun: [1.0, 0.9, 0.8],
+        },
+        night: 0.5,
+    };
+    assert_eq!(with_flash(given, 0.0), given, "no flash, nothing changed");
+    assert_eq!(with_flash(given, -1.0), given);
+    let lit = with_flash(given, 1.0);
+    assert_eq!(with_flash(given, 3.0), lit, "within 0 and 1");
+    // Its colour added to the ambient light, bounded to 1; the sun itself kept.
+    for ((lit, given), flash) in lit.sun.ambient.iter().zip(given.sun.ambient).zip(FLASH_COLOUR) {
+        let expected = (given + flash * FLASH_AMBIENT).min(1.0);
+        assert!((lit - expected).abs() < 1e-6, "{lit} {expected}");
+    }
+    assert_eq!(lit.sun.ambient[2], 0.95);
+    assert_eq!(lit.sun.ambient[1], 1.0, "bounded");
+    assert_eq!(
+        (lit.sun.direction, lit.sun.colour),
+        (given.sun.direction, given.sun.colour)
+    );
+    // The sky and the water turned to it, the alphas of the water kept; the fog's colour in gamma.
+    let toward = |from: f32, channel: usize| from + (FLASH_COLOUR[channel] - from) * FLASH_SKY;
+    assert!(
+        lit.sky
+            .iter()
+            .all(|colour| (0..3).all(|at| (colour[at] - toward(given.sky[0][at], at)).abs() < 1e-6))
+    );
+    assert!((lit.water.river[0][0] - toward(0.1, 0)).abs() < 1e-6);
+    assert_eq!((lit.water.river[1][3], lit.water.ocean[0][3]), (0.5, 0.75));
+    assert_eq!(lit.water.sun, given.water.sun);
+    let srgb = |value: f32| {
+        if value <= 0.003_130_8 {
+            value * 12.92
+        } else {
+            1.055 * value.powf(1.0 / 2.4) - 0.055
+        }
+    };
+    for (channel, (lit, given)) in lit.fog_colour.iter().zip(given.fog_colour).enumerate() {
+        assert!((srgb(*lit) - toward(srgb(given), channel)).abs() < 1e-4, "{lit}");
+    }
+    // The distances of the fog and the glow at night kept; half a flash halfway in the sky.
+    assert_eq!((lit.fog, lit.night), (given.fog, given.night));
+    let half = with_flash(given, 0.5);
+    assert!((half.sky[0][0] - (0.1 + (FLASH_COLOUR[0] - 0.1) * FLASH_SKY * 0.5)).abs() < 1e-6);
+}
+
+#[test]
+fn the_flash_the_weather_gives_lights_the_view_but_in_a_liquid_lit_by_its_own_light() {
+    let files = Arc::new(Files(Mutex::new(VfsState::Ready { archives: 1, files: 1 })));
+    let mut host = host(files);
+    let mut module = crate::LightingModule {
+        client: Some((1, 1)),
+        tables: Some(Ok(Arc::new(tables().with_liquids(&liquids())))),
+        ..Default::default()
+    };
+    let egui = egui::Context::default();
+    *host.editor.map.lock().unwrap() = json!({ "id": 0, "name": "Azeroth" });
+    *host.editor.camera.lock().unwrap() = Some([-5_000.0, 0.0, 600.0]);
+    let seen = |module: &mut crate::LightingModule, host: &mut Host| {
+        module.windows_ui(&egui, &mut Context::new(host, "lighting"));
+        host.seen.0.lock().unwrap().unwrap()
+    };
+    *host.sent.0.lock().unwrap() = Some(Effect {
+        kind: Kind::Thunders,
+        intensity: 0.0,
+    });
+    let dark = seen(&mut module, &mut host);
+    *host.sent.1.lock().unwrap() = 0.5;
+    let lit = seen(&mut module, &mut host);
+    assert_eq!(lit, with_flash(dark, 0.5));
+    assert!(lit.sun.ambient[0] > dark.sun.ambient[0]);
+    assert!(
+        panel(&mut module, &mut host)
+            .contains(&"Weather: thunderstorm at 0.00; a flash of lightning of 0.50.".to_owned())
+    );
+    // In the magma, its own light alone.
+    *host.pond.liquid.lock().unwrap() = Some(3);
+    *host.sent.1.lock().unwrap() = 0.0;
+    let magma = seen(&mut module, &mut host);
+    *host.sent.1.lock().unwrap() = 1.0;
+    assert_eq!(seen(&mut module, &mut host), magma);
+    // Without the service: none.
+    *host.pond.liquid.lock().unwrap() = None;
+    host.weather = None;
+    assert_eq!(seen(&mut module, &mut host), dark);
 }
 
 /// The texts the panel of `module` draws.
