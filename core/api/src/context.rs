@@ -1,5 +1,6 @@
 use std::any::Any;
 
+use crate::theme::Level;
 use crate::ui::SharedUi;
 use crate::{
     CallId, Command, Editor, JobContext, JobFn, JobId, PropertyInfo, PropertyValue, ServiceKey, egui, egui_wgpu,
@@ -26,6 +27,8 @@ pub trait Host {
     fn cancel(&mut self, owner: &str, job: JobId);
     fn call(&mut self, caller: &str, name: &str, arguments: serde_json::Value) -> CallId;
     fn editor(&self, caller: &str) -> Editor;
+    /// Shows `text` of `owner` in a notice over the editor's window for a few seconds.
+    fn notify(&mut self, _owner: &str, _level: Level, _text: &str) {}
 }
 
 /// Access to the kernel for one module, passed to every `Module` method after `register`.
@@ -179,6 +182,13 @@ impl<'a> Context<'a> {
     /// frame through `Module::on_reply`, with the returned id.
     pub fn call(&mut self, name: &str, arguments: serde_json::Value) -> CallId {
         self.host.call(self.module, name, arguments)
+    }
+
+    /// Shows `text` in a notice over the editor's window for a few seconds, under the name of this
+    /// module: the outcome of what the user asked, or a problem. A notice of the same module and
+    /// text shown again counts the times instead of showing twice.
+    pub fn notify(&mut self, level: Level, text: &str) {
+        self.host.notify(self.module, level, text);
     }
 
     /// A handle to the editor for other threads, acting for this module.
