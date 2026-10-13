@@ -1,5 +1,5 @@
 //! Tests of the groups of a building seen from inside: the group the camera is in, by the triangles
-//! of its tree under and over it, and the groups seen through the portals.
+//! of its tree under and over it, and the groups seen through the portals; and from outside.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -277,6 +277,37 @@ fn the_groups_seen_are_those_the_portals_in_sight_lead_to_from_the_side_of_the_c
 }
 
 #[test]
+fn from_outside_the_groups_seen_are_those_outside_and_those_their_portals_lead_to() {
+    let cells = Cells::new(&row([-1.0, 1.0]));
+    let seen = |eye: Vec3, target: Vec3| cells.seen_outside(eye, &sides(eye, target));
+    // Past the group outside, looking in through the door: the rooms one after the other.
+    assert_eq!(
+        seen(Vec3::new(60.0, 0.0, 2.0), Vec3::new(-100.0, 0.0, 2.0)),
+        Some(vec![true; 4])
+    );
+    // Looking away from the door, or from the other end, behind the walls: the group outside alone.
+    assert_eq!(
+        seen(Vec3::new(60.0, 0.0, 2.0), Vec3::new(200.0, 0.0, 2.0)),
+        Some(vec![false, false, false, true])
+    );
+    assert_eq!(
+        seen(Vec3::new(-50.0, 0.0, 2.0), Vec3::new(100.0, 0.0, 2.0)),
+        Some(vec![false, false, false, true])
+    );
+    // The second door aside: past the first room, the view no longer reaches the others.
+    let aside = Cells::new(&row([4.0, 5.0]));
+    let eye = Vec3::new(60.0, 0.0, 2.0);
+    assert_eq!(
+        aside.seen_outside(eye, &sides(eye, Vec3::new(-100.0, 0.0, 2.0))),
+        Some(vec![false, false, true, true])
+    );
+    // Without a group outside, as a dungeon: none, its groups drawn by their bounds.
+    let mut dungeon = row([-1.0, 1.0]);
+    dungeon.groups[3].flags = INSIDE;
+    assert_eq!(Cells::new(&dungeon).seen_outside(eye, &sides(eye, Vec3::ZERO)), None);
+}
+
+#[test]
 fn a_building_the_camera_is_inside_of_draws_and_shows_the_doodads_and_liquids_of_the_groups_its_portals_let_it_see() {
     let Some(gpu) = device() else {
         return;
@@ -332,9 +363,15 @@ fn a_building_the_camera_is_inside_of_draws_and_shows_the_doodads_and_liquids_of
     let listing = layer::list(&placed, &view(at(5.0, 2.0), at(100.0, 2.0)), None);
     assert_eq!((listing.inside, listing.through), (1, 4));
     assert_eq!(shown(), [true; 6]);
-    // From outside the building: all of them, its groups by their bounds.
+    // From outside the building, before its first room: its group outside, past the far end, the
+    // rooms behind its walls not drawn, their doodads and liquid hidden.
     layer::list(&placed, &view(at(5.0, 2.0), at(-100.0, 2.0)), None);
     let listing = layer::list(&placed, &view(at(-50.0, 2.0), at(100.0, 2.0)), None);
+    assert_eq!((listing.inside, listing.groups), (0, 1));
+    assert_eq!(shown(), [false, false, true, true, false, false]);
+    // From its outside, past the far end, looking in through the door: the rooms the doors let it
+    // see.
+    let listing = layer::list(&placed, &view(at(60.0, 2.0), at(-100.0, 2.0)), None);
     assert_eq!((listing.inside, listing.groups), (0, 4));
     assert_eq!(shown(), [true; 6]);
     // The second door aside: the rooms past it in sight, not drawn.

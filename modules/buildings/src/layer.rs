@@ -1,6 +1,7 @@
 //! The layer of the buildings: at each frame, each placement tested by its bounds against the view,
 //! then each of its groups by its own, those of a building the camera is inside of first by what
-//! its portals let it see; the batches of the groups seen listed as indirect draws, the opaque ones
+//! its portals let it see, those of one seen from outside by its groups outside and what their
+//! portals let it see, a building without a group outside by the bounds of its groups; the batches of the groups seen listed as indirect draws, the opaque ones
 //! by state, the blended ones from the farthest group, and drawn in the pass, a
 //! `multi_draw_indexed_indirect` for each run of one state. Where the device computes, the groups
 //! listed are tested against the depth on the GPU (`occlusion`): the opaque batches of those seen at
@@ -103,10 +104,21 @@ pub fn seen_inside(building: &Placed, eye: Vec3, planes: &[Vec4; 5], bounds: &[V
     }
     let local = building.transform.inverse().transform_point3(eye);
     let start = building.wmo.cells.holding(local)?;
-    // A plane of the world, in the axes of the building.
+    Some(building.wmo.cells.seen(local, &local_planes(building, planes), start))
+}
+
+/// The groups of `building` seen from `eye` outside its groups inside, within the sides of the view
+/// `planes`: its groups outside and those their portals let it see; none for a building without a
+/// group outside, whose groups are drawn by their bounds.
+pub fn seen_outside(building: &Placed, eye: Vec3, planes: &[Vec4; 5]) -> Option<Vec<bool>> {
+    let local = building.transform.inverse().transform_point3(eye);
+    building.wmo.cells.seen_outside(local, &local_planes(building, planes))
+}
+
+/// The sides of the view `planes`, planes of the world, in the axes of `building`.
+fn local_planes(building: &Placed, planes: &[Vec4; 5]) -> Vec<Vec4> {
     let turned = building.transform.transpose();
-    let local_planes: Vec<Vec4> = planes.iter().map(|plane| turned * *plane).collect();
-    Some(building.wmo.cells.seen(local, &local_planes, start))
+    planes.iter().map(|plane| turned * *plane).collect()
 }
 
 /// Shows the doodads of `parts` held by a group `seen` says is seen, and those no group holds; all
@@ -169,11 +181,14 @@ pub(crate) fn list(placed: &[Placed], view: &View, surfaces: Option<&Surfaces>) 
             continue;
         }
         listing.buildings += 1;
-        let seen = seen_inside(building, view.eye, &planes, &bounds);
-        if let Some(seen) = &seen {
+        // From inside, what its portals let the camera see; from outside, its groups outside and
+        // what their portals let it see, as the client draws it.
+        let inside = seen_inside(building, view.eye, &planes, &bounds);
+        if let Some(seen) = &inside {
             listing.inside += 1;
             listing.through += seen.iter().filter(|seen| **seen).count();
         }
+        let seen = inside.or_else(|| seen_outside(building, view.eye, &planes));
         show(building.parts.as_ref(), seen.as_deref());
         show_liquids(building.liquids.as_ref(), seen.as_deref());
         for (index, group) in building.wmo.groups.iter().enumerate() {

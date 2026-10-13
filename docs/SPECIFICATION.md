@@ -6361,6 +6361,34 @@ section.
     vertex of the building for every group, the indices not made even, the first index taken as the
     unit of the arena).
 
+- **The arrays of textures shared by `models` and `buildings`: not done.** Both keep 64 slots of
+  arrays read as stored, so that one set could serve both through a service of `core/api`; but
+  neither module may depend on the other (either may be disabled or fail), the pool of `models` is
+  made by a job after its start where `buildings` makes its arrays when it starts, the classes of
+  both would share the 64 slots each shader binds and fill them sooner, and the files they share
+  are few: the materials of the buildings name the textures of `World\wmo` and of the dungeons,
+  the models those of their own folders, the doodads of the buildings being drawn by `models`
+  already. The memory saved is not known (no client at hand to count the textures both hold); kept
+  apart.
+- **A building seen from outside drawn through the portals of its groups outside**
+  (`buildings/src/cells.rs`, `layer.rs`), question 2 of *Step 9.6e2, as built*: from outside, a
+  building drew every group in sight by its bounds, so that from under Dalaran its sewers showed
+  through the faces turned away. Now, as the client draws it, a building the camera is in no group
+  inside of draws its groups outside and the groups inside their portals let the camera see, passed
+  as from inside (from the side of the group listing the portal, clipped by the view and the
+  portals before, eight at most one after the other). A building without a group outside, as a
+  dungeon, is drawn by the bounds of its groups as before. The doodads and the liquids of its
+  groups follow what is seen, as from inside: those of a group inside not seen hidden. The groups
+  then drawn are fewer; the portals of the groups outside are passed for each building in sight at
+  each frame, which the listing did not do from outside before.
+  - **Tested**: past the group outside, looking in through the door, every room one after the
+    other; looking away, or from the other end behind the walls, the group outside alone; the
+    second door aside, the first room only; a building without a group outside, by its bounds; the
+    layer listing from the other end the group outside alone, the doodads and the liquid of the
+    rooms hidden, and from the far end every group. 3 changes made on purpose, all caught (the
+    groups seen from outside not asked, the portals of the groups outside not passed, a building
+    without a group outside passed as one with).
+
 **To measure by the user**: the flights of *The frames measured in flight, before any correction*
 (the terrain at 64 tiles, the buildings at 8, the doodads at 4, the models at a reach of 1,000; 300
 then 600 yards a second, from the Howling Fjord to Dalaran by the Grizzly Hills), with the journal
@@ -6391,7 +6419,10 @@ of the frames (`UNIWOW_SLOW_FRAMES`), before this work and after it:
    before, and `view: buildings prepare`.
 8. The arenas of the buildings in the statistics of the layer, the indices against before, from
    Zul'Drak to the Storm Peaks.
-9. The time the tiles within reach take to load once a map is shown, which the panels of the
+9. Under Dalaran and in Stormwind, from outside: the sewers no longer shown through the faces
+   turned away, nothing missing that the game shows (the insides seen through the doors and the
+   windows that are portals); the part `buildings prepare: the listing` against before.
+10. The time the tiles within reach take to load once a map is shown, which the panels of the
    terrain, the doodads and the buildings say, against before (the files of the tiles kept).
 
 #### Step 9.7, proposed: the light of the map
