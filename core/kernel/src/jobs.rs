@@ -1,10 +1,12 @@
 //! The pool of worker threads that runs the jobs of the modules (rule T2), and the slices of
-//! their `parallel_for`: a worker takes a job, or the kernel's own work, before any slice, the
-//! lowest priority first, those of one priority in the order they came.
+//! their `parallel_for`: a worker takes the slices left of a `parallel_for` before any job, since
+//! their caller waits for them, often with a deadline each frame, as the thread of the animations
+//! does; then the jobs, and the kernel's own work, the lowest priority first, those of one
+//! priority in the order they came.
 
 use std::cmp::Ordering as Order;
 use std::collections::{BinaryHeap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
@@ -74,8 +76,8 @@ impl Ord for Queued {
     }
 }
 
-/// What the workers take: the jobs and the kernel's own work first, by their priority, then the
-/// helpers of the slices.
+/// What the workers take: the helpers of the slices first, then the jobs and the kernel's own work
+/// by their priority.
 #[derive(Default)]
 struct Waiting {
     jobs: BinaryHeap<Queued>,
@@ -90,8 +92,6 @@ struct Waiting {
 struct Queue {
     waiting: Mutex<Waiting>,
     ready: Condvar,
-    /// The jobs waiting, read without the lock by a worker between two slices.
-    jobs: AtomicUsize,
 }
 
 impl Queue {
@@ -108,7 +108,6 @@ impl Queue {
         let order = waiting.queued;
         waiting.queued += 1;
         waiting.jobs.push(Queued { priority, order, task });
-        self.jobs.fetch_add(1, Ordering::Release);
         self.ready.notify_one();
         true
     }
@@ -128,17 +127,16 @@ impl Queue {
         self.ready.notify_all();
     }
 
-    /// What a worker runs: the first job by its priority, else a helper; none once the pool is gone
-    /// and nothing waits.
+    /// What a worker runs: a helper of slices, else the first job by its priority; none once the
+    /// pool is gone and nothing waits.
     fn take(&self) -> Option<Result<Task, Helping>> {
         let mut waiting = self.lock();
         loop {
-            if let Some(queued) = waiting.jobs.pop() {
-                self.jobs.fetch_sub(1, Ordering::Release);
-                return Some(Ok(queued.task));
-            }
             if let Some(helper) = waiting.helpers.pop_front() {
                 return Some(Err(helper));
+            }
+            if let Some(queued) = waiting.jobs.pop() {
+                return Some(Ok(queued.task));
             }
             if waiting.closed {
                 return None;
@@ -193,14 +191,9 @@ impl Pool {
                     while let Some(work) = queue.take() {
                         match work {
                             Ok(task) => task(),
-                            // Between two slices, a job waiting takes the worker back; the helper
-                            // is queued again for the slices left, taken after that job.
+                            // The slices taken until none is left: their caller waits for them.
                             Err((owner, helper)) => {
-                                let left =
-                                    acting_as(owner.as_deref(), || helper(&|| queue.jobs.load(Ordering::Acquire) > 0));
-                                if left {
-                                    queue.push_helper((owner, helper));
-                                }
+                                acting_as(owner.as_deref(), || helper(&|| false));
                             }
                         }
                     }
@@ -655,66 +648,64 @@ mod tests {
     }
 
     #[test]
-    fn a_job_started_while_every_thread_runs_slices_waits_for_one_slice() {
+    fn the_slices_left_are_taken_before_a_job_started_meanwhile() {
         let mut pool = Pool::new(2, None, None);
         let workers = pool.workers();
-        let slices = pool.spawn(
-            "terrain",
+        let done = Arc::new(AtomicUsize::new(0));
+        let counted = done.clone();
+        pool.spawn(
+            "models",
             "slices",
             Box::new(move |_| {
-                workers.parallel_for(100, 1, |_| std::thread::sleep(Duration::from_millis(10)));
-                Box::new(Instant::now())
+                workers.parallel_for(100, 1, |_| {
+                    std::thread::sleep(Duration::from_millis(5));
+                    counted.fetch_add(1, Ordering::SeqCst);
+                });
+                Box::new(())
             }),
             editor(),
         );
         std::thread::sleep(Duration::from_millis(50));
-        let started = Instant::now();
-        let job = pool.spawn("notes", "add", Box::new(|_| Box::new(Instant::now())), editor());
+        let seen = done.clone();
+        let job = pool.spawn(
+            "terrain",
+            "tile",
+            Box::new(move |_| Box::new(seen.load(Ordering::SeqCst))),
+            editor(),
+        );
         let finished = wait_for(&mut pool, 2);
-        let ended = |id| {
-            finished
-                .iter()
-                .find(|f| f.id == id)
-                .and_then(|f| match &f.outcome {
-                    JobOutcome::Done(value) => value.downcast_ref::<Instant>().copied(),
-                    _ => None,
-                })
-                .expect("ended")
-        };
-        let waited = ended(job) - started;
-        assert!(waited < Duration::from_millis(100), "waited {waited:?}");
-        assert!(ended(job) < ended(slices), "the job ended before the slices");
+        let outcome = finished.into_iter().find(|f| f.id == job).expect("ended").outcome;
+        // Every slice taken first: at most the one its caller still runs left.
+        let slices = outcome.take::<usize>().expect("its value");
+        assert!(slices >= 99, "the job ran after {slices} slices of 100");
     }
 
     #[test]
-    fn a_worker_called_away_by_a_job_comes_back_to_the_slices_left() {
+    fn a_worker_helping_with_slices_takes_a_job_only_once_none_is_left() {
         let pool = Pool::new(1, None, None);
         let workers = pool.workers();
         let background = pool.background();
         let caller = std::thread::current().id();
-        let called = AtomicBool::new(false);
-        let done = Arc::new(AtomicBool::new(false));
-        let after = AtomicUsize::new(0);
+        let queued = AtomicBool::new(false);
+        let taken = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(Mutex::new(None));
         workers.parallel_for(60, 1, |_| {
-            if std::thread::current().id() == caller {
-                // The caller waits for the job, so that slices are left for the worker after it.
-                let started = Instant::now();
-                while !done.load(Ordering::Acquire) && started.elapsed() < Duration::from_secs(5) {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-            } else if !called.swap(true, Ordering::AcqRel) {
-                let done = done.clone();
-                background(Box::new(move || done.store(true, Ordering::Release)));
-            } else if done.load(Ordering::Acquire) {
-                after.fetch_add(1, Ordering::Relaxed);
+            taken.fetch_add(1, Ordering::SeqCst);
+            if std::thread::current().id() != caller && !queued.swap(true, Ordering::AcqRel) {
+                let (taken, seen) = (taken.clone(), seen.clone());
+                background(Box::new(move || {
+                    *seen.lock().unwrap() = Some(taken.load(Ordering::SeqCst))
+                }));
             }
             std::thread::sleep(Duration::from_millis(1));
         });
-        assert!(done.load(Ordering::Acquire), "the job ran");
-        assert!(
-            after.load(Ordering::Relaxed) > 0,
-            "the worker took slices again after the job"
-        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while seen.lock().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "the job never ran");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(queued.load(Ordering::Acquire), "the worker helped");
+        assert_eq!(*seen.lock().unwrap(), Some(60), "the job after every slice");
     }
 
     #[test]

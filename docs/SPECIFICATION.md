@@ -449,7 +449,7 @@ Who runs what, and how the threads reach each other:
 | Thread | Owns | Runs |
 |---|---|---|
 | Interface | Every module's state, the history and the open groups, the views of the interface objects, the kernel's state | The `Module` methods of every module, the undoable commands, Undo and Redo, the requests of the queue, the drawing |
-| Worker of the pool | Nothing | Jobs of `Context::spawn` (T2); the sorts of large tables of the interface objects; the slices of `parallel_for`, after any job waiting |
+| Worker of the pool | Nothing | The slices of `parallel_for`, before any job, their caller waiting for them; jobs of `Context::spawn` (T2) by their priority; the sorts of large tables of the interface objects |
 | Thread of its own | Nothing | Scripts and jobs that wait (`Context::spawn_thread`), among them the threads of modules waiting for the frame signal of the viewport |
 | Thread of a compiled module | The module's data, by its own rules | Its slots, paintings and `apply_change`, and its commands called from the interface thread |
 | Any thread | — | Commands running on the caller (T4), the reading and writing of animatable properties, the C functions (T7) |
@@ -462,7 +462,7 @@ Shared state and locks:
 | Events and failures from other threads | Lock of the bridge | Pushed by any thread, taken by the interface thread at each frame |
 | Subscriptions | Lock of the bridge, then one queue per subscription | Delivered by the interface thread, read by the subscriber's thread |
 | Interface objects of a compiled module | One lock per module | The interface thread while it draws them, any thread in the C functions. Never held while the code of the module owning them runs: slots, paintings and replies are called once it is released. The services drawing curve views, dopesheets and property grids, code of other modules, run while it is held: they touch no module's objects, and the properties they show are read before it is taken. In C++ and C#, the lock of the classes' connections is taken before it, never after |
-| Queues of the pool: the jobs and the kernel's work, then the slices | One lock | Released before a job or a slice runs; the count of jobs waiting is read without it between two slices |
+| Queues of the pool: the slices, then the jobs and the kernel's work by their priority | One lock | Released before a job or a slice runs |
 
 No lock is held while the kernel calls a module.
 
@@ -6240,6 +6240,22 @@ section.
     diagonal past its corner, as the terrain gives it to a load. Not tested: each module giving its
     distance, in the steering of the modules, which no test drives.
 
+- **The slices of `parallel_for` before the jobs** (`kernel/src/jobs.rs`, `core/api/src/parallel.rs`):
+  a worker took a job before any slice, and one helping with slices went back to the jobs between
+  two of them, so that a job waited for one slice at most. The thread of the animations, which
+  splits its bones with `parallel_for` and must end before the frame it is for, rose to 9 ms while
+  the loads kept the workers. A worker now takes the slices left before any job, and helps until
+  none is left: the caller of `parallel_for` waits for no job but those already running, and a job
+  waits for the slices taken meanwhile, short by the rule of `parallel_for` (under a millisecond
+  each). The jobs of a module calling `parallel_for` (the chunks of a tile of the terrain built)
+  finish sooner the same way.
+  - **Tested**: a job started while every worker runs slices runs once the slices are all taken (99
+    of 100 at least, the last of its caller running); a worker helping takes a job queued
+    meanwhile only once no slice is left; the slices as before (every index once, nested, a panic
+    coming back once every slice ended, on behalf of the module calling). The two tests of the
+    order before, a job waiting for one slice at most and a worker called away by a job, replaced
+    by those two.
+
 **To measure by the user**: the flights of *The frames measured in flight, before any correction*
 (the terrain at 64 tiles, the buildings at 8, the doodads at 4, the models at a reach of 1,000; 300
 then 600 yards a second, from the Howling Fjord to Dalaran by the Grizzly Hills), with the journal
@@ -6258,6 +6274,8 @@ of the frames (`UNIWOW_SLOW_FRAMES`), before this work and after it:
 4. The jobs started not yet handed back and whether the tile under the camera, and the buildings
    and models near it, now come first after a fast flight stops (the ground under the camera no
    longer missing while far buildings load).
+5. The thread of the animations: its time a frame on average and at most, in the statistics of
+   `models`, during the loads (9 ms at most before), and whether the loads seem slower.
 
 #### Step 9.7, proposed: the light of the map
 
