@@ -376,8 +376,12 @@ impl Module for WeatherModule {
                 ctx.set_setting(INTENSITY, json!(intensity));
             }
         }
-        let falling = lock(&self.falling);
-        match falling.effect {
+        // Taken out of the lock before the services are asked.
+        let (effect, liquids, buildings) = {
+            let falling = lock(&self.falling);
+            (falling.effect, falling.liquids.clone(), falling.buildings.clone())
+        };
+        match effect {
             Some(effect) => {
                 ui.label(format!("Applied: {} at {:.2}.", effect.kind.name(), effect.intensity));
                 if let Some(eye) = ctx
@@ -387,7 +391,7 @@ impl Module for WeatherModule {
                         PropertyValue::Vector(eye) => Some(eye.map(|value| value as f32)),
                         _ => None,
                     })
-                    && let (Some(why), _) = fall::sheltered(falling.liquids.as_ref(), falling.buildings.as_ref(), eye)
+                    && let (Some(why), _) = fall::sheltered(liquids.as_ref(), buildings.as_ref(), eye)
                 {
                     ui.label(format!("Nothing falls: {why}."));
                 }
