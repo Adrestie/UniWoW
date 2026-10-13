@@ -37,11 +37,13 @@ fn source(shader: &str) -> String {
 /// Floats of the shaders' `Camera`.
 pub const CAMERA: usize = 80;
 
-/// What the tiles, the horizon and the sky share: the device, the layouts and the pipelines, the
-/// samplers, an empty array for the slots without one, and the arrays of textures.
+/// What the tiles, the horizon and the sky share: the device, the target its pipelines draw into,
+/// the layouts and the pipelines, the samplers, an empty array for the slots without one, and the
+/// arrays of textures.
 pub struct Shared {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    pub target: Target,
     pub camera_layout: wgpu::BindGroupLayout,
     tile_layout: wgpu::BindGroupLayout,
     arrays_layout: wgpu::BindGroupLayout,
@@ -273,6 +275,7 @@ impl Shared {
         Ok(Self {
             device: device.clone(),
             queue: gpu.queue.clone(),
+            target: *target,
             camera_layout,
             tile_layout,
             arrays_layout,

@@ -1,15 +1,18 @@
 //! The layer of the terrain in the 3D view: the tiles in sight a draw each at their level of detail,
 //! the horizon in one draw, its tiles drawn in detail left out, and last the sky, where nothing was
-//! drawn. Its bundle is kept while the tiles drawn, their levels and the arrays of textures stay the
-//! same; the camera, which moves at every frame, is written in `prepare` into its buffer.
+//! drawn. Drawn in the pass at each frame: the tiles in sight by blocks of `BLOCK` × `BLOCK` tiles of
+//! the map, each block a render bundle of its own, kept while the tiles of the block in sight, their
+//! levels and the arrays of textures stay the same, and recorded again alone once one of them
+//! changes; the horizon and the sky drawn in the pass as they are. The camera, which moves at every
+//! frame, is written in `prepare` into its buffer, which the bundles read.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use uniwow_api::glam::{Mat3, Mat4, Vec3, Vec4};
 use uniwow_api::journal;
-use uniwow_api::viewport::{Layer, LayerStats, Phase, Stage, Target, View};
+use uniwow_api::viewport::{Drawing, Layer, LayerStats, Phase, Stage, Target, View};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
 use crate::gpu::SLOTS;
@@ -104,6 +107,69 @@ pub fn camera_values(view: &View) -> [f32; CAMERA] {
     values
 }
 
+/// The side of a block of tiles drawn by one bundle, in tiles of the map.
+pub const BLOCK: u32 = 4;
+
+/// The block of the tile `id`.
+pub fn block_of(id: TileId) -> [u32; 2] {
+    [id.x / BLOCK, id.y / BLOCK]
+}
+
+/// The bundle of a block of tiles: what it was recorded with, the tiles of the block in sight, by
+/// their place, with their levels, and the generation of the arrays of textures; the tiles, held so
+/// that no other takes their place meanwhile.
+struct Block {
+    recorded: (Vec<(usize, usize)>, u64),
+    tiles: Vec<Arc<TileGpu>>,
+    bundle: wgpu::RenderBundle,
+}
+
+/// What the tiles `tiles` in sight with their levels are recorded with, the arrays of textures of
+/// the generation `arrays`: each tile by the place of its resources, so that a tile loaded again
+/// is another.
+fn recorded_with(tiles: &[(Arc<TileGpu>, usize)], arrays: u64) -> (Vec<(usize, usize)>, u64) {
+    let tiles = tiles
+        .iter()
+        .map(|(tile, lod)| (Arc::as_ptr(tile) as usize, *lod))
+        .collect();
+    (tiles, arrays)
+}
+
+/// The bundle drawing `tiles` at their levels, for the target of `shared`.
+fn record(
+    shared: &Shared,
+    camera: &wgpu::BindGroup,
+    arrays: &wgpu::BindGroup,
+    tiles: &[(Arc<TileGpu>, usize)],
+) -> wgpu::RenderBundle {
+    let target = &shared.target;
+    let mut bundle = shared
+        .device
+        .create_render_bundle_encoder(&wgpu::RenderBundleEncoderDescriptor {
+            label: Some("terrain block"),
+            color_formats: &[Some(target.color_format)],
+            depth_stencil: Some(wgpu::RenderBundleDepthStencil {
+                format: target.depth_format,
+                depth_read_only: false,
+                stencil_read_only: true,
+            }),
+            sample_count: target.sample_count,
+            multiview: None,
+        });
+    bundle.set_pipeline(&shared.pipeline);
+    bundle.set_bind_group(0, camera, &[]);
+    bundle.set_bind_group(2, arrays, &[]);
+    for (tile, lod) in tiles {
+        bundle.set_bind_group(1, &tile.tile_group, &[]);
+        bundle.set_vertex_buffer(0, tile.vertices.slice(..));
+        bundle.set_index_buffer(tile.indices.slice(..), wgpu::IndexFormat::Uint16);
+        bundle.draw_indexed(tile.lods[*lod].clone(), 0, 0..1);
+    }
+    bundle.finish(&wgpu::RenderBundleDescriptor {
+        label: Some("terrain block"),
+    })
+}
+
 pub struct TerrainLayer {
     /// Where the job building the pipelines leaves what the terrain shares.
     incoming: Arc<Mutex<Option<Arc<Shared>>>>,
@@ -121,10 +187,14 @@ pub struct TerrainLayer {
     sky: bool,
     /// The level of each tile in sight at the last frame.
     lods: HashMap<TileId, usize>,
-    /// What the bundle was recorded with: the generation of the scene, that of the arrays, and the
-    /// tiles in sight with their levels.
-    recorded: (u64, u64, Vec<(TileId, usize)>),
-    version: u64,
+    /// The bundles of the blocks, kept while their tiles are in the scene, those of the blocks in
+    /// sight at this frame, the generation of the scene the blocks were last let go for, and the
+    /// bundles recorded at this frame and since the layer was made.
+    blocks: HashMap<[u32; 2], Block>,
+    shown: Vec<[u32; 2]>,
+    kept_for: Option<u64>,
+    recorded_now: usize,
+    recordings: u64,
     stats: LayerStats,
 }
 
@@ -142,9 +212,53 @@ impl TerrainLayer {
             horizon: None,
             sky: false,
             lods: HashMap::new(),
-            recorded: (u64::MAX, u64::MAX, Vec::new()),
-            version: 0,
+            blocks: HashMap::new(),
+            shown: Vec::new(),
+            kept_for: None,
+            recorded_now: 0,
+            recordings: 0,
             stats: LayerStats::default(),
+        }
+    }
+
+    /// How many bundles of blocks it recorded since it was made, and how many it keeps.
+    #[cfg(test)]
+    pub fn bundles(&self) -> (u64, usize) {
+        (self.recordings, self.blocks.len())
+    }
+
+    /// The bundles of the blocks of the tiles in sight, those recorded again first, where a tile in
+    /// sight, its level or the arrays of textures changed.
+    fn record_blocks(&mut self, shared: &Shared) {
+        let (Some((_, camera)), Some((arrays, arrays_group))) = (&self.camera, &self.arrays) else {
+            return;
+        };
+        let mut by_block: BTreeMap<[u32; 2], Vec<(Arc<TileGpu>, usize)>> = BTreeMap::new();
+        for (tile, lod) in &self.drawn {
+            by_block
+                .entry(block_of(tile.id))
+                .or_default()
+                .push((tile.clone(), *lod));
+        }
+        self.shown.clear();
+        self.recorded_now = 0;
+        for (key, tiles) in by_block {
+            let recorded = recorded_with(&tiles, *arrays);
+            if self.blocks.get(&key).is_none_or(|block| block.recorded != recorded) {
+                let bundle = record(shared, camera, arrays_group, &tiles);
+                let tiles = tiles.into_iter().map(|(tile, _)| tile).collect();
+                self.blocks.insert(
+                    key,
+                    Block {
+                        recorded,
+                        tiles,
+                        bundle,
+                    },
+                );
+                self.recorded_now += 1;
+                self.recordings += 1;
+            }
+            self.shown.push(key);
         }
     }
 
@@ -176,6 +290,10 @@ impl TerrainLayer {
 impl Layer for TerrainLayer {
     fn stage(&self) -> Stage {
         Stage::Ground
+    }
+
+    fn drawing(&self) -> Drawing {
+        Drawing::Pass
     }
 
     fn prepare(&mut self, gpu: &egui_wgpu::RenderState, view: &View) {
@@ -211,6 +329,13 @@ impl Layer for TerrainLayer {
         for (tile, lod) in &self.drawn {
             self.lods.insert(tile.id, *lod);
         }
+        // The blocks holding a tile the scene no longer has let go, its resources with them.
+        if self.kept_for != Some(scene.generation) {
+            let held: HashSet<*const TileGpu> = scene.tiles.iter().map(Arc::as_ptr).collect();
+            self.blocks
+                .retain(|_, block| block.tiles.iter().all(|tile| held.contains(&Arc::as_ptr(tile))));
+            self.kept_for = Some(scene.generation);
+        }
         if self.masked != Some(scene.generation) {
             let bits = horizon::mask(scene.tiles.iter().map(|tile| tile.id));
             gpu.queue.write_buffer(mask, 0, bytemuck::cast_slice(&bits));
@@ -221,15 +346,6 @@ impl Layer for TerrainLayer {
         gpu.queue
             .write_buffer(camera, 0, bytemuck::cast_slice(&camera_values(view)));
 
-        let recorded = (
-            scene.generation,
-            arrays,
-            self.drawn.iter().map(|(tile, lod)| (tile.id, *lod)).collect(),
-        );
-        if recorded != self.recorded {
-            self.recorded = recorded;
-            self.version += 1;
-        }
         let tile_triangles: u64 = self
             .drawn
             .iter()
@@ -241,77 +357,70 @@ impl Layer for TerrainLayer {
         let limited = scene.limited.map_or_else(String::new, |reach| {
             format!("; reach limited by the budget: {reach:.0} tiles")
         });
+        let (steering, bytes, models, loaded) = (scene.steering, scene.bytes, scene.models, scene.tiles.len());
+        drop(scene);
+        self.record_blocks(&shared);
         self.stats = LayerStats {
             draws: self.drawn.len() as u64 + u64::from(self.horizon.is_some()) + u64::from(self.sky),
             triangles: tile_triangles + horizon_triangles + u64::from(self.sky),
-            bytes: scene.bytes,
+            bytes,
             items: format!(
-                "{} tiles in sight of {} loaded ({full} full, {} light), levels {:?}\n  models {:.0} MB in memory; textures {} placed, {} unreadable, {} waiting for room, {} of {} arrays{limited}",
+                "{} tiles in sight of {loaded} loaded ({full} full, {} light), levels {:?}, in {} blocks, {} recorded again\n  models {:.0} MB in memory; textures {} placed, {} unreadable, {} waiting for room, {} of {} arrays{limited}",
                 self.drawn.len(),
-                scene.tiles.len(),
-                scene.tiles.len() - full,
+                loaded - full,
                 (0..mesh::LODS)
                     .map(|level| self.drawn.iter().filter(|(_, lod)| *lod == level).count())
                     .collect::<Vec<_>>(),
-                scene.models as f64 / (1024.0 * 1024.0),
+                self.shown.len(),
+                self.recorded_now,
+                models as f64 / (1024.0 * 1024.0),
                 textures.placed,
                 textures.unreadable,
                 textures.no_room,
                 textures.arrays,
                 SLOTS
             ),
-            steering: scene.steering,
+            steering,
         };
     }
 
-    fn version(&self) -> Option<u64> {
-        Some(self.version)
-    }
-
-    fn draw<'a>(
-        &'a mut self,
+    fn draw_pass(
+        &mut self,
         _gpu: &egui_wgpu::RenderState,
         _target: &Target,
         _view: &View,
         phase: Phase,
-        bundle: &mut wgpu::RenderBundleEncoder<'a>,
+        pass: &mut wgpu::RenderPass<'_>,
     ) {
-        let (Some(shared), Some((_, camera)), Some((_, mask)), Some((_, arrays))) =
-            (&self.shared, &self.camera, &self.mask, &self.arrays)
-        else {
+        let (Some(shared), Some((_, camera)), Some((_, mask))) = (&self.shared, &self.camera, &self.mask) else {
             return;
         };
         // The ground first in each phase: the sky begins the first blended one, where nothing
         // opaque was drawn; the depth is still at infinity there only.
         if phase == Phase::Beyond {
             if self.sky {
-                bundle.set_pipeline(&shared.sky_pipeline);
-                bundle.set_bind_group(0, camera, &[]);
-                bundle.draw(0..3, 0..1);
+                pass.set_pipeline(&shared.sky_pipeline);
+                pass.set_bind_group(0, camera, &[]);
+                pass.draw(0..3, 0..1);
             }
             return;
         }
         if phase != Phase::Opaque {
             return;
         }
-        if !self.drawn.is_empty() {
-            bundle.set_pipeline(&shared.pipeline);
-            bundle.set_bind_group(0, camera, &[]);
-            bundle.set_bind_group(2, arrays, &[]);
-            for (tile, lod) in &self.drawn {
-                bundle.set_bind_group(1, &tile.tile_group, &[]);
-                bundle.set_vertex_buffer(0, tile.vertices.slice(..));
-                bundle.set_index_buffer(tile.indices.slice(..), wgpu::IndexFormat::Uint16);
-                bundle.draw_indexed(tile.lods[*lod].clone(), 0, 0..1);
-            }
-        }
+        let blocks = &self.blocks;
+        pass.execute_bundles(
+            self.shown
+                .iter()
+                .filter_map(|key| blocks.get(key).map(|block| &block.bundle)),
+        );
         if let Some(horizon) = &self.horizon {
-            bundle.set_pipeline(&shared.horizon_pipeline);
-            bundle.set_bind_group(0, camera, &[]);
-            bundle.set_bind_group(1, mask, &[]);
-            bundle.set_vertex_buffer(0, horizon.vertices.slice(..));
-            bundle.set_index_buffer(horizon.indices.slice(..), wgpu::IndexFormat::Uint32);
-            bundle.draw_indexed(0..horizon.count, 0, 0..1);
+            pass.set_pipeline(&shared.horizon_pipeline);
+            pass.set_bind_group(0, camera, &[]);
+            pass.set_bind_group(1, mask, &[]);
+            pass.set_vertex_buffer(0, horizon.vertices.slice(..));
+            pass.set_index_buffer(horizon.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..horizon.count, 0, 0..1);
         }
     }
 

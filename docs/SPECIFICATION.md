@@ -6183,6 +6183,42 @@ section.
     as running until then; a module taking 10 ms to take each of six jobs back is given one at each
     pass of the kernel (egui may make two of a frame), the others still listed, each once; one
     taking them back at once is given twenty in a frame.
+- **The tiles of the terrain by blocks, each a bundle kept** (`terrain/src/layer.rs`): the bundle
+  of the terrain was recorded again whole once the tiles in sight or their levels changed, that is
+  at nearly every frame of a flight (3.9 ms of the interface thread in a slow frame). The layer now
+  draws in the pass: the tiles in sight are gathered by blocks of 4 × 4 tiles of the map, each
+  block a render bundle of its own, kept from a frame to the next while the tiles of the block in
+  sight, their levels and the generation of the arrays of textures stay the same, and recorded
+  again alone, in `prepare`, once one of them changes; a tile loaded again is another, told by the
+  place of its resources. The pass runs the bundles of the blocks in sight, then draws the horizon,
+  and the sky in `Beyond`, as before. A block holding a tile the scene no longer has is let go with
+  it, in sight or not, so that no bundle keeps the resources of a tile released. The statistics
+  say the blocks in sight and those recorded again at the frame.
+  - **Why blocks rather than a bundle a tile and a level**, as proposed: a probe of wgpu-core 30
+    alone, on its backend that draws nothing (`noop`), on the Linux machine this was built on and
+    not on the user's, drawing 500 tiles as the terrain does (a pipeline, the camera, twelve arrays,
+    then a bind group, two buffers and a draw a tile) into a pass, all of a frame on the CPU
+    counted, its submission included; three runs, in ms a frame: one bundle recorded again at each
+    frame 0.91 to 1.04, one bundle kept 0.41 to 0.43; a bundle a tile, kept, 0.79 to 0.85; drawn in
+    the pass at each frame 0.62 to 0.74; bundles of 16 tiles kept 0.43 to 0.48, a tenth of them
+    recorded again at each frame 0.51 to 0.62. Running a bundle costs wgpu-core about as much as
+    validating its commands once more: each binds its pipeline and groups again and merges their
+    resources (the twelve arrays) into the pass, so that a bundle a tile saves little over the
+    bundle recorded at each frame (at 1,000 tiles it cost more), while bundles of a few tiles kept
+    cost nearly what one kept costs. A draw of every tile at once (`multi_draw_indexed_indirect`)
+    would need the textures of blending of every tile in arrays, 256 layers of 64 × 64 for a full
+    tile where an array takes 2,048 at most on Direct3D 12: not done.
+  - **Tested** on the software adapter: a block recorded once and drawn, kept at the next frame at
+    the same level, recorded again farther at a coarser level, again once its tile is loaded again;
+    a tile of another block in sight recording that block alone, both drawn, both kept at the next
+    frame; both recorded again once the arrays change; the block of a tile let go dropped; a block
+    out of sight kept, then let go once a tile it holds is released. The tests of the drawing of the
+    terrain (the textures, the horizon, the sky, the fog, the light) draw it in the pass now, as the
+    view does. 7 changes made on purpose, 6 caught (every block recorded at each frame, the levels
+    left out, the arrays left out, a block kept while one of its tiles is, one block for the whole
+    map, a bundle not run); the seventh, the tiles told by their place in the map rather than by
+    their resources, is covered by the blocks let go with a tile the scene no longer has, a tile
+    loaded again changing the scene.
 
 **To measure by the user**: the flights of *The frames measured in flight, before any correction*
 (the terrain at 64 tiles, the buildings at 8, the doodads at 4, the models at a reach of 1,000; 300
@@ -6195,6 +6231,10 @@ of the frames (`UNIWOW_SLOW_FRAMES`), before this work and after it:
    how long the tiles within reach took to load). The same with the budget at 16 and at 64 MB.
 2. The part `kernel: jobs handed back` in the slow frames, which should stay near 3 ms, and the
    jobs started not yet handed back, which may now stay higher for a few frames after a burst.
+3. The terrain: `view: terrain record` (3.9 ms in a slow frame before) against, now, `view:
+   terrain prepare` (the blocks recorded again), `view: terrain record` (the bundles run) and `view:
+   submit` (wgpu-core validating the pass, bundles included); the blocks recorded again a frame, in
+   the statistics of the layer, flying straight and turning.
 
 #### Step 9.7, proposed: the light of the map
 

@@ -17,7 +17,7 @@ use uniwow_api::{JobId, JobOutcome, bytemuck, egui, egui_wgpu, wgpu};
 
 use crate::gpu::{self, Shared};
 use crate::horizon;
-use crate::layer::{Scene, TerrainLayer, in_sight, tiles_away};
+use crate::layer::{Scene, TerrainLayer, block_of, in_sight, tiles_away};
 use crate::loading::{self, Costs, Held, Inputs, Kind, Plan};
 use crate::mesh::{self, CHUNKS, LODS, SKIRT_DEPTH, TILE_VERTICES, VERTICES, Vertex};
 use crate::model::{CHUNK, ORIGIN, STEP, TILE, TileId, TileModel, chunk_bounds};
@@ -1189,25 +1189,6 @@ fn render_lit(
         water: None,
     };
     layer.prepare(gpu, &view);
-    // A bundle for each phase, run in their order.
-    let mut bundles = Vec::new();
-    for phase in phases.iter().copied() {
-        let mut bundle = gpu
-            .device
-            .create_render_bundle_encoder(&wgpu::RenderBundleEncoderDescriptor {
-                label: None,
-                color_formats: &[Some(target.color_format)],
-                depth_stencil: Some(wgpu::RenderBundleDepthStencil {
-                    format: target.depth_format,
-                    depth_read_only: false,
-                    stencil_read_only: true,
-                }),
-                sample_count: 1,
-                multiview: None,
-            });
-        layer.draw(gpu, target, &view, phase, &mut bundle);
-        bundles.push(bundle.finish(&wgpu::RenderBundleDescriptor { label: None }));
-    }
     let texture = |format, usage| {
         gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: None,
@@ -1256,7 +1237,10 @@ fn render_lit(
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.execute_bundles(&bundles);
+        // Drawn in the pass, as the view draws it, its phases in their order.
+        for phase in phases.iter().copied() {
+            layer.draw_pass(gpu, target, &view, phase, &mut pass);
+        }
     }
     gpu.queue.submit([encoder.finish()]);
     read_layer(gpu, &colour, 0)
@@ -1536,7 +1520,7 @@ fn the_sky_is_seen_from_the_screen_as_precisely_far_from_the_middle_of_the_world
 }
 
 #[test]
-fn the_bundle_is_recorded_again_when_the_level_of_a_tile_changes_and_kept_otherwise() {
+fn the_bundle_of_a_block_of_tiles_is_kept_across_frames_and_recorded_again_alone_once_its_tiles_change() {
     let Some(gpu) = device() else {
         eprintln!("skipped: no software adapter for a device");
         return;
@@ -1546,34 +1530,95 @@ fn the_bundle_is_recorded_again_when_the_level_of_a_tile_changes_and_kept_otherw
         ..TARGET
     };
     let shared = Arc::new(Shared::new(&gpu, &target).unwrap());
-    let model = TileModel::new(id(32, 32), two_textures());
-    let tile = Arc::new(
-        gpu::build_tile(&shared, &Fake::default(), &model, &|| false)
-            .unwrap()
-            .unwrap(),
-    );
+    let build = |at: TileId| {
+        let model = TileModel::new(at, two_textures());
+        Arc::new(
+            gpu::build_tile(&shared, &Fake::default(), &model, &|| false)
+                .unwrap()
+                .unwrap(),
+        )
+    };
     let scene = Arc::new(Mutex::new(Scene {
-        tiles: vec![tile],
+        tiles: vec![build(id(32, 32))],
         reach: 100_000.0,
         ..Scene::default()
     }));
-    let mut layer = TerrainLayer::new(Arc::new(Mutex::new(Some(shared))), scene);
+    let mut layer = TerrainLayer::new(Arc::new(Mutex::new(Some(shared.clone()))), scene.clone());
     let [x, y] = id(32, 32).centre();
-    let mut version_from = |height: f32| {
-        render(
+    // A frame seen from `height` over the tile: the bundles recorded in all and kept, the triangles
+    // drawn, and the pixels of the tiles.
+    let frame = |layer: &mut TerrainLayer, height: f32| {
+        let pixels = render(
             &gpu,
-            &mut layer,
+            layer,
             &target,
             Vec3::new(x + 1.0, y, height),
             Vec3::new(x, y, 0.0),
         );
-        (layer.version(), layer.stats().triangles)
+        let [red, green, ..] = counts(&pixels);
+        (layer.bundles(), layer.stats().triangles, red + green)
     };
-    let near = version_from(250.0);
-    assert_eq!(version_from(260.0).0, near.0, "the same tiles at the same level: kept");
-    let far = version_from(10.0 * TILE);
-    assert_ne!(far.0, near.0, "farther, at a coarser level");
+    let near = frame(&mut layer, 250.0);
+    assert_eq!(near.0, (1, 1), "a block, recorded");
+    assert!(near.2 > 2400, "and drawn: {} pixels", near.2);
+    assert_eq!(
+        frame(&mut layer, 260.0).0,
+        (1, 1),
+        "the same tile at the same level: kept"
+    );
+    let far = frame(&mut layer, 10.0 * TILE);
+    assert_eq!(far.0, (2, 1), "farther, at a coarser level: recorded again");
     assert!(far.1 < near.1 / 10, "{} triangles, then {}", near.1, far.1);
+    assert!(far.2 > 0, "and drawn");
+    // The tile loaded again: another tile, its block recorded again.
+    {
+        let mut scene = scene.lock().unwrap();
+        scene.tiles = vec![build(id(32, 32))];
+        scene.generation += 1;
+    }
+    assert_eq!(frame(&mut layer, 10.0 * TILE).0, (3, 1));
+    // A tile of another block in sight, four tiles aside: its block alone recorded.
+    assert_ne!(block_of(id(32, 32)), block_of(id(36, 32)));
+    {
+        let mut scene = scene.lock().unwrap();
+        scene.tiles.push(build(id(36, 32)));
+        scene.generation += 1;
+    }
+    let both = frame(&mut layer, 10.0 * TILE);
+    assert_eq!(both.0, (4, 2));
+    assert!(both.2 > far.2, "both drawn: {} pixels, then {}", far.2, both.2);
+    assert_eq!(frame(&mut layer, 10.0 * TILE).0, (4, 2), "kept at the next frame");
+    // The arrays of textures changed: both recorded again with them.
+    shared.textures.place(&plain(16, [9, 9, 9, 255])).unwrap();
+    assert_eq!(frame(&mut layer, 10.0 * TILE).0, (6, 2));
+    // The first tile let go: the bundle of its block with it.
+    {
+        let mut scene = scene.lock().unwrap();
+        scene.tiles.retain(|tile| tile.id != id(32, 32));
+        scene.generation += 1;
+    }
+    assert_eq!(frame(&mut layer, 10.0 * TILE).0, (6, 1));
+    // A second tile in the block left, drawn with the first; then out of sight, their bundle kept;
+    // then one of them let go, out of sight: the bundle let go too, not holding it.
+    assert_eq!(block_of(id(37, 32)), block_of(id(36, 32)));
+    {
+        let mut scene = scene.lock().unwrap();
+        scene.tiles.push(build(id(37, 32)));
+        scene.generation += 1;
+    }
+    assert_eq!(frame(&mut layer, 10.0 * TILE).0, (7, 1));
+    let away = |layer: &mut TerrainLayer| {
+        let eye = Vec3::new(x, y, 10.0 * TILE);
+        render(&gpu, layer, &target, eye, eye + Vec3::new(0.0, 1000.0, 0.0));
+        layer.bundles()
+    };
+    assert_eq!(away(&mut layer), (7, 1), "out of sight, kept");
+    {
+        let mut scene = scene.lock().unwrap();
+        scene.tiles.retain(|tile| tile.id != id(37, 32));
+        scene.generation += 1;
+    }
+    assert_eq!(away(&mut layer), (7, 0), "let go with a tile it held");
 }
 
 #[test]
