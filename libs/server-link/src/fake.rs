@@ -1,10 +1,11 @@
 //! A fake observer on 127.0.0.1, for the tests of the client and of the modules using it: it
-//! welcomes the token it is given, keeps what it receives, and sends what the test queues.
+//! welcomes the token it is given with the capabilities the test sets, keeps what it receives, and
+//! sends what the test queues.
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -24,6 +25,7 @@ struct Shared {
     accepted: AtomicUsize,
     drop_connection: AtomicBool,
     stop: AtomicBool,
+    capabilities: AtomicU32,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -37,13 +39,15 @@ pub struct FakeObserver {
 }
 
 impl FakeObserver {
-    /// Listens on a free port of 127.0.0.1 and welcomes `token`; one connection at a time.
+    /// Listens on a free port of 127.0.0.1 and welcomes `token`, reading and nothing more, as an
+    /// observer before the world; one connection at a time.
     pub fn start(token: &str) -> io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let address = listener.local_addr()?;
         let shared = Arc::new(Shared {
             token: token.to_owned(),
+            capabilities: AtomicU32::new(CAPABILITY_READING),
             ..Shared::default()
         });
         let serving = shared.clone();
@@ -95,6 +99,11 @@ impl FakeObserver {
             std::thread::sleep(POLL);
         }
         test(&lock(&self.shared.received))
+    }
+
+    /// The capabilities the next WELCOME tells.
+    pub fn set_capabilities(&self, capabilities: u32) {
+        self.shared.capabilities.store(capabilities, Ordering::Release);
     }
 
     /// The connections accepted so far.
@@ -161,7 +170,7 @@ fn serve(shared: &Shared, mut stream: TcpStream) -> io::Result<()> {
                 welcomed = true;
                 stream.write_all(&encode_from_observer(&FromObserver::Welcome(Welcome {
                     version: VERSION,
-                    capabilities: CAPABILITY_READING,
+                    capabilities: shared.capabilities.load(Ordering::Acquire),
                     server: "a fake observer".to_owned(),
                     commit: "0000000".to_owned(),
                     max_radius: 533.0,

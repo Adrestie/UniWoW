@@ -5,6 +5,7 @@
 
 #include "Log.h"
 #include "ScriptMgr.h"
+#include "Weather.h"
 
 #include <exception>
 
@@ -23,6 +24,33 @@ namespace
         void OnShutdown() override
         {
             UniwowObserver::Observer::Instance().Stop();
+        }
+    };
+
+    // Every change of the weather of a zone, as the server sends it to the players there
+    // (`Weather::UpdateWeather`, which calls it only when a player is in the zone).
+    class ObserverWeather : public ALEScript
+    {
+    public:
+        ObserverWeather() : ALEScript("UniwowObserverWeather") { }
+
+        // On the thread updating the map of the weather.
+        void OnWeatherChange(Weather* weather, WeatherState state, float grade) override
+        {
+            if (!weather)
+                return;
+            try
+            {
+                UniwowObserver::Observer::Instance().RecordWeather(weather->GetZone(), uint32(state), grade);
+            }
+            catch (std::exception const& error)
+            {
+                LOG_ERROR("module", "uniwow-observer: {}", error.what());
+            }
+            catch (...)
+            {
+                LOG_ERROR("module", "uniwow-observer: an unknown error in a change of the weather");
+            }
         }
     };
 
@@ -54,4 +82,5 @@ void AddUniwowObserverScripts()
 {
     new ObserverWorld();
     new ObserverMaps();
+    new ObserverWeather();
 }

@@ -1,13 +1,16 @@
 //! The connection to the observer, on a thread of its own: it connects, says why when it cannot,
 //! subscribes to the zone around the camera on the map the terrain shows, follows the camera, and
-//! keeps the shared snapshot of the entities. Every wait is bounded, its cancellation checked in
-//! between.
+//! keeps the shared snapshot of the entities; and, from an observer that sends it, the world: the
+//! hour of the server and the weathers of its zones. Every wait is bounded, its cancellation checked
+//! in between.
 
 use std::net::{SocketAddr, TcpStream};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use uniwow_api::server_link::protocol::{FromObserver, State, ToObserver, Zone};
+use uniwow_api::server_link::protocol::{
+    CAPABILITY_WORLD, FromObserver, State, ToObserver, World as ServerWorld, Zone, ZoneWeather,
+};
 use uniwow_api::server_link::{Client, Error};
 
 use crate::world::{Change, World};
@@ -71,6 +74,8 @@ pub struct Status {
     /// The zone subscribed to and where its subscription stands.
     pub zone: Option<Zone>,
     pub state: Option<State>,
+    /// Whether the observer sends the world (`CAPABILITY_WORLD`), once welcomed.
+    pub world_offered: Option<bool>,
 }
 
 impl Default for Status {
@@ -81,7 +86,37 @@ impl Default for Status {
             commit: String::new(),
             zone: None,
             state: None,
+            world_offered: None,
         }
+    }
+}
+
+/// A day, in seconds.
+const DAY: u32 = 24 * 60 * 60;
+
+/// The world the observer sent last, and when it came.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Observed {
+    pub world: ServerWorld,
+    pub at: Instant,
+}
+
+impl Observed {
+    /// The hour of the server at `now`, in seconds from its midnight: the one sent, counted on.
+    pub fn time_at(&self, now: Instant) -> u32 {
+        let since = now.saturating_duration_since(self.at).as_secs();
+        ((u64::from(self.world.time) + since) % u64::from(DAY)) as u32
+    }
+
+    /// The weather of `zone` the server sent last, its age counted on to `now`; none when the
+    /// server sent none of it.
+    pub fn weather_at(&self, zone: u32, now: Instant) -> Option<ZoneWeather> {
+        let since = now.saturating_duration_since(self.at).as_secs();
+        let weather = self.world.weathers.iter().find(|weather| weather.zone == zone)?;
+        Some(ZoneWeather {
+            age: weather.age.saturating_add(u32::try_from(since).unwrap_or(u32::MAX)),
+            ..*weather
+        })
     }
 }
 
@@ -90,6 +125,8 @@ impl Default for Status {
 pub struct Shared {
     world: Mutex<Arc<World>>,
     status: Mutex<Status>,
+    /// The world the observer sent last, none before it sends one or once the connection ends.
+    observed: Mutex<Option<Observed>>,
     /// Whether another connection took its place, after which it changes and tells nothing; held
     /// while the world is changed and told, so that nothing is told after the change that
     /// retires it.
@@ -107,6 +144,10 @@ impl Shared {
 
     pub fn status(&self) -> Status {
         lock(&self.status).clone()
+    }
+
+    pub fn observed(&self) -> Option<Observed> {
+        lock(&self.observed).clone()
     }
 
     /// The thread stopped for `why`, which nothing else will say.
@@ -137,12 +178,19 @@ impl Shared {
     }
 
     fn set_connection(&self, connection: Connection) {
-        let mut status = lock(&self.status);
-        if connection != Connection::Connected {
-            status.zone = None;
-            status.state = None;
+        let connected = connection == Connection::Connected;
+        {
+            let mut status = lock(&self.status);
+            if !connected {
+                status.zone = None;
+                status.state = None;
+                status.world_offered = None;
+            }
+            status.connection = connection;
         }
-        status.connection = connection;
+        if !connected {
+            *lock(&self.observed) = None;
+        }
     }
 }
 
@@ -241,11 +289,17 @@ fn session(
     surroundings: &dyn Surroundings,
     cancelled: &dyn Fn() -> bool,
 ) -> Connection {
+    // The world asked once of an observer that sends it; an older one would close the connection.
+    let world_offered = client.welcome().capabilities & CAPABILITY_WORLD != 0;
+    if world_offered && let Err(error) = client.send(&ToObserver::WatchWorld) {
+        return lost(error);
+    }
     {
         let mut status = lock(&shared.status);
         status.connection = Connection::Connected;
         status.server = client.welcome().server.clone();
         status.commit = client.welcome().commit.clone();
+        status.world_offered = Some(world_offered);
     }
     let radius = settings.radius.min(client.welcome().max_radius);
     let mut sent: Option<Zone> = None;
@@ -297,6 +351,10 @@ fn session(
         let (world, change) = match received {
             FromObserver::Status { state, .. } => {
                 lock(&shared.status).state = Some(state);
+                continue;
+            }
+            FromObserver::World(world) => {
+                *lock(&shared.observed) = Some(Observed { world, at: now });
                 continue;
             }
             FromObserver::Snapshot {

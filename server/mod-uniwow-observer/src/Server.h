@@ -42,6 +42,8 @@ namespace UniwowObserver
         void Send(std::vector<uint8> message);
         void Write();
         void SendStatus(State state, Zone const& zone);
+        // Sends WORLD when the weathers changed since it was last sent, or once a minute.
+        void SendWorld(Clock::time_point now);
 
         Server& _server;
         boost::asio::ip::tcp::socket _socket;
@@ -63,6 +65,12 @@ namespace UniwowObserver
         // What each entity was last sent as, by GUID, compared without what its spline tells.
         std::unordered_map<uint64, std::vector<uint8>> _sent;
         uint64 _bytes = 0;
+        // Whether the editor asked for the world (WATCH_WORLD), the count of the changes of the
+        // weathers it was last sent, and when.
+        bool _world = false;
+        uint64 _worldVersion = 0;
+        bool _worldSentOnce = false;
+        Clock::time_point _worldSent;
     };
 
     class Server

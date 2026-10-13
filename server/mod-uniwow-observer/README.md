@@ -1,8 +1,9 @@
 # mod-uniwow-observer
 
 A module of AzerothCore that streams, read only, the creatures, game objects and players of a zone
-of a map to the UniWoW editor running on the same machine. It changes no data of the game, spawns
-nothing and offers no command; its protocol is in [PROTOCOL.md](PROTOCOL.md).
+of a map to the UniWoW editor running on the same machine, with the hour of the server and the
+weathers its zones were last sent. It changes no data of the game, spawns nothing and offers no
+command; its protocol is in [PROTOCOL.md](PROTOCOL.md).
 
 Licence: GPL 2.0 or later, as AzerothCore, into which it is compiled ([LICENSE](LICENSE)). The editor
 speaks to it only through its protocol, over the network: they are two separate programs.
@@ -25,11 +26,17 @@ speaks to it only through its protocol, over the network: they are two separate 
   time `UniwowObserver.Heartbeat` sets.
 - Any message malformed, too long or out of order closes its connection, nothing more; the
   connections, the size of the messages and what waits to be written are bounded.
+- Each change of the weather of a zone the server sends its players is recorded, under a lock of
+  its own, on the thread of the map that changed it (the hook `OnWeatherChange`); the network thread
+  sends the weathers recorded to the connections that asked for the world. The weather of a zone is
+  known only once a player was in it: AzerothCore makes and changes it only then.
 
 ## Supported AzerothCore
 
 Built and checked against AzerothCore commit `bc9198ce7` (azerothcore-wotlk). A newer commit is a
-change of this module, checked again.
+change of this module, checked again. The world (the hook of the weather and the hour) was written
+against the headers of `bc9198ce7` and `1b4717c93`, which agree on what it uses, and not yet built:
+build it again before relying on it.
 
 ## Building
 
@@ -68,11 +75,14 @@ Alternatively, `UniwowObserver.Enable = 0` keeps it built but idle.
 python tools/probe.py watch --token <token> --map 1 --x 1629 --y -4373 --radius 200 --seconds 60
 python tools/probe.py move --token <token> --map 1 --x 1629 --y -4373 --radius 300 --speed 100
 python tools/probe.py abuse --token <token>
+python tools/probe.py world --token <token> --seconds 120
 ```
 
 `watch` prints what it receives each second and, at the end, which entities moved. `move` moves the
 zone as a flying camera would, subscribing again as `PROTOCOL.md` says: one SNAPSHOT, then CHANGES
-only. `abuse` sends what the module must survive: messages corrupted, cut short, too long or out of
+only. `world` prints the hour of the server and the weathers of its zones as they come: with a player in a
+zone that has weather, `.wchange 1 0.8` (rain at 0.8) sends a new WORLD at once. `abuse` sends what
+the module must survive: messages corrupted, cut short, too long or out of
 order, 100 connections in a row, more connections than allowed, zones that do not exist; the
 worldserver goes on. With
 `UniwowObserver.StatsInterval` set, the log gives, per connection, the time the module took in the

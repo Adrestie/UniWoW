@@ -1,6 +1,7 @@
 //! The world as it runs on the server: the creatures, game objects and players around the camera,
-//! on the map the terrain shows, streamed by the observer `mod-uniwow-observer`. Read only: nothing
-//! is changed on the server, nothing goes to the history. A thread of its own holds the connection
+//! on the map the terrain shows, streamed by the observer `mod-uniwow-observer`, and the hour of the
+//! server and the weathers of its zones, from an observer that sends them. Read only: nothing is
+//! changed on the server, nothing goes to the history. A thread of its own holds the connection
 //! (`link`); the commands read the snapshot it leaves, from any thread; an event, batched, tells
 //! what each message of the observer changed.
 
@@ -126,6 +127,57 @@ fn state_text(state: Option<State>) -> Option<&'static str> {
     })
 }
 
+/// Why the world of the server is not known, by `status`: no connection, an observer that does not
+/// send it, or none sent yet.
+fn world_unknown(status: &link::Status) -> String {
+    match (&status.connection, status.world_offered) {
+        (Connection::Connected, Some(false)) => "the observer sends neither the hour nor the weathers: rebuild the worldserver with the mod-uniwow-observer of this editor".to_owned(),
+        (Connection::Connected, _) => "the observer has sent nothing of the world yet".to_owned(),
+        _ => "no connection to the observer of the server".to_owned(),
+    }
+}
+
+/// An hour in seconds from midnight, as text.
+fn hour_text(time: u32) -> String {
+    format!("{:02}:{:02}", time / 3600, time / 60 % 60)
+}
+
+/// The command `live-world.time`: the hour of the server, counted on from the last it sent.
+fn time(shared: &Shared) -> Value {
+    match shared.observed() {
+        Some(observed) => json!({ "known": true, "time": observed.time_at(Instant::now()) }),
+        None => json!({ "known": false, "time": null, "reason": world_unknown(&shared.status()) }),
+    }
+}
+
+/// The command `live-world.weather`: the weather of the zone `zone` the server sent last.
+fn weather(shared: &Shared, arguments: &Value) -> Result<Value, String> {
+    let zone = arguments
+        .get("zone")
+        .and_then(Value::as_u64)
+        .and_then(|zone| u32::try_from(zone).ok())
+        .ok_or("zone: the id of a zone of AreaTable.dbc")?;
+    let Some(observed) = shared.observed() else {
+        return Ok(json!({ "zone": zone, "known": false, "reason": world_unknown(&shared.status()) }));
+    };
+    Ok(match observed.weather_at(zone, Instant::now()) {
+        Some(weather) => json!({
+            "zone": zone,
+            "known": true,
+            "state": weather.state,
+            "grade": weather.grade,
+            "age": weather.age,
+        }),
+        None => json!({
+            "zone": zone,
+            "known": false,
+            "reason": format!(
+                "the server sent no weather of the zone {zone} since it started: AzerothCore keeps the weather of a zone only while a player is in it"
+            ),
+        }),
+    })
+}
+
 /// The command `live-world.state`.
 fn state(shared: &Shared, settings: &Settings) -> Value {
     let status = shared.status();
@@ -150,6 +202,7 @@ fn state(shared: &Shared, settings: &Settings) -> Value {
             "map": zone.map, "instance": zone.instance, "centre": zone.centre, "radius": zone.radius,
         })),
         "subscription": state_text(status.state),
+        "world_offered": status.world_offered,
         "sequence": world.sequence,
         "entities": {
             "creatures": world.count(Kind::Creature),
@@ -316,6 +369,26 @@ impl Module for LiveWorld {
         );
         let current = self.current.clone();
         reg.command_on_caller(
+            "live-world.time",
+            "The hour of the server, in seconds from midnight of its local time, which the hour of the game follows, counted on from the last its observer sent; known false, with the reason, before.",
+            json!({ "type": "object" }),
+            json!({ "type": "object" }),
+            Arc::new(move |_| Ok(time(&lock(&current).clone()))),
+        );
+        let current = self.current.clone();
+        reg.command_on_caller(
+            "live-world.weather",
+            "The weather of the zone zone (AreaTable.dbc) the server last sent its players there: its state (WeatherState of AzerothCore), its grade from 0 to 1 and how many seconds ago; known false, with the reason, when the server sent none, as when no player entered the zone, AzerothCore keeping the weather of a zone only while a player is in it.",
+            json!({
+                "type": "object",
+                "properties": { "zone": { "type": "integer", "minimum": 0 } },
+                "required": ["zone"],
+            }),
+            json!({ "type": "object" }),
+            Arc::new(move |arguments| weather(&lock(&current).clone(), &arguments)),
+        );
+        let current = self.current.clone();
+        reg.command_on_caller(
             "live-world.entities",
             "The creatures, game objects and players of the server within radius yards of x, y, the nearest first: at most limit (500), of the kinds given (creature, game object, player); around the zone subscribed to when x and y are not given.",
             json!({
@@ -398,6 +471,27 @@ impl Module for LiveWorld {
             ));
         } else if status.connection == Connection::Connected {
             ui.label("No zone: the terrain shows no map.");
+        }
+        if status.connection == Connection::Connected {
+            match shared.observed() {
+                Some(observed) => {
+                    let count = observed.world.weathers.len();
+                    ui.label(format!(
+                        "Hour of the server: {}; the weathers of {count} {} sent.",
+                        hour_text(observed.time_at(Instant::now())),
+                        if count == 1 { "zone" } else { "zones" },
+                    ));
+                }
+                None if status.world_offered == Some(false) => {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!("No hour nor weather: {}.", world_unknown(&status)),
+                    );
+                }
+                None => {
+                    ui.label(format!("No hour nor weather yet: {}.", world_unknown(&status)));
+                }
+            }
         }
         ui.separator();
         egui::Grid::new("live-world settings").num_columns(2).show(ui, |ui| {

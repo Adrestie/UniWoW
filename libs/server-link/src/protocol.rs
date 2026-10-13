@@ -1,5 +1,7 @@
 //! The protocol of the observer, version 1, both ways: what `server/mod-uniwow-observer/PROTOCOL.md`
-//! describes, little-endian, each message its length, its kind and its body.
+//! describes, little-endian, each message its length, its kind and its body. The world (the hour of
+//! the server and the weathers of its zones) is an addition that keeps the version: an observer
+//! tells it by a capability, and the editor asks for it only then.
 
 /// The version of the protocol spoken.
 pub const VERSION: u16 = 1;
@@ -8,16 +10,21 @@ pub const MAX_FROM_EDITOR: usize = 1024;
 pub const MAX_FROM_OBSERVER: usize = 16 << 20;
 /// Capability: the observer reads.
 pub const CAPABILITY_READING: u32 = 0x1;
+/// Capability: the observer sends the world, the hour of the server and the weathers of its zones,
+/// once asked (`ToObserver::WatchWorld`).
+pub const CAPABILITY_WORLD: u32 = 0x2;
 
 const HELLO: u8 = 1;
 const SUBSCRIBE: u8 = 2;
 const UNSUBSCRIBE: u8 = 3;
 const HEARTBEAT: u8 = 4;
+const WATCH_WORLD: u8 = 5;
 const WELCOME: u8 = 101;
 const REFUSED: u8 = 102;
 const STATUS: u8 = 103;
 const SNAPSHOT: u8 = 104;
 const CHANGES: u8 = 105;
+const WORLD: u8 = 106;
 
 /// Flags of an entity.
 pub const TEMPORARY: u8 = 0x01;
@@ -45,10 +52,16 @@ pub struct Zone {
 /// What the editor sends.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ToObserver {
-    Hello { version: u16, token: String },
+    Hello {
+        version: u16,
+        token: String,
+    },
     Subscribe(Zone),
     Unsubscribe,
     Heartbeat,
+    /// Asks for the world, to an observer of `CAPABILITY_WORLD` only: an older one closes the
+    /// connection on it.
+    WatchWorld,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -76,6 +89,27 @@ pub enum State {
     NotFound,
 }
 
+/// The weather of a zone as the server last sent it to the players in it: the zone (`AreaTable`),
+/// its state (`WeatherState` of AzerothCore), its grade, from 0 to 1, and how many seconds ago it
+/// was sent. AzerothCore keeps the weather of a zone only while a player is in it: none is sent of a
+/// zone no player entered since the server started, and one may have ended since the last player
+/// left.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ZoneWeather {
+    pub zone: u32,
+    pub state: u32,
+    pub grade: f32,
+    pub age: u32,
+}
+
+/// The world: the hour of the server, in seconds from midnight of its local time, which the hour of
+/// the game follows, and the weathers of its zones.
+#[derive(Clone, Debug, PartialEq)]
+pub struct World {
+    pub time: u32,
+    pub weathers: Vec<ZoneWeather>,
+}
+
 /// What the observer sends.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FromObserver {
@@ -100,6 +134,7 @@ pub enum FromObserver {
         entities: Vec<Entity>,
         left: Vec<u64>,
     },
+    World(World),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -264,6 +299,7 @@ pub fn encode_to_observer(message: &ToObserver) -> Vec<u8> {
         }
         ToObserver::Unsubscribe => writer.frame(UNSUBSCRIBE),
         ToObserver::Heartbeat => writer.frame(HEARTBEAT),
+        ToObserver::WatchWorld => writer.frame(WATCH_WORLD),
     }
 }
 
@@ -283,6 +319,7 @@ pub fn decode_to_observer(kind: u8, body: &[u8]) -> Result<ToObserver, String> {
         }),
         UNSUBSCRIBE => ToObserver::Unsubscribe,
         HEARTBEAT => ToObserver::Heartbeat,
+        WATCH_WORLD => ToObserver::WatchWorld,
         other => return Err(format!("a message of an unknown kind, {other}")),
     };
     reader.done()?;
@@ -359,6 +396,17 @@ pub fn encode_from_observer(message: &FromObserver) -> Vec<u8> {
             }
             writer.frame(CHANGES)
         }
+        FromObserver::World(world) => {
+            writer.u32(world.time);
+            writer.u32(world.weathers.len() as u32);
+            for weather in &world.weathers {
+                writer.u32(weather.zone);
+                writer.u32(weather.state);
+                writer.f32(weather.grade);
+                writer.u32(weather.age);
+            }
+            writer.frame(WORLD)
+        }
     }
 }
 
@@ -409,6 +457,23 @@ pub fn decode_from_observer(kind: u8, body: &[u8]) -> Result<FromObserver, Strin
                 left
             },
         },
+        WORLD => FromObserver::World(World {
+            time: reader.u32()?,
+            weathers: {
+                let count = reader.u32()? as usize;
+                // A weather takes 16 bytes: bounded by what the body holds.
+                let mut weathers = Vec::with_capacity(count.min(body.len() / 16));
+                for _ in 0..count {
+                    weathers.push(ZoneWeather {
+                        zone: reader.u32()?,
+                        state: reader.u32()?,
+                        grade: reader.f32()?,
+                        age: reader.u32()?,
+                    });
+                }
+                weathers
+            },
+        }),
         other => return Err(format!("a message of an unknown kind, {other}")),
     };
     reader.done()?;
