@@ -7935,7 +7935,8 @@ right and middle buttons and the wheel. The module `scene-tools` gives two tools
   go.
 - **The keys**: W, E and R are hotkeys of `scene-tools`, F frames the selection and Delete and
   Ctrl+D are those of `scene`; they act while the pointer is over the 3D view or the Hierarchy, as
-  the camera flies only over the view. E is also the key that flies up: *To decide*, point 1.
+  the camera flies only over the view. The keys that fly up and down move off E and A (*Decided by
+  the user after the proposal*, point 1).
 
 **The components** (decisions 15 to 20). A component type is declared once by the module that
 serves it: an id `<module>/<name>` (`scene/transform`, `doodads/model`, `spawns/creature`), a label,
@@ -8007,8 +8008,9 @@ answer, or when its module fails.
 the files and the database hold: the entities moved, changed, created and deleted, by id, laid over
 what its jobs read, so that a tile left and read again shows them still. The terrain keeps a tile
 changed whole and full, as it already does (*Step 9.2f*). Nothing of it is written; at close, the
-modules tell their changes as unsaved (`Module::unsaved`), and the window of the kernel says they
-will be lost (*To decide*, point 2).
+modules keep their changes in the project as lists of changes, readable, read again when it opens
+(*Decided by the user after the proposal*, point 2); the window of the kernel says what a *Don't
+save* would lose since the project was last saved.
 
 **Create, duplicate, delete** (decision 25), commands of the providers through `scene.create`,
 `scene.duplicate` and `scene.delete`, one undo entry each:
@@ -8259,7 +8261,7 @@ Each step is built, tested, reviewed and checked by the user before the next one
 
 | Step | Content |
 |---|---|
-| 15.1 | Verified first, by probes not kept: the depth of the chains of `AreaTable.dbc`; the unique ids listed twice with other data, over the four continents; the memory the triangles at rest of the models and the trees of every group would take in Dalaran and Northrend; `mysql` in the runtime (its crates, the symbols, the fingerprint) and its connection to the user's MySQL (its version, its authentication without TLS); the rows of `creature` and `gameobject` of each continent and the time to read them; the hotkeys (*To decide*, point 1) |
+| 15.1 | Verified first, by probes not kept: the depth of the chains of `AreaTable.dbc`; the unique ids listed twice with other data, over the four continents; the memory the triangles at rest of the models and the trees of every group would take in Dalaran and Northrend; `mysql` in the runtime (its crates, the symbols, the fingerprint) and its connection to the user's MySQL (its version, its authentication without TLS); the rows of `creature` and `gameobject` of each continent and the time to read them; the hotkeys (*Decided by the user after the proposal*, point 1) |
 | 15.2 | The entities and the registry |
 | 15.3 | The selection, picking and the selection shown in 3D |
 | 15.4 | The Hierarchy, its main view |
@@ -8447,37 +8449,37 @@ Left to the steps, which answer them by measure or by reading:
 - **The runtime** grows: `libs/db` and its crates (the symbols counted by `cargo xtask check`, 50,000
   at most), and the fingerprint changing at each step that touches `core/api`: every module rebuilt,
   as expected.
-- **The changes in memory** are lost at close (decision 26): an afternoon's work in groups, prefabs
-  and moves gone with a crash or a *Don't save* (*To decide*, point 2).
+- **The changes in memory** are kept in the project (*Decided by the user after the proposal*, point
+  2): its lists of changes must be read again whole after a crash, written by a temporary file
+  renamed over the last.
 - **The prefabs linked** are the largest part of this work (overrides, apply, revert, instances made
   again); nested prefabs are left out for that reason.
 - **The database**: the authentication of the user's MySQL without TLS (15.1); a query that is slow
   on a large table holds a job, never the interface; a session read only also by its user's rights,
   which the user can make so (a user with `SELECT` only).
 
-#### To decide
+#### Decided by the user after the proposal
 
-1. **E for Rotate and E to fly up.** Proposed, as Unity: the camera flies with its keys only while the
-   right button is held, and W, E and R choose the gizmos otherwise; or the gizmos on other keys by
-   default; or the flying keys moved. Proposed besides: *Edit > Hotkey* says two hotkeys of
-   different modules bound to the same keys when they act over the same panel.
-2. **The changes in memory at close.** As decided, lost (the window of unsaved changes says so);
-   or kept in the project as lists of changes, readable, a section a module (the entities created,
-   moved, changed, deleted, with their values), read again when the project opens: still nothing
-   written to the game's files or the database. Proposed: kept in the project.
-3. **A lock and the Hierarchy**: a locked entity not picked in the 3D view but chosen in the Hierarchy,
-   as Unity (proposed), or chosen nowhere.
-4. **The summoned live creatures and game objects** (no spawn): proposed in *Live* with the players,
-   read only.
-5. **The water locked by default**, as the terrain (proposed), so that a click over a lake picks what
-   is under it.
-6. **The relative values**: `+n`, `-=n`, `*n`, `/n` change, `-n` is a value (proposed), or as Unity
-   `+=n`, `-=n`, `*=n`, `/=n` only.
+1. **E for Rotate and E to fly up**: the flying keys up and down move to other keys, W, E and R
+   choosing the gizmos. Proposed: Space up and C down (Ctrl being the key of the snapping and of the
+   selection, Space playing the timeline only over its panel), checked against every hotkey in
+   15.1; *Edit > Hotkey* says besides two hotkeys of different modules bound to the same keys when
+   they act over the same panel.
+2. **The changes in memory at close**: kept in the project as lists of changes, readable, a section a
+   module (the entities created, moved, changed, deleted, with their values), read again when the
+   project opens; still nothing written to the game's files or the database.
+3. **A lock and the Hierarchy**: a locked entity is not picked in the 3D view but can be chosen in
+   the Hierarchy, as Unity.
+4. **The summoned live creatures and game objects** (no spawn): in *Live* with the players, read
+   only.
+5. **The water locked by default**, as the terrain, so that a click over a lake picks what is under
+   it.
+6. **The relative values**: `+n`, `-=n`, `*n`, `/n` change each value; `-n` alone is a value.
 7. **The component *Quests* built in 15.11c**, read and changed in memory, as the first drawing of a
-   module's own and the server component that 15.14 needs (proposed); the other components of
-   decision 20 in later works.
-8. **The scope by default**: 2 tiles listed, whatever the modules hold at their distances (proposed),
-   or all they hold.
+   module's own and the server component that 15.14 needs; the other components of decision 20 in
+   later works.
+8. **The scope by default**: 2 tiles around the camera listed, whatever the modules hold at their
+   distances; a setting widens it.
 
 ### Milestone 10: Lua modules (outline)
 
