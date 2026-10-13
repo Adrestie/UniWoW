@@ -1,5 +1,6 @@
 //! What the buildings share on the GPU, to be drawn by a few commands: the vertices of every
-//! building in one arena and their indices in another, their materials in a table, their textures
+//! building in one arena and their indices in another, of 16 bits into the vertices of their group,
+//! each group drawn from where its vertices begin, their materials in a table, their textures
 //! in arrays of `core/api`; and the pipelines of the states of their materials. A file of a
 //! building is put there by the job that reads it, and its ranges given back when it is dropped.
 
@@ -333,7 +334,7 @@ impl Shared {
                 queue,
                 "buildings indices",
                 wgpu::BufferUsages::INDEX,
-                4,
+                INDEX_UNIT,
                 1 << 18,
             ),
             materials: Arena::new(
@@ -494,11 +495,13 @@ pub fn kind(index: usize, counts: [u16; 3]) -> u32 {
     }
 }
 
-/// A group on the GPU: its bounds, its flags for the shader, its batches.
+/// A group on the GPU: its bounds, its flags for the shader, where its vertices begin in their
+/// arena, which its indices count from, its batches.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GroupGpu {
     pub bounds: [[f32; 3]; 2],
     pub flags: u32,
+    pub base_vertex: i32,
     pub batches: Vec<BatchGpu>,
 }
 
@@ -511,8 +514,6 @@ pub struct WmoGpu {
     materials: Range<u64>,
     /// The textures of its materials, held while it is.
     _textures: Vec<Arc<Placed>>,
-    /// Where its vertices begin in their arena.
-    pub base_vertex: i32,
     pub groups: Vec<GroupGpu>,
     pub bounds: [[f32; 3]; 2],
     /// Its ambient colour, red, green and blue from 0 to 1.
@@ -527,7 +528,7 @@ impl WmoGpu {
     pub fn arenas(&self) -> [u64; 2] {
         [
             (self.vertices.end - self.vertices.start) * size_of::<Vertex>() as u64,
-            (self.indices.end - self.indices.start) * 4,
+            (self.indices.end - self.indices.start) * INDEX_UNIT,
         ]
     }
 
@@ -551,16 +552,29 @@ impl Drop for WmoGpu {
     }
 }
 
-/// The vertices of `wmo`, its groups one after the other, with their colours fixed as the client
-/// fixes them; and the indices of each group's triangles into them.
-pub fn geometry(wmo: &mut Wmo) -> (Vec<Vertex>, Vec<u32>, Vec<u32>) {
+/// The bytes of a unit of the arena of the indices: two indices of 16 bits, a group's indices taking
+/// an even number of them.
+pub const INDEX_UNIT: u64 = 4;
+
+/// The geometry of a building on the CPU: the vertices of its groups one after the other; the
+/// indices of each group's triangles into its own vertices, each group's an even number of them,
+/// a last one added where they are odd; where each group's indices begin, and its vertices.
+pub struct Geometry {
+    pub vertices: Vec<Vertex>,
+    pub indices: Vec<u16>,
+    pub starts: Vec<u32>,
+    pub bases: Vec<u32>,
+}
+
+/// The geometry of `wmo`, its colours fixed as the client fixes them.
+pub fn geometry(wmo: &mut Wmo) -> Geometry {
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
-    // Where each group's indices begin.
     let mut starts = Vec::with_capacity(wmo.groups.len());
+    let mut bases = Vec::with_capacity(wmo.groups.len());
     for group in &mut wmo.groups {
         colours::fix(group, wmo.flags, wmo.ambient);
-        let base = vertices.len() as u32;
+        bases.push(vertices.len() as u32);
         starts.push(indices.len() as u32);
         let colour = |set: usize, index: usize| {
             group
@@ -592,16 +606,29 @@ pub fn geometry(wmo: &mut Wmo) -> (Vec<Vertex>, Vec<u32>, Vec<u32>) {
                 colours: [colour(0, index), colour(1, index)],
             });
         }
-        indices.extend(group.triangles.iter().map(|index| base + u32::from(*index)));
+        indices.extend_from_slice(&group.triangles);
+        if indices.len() % 2 == 1 {
+            indices.push(0);
+        }
     }
-    (vertices, indices, starts)
+    Geometry {
+        vertices,
+        indices,
+        starts,
+        bases,
+    }
 }
 
 /// `wmo` put on the GPU of `shared`, its textures read through `formats`: its geometry in the
 /// arenas, its materials in the table, its textures in the arrays.
 pub fn upload(shared: &Arc<Shared>, formats: &dyn Formats, mut wmo: Wmo) -> Result<WmoGpu, Refusal> {
     let cells = Cells::new(&wmo);
-    let (vertices, indices, starts) = geometry(&mut wmo);
+    let Geometry {
+        vertices,
+        indices,
+        starts,
+        bases,
+    } = geometry(&mut wmo);
     let mut textures = Vec::new();
     let materials: Vec<MaterialGpu> = wmo
         .materials
@@ -651,12 +678,14 @@ pub fn upload(shared: &Arc<Shared>, formats: &dyn Formats, mut wmo: Wmo) -> Resu
             return Err(reason.into());
         }
     };
+    let first_index = index_range.start * INDEX_UNIT / 2;
     let groups = wmo
         .groups
         .iter()
-        .zip(starts)
-        .map(|(group, start)| GroupGpu {
+        .zip(starts.into_iter().zip(bases))
+        .map(|(group, (start, base))| GroupGpu {
             bounds: group.bounds,
+            base_vertex: (vertex_range.start + u64::from(base)) as i32,
             flags: group.flags & (HAS_COLOURS | colours::OUTSIDE)
                 | if wmo.flags & LIT_AS_ONE != 0 {
                     GROUP_LIT_AS_ONE
@@ -669,7 +698,7 @@ pub fn upload(shared: &Arc<Shared>, formats: &dyn Formats, mut wmo: Wmo) -> Resu
                 .enumerate()
                 .filter(|(_, batch)| batch.count > 0)
                 .map(|(index, batch)| BatchGpu {
-                    first: index_range.start as u32 + start + batch.first,
+                    first: first_index as u32 + start + batch.first,
                     count: batch.count,
                     material: material_range.start as u32 + u32::from(batch.material),
                     state: State::of(&wmo.materials[usize::from(batch.material)]),
@@ -685,8 +714,7 @@ pub fn upload(shared: &Arc<Shared>, formats: &dyn Formats, mut wmo: Wmo) -> Resu
     let [r, g, b, _] = wmo.ambient;
     Ok(WmoGpu {
         shared: shared.clone(),
-        base_vertex: vertex_range.start as i32,
-        bytes: (vertices.len() * size_of::<Vertex>() + indices.len() * 4 + materials.len() * size_of::<MaterialGpu>())
+        bytes: (vertices.len() * size_of::<Vertex>() + indices.len() * 2 + materials.len() * size_of::<MaterialGpu>())
             as u64,
         vertices: vertex_range,
         indices: index_range,

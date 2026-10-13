@@ -199,7 +199,7 @@ pub(crate) fn list(placed: &[Placed], view: &View, surfaces: Option<&Surfaces>) 
                 let listed = Listed {
                     state: batch.state,
                     distance,
-                    command: [batch.count, 1, batch.first, building.wmo.base_vertex as u32, 0],
+                    command: [batch.count, 1, batch.first, group.base_vertex as u32, 0],
                     entry: [instance as u32, batch.material, group.flags | batch.kind << 8, listed],
                 };
                 if !batch.state.blended() {
@@ -331,6 +331,12 @@ impl BuildingsLayer {
     #[cfg(test)]
     pub fn scene(&self) -> Arc<Mutex<Scene>> {
         self.scene.clone()
+    }
+
+    /// What the buildings share on the GPU, for the tests.
+    #[cfg(test)]
+    pub fn shared(&self) -> Arc<Shared> {
+        self.shared.clone()
     }
 }
 
@@ -553,7 +559,7 @@ impl Layer for BuildingsLayer {
         pass.set_bind_group(0, camera, &[]);
         pass.set_bind_group(1, group, &[]);
         pass.set_vertex_buffer(0, vertices.slice(..));
-        pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+        pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint16);
         for run in runs {
             pass.set_pipeline(&self.shared.pipeline(run.state));
             pass.multi_draw_indexed_indirect(commands, u64::from(run.first) * 20, run.count);

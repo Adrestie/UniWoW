@@ -196,12 +196,22 @@ fn the_geometry_of_a_building_puts_its_groups_one_after_the_other() {
     second.colours.clear();
     second.coordinates.push(vec![[0.5, 0.5]; 4]);
     wmo.groups.push(second);
-    let (vertices, indices, starts) = gpu::geometry(&mut wmo);
-    assert_eq!((vertices.len(), starts), (8, vec![0, 6]));
+    // The second group of a triangle and a half: its indices made even.
+    let mut third = wmo.groups[0].clone();
+    third.triangles = vec![0, 1, 2];
+    third.batches[0].count = 3;
+    wmo.groups.push(third);
+    let gpu::Geometry {
+        vertices,
+        indices,
+        starts,
+        bases,
+    } = gpu::geometry(&mut wmo);
+    assert_eq!((vertices.len(), starts, bases), (12, vec![0, 6, 12], vec![0, 4, 8]));
     assert_eq!(
         indices[6..],
-        [4, 5, 6, 4, 6, 7],
-        "the second group's after the first's vertices"
+        [0, 1, 2, 0, 2, 3, 0, 1, 2, 0],
+        "each group's into its own vertices, the last made even"
     );
     assert_eq!(vertices[0].normal, [127, 0, 0, 0]);
     assert_eq!(vertices[2].uv, [[1.0, 1.0], [0.0, 0.0]]);
@@ -932,6 +942,62 @@ fn a_blended_group_is_drawn_only_while_found_in_sight() {
 }
 
 #[test]
+fn each_group_is_drawn_from_where_its_vertices_begin_its_indices_of_16_bits() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    // Another building first, a triangle, its indices made even, so that neither the vertices nor
+    // the indices of the second begin their arenas; the second of two groups, the left one and the
+    // right one.
+    let mut triangle = square(material(0x1, 0), false, None);
+    triangle.groups[0].triangles.truncate(3);
+    triangle.groups[0].batches[0].count = 3;
+    let Some(mut layer) = bench(&gpu, triangle) else {
+        eprintln!("skipped: the software adapter does not draw buildings");
+        return;
+    };
+    let mut wmo = square(material(0x1, 0), false, None);
+    let mut right = wmo.groups[0].clone();
+    for vertex in &mut right.vertices {
+        vertex[1] += 1.5;
+    }
+    right.bounds = [[0.0, 0.5, -1.0], [0.0, 2.5, 1.0]];
+    for vertex in &mut wmo.groups[0].vertices {
+        vertex[1] -= 1.5;
+    }
+    wmo.groups[0].bounds = [[0.0, -2.5, -1.0], [0.0, -0.5, 1.0]];
+    wmo.groups.push(right);
+    wmo.bounds = [[0.0, -2.5, -1.0], [0.0, 2.5, 1.0]];
+    let scene = layer.scene();
+    let shared = layer.shared();
+    let uploaded = Arc::new(gpu::upload(&shared, &NoFiles, wmo).unwrap());
+    assert_eq!(
+        uploaded
+            .groups
+            .iter()
+            .map(|group| group.base_vertex)
+            .collect::<Vec<_>>(),
+        [4, 8],
+        "after the 4 vertices of the first building, each group's own"
+    );
+    scene.lock().unwrap().placed = vec![Placed {
+        transform: Mat4::IDENTITY,
+        wmo: uploaded,
+        parts: None,
+        liquids: None,
+    }]
+    .into();
+    let drawn = row(&gpu, &mut layer, Vec3::new(5.0, 0.0, 0.0));
+    let white = [255, 255, 255, 255];
+    // Each square whole, both its triangles, across the middle row.
+    assert!(
+        drawn[4..=12].iter().chain(&drawn[20..=28]).all(|pixel| *pixel == white),
+        "{drawn:?}"
+    );
+    assert_eq!(drawn[16], [0, 0, 0, 255], "nothing between them");
+}
+
+#[test]
 fn a_building_is_drawn_its_back_culled_but_where_two_sided() {
     let Some(gpu) = device() else {
         return;
@@ -1431,7 +1497,7 @@ fn a_file_refused_for_want_of_room_is_put_on_the_gpu_once_a_range_is_given_back(
         wmo
     };
     let first = gpu::upload(&shared, &NoFiles, file()).unwrap();
-    assert_eq!(first.arenas(), [480 * 40, 720 * 4]);
+    assert_eq!(first.arenas(), [480 * 40, 720 * 2], "its indices of 16 bits");
     let given = shared.given();
     assert!(
         matches!(gpu::upload(&shared, &NoFiles, file()), Err(Refusal::NoRoom(_))),

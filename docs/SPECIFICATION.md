@@ -6348,6 +6348,19 @@ section.
     on purpose, all caught (a file read again not kept the longest, a failure kept, more kept than
     the bytes allow).
 
+- **The indices of the buildings in 16 bits** (`buildings/src/gpu.rs`): each group's indices are
+  kept as the file gives them, into its own vertices (a group's `MOVI` is of 16 bits), two to a
+  unit of their arena, a group's an even number of them, a last one added where they are odd; each
+  group has the place where its vertices begin in their arena, which the command of each of its
+  batches gives as its base vertex. The arena of the indices takes half its bytes before (64 MB of
+  32-bit indices, 45 used, in the flight from Zul'Drak to the Storm Peaks of 9.6e1).
+  - **Tested**: the geometry of three groups, each one's indices into its own vertices from where
+    they begin, the last of three indices made even; a file's indices taking half the bytes of
+    before; on the software adapter, a building of two groups after another of one triangle, its
+    groups drawn whole each where its vertices are. 3 changes made on purpose, all caught (the base
+    vertex of the building for every group, the indices not made even, the first index taken as the
+    unit of the arena).
+
 **To measure by the user**: the flights of *The frames measured in flight, before any correction*
 (the terrain at 64 tiles, the buildings at 8, the doodads at 4, the models at a reach of 1,000; 300
 then 600 yards a second, from the Howling Fjord to Dalaran by the Grizzly Hills), with the journal
@@ -6376,7 +6389,9 @@ of the frames (`UNIWOW_SLOW_FRAMES`), before this work and after it:
 7. The buildings in the cities (Dalaran, Stormwind) and over Northrend: the groups hidden by the
    depth in the statistics of `buildings`, the GPU of the layer (its computing included) against
    before, and `view: buildings prepare`.
-8. The time the tiles within reach take to load once a map is shown, which the panels of the
+8. The arenas of the buildings in the statistics of the layer, the indices against before, from
+   Zul'Drak to the Storm Peaks.
+9. The time the tiles within reach take to load once a map is shown, which the panels of the
    terrain, the doodads and the buildings say, against before (the files of the tiles kept).
 
 #### Step 9.7, proposed: the light of the map
