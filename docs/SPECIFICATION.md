@@ -7733,6 +7733,73 @@ looked at again as 9.7f was, the user away: what the client does with the lights
      braziers.
   3. A room without lights named (most rooms): no change since 9.7d.
 
+#### Step 9.7h, as built: the highlights of the materials of the buildings
+
+Left out by 9.7d (*WebWowViewerCpp* draws none), looked at again as 9.7f was, the user away: the
+highlight of the sun on the materials of the shaders specular (1), metal (2) and environment metal
+(5), 517, 90 and 1,273 of the materials of the client (9.6d1), and on the models.
+
+- **Read in the sources**, for their facts only:
+  - *WebWowViewerCpp*, of later clients: its shader specular gives its highlight (`calcSpec`) the
+    alpha of the texel, its metal the red of the texel four times its alpha (`caclWMOFragMat`); its
+    `calcSpec` gives nothing, the formula of later clients kept commented out: half way between
+    towards the sun and towards the eye, 1.25 times the cosine of that way with the normal to the
+    8th power; times what the face reflects, the 5th power of what the cosine of the sun with that
+    way leaves of 1, mixed towards 1 by the value given, beyond 1 above it; times the direct colour
+    of the light, outside that of the map, in a room the direct colour of the room, a transition
+    mixing the two by its share of the light outside, the direction turned between them; times the
+    cosine of the sun with the normal; added after the light; a fade with the distance commented out
+    too. Its environment metal (5) has no highlight: its environment only, added after the light
+    since 9.7d.
+  - *Noggit* draws the shaders 0, 1, 2 and 4 alike, as diffuse.
+  - *benilla*, of the client 1.12.1: no pixel shader for the buildings, which the fixed light of the
+    system lights without a highlight; the band 9 of the light the colour of the client's specular
+    light, which its terrain and its water take (its `terrain.wgsl`, `liquid.wgsl`); that of the
+    light of the system not pinned (`CGLight`, `GL_SPECULAR`).
+  - The pixel shaders of 3.3.5a for the buildings (`MapObjSpecular`, `MapObjMetal`, in the client's
+    `Shaders\Pixel`) are not read here (no client); no public description of what they compute was
+    found.
+  - The models: what *WebWowViewerCpp* calls their specular is what their combiners add, their
+    second or third texture (`calcM2FragMaterial`), not a light of the sun; the models of the editor
+    draw those layers already (9.6).
+- **The module `buildings`**: a texel of the shaders specular and metal of a batch lit, outside,
+  given the highlight of that formula (`highlight`), from the sun of the light of the view, in the
+  colour of the band 9 of the light (`View::water`, its `sun`), times the share of the light outside
+  of the batch: whole outside and in a building lit as one, by its alpha in a transition, none in a
+  room; added in gamma after the light, with the environment and the glow at night, before the fog.
+  None without the light of a map, nor on a material unlit. A setting of the category *Buildings*,
+  *Highlights of the specular and metal materials*, 1 by default, 0 leaving them out
+  (`Scene::highlights`, `gpu::camera_values`).
+- **Choices of the editor**: the formula of later clients for 3.3.5a, the nearest found, its own
+  unknown, under a setting to compare it with none; its colour the band 9 of the light, the colour
+  of the sun and of its highlights in the bands of 9.7 and the specular colour of 1.12.1, where
+  *WebWowViewerCpp*'s formula takes the direct colour of the light, its diffuse; none in a room,
+  which has no direct light in the model of 9.7d, a transition by its share outside, the direction
+  that of the sun alone; the sun of the light (`light::sun_direction`), not the visible sun of 9.7f;
+  the mask of the metal unbounded, as the formula gives it, up to 4 times; the environment metal
+  left as 9.7d draws it.
+- **Not done**: the fade with the distance (commented out in the source too); a highlight on the
+  models (none in the sources); the highlights of the terrain (`Not in 9.7`).
+- **Tested**: drawn on the software adapter, a square facing the eye, the sun behind the eye: a
+  specular texel white and opaque highlighted 1.25 times the band 9 over its light; none with the
+  setting off nor without the light of a map; a texel of no alpha nothing, the sun seen straight; a
+  grey texel by its alpha for the specular, its red four times its alpha for the metal; a diffuse
+  one none; the sun 60° aside, 1.25 × cos⁸ 30° times a half; the eye and the sun 60° either side of
+  the normal, a texel of no alpha by (1 − cos 60°)⁵; a room as without it, a building lit as one as
+  outside; the setting 1 by default, 0 kept. 17 changes made on purpose: 16 caught, the other
+  showing a line that changed nothing, a building lit as one having only batches outside, taken out.
+- **To check by the user**, with captures of the game (`jeu.ps1`) at the places and hours noted, the
+  editor at the same place and hour, the setting *Highlights* at 1 then at 0:
+  1. The metal of the gates and of the armour stands of the keep of Stormwind, the forges of
+     Ironforge, the walls of Ulduar, at 12:00, the camera turned so that the sun is behind it then
+     before it: whether the game shows a highlight that moves with the camera; if it shows none, the
+     setting to 0 by default.
+  2. The streets and spires of Dalaran at 12:00 and at 06:30: the colour of the highlight, white at
+     noon, orange at dawn by the band 9, against the game's (the diffuse colour of the light, should
+     3.3.5a take that of later clients).
+  3. The same materials inside a room (the halls of Dalaran, the throne room of Stormwind): no
+     highlight here; whether the game shows one.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

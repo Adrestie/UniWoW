@@ -23,7 +23,7 @@ use crate::occlusion::Testing;
 /// The arrays of textures the shader binds at once.
 pub const SLOTS: usize = 64;
 /// Floats of the shader's `Camera`.
-pub const CAMERA: usize = 56;
+pub const CAMERA: usize = 60;
 /// The alpha under which an alpha-keyed batch is not drawn, as the models test it.
 pub const ALPHA_KEY: f32 = 224.0 / 255.0;
 
@@ -158,8 +158,11 @@ pub fn packed(colour: [u8; 4]) -> u32 {
 }
 
 /// The camera of the shader: the view, its sun and its fog, the axes of the camera, across, up and
-/// back, which the environment is mapped by, and the glow at night.
-pub fn camera_values(view: &View) -> [f32; CAMERA] {
+/// back, which the environment is mapped by, the glow at night, and the colour of the highlight of
+/// the specular and metal materials when they are `highlighted`: the colour of the sun of the light
+/// of the map (its band 9, which the view carries with its water, the client's colour of the sun and
+/// its highlights), none without it.
+pub fn camera_values(view: &View, highlighted: bool) -> [f32; CAMERA] {
     let mut values = [0f32; CAMERA];
     values[..16].copy_from_slice(&view.view_proj.to_cols_array());
     values[16..19].copy_from_slice(&view.sun.direction);
@@ -173,6 +176,9 @@ pub fn camera_values(view: &View) -> [f32; CAMERA] {
         values[at..at + 3].copy_from_slice(&view.view.row(row).truncate().normalize_or_zero().to_array());
     }
     values[52] = view.night;
+    if let Some(water) = view.water.filter(|_| highlighted) {
+        values[56..59].copy_from_slice(&water.sun);
+    }
     values
 }
 

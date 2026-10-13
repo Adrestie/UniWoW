@@ -18,7 +18,7 @@ use uniwow_api::formats::{
 use uniwow_api::glam::{Mat3, Mat4, Quat, Vec3};
 use uniwow_api::liquids::{Liquids, Surfaces};
 use uniwow_api::models::{Extent, Instance, Look, LookId, LookState, Models};
-use uniwow_api::viewport::{Layer, Phase, Pyramid, Target, View};
+use uniwow_api::viewport::{Layer, Phase, Pyramid, Target, View, Water};
 use uniwow_api::{egui, egui_wgpu, wgpu};
 
 use crate::budget;
@@ -1678,6 +1678,106 @@ fn the_environment_is_added_after_the_light() {
     let lit = row_of(&gpu, &mut metal, &seen, &Phase::ALL)[16];
     let added = 128.0 / 255.0 * 64.0 / 255.0;
     assert!(near(lit, [grey, grey + added, grey]), "{lit:?}");
+}
+
+#[test]
+fn the_specular_and_metal_materials_are_highlighted_by_the_colour_of_the_sun_outside() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    let shining = |shader, texture: Option<&str>, inside| {
+        let mut material = material(0, 0);
+        material.shader = shader;
+        material.textures[0] = texture.map(|path| FileRef::Path(path.to_owned()));
+        square(material, inside, None)
+    };
+    let Some(mut white) = bench(&gpu, shining(1, None, false)) else {
+        return;
+    };
+    // Seen from the front, the sun of the view behind the eye, the colour of the sun given or not.
+    let seen = |sun: Option<[f32; 3]>| View {
+        sun: facing_sun(),
+        water: sun.map(|sun| Water {
+            river: [[0.0; 4]; 2],
+            ocean: [[0.0; 4]; 2],
+            sun,
+        }),
+        ..view(Vec3::new(5.0, 0.0, 0.0))
+    };
+    let highlighted = |layer: &mut BuildingsLayer, on: bool, view: &View| {
+        layer.scene().lock().unwrap().highlights = on;
+        row_of(&gpu, layer, view, &Phase::ALL)[16]
+    };
+    let sunny = seen(Some([0.1, 0.05, 0.0]));
+    // Straight on the face: 1.25 times the colour of the sun by the alpha of the texel, added in
+    // gamma to the white lit, 0.64.
+    let lit = highlighted(&mut white, true, &sunny);
+    assert!(near(lit, [0.64 + 0.125, 0.64 + 0.0625, 0.64]), "{lit:?}");
+    // Off, none; nor without the colour of the sun.
+    let off = highlighted(&mut white, false, &sunny);
+    assert!(near(off, [0.64; 3]), "{off:?}");
+    let unlit = highlighted(&mut white, true, &seen(None));
+    assert!(near(unlit, [0.64; 3]), "{unlit:?}");
+    // Its texel of no alpha: only what the face reflects of the sun seen straight, nothing.
+    let mut masked = bench(&gpu, shining(1, Some("masked.blp"), false)).unwrap();
+    let lit = highlighted(&mut masked, true, &sunny);
+    assert!(near(lit, [0.64; 3]), "{lit:?}");
+    // Grey: the specular by its alpha alone, the metal by its red four times its alpha.
+    let linear = |gamma: f32| ((gamma + 0.055) / 1.055).powf(2.4);
+    let gamma = |linear: f32| 1.055 * linear.powf(1.0 / 2.4) - 0.055;
+    let grey = gamma(linear(128.0 / 255.0) * linear(0.64));
+    let mut specular = bench(&gpu, shining(1, Some("grey.blp"), false)).unwrap();
+    let lit = highlighted(&mut specular, true, &sunny);
+    assert!(near(lit, [grey + 0.125, grey + 0.0625, grey]), "{lit:?}");
+    let mut metal = bench(&gpu, shining(2, Some("grey.blp"), false)).unwrap();
+    let mask = 4.0 * 128.0 / 255.0;
+    let lit = highlighted(&mut metal, true, &sunny);
+    assert!(near(lit, [grey + 0.125 * mask, grey + 0.0625 * mask, grey]), "{lit:?}");
+    // Nor any other shader.
+    let mut diffuse = bench(&gpu, shining(0, Some("grey.blp"), false)).unwrap();
+    let lit = highlighted(&mut diffuse, true, &sunny);
+    assert!(near(lit, [grey; 3]), "{lit:?}");
+    // The sun 60° aside: half way between it and the eye, 30° from the normal, 1.25 × cos⁸ 30°,
+    // times the cosine of the sun with the face, a half; over the white lit by half its diffuse.
+    let mut aside = seen(Some([0.4, 0.2, 0.0]));
+    aside.sun.direction = [0.5, 3f32.sqrt() / 2.0, 0.0];
+    let shine = 1.25 * (3f32.sqrt() / 2.0).powi(8) * 0.5;
+    let lit = highlighted(&mut white, true, &aside);
+    assert!(near(lit, [0.5 + 0.4 * shine, 0.5 + 0.2 * shine, 0.5]), "{lit:?}");
+    // The eye and the sun 60° either side of the normal: half way, the normal itself; 1.25 times the
+    // cosine of the sun with the face, a half, times what a texel of no alpha reflects of a sun 60°
+    // from that way, (1 − cos 60°)⁵.
+    let mut grazing = View {
+        sun: facing_sun(),
+        water: seen(Some([1.0; 3])).water,
+        ..view(Vec3::new(2.5, 2.5 * 3f32.sqrt(), 0.0))
+    };
+    grazing.sun.direction = [0.5, -(3f32.sqrt()) / 2.0, 0.0];
+    let reflected = 1.25 * 0.5 * 0.5f32.powi(5);
+    let lit = highlighted(&mut masked, true, &grazing);
+    assert!(near(lit, [0.5 + reflected; 3]), "{lit:?}");
+    // Inside, none: what the rooms show with or without it; but in a building lit as one, as outside.
+    let mut room = bench(&gpu, shining(1, None, true)).unwrap();
+    assert_eq!(
+        highlighted(&mut room, true, &sunny),
+        highlighted(&mut room, false, &sunny)
+    );
+    let mut as_one = shining(1, None, true);
+    as_one.flags = 0xF;
+    let mut as_one = bench(&gpu, as_one).unwrap();
+    let off = highlighted(&mut as_one, false, &sunny).map(|value| f32::from(value) / 255.0);
+    let lit = highlighted(&mut as_one, true, &sunny);
+    assert!(
+        near(lit, [off[0] + 0.125, off[1] + 0.0625, off[2]]),
+        "{lit:?} against {off:?}"
+    );
+}
+
+#[test]
+fn the_highlights_are_a_setting_on_by_default() {
+    let setting = crate::highlights_setting();
+    assert_eq!((setting.range, setting.default), ([0, 1], 1));
+    assert_eq!(setting.value(Some(&uniwow_api::serde_json::json!(0))), 0);
 }
 
 #[test]

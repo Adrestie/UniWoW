@@ -33,8 +33,8 @@ use uniwow_api::glam::Vec3;
 use uniwow_api::serde_json::json;
 use uniwow_api::viewport::Demand;
 use uniwow_api::{
-    Context, DockArea, JobId, JobOutcome, Module, Priority, PropertyValue, Registrar, egui, liquids, log, models,
-    viewport,
+    Context, DockArea, JobId, JobOutcome, Module, Priority, PropertyValue, Registrar, SettingSpec, egui, liquids, log,
+    models, viewport,
 };
 
 use doodads::Owners;
@@ -44,6 +44,19 @@ use layer::{BuildingsLayer, Placed, Poured, Scene};
 
 /// The setting of how far around the camera tiles are read, in tiles (`formats::distance_setting`).
 const DISTANCE: &str = "distance";
+/// The setting of the highlight of the specular and metal materials (`highlights_setting`).
+const HIGHLIGHTS: &str = "highlights";
+
+/// The highlight of the materials of the shaders specular (1) and metal (2), by the formula of later
+/// clients, or none, as the client 3.3.5a may draw them: on by default.
+fn highlights_setting() -> SettingSpec {
+    SettingSpec::integer(
+        HIGHLIGHTS,
+        "Highlights of the specular and metal materials, by the formula of later clients (1) or none (0)",
+        [0, 1],
+        1,
+    )
+}
 /// The refusals the panel keeps.
 const REFUSALS: usize = 8;
 
@@ -346,10 +359,12 @@ impl BuildingsModule {
             self.took = None;
         }
         self.steer_tiles(ctx);
+        let highlights = highlights_setting().value(ctx.setting(HIGHLIGHTS).as_ref()) == 1;
         let mut scene = lock(&self.scene);
         if scene.liquids.is_none() {
             scene.liquids = ctx.service(liquids::SERVICE);
         }
+        scene.highlights = highlights;
         scene.steering = start.elapsed();
     }
 
@@ -632,7 +647,10 @@ impl Module for BuildingsModule {
     fn register(&mut self, reg: &mut Registrar) {
         let seen: service::Handle = Arc::new(Seen(self.scene.clone()));
         reg.panel("buildings", "Buildings", DockArea::Right)
-            .settings("Buildings", vec![formats::distance_setting(DISTANCE)])
+            .settings(
+                "Buildings",
+                vec![formats::distance_setting(DISTANCE), highlights_setting()],
+            )
             .provide(service::SERVICE, seen);
     }
 
