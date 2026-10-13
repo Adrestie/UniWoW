@@ -1,0 +1,11 @@
+[package]
+name = "uniwow-audio"
+description = "The sounds of the runtime: WAV and MP3 decoded, played on the thread of the audio device, faded, by categories of volume (rodio)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+log.workspace = true
+# The output of the device (cpal), the mixer, and the decoders of WAV and MP3 (symphonia), the
+# formats of the sounds of the client; nothing else.
+rodio = { version = "0.22", default-features = false, features = ["playback", "wav", "mp3", "symphonia-adpcm"] }

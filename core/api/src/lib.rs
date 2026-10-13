@@ -18,6 +18,9 @@ pub use miniz_oxide;
 pub use rfd;
 pub use serde;
 pub use serde_json;
+/// The playback of sounds (`libs/audio`, rodio), part of the runtime, which the service `audio`
+/// offers.
+pub use uniwow_audio::rodio;
 /// Lua 5.1 (`libs/lua`), part of the runtime.
 pub use uniwow_lua::mlua;
 /// The client of the observer of the server (`libs/server-link`), part of the runtime.
@@ -46,6 +49,7 @@ macro_rules! numbered {
 }
 
 pub mod arena;
+pub mod audio;
 pub mod buildings;
 mod command;
 mod commands;

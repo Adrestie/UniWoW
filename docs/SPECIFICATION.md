@@ -278,6 +278,7 @@ fills it, or *not planned* when no milestone does yet.
 | Drawing in the 3D view | The service `viewport`: its layers (`prepare`, a version to keep their bundle, their statistics with `stats`, the texts they write over the view with `labels`) and its frame signal (`wait_frame`) | — not planned (an other 3D access of step 8.3) | — | — |
 | The client's files, read from its archives, and their formats | The services `vfs` and `formats` of the module `assets` — step 9.1 | — not planned yet | — | — |
 | The live world: entities of the server around a point, their moves | The commands `live-world.state` and `live-world.entities`, the event `live-world.changed` (step 9.3b); the client of the observer, `uniwow_api::server_link` | The same commands and event, through `call` and `subscribe` | The same, through `call` and `subscribe` | Lua: the same, through `uniwow.call` and `uniwow.subscribe` (checked in step 9.3b); Python: milestone 11 |
+| Sounds played: a file of the client, its category of volume, its volume and fades, looped or once | The service `audio` of the module `audio` (`Clip::decode`, `Audio::play`, `set_volume`, `stop`; *The lightning and the sounds of the weather, as built*) | The commands `audio.play`, `audio.volume`, `audio.stop`, `audio.state` through `call` | The same, through `call` | Scripts: the same, through `uniwow.call` |
 | Splitting work over the cores, `parallel_for` | `uniwow_api::parallel_for` (step 9.2a) | — not planned; compiled modules run threads of their own (T7) | — | — |
 | Picking in the 3D view, the selection shown in 3D | — designed in milestone 9, not built | — | — | — |
 | The terrain of a map shown in the 3D view, with its horizon | The module `terrain` (steps 9.2c, 9.2e, 9.2f) | — not planned yet | — | — |
@@ -519,6 +520,7 @@ milestone 9 takes up those that concern it.
 | server-link | The client of the observer `mod-uniwow-observer` and a fake observer for the tests (step 9.3b); the SOAP client and the control of the server process: later |
 | client-link | Protocol with the WXL client module |
 | ids | Id range allocation per module |
+| audio | The playback of sounds (`uniwow-audio`, on rodio): WAV and MP3 decoded, played by the thread of the audio device, faded, by categories of volume under a master volume; offered to the modules through the service `audio` of the module of that name (*The lightning and the sounds of the weather, as built*) |
 
 ---
 
@@ -562,6 +564,7 @@ added through section 4 without touching the core.
 | Id | Module |
 |---|---|
 | assets | Browse the virtual file system (archives and project), search, preview. Holds the reading of the formats and archives of WoW and offers it through the services `vfs` and `formats` (milestone 9) |
+| audio | The sounds of the editor: the engine of the runtime (`libs/audio`) started and given to the other modules through the service `audio`; the master volume and those of the sounds, the ambience and the music in the settings of *Audio*, silent while the editor is minimised; commands playing a file of the client for every language (*The lightning and the sounds of the weather, as built*) |
 | textures | BLP view, PNG to BLP and back, format and size checks |
 | models | M2 and WMO viewer (animations, textures, attachments), import of new models. Provides the `models` service: M2 and WMO loaded in jobs, kept on the GPU, and instances drawn for the modules giving them (milestone 9) |
 | retail-import | Fetch modern assets through the wow.export bridge |
@@ -7562,8 +7565,62 @@ said where it is made, and what the game is to tell listed at the end.
   module and said in its panel, none in the magma, none without the service. 10 changes made on
   purpose, all caught, one once the test listened for the thunders of the storm before from its
   first step on.
-- **Not done**: a bolt drawn in the sky (a model, or a line of light); the clouds lit apart from the
-  ground, the clouds not being drawn yet; lightning in any weather but the thunderstorm.
+- **The sounds of the runtime** (`libs/audio`, the crate `uniwow-audio`, a normal dependency of
+  `uniwow-api` as every library): **rodio** 0.22 (RustAudio, MIT or Apache 2.0), chosen for its
+  output through cpal (WASAPI on Windows, ALSA on Linux) and its mixer, which converts the rate and
+  the channels of each sound to the device's, with only its features of playback and its decoders of
+  WAV (PCM and ADPCM) and MP3, through symphonia (MPL 2.0, pure Rust): the formats of the sounds of
+  the client, its other formats and its recording left out. Not chosen: kira, whose tweens and
+  tracks the editor does not need yet; cpal with decoders and a mixer written here; rodio 0.23, two
+  days old, which its authors call a minimal release before a bigger one. Building on Linux needs
+  the headers of ALSA (`libasound2-dev`); on Windows, nothing. The runtime of Windows exports 23,989
+  symbols with it, 3,682 more, 37% of the limit (counted on the build of MinGW here).
+  - `Clip::decode`: a file of WAV or MP3, whatever its name says, decoded whole into its samples, in
+    a job (a loop of a minute takes a while); `Clip::new` for sounds made.
+  - `Engine`: started with a thread of its own (`uniwow audio`), which opens the default device,
+    rodio trying the others if it cannot, and holds it open; the sounds played meanwhile wait for it,
+    those stopped meanwhile never heard. Without a device, the reason is logged once as a warning and
+    kept (`State::Silent`), nothing is played, and nothing waits. A sound played (`Sound`: its clip,
+    its category, its own volume, looped or once, faded in over a time) is added to the mixer of the
+    device; nothing asked of the engine waits for the device. What changes of a sound (its volume and
+    the time to reach it, its stop) is read from atomics every 256 frames (`BLOCK`), its own volume
+    moving by a straight line over the time given, the volumes of the categories and the master
+    volume over one block, without a click: the thread of the device never takes a lock. A sound
+    stopped fades out, then ends; `shutdown` stops all at once and closes the device.
+  - The categories of volume of the options of the client: the sounds (effects), the ambience and
+    the music, under the master volume, all silenced at once while muted.
+- **The service `audio`** (`core/api/src/audio.rs`): a sound played, taken to a volume over a time,
+  stopped over a time, whether it still plays, where the output stands; given by the engine.
+- **The module `audio`** (Assets, `modules/audio`): starts the engine as it registers and gives it
+  through the service; the category *Audio* of the settings: the master volume (80 by default), the
+  sounds (100), the ambience (70), the music (50), in hundredths, the editor's choices, and silence
+  while the editor is minimised (on), as egui tells it; taken at each frame. Stopping the module
+  stops every sound and closes the device. Commands for every language (S1, R9): `audio.play` (a
+  file of the client's archives, decoded on the calling thread, its category, volume, looping and
+  fade), `audio.volume`, `audio.stop`, `audio.state`. Its panel, closed by default (*Window*), says
+  the device or why there is none, the sounds playing, and the silence while minimised.
+- **Tested** (no sound heard here: the tests play into a mixer they read as the device would, at
+  one channel and 1,000 frames a second): a WAV of one channel and of two decoded to its values,
+  interleaved; an MP3 of silent frames the tests write decoded; what is not a sound, a WAV without a
+  sample and a frame cut short refused; a sound at its volume times its category and the master
+  volume, a category or the master changed moving there over one block by a straight line, another
+  category left as it was, muted and heard again, the volumes held within 0 and 1; faded in, then
+  to another volume, then stopped over its fade and gone, a sound unknown asked nothing; a clip
+  ended or looped, two sounds added; played before the device opens and heard once it is, one
+  stopped meanwhile never heard; without a device the reason said, nothing playing, nothing waited
+  for; shut down, every sound stopped and nothing played after. The module: the service, the
+  category and its defaults, its panel closed by default; the volumes of the settings taken at the
+  next frame, silent while minimised and heard again, not when the setting says otherwise; the
+  commands playing a file of the client's archives looped in the ambience at its volume, its volume
+  changed, stopped, once and faded in, the state said, a file absent, one not a sound, a category
+  unknown and no file refused with the reason, nothing without the service `vfs`; its panel saying
+  the device, the sounds playing, the module stopped and why there is no device. 9 changes made on
+  purpose, all caught.
+- **Not done**: the lightning drawn as a bolt in the sky (a model, or a line of light); the clouds lit
+  apart from the ground, the clouds not being drawn yet; lightning in any weather but the
+  thunderstorm. The choice of the audio device in the settings (the default one of the system, as
+  it is when the editor starts: a device plugged in later is not taken); the sounds placed in the
+  world (distances, left and right): none of the weather needs them.
 - **To check by the user**:
   1. A thunderstorm where a zone has weather (`.wchange 86 0.8` in Elwynn Forest, the weather the
      server's in the editor), at 00:00 and at 12:00 (the setting *Hour* of *Light*, the speed 0):
@@ -7571,6 +7628,15 @@ said where it is made, and what the game is to tell listed at the end.
      *Weather* at 0, and its default to change; if it does, how often at 0.3 and at 1
      (`.wchange 86 0.3`), how bright and of what colour, the sky alone or the ground too, a bolt
      drawn or not, against the editor's.
+  2. The sounds, none of which could be heard here: *Window > Audio* says *Playing on the default
+     device…*; with no output device (every one disabled in the sound settings of Windows), the
+     editor starts and works, the panel and the log saying once why nothing is played. In the Lua
+     console, `uniwow.call("audio.play", {file = "Sound\\Ambience\\Weather\\RainHeavyLoop.wav",
+     category = "ambience", loop = true})` heard, then `uniwow.call("audio.stop", {sound = <its
+     number>, fade = 2})` fading out over two seconds; an MP3, `uniwow.call("audio.play", {file =
+     "Sound\\Music\\CityMusic\\Stormwind\\stormwind_intro-moment.mp3", category = "music"})`; the
+     volumes of *Edit > Settings > Audio* moved while it plays, heard at once and without a click;
+     the editor minimised, silent, then heard again once restored.
 
 #### Tests
 
