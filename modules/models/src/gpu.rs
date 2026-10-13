@@ -106,13 +106,14 @@ const MOD: u16 = 5;
 const MOD2X: u16 = 6;
 const BLEND_ADD: u16 = 7;
 
-/// The state of a pipeline a material needs.
+/// The state of a pipeline a material needs, and whether it draws a model of the sky (`sky`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct State {
     pub blending: u16,
     pub two_sided: bool,
     pub depth_test: bool,
     pub depth_write: bool,
+    pub sky: bool,
 }
 
 impl State {
@@ -129,6 +130,18 @@ impl State {
             two_sided: material.flags & TWO_SIDED != 0,
             depth_test: material.flags & NO_DEPTH_TEST == 0,
             depth_write: material.flags & NO_DEPTH_WRITE == 0 && blending <= ALPHA_KEYED,
+            sky: false,
+        }
+    }
+
+    /// The state of `material` drawn in a model of the sky: around the eye, behind everything,
+    /// only where the depth is still at infinity, writing none, unfogged (`vs_sky`, `fs_sky`).
+    pub fn of_sky(material: &formats::Material) -> Self {
+        Self {
+            depth_test: true,
+            depth_write: false,
+            sky: true,
+            ..Self::of(material)
         }
     }
 
@@ -137,7 +150,8 @@ impl State {
     }
 
     /// The pipeline of this state drawing into `target`, by `shader` laid out by `layout`, its
-    /// vertices read from `buffers`.
+    /// vertices read from `buffers`: a model of the sky by the entry points of the sky of `shader`,
+    /// where the depth is still that of infinity, at which they place it.
     pub fn pipeline(
         &self,
         device: &wgpu::Device,
@@ -151,7 +165,7 @@ impl State {
             layout: Some(layout),
             vertex: wgpu::VertexState {
                 module: shader,
-                entry_point: Some("vs_main"),
+                entry_point: Some(if self.sky { "vs_sky" } else { "vs_main" }),
                 compilation_options: Default::default(),
                 buffers,
             },
@@ -163,7 +177,10 @@ impl State {
                 format: target.depth_format,
                 depth_write_enabled: Some(self.depth_write),
                 // Or equal, as the client tests the depth: the layers of a submesh lie on its first.
-                depth_compare: Some(if self.depth_test {
+                // The sky only where the depth is still at infinity, where it was cleared.
+                depth_compare: Some(if self.sky {
+                    wgpu::CompareFunction::Equal
+                } else if self.depth_test {
                     or_equal(target.depth_compare)
                 } else {
                     wgpu::CompareFunction::Always
@@ -177,7 +194,7 @@ impl State {
             },
             fragment: Some(wgpu::FragmentState {
                 module: shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some(if self.sky { "fs_sky" } else { "fs_main" }),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target.color_format,

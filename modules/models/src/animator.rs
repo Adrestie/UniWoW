@@ -92,15 +92,23 @@ pub fn scaled(motion: Motion, scale: f32) -> Motion {
         Motion::Standing => Motion::Standing,
         Motion::Walking(speed) => Motion::Walking(speed / scale),
         Motion::Moving(speed) => Motion::Moving(speed / scale),
+        Motion::Share(share) => Motion::Share(share),
     }
+}
+
+/// The moment, in milliseconds, of a sequence of `duration` held at the share `share` of it, from
+/// 0 to 1, within it.
+pub fn held_at(share: f32, duration: f32) -> f32 {
+    let share = if share.is_finite() { share.clamp(0.0, 1.0) } else { 0.0 };
+    (share * duration).min(duration - 1.0).max(0.0)
 }
 
 /// The animation `motion`, in yards of the model, asks of `animation`, and the speed it moves at:
 /// walking as its flags say; moving, *Walk* or *Run* by whichever of their speeds is nearer its
-/// own, *Walk* when the model has no *Run*.
+/// own, *Walk* when the model has no *Run*; standing, at a moment given or not.
 pub fn wanted(animation: &Animation, motion: Motion) -> (u16, Option<f32>) {
     match motion {
-        Motion::Standing => (STAND, None),
+        Motion::Standing | Motion::Share(_) => (STAND, None),
         Motion::Walking(speed) => (WALK, Some(speed)),
         Motion::Moving(speed) => {
             let pace = |id| {
@@ -172,7 +180,8 @@ pub fn choose(animation: &Animation, wanted: u16, roll: u32, fallbacks: &HashMap
 
 /// `playing` of `animation`, moved on by `elapsed` milliseconds as `motion` moves, in yards of the
 /// model: a new animation wanted starts from its beginning, the one before blended out for the
-/// time of blending of the new; a sequence ended starts again, a variation picked again.
+/// time of blending of the new; a sequence ended starts again, a variation picked again. Held at a
+/// share of its sequence, it stands there, blending nothing.
 pub fn advance(
     playing: &mut Playing,
     animation: &Animation,
@@ -193,6 +202,11 @@ pub fn advance(
             time: 0.0,
             ..*playing
         };
+    }
+    if let Motion::Share(share) = motion {
+        playing.time = held_at(share, animation.sequences[playing.sequence].duration.max(1) as f32);
+        playing.before = None;
+        return;
     }
     if let Some((sequence, time, left, whole)) = playing.before {
         let left = left - elapsed;
@@ -221,8 +235,8 @@ pub fn advance(
 }
 
 /// What the instance `id` of `look`, whose model moves as `animation`, plays when it is first seen
-/// with it, moving as `motion`, in yards of the model: its animation from a moment of its own; none
-/// when it has no sequence for it, nor a fallback.
+/// with it, moving as `motion`, in yards of the model: its animation from a moment of its own, or
+/// the one given; none when it has no sequence for it, nor a fallback.
 pub fn start(
     look: LookId,
     animation: &Animation,
@@ -233,11 +247,15 @@ pub fn start(
     let (want, _) = wanted(animation, motion);
     let sequence = choose(animation, want, roll(id, 0), fallbacks)?;
     let duration = animation.sequences[sequence].duration.max(1);
+    let time = match motion {
+        Motion::Share(share) => held_at(share, duration as f32),
+        _ => (roll(id, u32::MAX) % duration) as f32,
+    };
     Some(Playing {
         look,
         wanted: want,
         sequence,
-        time: (roll(id, u32::MAX) % duration) as f32,
+        time,
         loops: 0,
         before: None,
     })
@@ -353,10 +371,12 @@ impl Animator {
                     group.low - Vec3::splat(radius + MARGIN),
                     group.high + Vec3::splat(radius + MARGIN),
                 ];
-                let shown = camera.is_some_and(|(view_proj, _, eye)| {
-                    let wider = Mat4::from_scale(Vec3::new(1.0 / WIDER, 1.0 / WIDER, 1.0)) * view_proj;
-                    nearest(eye, bounds) <= reach * radius.max(1.0) && in_sight(wider, bounds)
-                });
+                // A model of the sky always, around the eye.
+                let shown = look.sky()
+                    || camera.is_some_and(|(view_proj, _, eye)| {
+                        let wider = Mat4::from_scale(Vec3::new(1.0 / WIDER, 1.0 / WIDER, 1.0)) * view_proj;
+                        nearest(eye, bounds) <= reach * radius.max(1.0) && in_sight(wider, bounds)
+                    });
                 for index in group.first..group.first + group.count {
                     let Some(instance) = published.instances.get(index as usize) else {
                         continue;

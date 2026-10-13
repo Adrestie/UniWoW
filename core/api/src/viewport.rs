@@ -368,12 +368,14 @@ pub enum Drawing {
     Pass,
 }
 
-/// When a layer is drawn among the others in each phase: the ground first, then the water, then the
-/// scene. Layers of one stage are drawn in the order they were added.
+/// When a layer is drawn among the others in each phase: the ground first, then the models of the
+/// sky, the water, then the scene. Layers of one stage are drawn in the order they were added.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Stage {
     /// The terrain and its sky.
     Ground,
+    /// The models of the sky, over the sky of the ground and behind the rest.
+    Sky,
     /// The liquids.
     Water,
     /// What stands on the ground, by default.

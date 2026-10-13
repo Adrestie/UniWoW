@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use uniwow_api::formats::{
-    FogBand, LightBand, LightParamsRecord, LightRecord, LiquidTypeRecord, TILE, ZoneLightRecord,
+    FogBand, LightBand, LightParamsRecord, LightRecord, LightSkyboxRecord, LiquidTypeRecord, TILE, ZoneLightRecord,
 };
 use uniwow_api::viewport::{Fog, MapLight, Sun, Water};
 
@@ -189,7 +189,22 @@ pub struct Tables {
     /// Every light, by id.
     by_id: HashMap<u32, LightRecord>,
     liquids: HashMap<u32, u32>,
+    /// The models of the sky (`LightSkybox.dbc`), by id.
+    skyboxes: HashMap<u32, LightSkyboxRecord>,
 }
+
+/// A model of the sky the lights give (`LightSkybox.dbc`): its id, its model, its flags (0x1 its
+/// animation following the hour) and its alpha.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Skybox {
+    pub id: u32,
+    pub model: String,
+    pub flags: u32,
+    pub alpha: f32,
+}
+
+/// The flag of a model of the sky whose first animation follows the hour.
+pub const FOLLOWS_THE_HOUR: u32 = 0x1;
 
 /// Whether `light` is the global light of its map, at 0, 0, 0.
 fn global(light: &LightRecord) -> bool {
@@ -283,7 +298,60 @@ impl Tables {
             numbers: numbers.iter().map(sorted).collect(),
             zones: by_zone,
             liquids: HashMap::new(),
+            skyboxes: HashMap::new(),
         }
+    }
+
+    /// The tables with the models of the sky `skyboxes`.
+    pub fn with_skyboxes(mut self, skyboxes: &[LightSkyboxRecord]) -> Self {
+        self.skyboxes = skyboxes.iter().map(|record| (record.id, record.clone())).collect();
+        self
+    }
+
+    /// The models of the sky of the lights mixed into `mixed`, the eye where `immersion` says: none
+    /// in a liquid, the client drawing no sky then (0x79ACAF); otherwise those the params of each
+    /// light name for its slot, in the order the lights are mixed, by their weights, as the public
+    /// implementation WebWowViewerCpp collects them (`SkyBoxCollector::addSkyBox`): a model given
+    /// again takes the greater of its two alphas, and every other is faded by what that one weighs;
+    /// a light without one changes nothing. Those of no alpha left out; the faintest first, so that
+    /// the strongest is drawn last.
+    pub fn skies(&self, mixed: &Mixed, immersion: Immersion) -> Vec<Skybox> {
+        if immersion != Immersion::Dry {
+            return Vec::new();
+        }
+        let mut skies: Vec<Skybox> = Vec::new();
+        for (id, weight) in &mixed.used {
+            let Some(record) = self
+                .by_id
+                .get(id)
+                .and_then(|light| self.params.get(&params_of(light, slot(immersion))))
+                .and_then(|params| self.skyboxes.get(&params.skybox))
+                .filter(|record| record.id > 0 && !record.model.is_empty())
+            else {
+                continue;
+            };
+            let alpha = match skies.iter_mut().find(|sky| sky.id == record.id) {
+                Some(sky) => {
+                    sky.alpha = sky.alpha.max(*weight);
+                    sky.alpha
+                }
+                None => {
+                    skies.push(Skybox {
+                        id: record.id,
+                        model: record.model.clone(),
+                        flags: record.flags,
+                        alpha: *weight,
+                    });
+                    *weight
+                }
+            };
+            for sky in skies.iter_mut().filter(|sky| sky.id != record.id) {
+                sky.alpha *= 1.0 - alpha;
+            }
+        }
+        skies.retain(|sky| sky.alpha > 0.0);
+        skies.sort_by(|a, b| a.alpha.total_cmp(&b.alpha));
+        skies
     }
 
     /// The tables with the params of the light of each of the types of liquid `types` naming one.

@@ -202,6 +202,34 @@ fn instances_start_apart_the_same_at_every_run() {
     );
 }
 
+#[test]
+fn a_motion_held_at_a_share_stands_at_that_moment_of_its_sequence() {
+    let animation = of(vec![
+        sequence(0, 1000, 0.0, 0x7FFF, true),
+        sequence(4, 1000, 2.5, 0x7FFF, true),
+    ]);
+    let none = HashMap::new();
+    // A quarter of the day: a quarter of its sequence, whatever the instance, its scale ignored.
+    let mut playing = start(LookId(0), &animation, Motion::Share(0.25), 9, &none).unwrap();
+    assert_eq!((playing.wanted, playing.sequence, playing.time), (0, 0, 250.0));
+    assert_eq!(scaled(Motion::Share(0.25), 4.0), Motion::Share(0.25));
+    // Held there however long passes, then where the share moves.
+    advance(&mut playing, &animation, Motion::Share(0.25), 600.0, 9, &none);
+    assert_eq!((playing.time, playing.loops), (250.0, 0));
+    advance(&mut playing, &animation, Motion::Share(0.5), 16.0, 9, &none);
+    assert_eq!(playing.time, 500.0);
+    // Within the sequence: its end a millisecond short, a share unknown at its start.
+    advance(&mut playing, &animation, Motion::Share(1.0), 16.0, 9, &none);
+    assert_eq!(playing.time, 999.0);
+    advance(&mut playing, &animation, Motion::Share(f32::NAN), 16.0, 9, &none);
+    assert_eq!(playing.time, 0.0);
+    // From a walk, at once, without blending.
+    let mut walking = start(LookId(0), &animation, Motion::Walking(2.5), 9, &none).unwrap();
+    walking.before = Some((1, 10.0, 100.0, 150.0));
+    advance(&mut walking, &animation, Motion::Share(0.75), 16.0, 9, &none);
+    assert_eq!((walking.sequence, walking.time, walking.before), (0, 750.0, None));
+}
+
 /// A track of one value held through the sequence 0.
 fn held<T: Copy>(value: T) -> Track<T> {
     Track {

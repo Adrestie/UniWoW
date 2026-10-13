@@ -35,6 +35,7 @@ use crate::loading::{LookGpu, Ready};
 use crate::lock;
 use crate::pool::Pool;
 use crate::service::Service;
+use crate::sky::{SkyFrame, SkyGroup, SkyLayer};
 
 /// The distances, in radii of an instance, past which its skin goes to the next one; the share of
 /// a limit a level is kept beyond it.
@@ -311,6 +312,8 @@ pub struct ModelsLayer {
     /// The plan of each owner (`plan_of`), by its number, with the publication, the generation of the
     /// looks and that of the tables it was made of.
     plans: HashMap<u32, (Arc<Published>, u64, u64, Arc<OwnerPlan>)>,
+    /// What the layer of the sky draws of the frame prepared last (`sky_layer`).
+    sky: Arc<Mutex<SkyFrame>>,
     stats: LayerStats,
 }
 
@@ -335,8 +338,15 @@ impl ModelsLayer {
             blended_order: Vec::new(),
             owner_bounds: HashMap::new(),
             plans: HashMap::new(),
+            sky: Arc::default(),
             stats: LayerStats::default(),
         }
+    }
+
+    /// The layer drawing the models of the sky this layer finds, in a stage of its own, over the
+    /// sky of the ground and behind the rest.
+    pub fn sky_layer(&self) -> SkyLayer {
+        SkyLayer::new(self.sky.clone())
     }
 
     fn pool(&self) -> Option<Arc<Pool>> {
@@ -466,6 +476,7 @@ impl Layer for ModelsLayer {
             .map(|(number, published, at, count)| (*number, (published, *at, *count)))
             .collect();
         let mut present = HashSet::new();
+        let mut skies: Vec<SkyGroup> = Vec::new();
         // The arena read after what the owners published: it holds every range they name.
         let published: Vec<_> = self
             .service
@@ -572,12 +583,22 @@ impl Layer for ModelsLayer {
                     found.push((slot.number, published.layout, at));
                 }
             }
-            // The looks of their own, by group in sight.
+            // The looks of their own, by group in sight; the models of the sky, around the eye,
+            // never culled, at their finest level, for the layer of the sky.
             for &index in &plan.own {
                 let group = &published.groups[index];
                 let Some(look) = looks.get(&group.look) else {
                     continue;
                 };
+                if look.sky() {
+                    let start = first + group.first;
+                    skies.push(SkyGroup {
+                        look: look.clone(),
+                        buffer: buffer.clone(),
+                        instances: start..start + group.count,
+                    });
+                    continue;
+                }
                 let radius = look.radius() * group.scale;
                 let bounds = [group.low - Vec3::splat(radius), group.high + Vec3::splat(radius)];
                 let distance = nearest(view.eye, bounds);
@@ -713,6 +734,19 @@ impl Layer for ModelsLayer {
                     self.recordings.len()
                 )
             }
+        };
+        // The models of the sky in the order their owners gave them, posed as the looks of their
+        // own are.
+        skies.sort_by_key(|group| group.instances.start);
+        let posing = match (&pool, &self.choice, &self.skin_group) {
+            (Some(_), Some(choice), Some((skin, _))) if choice.tables.is_some() => Some(skin.clone()),
+            (Some(pool), _, _) => Some(pool.rest.clone()),
+            _ => None,
+        };
+        *lock(&self.sky) = SkyFrame {
+            camera: self.camera.as_ref().map(|(_, group)| group.clone()),
+            posing,
+            groups: skies,
         };
         spent("models prepare: the frame of the choice");
         while self

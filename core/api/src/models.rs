@@ -39,6 +39,10 @@ pub enum Geosets {
         hair: u32,
         facial: [u32; 5],
     },
+    /// All of them, the model drawn as a model of the sky (`LightSkybox.dbc`, or a building's,
+    /// `MOSB`): around the eye, wherever its instance stands, behind everything, over the sky of
+    /// the ground, its batches in their order; never culled.
+    Sky,
 }
 
 /// A look, as `Models::look` numbers it.
@@ -46,14 +50,17 @@ pub enum Geosets {
 pub struct LookId(pub u32);
 
 /// How an instance moves, which chooses the animation it plays: standing; walking, as its flags
-/// say, at a speed in yards a second; or moving at a speed without saying how, its walk or its run
-/// then chosen by that speed.
+/// say, at a speed in yards a second; moving at a speed without saying how, its walk or its run
+/// then chosen by that speed; or standing at a moment given.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum Motion {
     #[default]
     Standing,
     Walking(f32),
     Moving(f32),
+    /// Standing, its sequence held at a share of its length, from 0 to 1, as a model of the sky
+    /// that follows the hour plays its first (`LightSkybox.dbc`, flag 0x1).
+    Share(f32),
 }
 
 /// The light of an instance inside a building, in gamma, in place of the light of the view: its

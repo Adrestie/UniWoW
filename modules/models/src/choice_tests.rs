@@ -577,6 +577,7 @@ fn record(at: u32, blending: u16, two_sided: bool) -> Record {
             two_sided,
             depth_test: true,
             depth_write: blending <= 1,
+            sky: false,
         },
     }
 }

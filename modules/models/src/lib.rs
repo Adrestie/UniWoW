@@ -2,9 +2,10 @@
 //! look of a model at a transform, kept until its owner gives others. The looks wanted are loaded
 //! by jobs of the pool, the nearest first, as many as the shared budget of the view holds, their
 //! models and textures read once whoever asks; drawn by the layer of the module instanced, a draw
-//! per group of instances and batch, their bones posed by a thread of their own at each frame. Its
-//! panel sets how far an instance is drawn and previews a display before the camera. Nothing is
-//! changed: no undo entry, no file written.
+//! per group of instances and batch, their bones posed by a thread of their own at each frame; the
+//! looks drawn as the sky (`Geosets::Sky`) around the eye, behind everything, by a layer of their
+//! own (`sky`). Its panel sets how far an instance is drawn and previews a display before the
+//! camera. Nothing is changed: no undo entry, no file written.
 
 mod animator;
 #[cfg(test)]
@@ -32,6 +33,9 @@ mod service;
 #[cfg(test)]
 mod shader_tests;
 mod shaders;
+mod sky;
+#[cfg(test)]
+mod sky_tests;
 #[cfg(test)]
 mod tests;
 
@@ -371,7 +375,8 @@ enum Shown {
 }
 
 /// `look` made ready: from the pool when there is one, with buffers and textures of its own when
-/// there is none or it finds no room there.
+/// there is none or it finds no room there; a model of the sky always of its own, drawn by
+/// pipelines of its own.
 fn load(
     shared: &Shared,
     formats: &dyn Formats,
@@ -379,7 +384,7 @@ fn load(
     look: &Look,
     refused: &mut Vec<String>,
 ) -> Result<Ready, String> {
-    if let Some(pool) = &shared.pool {
+    if let Some(pool) = shared.pool.as_ref().filter(|_| look.geosets != Geosets::Sky) {
         match pooled::look(pool, formats, caches, look) {
             Ok(pooled) => return Ok(Ready::Pooled(pooled)),
             Err(why) => log::info!("models: {:?} drawn on the path of 9.4c: {why}", look.model),
@@ -1038,14 +1043,10 @@ impl Module for ModelsModule {
             return;
         };
         let _ = self.service.gpu.set((gpu.device.clone(), gpu.queue.clone()));
-        view.add_layer(
-            "models",
-            Box::new(ModelsLayer::new(
-                self.service.clone(),
-                self.scene.clone(),
-                self.incoming.clone(),
-            )),
-        );
+        let layer = ModelsLayer::new(self.service.clone(), self.scene.clone(), self.incoming.clone());
+        let sky = layer.sky_layer();
+        view.add_layer("models", Box::new(layer));
+        view.add_layer("models", Box::new(sky));
         let target = view.target();
         self.view = Some(view);
         self.setup = Some(ctx.spawn("Build the pipelines of the models", move |_| {

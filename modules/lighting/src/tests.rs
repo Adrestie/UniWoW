@@ -8,10 +8,11 @@ use std::time::{Duration, Instant};
 
 use uniwow_api::formats::{
     AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef,
-    FogBand, Formats, GameObjectDisplay, HairGeoset, LightBand, LightParamsRecord, LightRecord, LiquidTypeRecord,
-    MapRecord, Model, Texture, Tile, Wdl, Wdt, Wmo, ZoneLightRecord,
+    FogBand, Formats, GameObjectDisplay, HairGeoset, LightBand, LightParamsRecord, LightRecord, LightSkyboxRecord,
+    LiquidTypeRecord, MapRecord, Model, Texture, Tile, Wdl, Wdt, Wmo, ZoneLightRecord,
 };
 use uniwow_api::liquids::{Liquids, Surfaces};
+use uniwow_api::models::{self, Geosets, Instance, Look, LookId, LookState, Models, Motion};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::vfs::{Vfs, VfsState};
 use uniwow_api::viewport::{self, MapLight, Sun};
@@ -21,7 +22,8 @@ use uniwow_api::{
 };
 
 use crate::light::{
-    Immersion, Tables, colour_at, map_light, night_glow, number_at, prepared_fog, sun_direction, with_building_fog,
+    Immersion, Skybox, Tables, colour_at, map_light, night_glow, number_at, prepared_fog, sun_direction,
+    with_building_fog,
 };
 
 /// A band of numbers of `keys`.
@@ -808,6 +810,75 @@ fn the_fog_of_a_building_is_mixed_into_that_of_the_light_by_its_weight() {
     assert!(editor.fog_colour.iter().all(|channel| grey(*channel)));
 }
 
+/// The tables of `parts` whose params name models of the sky: the global light's (params 1) and
+/// the light 3's (params 3) the model 7, following the hour; the light 2's the model 8, under the
+/// water the model 9; params 3 naming none when `none_for_3`.
+fn skied(none_for_3: bool) -> Tables {
+    let (lights, mut records, colours, fog) = parts();
+    for record in &mut records {
+        record.skybox = match record.id {
+            1 => 7,
+            2 => 8,
+            3 if !none_for_3 => 7,
+            4 => 9,
+            _ => 0,
+        };
+    }
+    let skybox = |id: u32, model: &str, flags: u32| LightSkyboxRecord {
+        id,
+        model: model.to_owned(),
+        flags,
+    };
+    Tables::new(&lights, &records, &colours, &fog, &[]).with_skyboxes(&[
+        skybox(7, "Global.mdx", 0x1),
+        skybox(8, "Local.mdx", 0),
+        skybox(9, "Under.mdx", 0),
+    ])
+}
+
+/// The models of the sky of `tables` at `place`, the eye where `immersion` says, by their ids and
+/// alphas.
+fn skies_at(tables: &Tables, place: [f32; 2], immersion: Immersion) -> Vec<(u32, f32)> {
+    let mixed = tables.light_in(0, place, 0.0, true, immersion).unwrap();
+    tables
+        .skies(&mixed, immersion)
+        .into_iter()
+        .map(|sky| (sky.id, (sky.alpha * 1e4).round() / 1e4))
+        .collect()
+}
+
+#[test]
+fn the_models_of_the_sky_of_the_lights_are_collected_by_their_weights_as_the_client_does() {
+    let tables = skied(false);
+    // The global light alone, its model whole, with its flags.
+    let mixed = tables.light_at(0, [-5_000.0, 0.0], 0.0, 0, true).unwrap();
+    assert_eq!(
+        tables.skies(&mixed, Immersion::Dry),
+        [Skybox {
+            id: 7,
+            model: "Global.mdx".to_owned(),
+            flags: 0x1,
+            alpha: 1.0,
+        }]
+    );
+    // Wholly within the light 2: its model, the global one faded out.
+    assert_eq!(skies_at(&tables, [920.0, -50.0], Immersion::Dry), [(8, 1.0)]);
+    // Halfway to it: each by half, the faintest first.
+    assert_eq!(skies_at(&tables, [800.0, 0.0], Immersion::Dry), [(7, 0.5), (8, 0.5)]);
+    // Within the light 3 too, whose model is the global one's again: its greater alpha, the light
+    // 2's faded out.
+    assert_eq!(skies_at(&tables, [1_090.0, 0.0], Immersion::Dry), [(7, 1.0)]);
+    // A light without a model changes nothing.
+    assert_eq!(skies_at(&skied(true), [1_090.0, 0.0], Immersion::Dry), [(8, 1.0)]);
+    // In a liquid, none: the client draws no sky then.
+    assert!(skies_at(&tables, [920.0, -50.0], Immersion::Under).is_empty());
+    assert!(skies_at(&tables, [920.0, -50.0], Immersion::Lit(4)).is_empty());
+    assert!(
+        skies_at(&self::tables(), [-5_000.0, 0.0], Immersion::Dry).is_empty(),
+        "no models read"
+    );
+}
+
 #[test]
 fn the_hour_set_turns_at_its_speed_past_midnight() {
     assert_eq!(crate::half_minutes(720.0, 0, 100.0), 1440.0, "still");
@@ -1040,6 +1111,66 @@ impl Liquids for Pond {
     }
 }
 
+/// Models keeping the looks numbered and the instances of each owner, the looks in the state
+/// `states` gives them by their paths, waiting otherwise.
+#[derive(Default)]
+struct Sky {
+    looks: Mutex<Vec<Look>>,
+    placed: Mutex<HashMap<String, Vec<Instance>>>,
+    states: Mutex<HashMap<String, LookState>>,
+}
+
+impl Sky {
+    fn placed(&self) -> Vec<Instance> {
+        self.placed.lock().unwrap().get("lighting").cloned().unwrap_or_default()
+    }
+
+    fn look_of(&self, look: LookId) -> Look {
+        self.looks.lock().unwrap()[look.0 as usize].clone()
+    }
+}
+
+impl Models for Sky {
+    fn look(&self, look: &Look) -> LookId {
+        let mut looks = self.looks.lock().unwrap();
+        let at = looks.iter().position(|kept| kept == look).unwrap_or_else(|| {
+            looks.push(look.clone());
+            looks.len() - 1
+        });
+        LookId(at as u32)
+    }
+    fn display(&self, _display: u32) -> Result<(Look, f32), String> {
+        Err("no displays".to_owned())
+    }
+    fn object(&self, _display: u32) -> Result<Option<Look>, String> {
+        Err("no objects".to_owned())
+    }
+    fn place(&self, owner: &str, instances: &[Instance]) {
+        self.placed.lock().unwrap().insert(owner.to_owned(), instances.to_vec());
+    }
+    fn change(&self, _owner: &str, _changed: &[Instance], _removed: &[u64]) {}
+    fn clear(&self, owner: &str) {
+        self.placed.lock().unwrap().remove(owner);
+    }
+    fn shown(&self, _owner: &str) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::default()
+    }
+    fn state(&self, look: LookId) -> LookState {
+        let FileRef::Path(path) = self.look_of(look).model else {
+            return LookState::Waiting;
+        };
+        self.states
+            .lock()
+            .unwrap()
+            .get(&path)
+            .cloned()
+            .unwrap_or(LookState::Waiting)
+    }
+    fn extent(&self, _look: LookId) -> Option<models::Extent> {
+        None
+    }
+}
+
 /// Buildings where the eye stands as the test sets it.
 #[derive(Default)]
 struct Rooms(Mutex<uniwow_api::buildings::Eye>);
@@ -1050,7 +1181,7 @@ impl uniwow_api::buildings::Buildings for Rooms {
     }
 }
 
-/// A host offering `formats`, `vfs`, `viewport`, `liquids` and `buildings`, counting the jobs
+/// A host offering `formats`, `vfs`, `viewport`, `liquids`, `buildings` and `models`, counting the jobs
 /// started, kept unrun for the test to run them, and those cancelled, its editor `editor`.
 struct Host {
     formats: Arc<dyn Formats>,
@@ -1059,6 +1190,8 @@ struct Host {
     liquids: uniwow_api::liquids::Handle,
     rooms: Arc<Rooms>,
     buildings: uniwow_api::buildings::Handle,
+    sky: Arc<Sky>,
+    models: models::Handle,
     view: viewport::Handle,
     seen: Arc<View>,
     started: Vec<String>,
@@ -1072,11 +1205,14 @@ fn host(files: Arc<Files>) -> Host {
     let seen = Arc::new(View::default());
     let pond = Arc::new(Pond::default());
     let rooms = Arc::new(Rooms::default());
+    let sky = Arc::new(Sky::default());
     Host {
         liquids: pond.clone(),
         pond,
         buildings: rooms.clone(),
         rooms,
+        models: sky.clone(),
+        sky,
         formats: Arc::new(TestFormats {
             zones: Err("none".to_owned()),
             liquids: Ok(liquids()),
@@ -1106,6 +1242,7 @@ impl uniwow_api::Host for Host {
             "viewport" => Some(&self.view),
             "liquids" => Some(&self.liquids),
             "buildings" => Some(&self.buildings),
+            "models" => Some(&self.models),
             _ => None,
         }
     }
@@ -1185,7 +1322,7 @@ fn the_tables_are_read_once_the_client_is_open_and_again_once_it_changes() {
     assert_eq!(host.cancelled, [JobId(2)]);
     assert_eq!(host.started.len(), 2);
     // A job of before coming back is not taken.
-    let read: Result<crate::Read, String> = Ok((Arc::new(Tables::default()), None, None));
+    let read: Result<crate::Read, String> = Ok((Arc::new(Tables::default()), None, None, None));
     module.on_job(
         JobId(2),
         JobOutcome::Done(Box::new(read)),
@@ -1226,7 +1363,8 @@ fn the_tables_are_read_once_the_client_is_open_and_again_once_it_changes() {
         files: 150,
     };
     module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
-    let read: Result<crate::Read, String> = Ok((Arc::new(Tables::default()), Some("no Wow.exe".to_owned()), None));
+    let read: Result<crate::Read, String> =
+        Ok((Arc::new(Tables::default()), Some("no Wow.exe".to_owned()), None, None));
     module.on_job(
         JobId(5),
         JobOutcome::Done(Box::new(read)),
@@ -1441,6 +1579,87 @@ fn the_fog_of_the_building_whose_room_the_eye_is_in_weighs_by_how_far_it_is_from
     );
 }
 
+#[test]
+fn the_models_of_the_sky_are_placed_at_the_eye_the_building_s_over_those_of_the_lights() {
+    let files = Arc::new(Files(Mutex::new(VfsState::Ready { archives: 1, files: 1 })));
+    let mut host = host(files);
+    let mut module = crate::LightingModule {
+        client: Some((1, 1)),
+        tables: Some(Ok(Arc::new(skied(false).with_liquids(&liquids())))),
+        ..Default::default()
+    };
+    let egui = egui::Context::default();
+    *host.editor.map.lock().unwrap() = json!({ "id": 0, "name": "Azeroth" });
+    *host.editor.camera.lock().unwrap() = Some([-5_000.0, 0.0, 600.0]);
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    // The global light's, at the eye, drawn as the sky, at noon halfway through its animation.
+    let placed = host.sky.placed();
+    assert_eq!(placed.len(), 1);
+    assert_eq!(
+        host.sky.look_of(placed[0].look),
+        Look {
+            model: FileRef::Path("Global.mdx".to_owned()),
+            textures: Vec::new(),
+            geosets: Geosets::Sky,
+        }
+    );
+    assert_eq!(placed[0].transform.w_axis.truncate().to_array(), [-5_000.0, 0.0, 600.0]);
+    assert_eq!(
+        (placed[0].id, placed[0].alpha, placed[0].motion),
+        (7, 1.0, Motion::Share(0.5))
+    );
+    assert!(
+        panel(&mut module, &mut host)
+            .iter()
+            .any(|text| text.contains("Models of the sky: Global.mdx (1.00, following the hour)"))
+    );
+    // In a group of a building showing its own: over it, whole, playing at its pace; said refused
+    // when the models refuse it.
+    host.rooms.0.lock().unwrap().group = Some(uniwow_api::buildings::EyeGroup {
+        flags: 0x40000 | 0x40,
+        fog: None,
+        exit: 0.0,
+        skybox: Some(FileRef::Path("World\\Sky.m2".to_owned())),
+    });
+    host.sky.states.lock().unwrap().insert(
+        "World\\Sky.m2".to_owned(),
+        LookState::Refused("not in the client".to_owned()),
+    );
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    let placed = host.sky.placed();
+    assert_eq!(placed.len(), 2);
+    assert_eq!(
+        host.sky.look_of(placed[1].look).model,
+        FileRef::Path("World\\Sky.m2".to_owned())
+    );
+    assert_eq!(
+        (placed[1].id, placed[1].alpha, placed[1].motion),
+        (1 << 32, 1.0, Motion::Standing)
+    );
+    let texts = panel(&mut module, &mut host);
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("the building's World\\Sky.m2 (1.00)")),
+        "{texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("World\\Sky.m2: not in the client"))
+    );
+    // Under the water: none, taken back.
+    *host.pond.liquid.lock().unwrap() = Some(5);
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert!(host.sky.placed().is_empty());
+    // Out of it again, then the module stopped: cleared.
+    *host.pond.liquid.lock().unwrap() = None;
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert_eq!(host.sky.placed().len(), 2);
+    module.shutdown();
+    assert!(!host.sky.placed.lock().unwrap().contains_key("lighting"));
+}
+
 /// The texts the panel of `module` draws.
 fn panel(module: &mut crate::LightingModule, host: &mut Host) -> Vec<String> {
     let egui = egui::Context::default();
@@ -1485,6 +1704,11 @@ fn the_lights_of_the_liquids_are_read_with_the_tables_the_light_read_without_the
         module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
         let immersion = module.shown.as_ref().unwrap().immersion;
         let texts = panel(&mut module, &mut host);
+        // The models of the sky, which these tables do not give: the light read without them.
+        assert!(
+            texts.contains(&"No models of the sky: the models of the sky are not read".to_owned()),
+            "{texts:?}"
+        );
         if liquids.is_ok() {
             assert_eq!(immersion, Immersion::Lit(4), "in the magma, its light");
             assert_eq!(module.liquids_unread, None);
