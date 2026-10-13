@@ -27,6 +27,7 @@ use uniwow_api::{
 };
 
 use crate::fall::{self, FallLayer, Falling};
+use crate::storm::{self, Storm, Strike};
 use crate::{ServerWeather, WeatherModule, lock, zone_of};
 
 fn area(id: u32, parent: u32, name: &str) -> AreaRecord {
@@ -307,10 +308,12 @@ impl EditorBackend for Shown {
     }
 }
 
-/// A host offering `formats` and `vfs`, keeping the jobs started for the test to run them.
+/// A host offering `formats`, `vfs` and `buildings` when the test sets them, keeping the jobs started
+/// for the test to run them.
 struct Host {
     formats: Arc<dyn Formats>,
     files: Arc<dyn Vfs>,
+    buildings: Option<uniwow_api::buildings::Handle>,
     jobs: Vec<JobFn>,
     settings: HashMap<String, Value>,
     editor: Arc<Shown>,
@@ -320,6 +323,7 @@ fn host() -> Host {
     Host {
         formats: Arc::new(Areas),
         files: Arc::new(Files),
+        buildings: None,
         jobs: Vec::new(),
         settings: HashMap::new(),
         editor: Arc::new(Shown {
@@ -339,6 +343,10 @@ impl uniwow_api::Host for Host {
         match id {
             "formats" => Some(&self.formats),
             "vfs" => Some(&self.files),
+            "buildings" => self
+                .buildings
+                .as_ref()
+                .map(|buildings| buildings as &(dyn Any + Send + Sync)),
             _ => None,
         }
     }
@@ -681,4 +689,212 @@ fn what_falls_is_drawn_around_the_eye_in_one_draw_moving_with_the_time_not_where
     rooms.0.lock().unwrap().group = Some(group(0x2000));
     lock(&falling).buildings = Some(rooms);
     assert_eq!(lit(&render(&gpu, &mut layer, eye, 1.0)), 0, "in a room");
+}
+
+/// The flashes of `storm` and the thunders heard, stepped every `step` seconds for `seconds`, in a
+/// storm of `intensity`: the strikes as they fell, and the thunders.
+fn run(storm: &mut Storm, intensity: f32, seconds: f64, step: f64) -> (Vec<Strike>, Vec<storm::Thunder>) {
+    let (mut strikes, mut thunders) = (Vec::new(), Vec::new());
+    let mut now = 0.0;
+    while now < seconds {
+        let (flash, thunder) = storm.step(now, Some(intensity));
+        assert!((0.0..=1.0).contains(&flash), "{flash}");
+        if let Some(strike) = storm.strike()
+            && strikes.last() != Some(&strike)
+        {
+            strikes.push(strike);
+        }
+        thunders.extend(thunder);
+        now += step;
+    }
+    (strikes, thunders)
+}
+
+#[test]
+fn the_lightning_strikes_seeded_more_often_as_the_storm_grows_each_strike_followed_by_its_thunder() {
+    // The same seed, the same storm; another, another.
+    let (strikes, thunders) = run(&mut Storm::new(7), 1.0, 600.0, 0.01);
+    assert_eq!(
+        run(&mut Storm::new(7), 1.0, 600.0, 0.01),
+        (strikes.clone(), thunders.clone())
+    );
+    assert_ne!(run(&mut Storm::new(8), 1.0, 600.0, 0.01).0, strikes);
+    // At full intensity, a strike every 6 seconds or so, each after half to one and a half times
+    // that; four times as rare at the lowest.
+    let mean = |strikes: &[Strike]| 600.0 / strikes.len() as f64;
+    assert!((4.5..7.5).contains(&mean(&strikes)), "{}", mean(&strikes));
+    assert!(
+        strikes[0].at >= 3.0 && strikes[0].at < 9.0,
+        "the first after one interval"
+    );
+    assert!(
+        strikes
+            .windows(2)
+            .all(|pair| (2.99..9.01).contains(&(pair[1].at - pair[0].at))),
+        "the intervals"
+    );
+    let (rare, _) = run(&mut Storm::new(7), 0.0001, 600.0, 0.01);
+    assert!((18.0..30.0).contains(&mean(&rare)), "{}", mean(&rare));
+    // One to three flashes each, the nearer the brighter; a thunder each, as late as the strike
+    // is far, as loud as it is near.
+    assert!(strikes.iter().all(|strike| (1..=3).contains(&strike.flashes)));
+    assert!(strikes.iter().any(|strike| strike.flashes == 1) && strikes.iter().any(|strike| strike.flashes == 3));
+    assert_eq!(thunders.len(), strikes.len());
+    for (strike, thunder) in strikes.iter().zip(&thunders) {
+        let delay = thunder.at - strike.at;
+        let near = (strike.brightness - storm::DIMMEST) / (1.0 - storm::DIMMEST);
+        let far = storm::NEAREST + (storm::FARTHEST - storm::NEAREST) * (1.0 - near);
+        assert!((delay - f64::from(far / storm::SOUND)).abs() < 1e-3, "{delay}");
+        assert!(
+            (thunder.loudness - (storm::FAINTEST + (1.0 - storm::FAINTEST) * near)).abs() < 1e-5,
+            "{thunder:?}"
+        );
+        assert!((0.5..4.3).contains(&delay), "{delay}");
+    }
+    // Heard when due, never before: stepped at its time, a thunder comes at that step.
+    let mut storm = Storm::new(7);
+    let (strikes, _) = run(&mut storm.clone(), 1.0, 20.0, 0.01);
+    let first = strikes[0];
+    let mut heard = None;
+    let mut now = 0.0;
+    while heard.is_none() && now < 20.0 {
+        heard = storm.step(now, Some(1.0)).1.map(|thunder| (now, thunder));
+        now += 0.01;
+    }
+    let (at, thunder) = heard.expect("a thunder");
+    assert!(at >= thunder.at && at - thunder.at < 0.011 && thunder.at > first.at);
+}
+
+#[test]
+fn a_strike_flashes_lit_at_once_and_fading_each_flash_dimmer_than_the_one_before() {
+    let strike = Strike {
+        at: 10.0,
+        flashes: 3,
+        brightness: 0.8,
+    };
+    let at = |since: f64| storm::brightness(&strike, 10.0 + since);
+    assert_eq!(at(-0.01), 0.0);
+    assert!((at(storm::RISE / 2.0) - 0.4).abs() < 1e-5);
+    assert!((at(storm::RISE) - 0.8).abs() < 1e-5, "whole at the end of its rise");
+    assert!(at(storm::RISE + storm::FADE / 2.0) < 0.8);
+    // The second flash, dimmer: at its height, 0.65 of the first.
+    let second = at(storm::GAP + storm::RISE);
+    assert!((second - 0.8 * 0.65).abs() < 1e-5, "{second}");
+    let third = at(2.0 * storm::GAP + storm::RISE);
+    assert!(third < second && third > 0.0, "{third}");
+    assert_eq!(at(2.0 * storm::GAP + storm::RISE + storm::FADE + 0.01), 0.0, "out");
+    // A strike of one flash: dark once it is out.
+    let one = Strike { flashes: 1, ..strike };
+    assert_eq!(
+        storm::brightness(&one, 10.0 + storm::GAP + storm::RISE + storm::FADE),
+        0.0
+    );
+}
+
+#[test]
+fn without_a_storm_nothing_strikes_and_the_thunders_waiting_are_forgotten() {
+    let mut storm = Storm::new(3);
+    for at in 0..1_000 {
+        assert_eq!(storm.step(f64::from(at), None), (0.0, None));
+        assert_eq!(
+            storm.step(f64::from(at) + 0.5, Some(0.0)),
+            (0.0, None),
+            "an intensity of 0"
+        );
+    }
+    // A strike, then the storm over before its thunder: no thunder, then or later.
+    let mut now = 0.0;
+    while storm.strike().is_none() {
+        storm.step(now, Some(1.0));
+        now += 0.01;
+    }
+    assert_eq!(storm.step(now, None), (0.0, None));
+    assert!(storm.strike().is_none());
+    // Back, the next strike after a whole interval from its start again; the first thunder heard
+    // that of a strike of the new storm, none of the one before.
+    let from = now + 100.0;
+    let (mut first, mut heard) = (None, None);
+    let mut at = from;
+    while heard.is_none() && at < from + 100.0 {
+        heard = storm.step(at, Some(1.0)).1;
+        first = first.or(storm.strike());
+        at += 0.01;
+    }
+    let first = first.expect("a strike");
+    assert!(first.at - from >= 2.99, "{first:?}");
+    assert!(heard.expect("a thunder").at > first.at, "{heard:?}");
+}
+
+#[test]
+fn the_flashes_of_a_thunderstorm_are_given_but_where_nothing_falls_or_when_the_settings_draw_none() {
+    let mut host = host();
+    let mut module = WeatherModule::default();
+    let mut reg = Registrar::default();
+    module.register(&mut reg);
+    let service = module.falling.clone();
+    let applied = crate::Applied(service.clone());
+    // A thunderstorm chosen at 1: run until a strike, its flash given.
+    host.settings.insert("mode".to_owned(), json!(2));
+    host.settings.insert("kind".to_owned(), json!(3));
+    host.settings.insert("intensity".to_owned(), json!(100));
+    let mut now = 0.0;
+    let mut brightest: f32 = 0.0;
+    while now < 30.0 {
+        module.steer_at(&mut Context::new(&mut host, "weather"), now);
+        assert_eq!(applied.current().map(|effect| effect.kind), Some(Kind::Thunders));
+        brightest = brightest.max(applied.flash());
+        now += 0.01;
+    }
+    assert!(brightest > 0.3, "{brightest}");
+    let texts = panel(&mut module, &mut host);
+    assert!(
+        texts.contains(&"A strike every 6 s or so, its thunder up to 4 s after.".to_owned()),
+        "{texts:?}"
+    );
+    // Lit at each moment as its storm says.
+    let flash_at = |module: &mut WeatherModule, host: &mut Host, now: f64| {
+        module.steer_at(&mut Context::new(host, "weather"), now);
+        applied.flash()
+    };
+    let mut copy = module.storm.clone();
+    let mut lit = 0;
+    for _ in 0..1_000 {
+        now += 0.01;
+        let expected = copy.step(now, Some(1.0)).0;
+        assert_eq!(flash_at(&mut module, &mut host, now), expected);
+        lit += usize::from(expected > 0.3);
+    }
+    assert!(lit > 0);
+    // In a room of a building: none seen.
+    let rooms = Arc::new(Rooms::default());
+    rooms.0.lock().unwrap().group = Some(group(0x2000));
+    host.buildings = Some(rooms.clone());
+    let mut unseen = 0;
+    for _ in 0..1_000 {
+        now += 0.01;
+        let expected = copy.step(now, Some(1.0)).0;
+        assert_eq!(flash_at(&mut module, &mut host, now), 0.0, "in a room");
+        unseen += usize::from(expected > 0.3);
+    }
+    assert!(unseen > 0);
+    assert!(panel(&mut module, &mut host).contains(&"Nothing falls: the eye is in a room of a building.".to_owned()));
+    host.buildings = None;
+    // The lightning off in the settings: none, ever.
+    host.settings.insert("lightning".to_owned(), json!(0));
+    let mut most: f32 = 0.0;
+    for step in 0..3_000 {
+        most = most.max(flash_at(&mut module, &mut host, now + f64::from(step) * 0.01));
+    }
+    assert_eq!(most, 0.0);
+    // The rain: none.
+    host.settings.insert("lightning".to_owned(), json!(1));
+    host.settings.insert("kind".to_owned(), json!(0));
+    for step in 0..3_000 {
+        most = most.max(flash_at(&mut module, &mut host, now + 30.0 + f64::from(step) * 0.01));
+    }
+    assert_eq!(most, 0.0);
+    // Stopped: none.
+    host.settings.insert("kind".to_owned(), json!(3));
+    module.shutdown();
+    assert_eq!(applied.flash(), 0.0);
 }

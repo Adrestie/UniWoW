@@ -537,7 +537,7 @@ added through section 4 without touching the core.
 | liquids | Draws and edits water, lava, slime: create, heights, types |
 | placement | Draws M2 doodads and WMOs in tiles; place, move, rotate, scale, with gizmos and snapping |
 | lighting | Light and sky of the maps (Light tables, skyboxes), from step 9.7 |
-| weather | The weather in the viewport: the server's in the zone of the camera, through the live world and its observer, or one chosen in the editor alone; falling around the eye (rain, snow, sand) and given through the service `weather` to the light of the map, which mixes in the params of storm and brings its fog nearer (step 9.7, *The weather, as built*) |
+| weather | The weather in the viewport: the server's in the zone of the camera, through the live world and its observer, or one chosen in the editor alone; falling around the eye (rain, snow, sand) and given through the service `weather` to the light of the map, which mixes in the params of storm and brings its fog nearer; in a thunderstorm, its lightning, whose flashes light the scene (step 9.7, *The weather, as built*; *The lightning and the sounds of the weather, as built*) |
 | environment | Zone music and ambience |
 | spawns | Server creatures and game objects placed in the viewport, waypoints, formations |
 | server-map-data | Regenerate .map, vmaps and mmaps for changed tiles (AzerothCore extractors), in the background |
@@ -7287,7 +7287,8 @@ observer's part written against the headers of AzerothCore and not built; each c
   blended on the eye's side of the water after it (`Phase::Near`), tested against the depth, writing
   none. Nothing falls while the eye is under the water, in a room of a building (a group inside, not
   lit as outside) or in a liquid of a building, nor under the surface of the water under the eye.
-  Neither the lightning of the thunderstorm nor the sounds are made.
+  Neither the lightning of the thunderstorm nor the sounds are made (made since: *The lightning and
+  the sounds of the weather, as built*).
 - **In the light** (`lighting`, through the service): a weather that falls mixes in the params of
   storm of the lights by its intensity (their third slot, the fourth under the water: `Light.dbc`
   gives each light clear, clear under the water, storm and storm under the water params), its values
@@ -7486,6 +7487,90 @@ the user did, and floating windows that can leave the main window.
     view torn off to the other screen, flown in, of the right sharpness on a screen of another scale,
     and Ctrl+Z from it; the editor minimised while a window torn off shows on the other screen (the
     window stays drawn).
+
+#### The lightning and the sounds of the weather, as built
+
+Asked by the user ("finish the light and the weather") after *The weather, as built*, which left
+out the lightning of the thunderstorm and the sounds. Built as it was, the user away, without a
+client nor captures here: what the client holds is taken from its tables of 12340, read for their
+facts and kept nowhere in the repository (marked *client*), and from public sources read for their
+facts only, never copied (*WoWDBDefs*, the sources of *AzerothCore* and of *CMaNGOS*); each choice
+said where it is made, and what the game is to tell listed at the end.
+
+- **Checked first**:
+  - `Weather.dbc` of 3.3.5a (*WoWDBDefs*: its id, a sound `AmbienceID` of `SoundEntries.dbc`, the
+    kind of what falls `EffectType`, `TransitionSkyBox`, a colour `EffectColor`, a texture
+    `EffectTexture`) holds 32 rows (*client*), one of them for each state AzerothCore sends: the
+    state of the server (`WeatherState`) is the id of a row of this table, which the packet calls
+    `WeatherID` (`WorldPackets::Misc::Weather`, *AzerothCore*). Its kinds: 0 nothing falls (the
+    fog, 1), 1 rain, 2 snow, 3 sand. Its sounds (*client*): the rains 3, 4 and 5 the rows 8,533,
+    8,534 and 8,535 of `SoundEntries.dbc` (`Weather - RainLight`, `- RainMedium`, `- RainHeavy`),
+    the snows 6, 7 and 8 the rows 8,536 to 8,538 (`Weather - SnowLight`…), the sandstorms 22, 41
+    and 42 the rows 8,558, 8,556 and 8,557 (`Weather - SandstormHeavy`, `- SandstormLight`,
+    `- SandstormMedium`: the state AzerothCore calls light takes the heavy sound, the medium the
+    light, the heavy the medium), the thunders 86 the row 4,994 (`DarkPortal`, a loop of
+    `Sound\Ambience\ZoneAmbience`), the black rain 90 none (its texture
+    `Particles\LeafBrown.blp`, falling leaves), the black snow 106 the row 8,556; the fog none. The
+    rows of the weather are each one WAV file of `Sound\Ambience\Weather` (`RainLightLoop.wav`,
+    `SnowLight.wav`…), of the volume 0.69 and of the type 50 (ambience); the 12,941 rows of the
+    table name 23,543 WAV files and 2,195 MP3, the music.
+  - The servers of 1.12 named the same rows in their packet of the weather (*CMaNGOS*, classic,
+    `Weather::GetSound`: 8,533 to 8,538 and 8,556 to 8,558, the grade cut at 0.27, 0.40 and 0.70
+    as for the states): 3.3.5a takes them from `Weather.dbc` by the state.
+  - No lightning: `Weather.dbc` of 3.3.5a has no field for it; the table `Lightning` (the
+    brightness and the colour of a flash, the interval between strikes, the strike and its fade,
+    its thunder) and the field `LightningID` of `Weather` come with 8.0.1 (*WoWDBDefs*); and no row
+    of `SoundEntries.dbc` is the thunder of a weather (*client*): those named of lightning are
+    doodads of the Blasted Lands, Netherstorm, the Storm Peaks (`StormPeaksLightning`, 13,021),
+    Tempest Keep and Ulduar, and spells. By its tables, the thunderstorm of 3.3.5a is a rain whose
+    sound is that of the Dark Portal. The lightning below is the editor's, asked for; whether the
+    game flashes is to check.
+- **The lightning** (`modules/weather/src/storm.rs`), in a weather of the kind thunderstorm alone
+  (`Kind::flashes`) and while the setting `lightning` of *Weather* says so (on by default, held in
+  the panel too): strikes at intervals drawn between half and one and a half times a mean that goes
+  from 24 seconds at the lowest intensity to 6 at the highest, the first one interval after the
+  storm begins; each strike one to three flashes 0.13 s apart, each lit in 0.04 s and out in 0.3 s,
+  the second at 0.65 of the first and the third at 0.4; the strike as bright as it is near, from
+  0.4 at 1,600 yards to whole at 200; its thunder as late as the sound takes from there, at 375
+  yards a second (from 0.5 to 4.3 s), and as loud as it is near (from 0.35 to 1). Every number is
+  the editor's, after the fields of the later table `Lightning`. Drawn from a seed (SplitMix64):
+  the same seed and the same moments give the same storm, which the tests replay; its state a few
+  numbers, four thunders waiting at most, nothing allocated as it runs; stepped at each frame by the
+  time since the module started. The flash goes through the service `weather` (`Weather::flash`, 0
+  by default for another provider of it): none where nothing falls on the eye (under the water, in
+  a room or in a liquid of a building, the reasons of what falls), none once the storm ends, its
+  thunders still waiting forgotten.
+- **In the light** (`lighting`, `light::with_flash`): the flash, from 0 to 1, adds its colour
+  (0.85, 0.9, 1 in gamma, a white turned to blue) times 0.9 to the ambient light, each channel
+  bounded to 1, so that every face is lit, much by night and little at noon, the sun kept; it turns
+  the sky, the colour of the fog (in gamma, then made linear) and the colours of the water towards
+  it by 0.7 of itself, their alphas kept; nothing in a liquid lit by its own light. The panel of
+  *Lighting* says it. Its colour and shares are the editor's; no bolt is drawn, the tables of
+  3.3.5a telling of none.
+- **Tested** (the GPU tests on the software adapter, llvmpipe here): the lightning seeded, the same
+  seed giving the same strikes and thunders, another other strikes; at full intensity a strike
+  every 4.5 to 7.5 s on average over ten minutes, each interval between 3 and 9 s, the first after
+  one interval; at the lowest every 18 to 30 s; one to three flashes, one thunder each, as late as
+  its strike is far and as loud as it is near, heard at the step it is due; a strike lit at once
+  then fading, each flash dimmer than the one before, dark once out; nothing without a storm or at
+  an intensity of 0, the thunders waiting forgotten when it ends, the first strike of a storm come
+  back one interval on; the module giving through the service the flash of its storm at each
+  moment, none in a room (said in the panel), none with the setting off, none in the rain, none once
+  stopped; the panel saying how often it strikes. The light lit by a flash: its ambient light
+  bounded, its sun kept, its sky, its fog in gamma and its water turned to it, their alphas, the
+  distances of the fog and the glow at night kept, half a flash halfway; given to the view by the
+  module and said in its panel, none in the magma, none without the service. 10 changes made on
+  purpose, all caught, one once the test listened for the thunders of the storm before from its
+  first step on.
+- **Not done**: a bolt drawn in the sky (a model, or a line of light); the clouds lit apart from the
+  ground, the clouds not being drawn yet; lightning in any weather but the thunderstorm.
+- **To check by the user**:
+  1. A thunderstorm where a zone has weather (`.wchange 86 0.8` in Elwynn Forest, the weather the
+     server's in the editor), at 00:00 and at 12:00 (the setting *Hour* of *Light*, the speed 0):
+     whether the game flashes at all. If it does not, the setting *Lightning in a thunderstorm* of
+     *Weather* at 0, and its default to change; if it does, how often at 0.3 and at 1
+     (`.wchange 86 0.3`), how bright and of what colour, the sky alone or the ground too, a bolt
+     drawn or not, against the editor's.
 
 #### Tests
 

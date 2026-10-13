@@ -794,6 +794,39 @@ pub fn fog_share(intensity: f32) -> f32 {
     1.0 - THICKEST * intensity.clamp(0.0, 1.0)
 }
 
+/// The colour of a flash of lightning, in gamma: a white turned to blue. How much of it a whole flash
+/// adds to the ambient light, and how far it turns the sky, the fog and the water to it. The
+/// editor's choices: the client of 3.3.5a names no lightning in its tables.
+pub const FLASH_COLOUR: [f32; 3] = [0.85, 0.9, 1.0];
+pub const FLASH_AMBIENT: f32 = 0.9;
+pub const FLASH_SKY: f32 = 0.7;
+
+/// The light `given` of the map lit by a flash of lightning of `flash`, from 0 to 1, as the service
+/// `weather` gives it: its colour added to the ambient light, each channel bounded to 1, so that
+/// every face, lit by the sun or not, is lit by it, much by night and little at noon; the sky, the
+/// colour of the fog and the colours of the water turned to it, the fog's in gamma then made
+/// linear, the alphas of the water kept. Unchanged at 0.
+pub fn with_flash(given: MapLight, flash: f32) -> MapLight {
+    let flash = flash.clamp(0.0, 1.0);
+    if flash <= 0.0 {
+        return given;
+    }
+    let toward = |colour: [f32; 3]| mix_colour(colour, FLASH_COLOUR, FLASH_SKY * flash);
+    let water = |colour: [f32; 4]| {
+        let [red, green, blue] = toward([colour[0], colour[1], colour[2]]);
+        [red, green, blue, colour[3]]
+    };
+    let mut lit = given;
+    lit.sun.ambient = std::array::from_fn(|channel| {
+        (given.sun.ambient[channel] + FLASH_COLOUR[channel] * FLASH_AMBIENT * flash).min(1.0)
+    });
+    lit.sky = given.sky.map(toward);
+    lit.fog_colour = toward(given.fog_colour.map(gamma)).map(linear);
+    lit.water.river = given.water.river.map(water);
+    lit.water.ocean = given.water.ocean.map(water);
+    lit
+}
+
 /// The params of the slot `slot` of `light`, or those of its first slot where it has none there (a
 /// choice of the editor: Noggit gives no light then).
 fn params_of(light: &LightRecord, slot: usize) -> u32 {

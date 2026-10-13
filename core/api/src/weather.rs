@@ -1,7 +1,8 @@
 //! Interface of the "weather" service: the weather the view is drawn under, as the module `weather`
 //! applies it, the server's or one chosen in the editor; read by the light of the map, which mixes
-//! in the params of storm of its lights by its intensity. And the weathers of the server as
-//! AzerothCore names them (`WeatherState`), which its observer sends.
+//! in the params of storm of its lights by its intensity and adds the flashes of the lightning of a
+//! thunderstorm. And the weathers of the server as AzerothCore names them (`WeatherState`), which
+//! its observer sends.
 
 use std::sync::Arc;
 
@@ -16,6 +17,12 @@ pub type Handle = Arc<dyn Weather>;
 pub trait Weather: Send + Sync {
     /// The weather drawn now; none for fine weather.
     fn current(&self) -> Option<Effect>;
+
+    /// How much a flash of lightning lights the scene now, from 0 to 1: none but in a thunderstorm
+    /// whose lightning is drawn, and none where nothing falls on the eye. None by default.
+    fn flash(&self) -> f32 {
+        0.0
+    }
 }
 
 /// A weather: its kind and its intensity, from 0 to 1, the grade the server sends with it.
@@ -75,6 +82,12 @@ impl Kind {
     /// Whether it thickens the fog: the fog and the sandstorm.
     pub fn foggy(self) -> bool {
         matches!(self, Kind::Fog | Kind::Sandstorm)
+    }
+
+    /// Whether lightning flashes in it: the thunderstorm alone, a choice of the editor (the client of
+    /// 3.3.5a names no lightning in its tables).
+    pub fn flashes(self) -> bool {
+        self == Kind::Thunders
     }
 }
 
@@ -169,5 +182,9 @@ mod tests {
         assert_eq!(Effect::state_name(2), None);
         assert!(Kind::Rain.falls() && Kind::Rain.stormy() && !Kind::Rain.foggy());
         assert!(!Kind::Fog.falls() && Kind::Fog.foggy() && Kind::Sandstorm.foggy());
+        assert_eq!(
+            Kind::ALL.iter().filter(|kind| kind.flashes()).collect::<Vec<_>>(),
+            [&Kind::Thunders]
+        );
     }
 }
