@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestones 10 to 14 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, proposed and waiting for the user's validation, the next in the order of work; milestones 10 to 14 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -279,12 +279,12 @@ fills it, or *not planned* when no milestone does yet.
 | The client's files, read from its archives, and their formats | The services `vfs` and `formats` of the module `assets` — step 9.1 | — not planned yet | — | — |
 | The live world: entities of the server around a point, their moves | The commands `live-world.state` and `live-world.entities`, the event `live-world.changed` (step 9.3b); the client of the observer, `uniwow_api::server_link` | The same commands and event, through `call` and `subscribe` | The same, through `call` and `subscribe` | Lua: the same, through `uniwow.call` and `uniwow.subscribe` (checked in step 9.3b); Python: milestone 11 |
 | Splitting work over the cores, `parallel_for` | `uniwow_api::parallel_for` (step 9.2a) | — not planned; compiled modules run threads of their own (T7) | — | — |
-| Picking in the 3D view, the selection shown in 3D | — designed in milestone 9, not built | — | — | — |
+| Picking in the 3D view, the selection shown in 3D | — designed in milestone 9, proposed in milestone 15 | — milestone 15, proposed: `scene.pick`, `viewport.ray`, `scene.select` | — | — |
 | The terrain of a map shown in the 3D view, with its horizon | The module `terrain` (steps 9.2c, 9.2e, 9.2f) | — not planned yet | — | — |
 | The statistics of the 3D view: the times of the frames, of the interface thread and of the GPU, what each layer drew | `Layer::stats`; shown over the view (step 9.2e) | — not planned yet | — | — |
 | Hotkeys: declared, read, bound to other keys by the user in *Edit > Hotkey* | `Registrar::hotkey`, `Hotkey::pressed`, `held` (step 9.2d) | — not planned yet | — | — |
 | The memory of the GPU the editor draws with | `Context::gpu_memory` (step 9.2d) | — not planned yet | — | — |
-| Editing the world: terrain, painting, objects and creatures placed | — designed in milestone 9, not built | — | — | — |
+| Editing the world: terrain, painting, objects and creatures placed | — designed in milestone 9; the objects and creatures proposed in milestone 15, the terrain later | — milestone 15, proposed: the commands `scene.*`, the components declared by every language | — | — |
 | Unsaved changes, asked about when the editor closes | `Module::unsaved`, `save_unsaved` | — not planned | — | — |
 | Notices over the window (the outcome of what the user asked, a problem) | `Context::notify`; the errors logged become notices for every language | — not planned yet; the errors logged (`log`) show as notices | The same, through the log | The same, through the log |
 | The theme: its palette, its sizes, the widgets showing work under way | `uniwow_api::theme` (the interface redesigned) | — not planned yet; the interface objects are drawn with it | — | — |
@@ -404,14 +404,14 @@ the same runtime.
 | Commands and history | Undo, redo, unsaved-changes tracking. When a module fails, all its entries leave the history, done and undone, with a warning in the log; the others stay valid since a command only changes its own module's state (F3). A document closed without saving takes its changes out of the history (`Context::forget_document`) |
 | Events | Publish and subscribe, typed by serialisation: the topic is a string and the payload JSON, written with `Context::publish_as` and read with `Event::decode` into a type each module declares on its own side. No Rust type is shared between modules. Events may be published from any thread; they are delivered on the interface thread |
 | Services | Registry of interface implementations provided by modules |
-| Selection | Current selection, any type |
+| Selection | Current selection, any type. Milestone 15 proposes it as the service `scene` of a module, its contract in `core/api` |
 | Animatable properties | Registry of the properties modules let be animated: path, type, range, reading and writing; written without history during playback (milestone 6). A property whose range is not two numbers, the lowest first, or whose name is empty or holds a `/` or a space (its path is `<module>/<name>`), is refused with the reason |
-| Project | Open, save; content defined in a later step |
+| Project | Open, save; its folder, its file and the sections of the modules proposed in milestone 15 |
 | Settings | Global, per project, per module. Written atomically (temporary file, then rename), at most once per second and at exit |
 | Hotkeys | Registry of the keys the kernel and the modules act on (`Registrar::hotkey`), with their keys by default; *Edit > Hotkey* binds them to others, kept in the settings (step 9.2d) |
 | Jobs | Pool of worker threads, one per processor core: background jobs with progress and cancel (T2) |
 | Log | Log panel shared by all modules. GPU errors captured by no module are logged instead of stopping the editor |
-| Inspector host | Shows the selection with the inspector registered for its type |
+| Inspector host | Shows the selection with the inspector registered for its type. Milestone 15 proposes the Inspector as a module, the selection shown as components |
 
 The 3D view is not a core service: it is the `viewport` module (section 7).
 
@@ -526,6 +526,11 @@ milestone 9 takes up those that concern it.
 
 Each line is one Rust module of this project. The list is open: new modules, of any kind, are
 added through section 4 without touching the core.
+
+Milestone 9 built `placement` as two modules, `doodads` and `buildings`. Milestone 15 (proposed)
+adds `scene` (the entities, their places, the selection, groups and prefabs), `scene-tools` (the
+selection in the 3D view and the gizmos), `hierarchy` (the window *Hierarchy*), `notes`, `spawns`
+and the connection of `world-db`, and grows `properties` into the Inspector.
 
 ### World
 
@@ -7520,6 +7525,960 @@ On the user's machine, with the client and the server on it:
 | A dungeon, and a zone with phases | Its instance's entities only; entities of other phases told apart |
 | Tests, `cargo xtask check`, CI | Green |
 
+### Milestone 15: the world edited: the scene, its hierarchy and its inspector (proposed)
+
+*Proposed from the user's request and decisions, checked against the code at e9d24f4, against
+the sources of AzerothCore at the commit of the user's server (bc9198ce7) and against WoWDBDefs;
+waiting for the user's validation: no code is written before it (decision 31).*
+
+The world of milestone 9, shown, becomes a world the user edits as a scene of Unity: a window
+*Hierarchy* left of the 3D view lists what is loaded around the camera, by the places of the game;
+a window *Inspector* on the right shows what is selected as components, each a set of fields
+edited by hand; the objects are selected in the view or in the list, moved, turned and scaled by
+gizmos, created, duplicated and deleted, gathered in groups and prefabs. Every change is made in
+memory and is an undo entry; nothing is written yet into the files of the client or the
+database (decision 26).
+
+**Its number and its place.** It is numbered 15 so that the references to milestones 10 to 14,
+two dozen of them in this document (the table of capabilities among them), stay right; it is the
+next in the order of work, after milestone 9 and before the outlined milestones 10 to 14, and is
+written here, after milestone 9, for that reason.
+
+**Rules:**
+
+| Id | Rule |
+|---|---|
+| E1 | Nothing written: no file of the client, no row of the database, no command to the server. Changes live in memory, in the 3D view and in the history; the database is read only (decisions 26, 27). |
+| E2 | Every change is an undoable command of the module whose data it changes (F2, F3); one gesture of the user (a value typed for 500 objects, a gizmo dragged) is one undo entry, whatever modules it touches. |
+| E3 | The interface thread never waits: the registry of the entities, the trees of the views, the picking, the queries of the database and the reading of values run in jobs, or read snapshots shared between threads (T1, T2). Nothing of this milestone walks every entity at each frame on the interface thread. |
+| E4 | The scene depends on no module that gives it entities: each module publishes its own through the contract of `core/api`; without one, its entities are missing and nothing else (R1, R4). |
+| E5 | The three relations of decision 1 are three data, never one: *part of* (the game's parenting, fixed), *lies in* (the place, from the area of the chunks) and *stored in* (the tile files and the chunks that list an object). Only the editor's groups and prefabs are rearranged. |
+| E6 | Every capability is offered to every language (R9): the entities, the selection, the components, their reads and writes, through named commands and events; component types are declared by modules of every language (decision 19); the Hierarchy and the Inspector are objects of the Qt of the core. |
+| E7 | The scale of the data is that of a whole map: the distances of the view go to 90 tiles, 45 by default (*The window Settings and the distances of the view, as built*), so that what is loaded can be a continent's doodads, 302,497 in Northrend (*Step 9.6, proposed*). The design holds 500,000 entities and is measured at that size. |
+
+#### Decided by the user
+
+**The Hierarchy:**
+
+1. Three relations are never confused:
+   - *part of, moves with*: only the game's own parenting, a building (WMO) and what its own file
+     describes, its groups (its rooms) and the doodads of its doodad sets;
+   - *lies in*: the place, map (continent), zone, subzone, from the area each chunk of terrain
+     carries (one area a chunk, its chain of parents in `AreaTable.dbc`); the rooms of a building
+     may also have names of `WMOAreaTable.dbc`;
+   - *stored in*: the tile file (ADT) and the chunks that list an object (decision recorded as
+     *MCRD/MCRW*; see *Checked before proposing*: in the tiles of 3.3.5a it is `MCRF`).
+   A building belongs to its subzone exactly as the tree next to it.
+2. The main view: Continent, Zone, Subzone, then the objects. In each subzone: a node *Terrain*
+   with its chunks, a node *Water*, the buildings (each with its rooms and the doodads of its file
+   under them), the doodads, the server objects, the groups and prefabs of the editor.
+3. An object that lies across subzones is listed once, in the subzone of the chunk under its
+   origin; the Inspector lists the other zones it reaches.
+4. Groups of the editor (the empty objects of Unity) and prefabs. A group lies in the subzone of
+   its origin; its children are listed under it, no longer in their own subzone; moving the group
+   moves them. Prefabs are linked as in Unity: changing the prefab changes its instances; an
+   instance keeps its overrides; *Apply* and *Revert*. Drag and drop only into groups and prefabs:
+   the game's parenting stays as it is.
+5. Other views, chosen at the top of the window: *Files* (a tile, then the objects stored in it),
+   *By type* (flat lists), *Server* (creatures and game objects by their template, each with its
+   spawns), *Groups & prefabs*. The selection is shared by every view.
+6. What is listed: the terrain and the water; the decor of the client (doodads, buildings with
+   their rooms and doodad sets); the server objects (the spawns of creatures and game objects of
+   the world database of AzerothCore); the live world and the ambience (players, live creatures,
+   the zones of light of `Light.dbc`, the weather, the areas).
+7. The scope: what is loaded around the camera, kept up to date as it moves; a filter keeps only
+   what is on screen.
+8. A live NPC is merged with its spawn of the database: one row, a sign that it is live, its
+   current place in the Inspector. The players, who are not in the world database, are in a branch
+   *Live* of their own, read only.
+9. Names: the doodads and buildings are named by their model and a number (`ElwynnTree03 #4521`),
+   can be renamed, the name kept in the project; the names of the game (zones, NPCs) in the
+   locale of the client.
+10. In the Hierarchy: search and filters (name, type, model, component, zone); an eye (hidden in
+    the 3D view) and a lock (not selectable) on each item and branch; the object framed by a double
+    click or F; drag and drop into groups and prefabs.
+
+**The selection:**
+
+11. A click in the 3D view (Ctrl toggles, Shift adds), a rectangle in the view (with a filter of
+    types), the Hierarchy (Ctrl, Shift a range), and smart selections (the same model, the same
+    type in this zone, the same texture…).
+12. A click on a child (a chair of a building, an object of a group or a prefab) selects the parent
+    first; a second click on the same spot goes down to the child, as in Unity.
+13. The terrain is locked (not selectable) by default; unlocked, a click selects the chunk.
+14. The selection shown in 3D: a setting of three options that add up, an outline (orange), a
+    tint, the bounding box; a chunk selected is framed.
+
+**The Inspector and the components:**
+
+15. Several objects edited at once: values that differ shown as `—`; a value typed is given to all;
+    `+10` or `*2` changes each from its own value. Pivot or Center, Local or World, chosen in a
+    toolbar.
+16. A mixed selection shows only the components every object has that declare they accept being
+    edited together (Transform yes, Model no).
+17. In the Inspector: *Add Component* (with a search, only the components that fit), a menu on each
+    component (reset, copy and paste its values between objects, remove, enable or disable), the
+    Inspector locked on what it shows, and a mode of the raw data (the fields of the file as stored:
+    ids, flags in hexadecimal, indices).
+18. A component is drawn from the fields it declares; a module may draw one of its own (the custom
+    editors of Unity), for instance a list of quests with a search.
+19. Component types are declared by modules of every language, through the unified API, as
+    commands and properties are.
+20. The components foreseen, to size the system, not all built now: quests and dialogues (gives
+    and ends quests, gossip menus, texts); trade and services (vendor, trainer, banker, flight
+    master, innkeeper…); behaviour (loot, waypoints and formations, respawn, scripts SmartAI and
+    ALE); notes of the editor (comments, tags, things to do, a colour in the Hierarchy, never
+    exported).
+21. A doodad exists in the client only. Given a component of the server (Quests, for one), the
+    editor offers to make it a game object of the server at the same place with the same model: a
+    template and a spawn in the database, and the rows of the client's tables when no row of
+    `GameObjectDisplayInfo` names its model.
+22. The Inspector of a chunk: its textures and their masks (4 layers, previews, alpha maps, their
+    order); its zone and flags (subzone, holes, flags); its water (type, heights, depth); its vertex
+    colours, its shadows baked in, its ambient sounds.
+23. The materials of models and buildings: the textures previewed with their path in the archives;
+    a texture replaced by dragging another texture of the game onto it (prepared now, saved later);
+    how they are drawn (blending, two-sided, unlit, glowing at night, environment…); the variants
+    (the skins and textures of creatures, the doodad sets and name sets of buildings).
+
+**Gizmos, creation, data, project, layout, scope:**
+
+24. Gizmos in the 3D view: move, rotate, scale (W, E, R), snapping to the ground, to the grid and to
+    angles (Ctrl), through the same path of change as the Inspector, undoable.
+25. Create, duplicate (Ctrl+D) and delete objects in memory, undoable; a menu *Create* (group,
+    doodad, building, NPC…).
+26. What this work delivers: the panels and the contracts, on the real data; the changes made in
+    memory (the 3D view and the history), nothing written to the files of the game or to the
+    database yet.
+27. The server's data: a connection to the database `world` of AzerothCore, reading; its address
+    and user in the settings; its password asked at each start and never stored.
+28. The project: a folder the user chooses, holding a project file of readable text (groups,
+    prefabs, names, the states of the eyes and locks, notes), later also the files changed before
+    they are exported. This settles part of the open question of the project model (section 10).
+29. The layout by default, as Unity's: the Hierarchy left of the 3D view, the Inspector on its
+    right; both can be torn off as the other panels.
+30. The tools of the terrain (sculpting, painting, holes) are not part of this work; a later one
+    builds on it.
+31. The user validates this specification before any code is written.
+
+#### Checked before proposing
+
+In the code (e9d24f4):
+
+- **What already identifies each thing.** A chunk is known by its tile and index
+  (`terrain::model::ChunkId`); a doodad of a tile by its unique id, the instance id the module
+  `doodads` gives `models`; a doodad of a building by its place in `MODD`, the instance id of the
+  owner `buildings/<map>/<unique id>/<groups>`; a building by its unique id
+  (`buildings/<map>/<unique id>`); a live entity by its GUID at run time with the guid of its row
+  in `creature` or `gameobject`, 0 for a temporary one (`server_link::Entity::spawn`). The point 2
+  of *Preparing the editing to come* holds as built.
+- **The same unique id in several tiles.** A doodad near the border of its tile is listed by every
+  tile its bounds reach, under the same unique id (7,593 in Azeroth, 11,715 in Kalimdor, 9,344 in
+  Outland, 10,637 in Northrend, up to 16 tiles for one), but the birds of Kalimdor 39_23 are listed
+  again under the ids of their neighbours, with other positions, and 33 doodads are listed only by
+  a tile they do not stand in (*Step 9.6b, as built*): a unique id names one object of a map, with
+  exceptions to be handled.
+- **What a chunk carries**: its area of `AreaTable.dbc` (`Chunk::area`, the word at 0x34 of the
+  header of `MCNK`), its holes, flags, layers, alpha maps, shadow, vertex colours, and what stands on
+  it (`Chunk::doodad_refs`, `building_refs`). In a tile of 3.3.5a those references are one chunk,
+  `MCRF`, the doodads then the buildings, as many as the header counts at 0x10 and 0x38; `MCRD` and
+  `MCRW` are those of the split tiles (`_obj0`) WarcraftXL loads (`modules/assets/src/terrain.rs`).
+  The command `terrain.area` gives the area at a point among the full tiles only (within 7 tiles of
+  the camera, *Step 9.2f*); no light read gives the areas of a tile without its terrain.
+- **The placements**: `MDDF` (36 bytes: a name, or a FileDataID with the flag 0x40; the unique id;
+  the position and the rotation in degrees in the axes of the file; the scale in 1024ths; the
+  flags) and `MODF` (64 bytes: the same, its bounds in the axes of the file, the doodad set and
+  the name set, and a field the reader takes as a scale only with the flag 0x4, which the public
+  description of the format gives to later clients: the client of 3.3.5a scales no building). The
+  light call `Formats::placements` reads them without the terrain, 4.2 ms a tile on average on 16
+  threads (*Step 9.6b, as built*).
+- **A building**: its id for `WMOAreaTable.dbc` (`Wmo::id`, of `MOHD`), each group's
+  (`WmoGroup::id`, of `MOGP`) and name (`WmoGroup::name`, of `MOGN` through `MOGI`), its doodad sets
+  (`MODS`: a name, the first doodad, a count) and doodads (`MODD`: the model, the flags, a
+  position, a quaternion, a scale, a colour), and the doodads each group holds
+  (`WmoGroup::doodad_refs`). The client places the set 0 always and the set the placement names
+  (*Step 9.6c, after its review*). `WMOAreaTable.dbc` is not read yet.
+- **`WMOAreaTable.dbc` of 3.3.5.12340** (WoWDBDefs): `ID`, `WMOID`, `NameSetID`, `WMOGroupID`, the
+  sounds and musics, `Flags`, `AreaTableID`, `AreaName_lang`: a room is named by the row of its
+  building's id, its placement's name set and its group's id.
+- **`models::Instance`** has no flag of highlight: the one point 3 of *Preparing the editing to
+  come* foresaw was not built. The left button of the view does nothing (point 4), kept for the
+  tools. No picking exists.
+- **The interface thread is the scarce resource** in flight: `models prepare` took 9 to 10 ms of it
+  moving in a crowded view before its lightening (*The frames measured while the camera moves,
+  after 9.6f2*); this milestone adds nothing to it that grows with the entities.
+- **Undo groups on the interface thread**: a group takes there only the commands of its own caller
+  (`core/kernel/src/groups.rs`), since every module works on that thread; a gesture of the
+  Inspector that changes the doodads, the buildings and the spawns cannot be one entry today.
+- **The hotkeys**: the camera flies with Z, Q, S, D, **E** and A, held while the pointer is over the
+  view (*Step 9.2d*); F and Delete are the Curves view's, Delete the dopesheet's. The kernel tells
+  two hotkeys bound to the same keys apart only within one module or against its own: E to rotate
+  (decision 24) and E to fly up would act at once without a word.
+- **The dock**: the right area holds the panels of the modules of the world (Terrain, Doodads,
+  Buildings, Liquids, Models, Lighting, Weather, Live world) and of two samples; the left one only
+  the sample *Events*.
+
+In the sources of AzerothCore at bc9198ce7, read only:
+
+- `creature`: `guid` (the key), `id1`, `id2`, `id3` (the templates it may be, one chosen when it
+  spawns), `map`, `zoneId`, `areaId`, `spawnMask`, `phaseMask`, `equipment_id`, `position_x` to
+  `orientation`, `spawntimesecs`, `wander_distance`, `currentwaypoint`, `MovementType`, `npcflag`,
+  `unit_flags`, `dynamicflags`, `ScriptName`, `Comment`; indexed by `map` and `id1`.
+- `gameobject`: `guid` (the key), `id`, `map`, `zoneId`, `areaId`, `spawnMask`, `phaseMask`, the
+  position and `orientation`, the quaternion `rotation0` to `rotation3` (one of zeros replaced by
+  the orientation's, `GameObject.cpp`), `spawntimesecs`, `animprogress`, `state`, `ScriptName`.
+  **No scale**: a game object takes the `size` of its template.
+- `creature_template` (`entry`): `name`, `subname`, `gossip_menu_id`, `npcflag`, `lootid`,
+  `AIName`, `ScriptName`…; its looks in `creature_template_model` (`CreatureID`, `Idx` up to 3,
+  `CreatureDisplayID`, `DisplayScale`, `Probability`). `gameobject_template` (`entry`): `type`,
+  `displayId`, `name`, `size`, `Data0` to `Data23`. Their names in other locales:
+  `creature_template_locale` and `gameobject_template_locale` (`entry`, `locale`).
+- `creature_queststarter`, `creature_questender`, `gameobject_queststarter`,
+  `gameobject_questender`: (`id`, `quest`), `id` **the template's entry**, never a spawn. The server
+  wants the flag of quest giver in the creature's `npcflag`, and a game object of type 2
+  (`GAMEOBJECT_TYPE_QUESTGIVER`), and says so in its log otherwise (`ObjectMgr.cpp`).
+- `npc_vendor`: (`entry`, `item`, `ExtendedCost`), the template's entry.
+- **The trainers are no longer `npc_trainer`**: the table is still in the base SQL, but the server
+  reads `trainer` (`Id`, `Type`, `Requirement`, `Greeting`), `trainer_spell` (`TrainerId`,
+  `SpellId`…) and `creature_default_trainer` (`CreatureId` → `TrainerId`).
+- `waypoint_data`: (`id`, `point`), `id` the path that `creature_addon.path_id` names for a spawn
+  (by its `guid`) or `creature_template_addon.path_id` for a template, though its comment says
+  *Creature GUID*. `creature_formations`: `memberGUID` the key, `leaderGUID`, spawns both.
+- `smart_scripts`: (`entryorguid`, `source_type`, `id`, `link`); `entryorguid` a template's entry
+  when positive, a spawn's `guid` negated when negative; `source_type` 0 a creature, 1 a game
+  object, 9 a timed list; the template names `SmartAI` in its `AIName`.
+- `gameobjectdisplayinfo_dbc`: the world database can extend the server's copy of
+  `GameObjectDisplayInfo.dbc`. `game_weather` is kept by zone.
+
+What follows from them: the quests, the gossip, the vendor, the trainer, the loot and the scripts
+by entry belong to a **template**, shared by all its spawns; only the place, the phases, the
+respawn, the movement, the waypoints (`creature_addon`), the formations and the scripts by `-guid`
+belong to one spawn. The template of a server object is to its spawns what a prefab is to its
+instances.
+
+#### The architecture
+
+**The modules.** Six new, the others grown; none depends on another (section 2), each reaching
+the others through the services and commands below.
+
+| Module | Category | What it does | New or grown |
+|---|---|---|---|
+| `scene` | World | The registry of the entities, their places, the selection, the eyes and locks, the names, the groups and prefabs, its section of the project; the service `scene`, the commands `scene.*` and their events | New |
+| `scene-tools` | World | The tools of the 3D view: selection by a click and by a rectangle, the gizmos, the toolbar of the view, the bounding boxes of the selection | New |
+| `hierarchy` | Interface (`modules/UI/`) | The window *Hierarchy* and its views; draws the object `HierarchyView` for every language | New |
+| `properties` | Interface | Grows: the window *Inspector*, the drawing of the components from their fields; draws the object `InspectorView` beside `PropertyGrid`, with the same editors of each kind | Grown |
+| `world-db` | Data | The connection to the world database, its settings and its password, read only; the service `world-db` and the command `world-db.query` (its generic editor of tables is a later work) | New |
+| `spawns` | World | The creatures and game objects of the database on the map shown, drawn through `models`, published as entities, with their components | New |
+| `notes` | World | The notes of the editor on any entity (comments, tags, things to do, a colour in the Hierarchy), in its section of the project, never exported | New |
+| `terrain`, `liquids`, `doodads`, `buildings`, `live-world`, `lighting`, `weather` | World | Grow: each publishes its entities, offers their components, picks them, shows their highlight and their eye, and keeps their changes in memory | Grown |
+| `viewport`, `models` | World | Grow: the tools of the view and the outline of the selection; a flag of highlight an instance and the picking of a look | Grown |
+
+`libs/db` (the client of MySQL) joins the runtime, as section 6 foresaw. The catalogue's
+`placement` is today the two modules `doodads` and `buildings`; its gizmos are in `scene-tools`.
+
+**The entities** (`uniwow_api::scene`, the contract, plain data and traits): everything the
+Hierarchy lists is an entity, with a stable id that survives a restart and is written in the
+project. An id is a kind and a key, written as text in JSON and in the project, held as a number
+of the registry in memory:
+
+| Kind | Key | Written | Given by |
+|---|---|---|---|
+| map | Map.dbc id | `map:571` | `scene` |
+| area | AreaTable.dbc id | `area:4395` | `scene` |
+| chunk | map, tile, chunk | `chunk:0:32_48:3_15` | `terrain` |
+| water | the chunk, its layer | `water:0:32_48:3_15:0` | `liquids` |
+| doodad | map, unique id | `doodad:0:183214` | `doodads` |
+| building | map, unique id | `building:0:4128` | `buildings` |
+| room | the building, its group's index | `room:0:4128:17` | `buildings` |
+| building doodad | the building, its place in `MODD` | `building-doodad:0:4128:256` | `buildings` |
+| creature, game object | the `guid` of its row | `creature:79753`, `gameobject:5714` | `spawns` |
+| live | the GUID at run time | `live:f13000046b0012e3` | `live-world` |
+| light | Light.dbc id; a zone of light of Wow.exe | `light:1203`, `light-zone:571:4` | `lighting` |
+| weather | the zone | `weather:1519` | `weather` |
+| group, prefab, prefab instance | an id of the project | `group:12`, `prefab:3`, `instance:7` | `scene` |
+| a kind of another module | its own key | `<module>/<kind>:<key>` | that module |
+
+The exceptions of the unique ids: two listings of one unique id whose model or position differ
+(Kalimdor 39_23) are two entities, the second written `doodad:1:<unique id>@<x>_<y>` by the tile
+that lists it; the Inspector says *this unique id is used twice in the files*.
+
+An entity as a provider publishes it: its id and kind; its default name and the stem of its
+model; its game parent (a room's building, a building doodad's room, or none); its position, its
+rotation, its bounds in the world; the tiles and chunks that store it; the components it has; the
+keys of the smart selections it answers to (its model, its textures, its template); flags (client,
+server or live; read only; a live sign); a version, changed with any of its values. A live
+creature with a spawn names that spawn (`merge: creature:79753`).
+
+**The registry.** The module `scene` keeps every entity published, by provider and by tile, each
+piece an `Arc` of its entities: a provider publishes or withdraws a piece from any thread (a job
+reading a tile publishes that tile's), and the registry swaps that piece alone, never copying the
+others. Readers on any thread take a snapshot, the pieces as they are. The registry indexes the
+pieces in jobs: by place, by chunk of the map for the picking, by the keys of the smart
+selections, by name for the search. It publishes `scene.changed` once a frame at most, the
+entities added, changed and removed since, never one event an entity (as L4). A module that
+fails takes its pieces away (`kernel.module_failed`).
+
+**The three relations, kept apart** (decision 1, rule E5). *Part of*: the game parent of the
+record, given by the provider and never changed by the user. *Lies in*: the place, computed by the
+registry, never given by a provider, but for an area (itself) and a weather (its zone). *Stored
+in*: the tiles and chunks the provider gives, as the files list the object; for an object changed in
+memory, every tile and chunk its bounds reach, as the client's files list their objects (*Step
+9.6b, as built*) and will list it once written, marked *to be written*.
+
+**The places** (decisions 1 to 3). The place of an entity is the area of the chunk under its
+origin, and the chain of that area's parents (`AreaRecord::parent`, 0 for a zone): the main view
+shows the map, then the chain from the zone down, then the entity. The registry reads the areas of
+a tile itself, through a new light call `Formats::areas(directory, x, y)` (the 256 words of the
+headers of `MCNK`, as `placements` reads its chunks alone), so that the places hold without the
+module `terrain`. An entity whose chunk has no area (0), or none the map knows, lies in *No area*
+under its map. The areas its bounds reach besides its own are its *other zones*, which the
+Inspector lists (decision 3). The names of the rooms come from `WMOAreaTable.dbc`, read by
+`formats` (`Formats::wmo_areas`); a room keeps its building's place (decision 1).
+
+**The scope** (decision 7). What the providers hold, around the camera at their own distances, is
+listed; a setting of the module `scene`, *Scope (tiles)*, from 1 to 90, can list less (2 by
+default): an entity whose tile lies farther from the camera's tile is left out of the views, not
+out of the registry. An entity selected or changed in memory stays listed wherever the camera
+goes. *On screen* is a filter of the views: the entities whose bounds meet the view of the frame,
+within the reach their module draws them at; made by a job four times a second at most, from the
+view the viewport gives (`Viewport::last_view`), never at each frame.
+
+**The names** (decision 9). A doodad or a building: the stem of its model and its unique id
+(`ElwynnTree03 #4521`); a building doodad: the stem of its model and its place in `MODD`; a room:
+its name of `WMOAreaTable.dbc`, else of `MOGN`, else *Room 17*; a chunk: *Chunk 3, 15*; a water: its
+type of `LiquidType.dbc`; a creature or a game object: its template's name in the locale of the
+client (`*_template_locale`, the template's own for enUS and enGB) and its guid; an area: its name
+of `AreaTable.dbc`, already in the client's locale. A name given by the user is kept by the
+module `scene` in its section of the project, by the entity's id; the default names are made when
+shown, never stored.
+
+**The selection** (decisions 11, 12). The module `scene` keeps it: the ids selected in their order,
+the last the active one. Every view, the 3D view and the Inspector change it through the service
+or the command `scene.select` (set, add, toggle, remove, clear, a range given as ids) and follow it
+by the event `scene.selection_changed`. Choosing is not a change of the world: it enters no history
+(Unity records it; set aside here, where one history serves every module and an undo would step
+through choices before changes). An entity unloaded while selected stays selected, the Inspector
+saying it is out of reach, with *Frame* to fly back.
+
+- **Parent first, then the child** (decision 12): a pick gives the deepest entity hit and its
+  chain up to the outermost one that can be selected (a group or prefab instance, then the game
+  parent, then the entity). A click selects the outermost; a click on the same spot (within 4
+  pixels, the same entity hit) while one of the chain is the only one selected selects the next
+  down; past the deepest, the outermost again.
+- **Locks** (decisions 10, 13): a locked entity, or one under a locked branch, is not picked in the
+  3D view, by a click or a rectangle; it is still chosen in the Hierarchy, as the pickability of
+  Unity (to confirm). The chunks and the water are locked by default.
+- **Smart selections** (decision 11): from the keys each provider publishes (the model, the
+  textures, the template, the kind), over the scope: *the same model*, *the same type in this
+  zone*, *the same texture*, *the same template*; offered in the menu of a row and of the view.
+
+**Picking** (decisions 11, 13). On the processor, in two phases, never on the interface thread:
+
+1. the registry's index by chunk of the map walked along the ray, the boxes of the entities in its
+   cells tested, nearest first;
+2. each box hit asked of its provider for the exact distance (`scene::Picker`, Rust, from any
+   thread): the terrain by the heights of its full tiles; the doodads, the building doodads and
+   the spawns by the triangles of their model at rest, through a new `Models::intersect(look, ray)`
+   on the vertices and the finest skin `models` keeps for each look drawn; the buildings and their
+   rooms by the BSP tree of each group (`MOBN`, `MOBR`, which every group has); the water by its
+   surfaces (`Liquids::surfaces`); the live entities and what has no model by their boxes. A
+   module of another language gives boxes only, its entities picked by them.
+
+A click is answered by a job in a frame or two; a rectangle selects the entities, of the types
+its filter leaves, whose origin falls in it, in front of the eye and within their reach. The
+viewport offers the ray under a point (`viewport.ray`, from the view of the last frame) to every
+language; `scene.pick` takes a ray.
+
+**The selection shown in 3D** (decision 14): a setting of the module `scene`, in its category
+*Selection* of the window *Settings*, three boxes that add up, the outline alone by default. The
+service gives every provider the entities highlighted, each with the options that apply to it, and
+the entities hidden by an eye, a snapshot with a version read at each frame without a copy; each
+provider shows them in what it draws. No module reads another's settings (F3).
+
+- **The bounding box**: drawn by `scene-tools` over the image of the view, the corners of each box
+  projected, as the labels are written (`Layer::labels`), at most 2,000 boxes, the box of all of
+  them beyond.
+- **The tint**: a flag of highlight in each instance (`models::Instance::highlight`, changed without
+  placing the instances again by `Models::mark(owner, ids, flags)`) and in each placement of the
+  buildings; their shaders mix the colour of the selection into what they draw.
+- **The outline (orange)**: the viewport gains a pass of the selection after the frame: each layer
+  draws its highlighted items into a mask of one byte a pixel (`Layer::draw_mask`, nothing by
+  default), and a pass over the image draws the colour where the mask has an edge, two pixels
+  wide; the whole outline, the hidden parts dimmed by the depth of the frame where the device lets
+  it be read (to measure). Its colour a setting, orange by default, which `scene` gives the
+  viewport as the light is given (`Viewport::set_outline`).
+- **A chunk selected is framed** whatever the boxes: the terrain draws its sides in the colour of
+  the selection, as its overlays were foreseen (point 5 of *Preparing the editing to come*), by a
+  flag of the chunk in the codes its tile already gives its shader.
+- **Hidden** (the eye): each provider leaves out of what it draws the entities hidden, as it leaves
+  out those not placed; the terrain draws a hidden chunk as holes.
+
+**The tools of the 3D view and the gizmos** (decision 24). The viewport gains tools, as it has
+layers: `Viewport::add_tool(owner, Box<dyn Tool>)`; a tool receives the left button and the pointer
+over the view (pressed, dragged, released, clicked twice, the modifiers, the ray), may take the
+pointer while it drags, paints over the image (an `egui::Painter`, as the labels) and draws its
+buttons in a toolbar along the top of the view; drawn and called on the interface thread inside
+`catch_unwind`, a tool that fails is removed and its module reported (F5). The camera keeps the
+right and middle buttons and the wheel. The module `scene-tools` gives two tools:
+
+- **Selection**: a click, Ctrl and Shift, a rectangle dragged from where no handle is, its filter
+  of types in the toolbar.
+- **Gizmos**: *Move* (W: three arrows, three planes, the middle in the plane of the view), *Rotate*
+  (E: three rings and the ring of the view), *Scale* (R: three handles and the middle for all); drawn
+  over the image as lines and shapes projected, picked on the screen. *Pivot* or *Center* (each
+  object about its own origin, or all about the middle of the selection) and *Local* or *World* (the
+  axes of the active object, or of the world), in the toolbar (decision 15). Snapping while Ctrl is
+  held: the grid (1 yard by default), the angles (15 degrees), the scale (0.1), settings of the
+  category *Selection*; *Ground*, a button of the toolbar: each object moved set on the first
+  surface of the terrain or of a building under its origin, the objects moved left out. A gizmo
+  writes as the Inspector does (below), the change under way at each frame, one undo entry when let
+  go.
+- **The keys**: W, E and R are hotkeys of `scene-tools`, F frames the selection and Delete and
+  Ctrl+D are those of `scene`; they act while the pointer is over the 3D view or the Hierarchy, as
+  the camera flies only over the view. E is also the key that flies up: *To decide*, point 1.
+
+**The components** (decisions 15 to 20). A component type is declared once by the module that
+serves it: an id `<module>/<name>` (`scene/transform`, `doodads/model`, `spawns/creature`), a label,
+a category of *Add Component*, the kinds of entity it fits, whether it is part of the entity
+(intrinsic, never removed) or added, whether it can be disabled, whether it accepts being edited
+together (decision 16), its fields, and, for its raw part, the fields as stored (decision 17). A
+field has a name, a label, a kind, whether it is read only, a default for *Reset*, a tooltip, and
+the kinds of entity it fits when it does not fit them all (the Transform of a creature has a yaw
+and no pitch, nor scale).
+
+| Kind of field | Shown as | Beyond the kinds of the animatable properties |
+|---|---|---|
+| number | dragged or typed, its range, its decimals, its unit (yards, degrees) | |
+| integer | dragged or typed, its range | new |
+| boolean | a box | |
+| vector | three numbers | |
+| colour | a swatch and its picker, with or without alpha | alpha new |
+| text | a field, one line or several | new |
+| enum | a list of named values (a doodad set, a type of liquid) | new |
+| flags | named bits, ticked, the word in hexadecimal beside them | new |
+| reference | an entity, or a row of a table of the client or of the database (`quest:176`, `CreatureDisplayInfo:3167`), its name shown, followed by a click | new |
+| asset | a file of the archives (`.m2`, `.wmo`, `.blp`) with its path and its preview, a file dropped on it from the game's | new |
+| list | rows of fields of their own, added, removed, ordered (the quests of an NPC, the layers of a chunk) | new |
+
+- **Reads**: the values of a component for a set of entities, as JSON, by the command its module
+  names (`doodads.read`, on the calling thread, from its own snapshot). The Inspector reads the
+  selection's values again when `scene.changed` names one of them, by `Context::call`, its answer at
+  a later frame: a Rust module answers on the calling thread, a module of another language on its
+  own, never holding the interface.
+- **Writes**: by the command its module names (`doodads.write`, on the interface thread), with the
+  entities, the field, the change and whether it is done. The change is a value, or relative to
+  each entity's own: `+n`, `-=n`, `*n`, `/n` (decision 15; `-n` is the value −n, not a change);
+  for a vector, its numbers one by one. Under way (a drag) the module shows it at once and records
+  nothing; done, it records one undoable command from the values before the gesture began, as the
+  property grid does (8.7b). A field refused (out of range, read only, a building scaled) is said in
+  the answer and shown by the Inspector.
+- **Add, remove, reset, enable**: commands the module names; a component added to an entity is
+  published with it. *Copy* and *Paste* are the Inspector's: the values of one component as JSON,
+  written to another entity with the same component.
+- **Several kinds selected** (decision 16): the components every entity selected has, among those
+  that accept being edited together; a value that differs shows `—`; a field that does not fit
+  every kind shows only for those it fits.
+- **The level of a server component**: each declares whether it changes the spawn or the template;
+  a component of the template says over its fields *Template 1423: changes its 37 spawns*, as an
+  instance of a prefab shows what it inherits (*Checked before proposing*).
+- **The raw data** (decision 17): each provider declares the raw part of its kinds, the fields of
+  the file or the row as stored: the 36 bytes of `MDDF` (its name's index, the unique id, the
+  position and rotation in the axes of the file, the scale in 1024ths, the flags in hexadecimal),
+  the 64 of `MODF`, the header of `MCNK`, the columns of `creature`. In the raw mode the Inspector
+  shows those alone, editable where the field is. `formats` gains what the readers skip today (the
+  index of the name of a placement, the words of the header of `MCNK`), read again by a job for the
+  entity shown.
+- **Drawings of their own** (decision 18): a component is drawn from its fields, or by its module:
+  a Rust module gives a drawer (`scene::ComponentDrawer`, egui, through the service of the
+  Inspector); a module of another language gives a layout of its interface objects, which the
+  Inspector embeds in the component's place, its signals reaching the module on its thread as in
+  its panels. The list of quests with a search is the first one (step 15.11c).
+
+**One gesture, one undo entry** (rule E2). The kernel gains the groups of a gesture: a module of
+the interface thread opens one (`Context::begin_gesture(label)`), makes its calls with it, and
+closes it; every change applied while serving those calls, in any module and on any thread, the
+calls those calls make in turn included, joins one entry, its parts owned each by the module whose
+data it changed (the history's `Entry` already holds parts of several modules). A group of the
+interface thread never takes a change made outside its calls, which is why the groups of S4 are
+kept off that thread today. A gesture left open is closed at the end of the frame after its last
+answer, or when its module fails.
+
+**The changes kept in memory** (decision 26). Each provider keeps what was changed apart from what
+the files and the database hold: the entities moved, changed, created and deleted, by id, laid over
+what its jobs read, so that a tile left and read again shows them still. The terrain keeps a tile
+changed whole and full, as it already does (*Step 9.2f*). Nothing of it is written; at close, the
+modules tell their changes as unsaved (`Module::unsaved`), and the window of the kernel says they
+will be lost (*To decide*, point 2).
+
+**Create, duplicate, delete** (decision 25), commands of the providers through `scene.create`,
+`scene.duplicate` and `scene.delete`, one undo entry each:
+
+- *Create* (the menu of the Hierarchy and of the view): a group; a doodad or a building by its file,
+  searched among the files of the archives (`Vfs::files_under`); an NPC or a game object by its
+  template, searched in the database. Placed on the ground where the centre of the view looks, and
+  selected.
+- *Duplicate* (Ctrl+D): new entities with the same values, selected in place of the originals.
+- *Delete*: the entities and their children of the editor; a room cannot be deleted; a building
+  doodad can, its file then changed for every placement (below).
+- **The ids given**: a new doodad or building takes a unique id of its map above every one its tiles
+  hold: when a map is shown, a job reads the placements of all its tiles (the light call: about 0.3
+  s for Northrend's 1,131 tiles on 16 threads, from *Step 9.6b*) and keeps the highest; the
+  project keeps those given, so that two sessions never give one twice. A new spawn takes a `guid`
+  above the highest of its table, read then. Both are checked again before anything is written, in
+  a later work.
+- **What belongs to a file**: the rooms and doodads of a building are its file's, as the textures
+  of a model are: changing a building doodad changes every placement of that building, as
+  changing a prefab changes its instances; the Inspector says so and names the other placements
+  loaded.
+
+**Groups and prefabs** (decision 4), kept by the module `scene` in its section of the project:
+
+- **A group** has an id, a name, a map, a pivot (a position and a rotation) and children: entities
+  of that map that no game parent holds (a doodad, a building, a spawn, another group). Its place is
+  that of its pivot; its children are listed under it and no longer in their own subzones. Moved,
+  turned or scaled, it moves each child by the same change, in one gesture. Drag and drop into it
+  adds a child, out of it takes one back to its place; the game's children are never dragged.
+- **A prefab** is kept in the project: its objects, each with a local id, a kind, a transform
+  relative to its pivot and the values of its components (its model, its doodad set, its template).
+  **An instance** is placed as a group whose children are real entities created from the prefab
+  (new unique ids and guids), with its overrides: for an object of the prefab, a field of a
+  component whose value differs, an object added, an object removed. Changing the prefab writes the
+  change to every instance's object whose field is not overridden. *Apply* writes an instance's
+  overrides into the prefab, then into the other instances; *Revert* gives an object the prefab's
+  values. Each is one gesture. A prefab within a prefab is set aside for now.
+- An instance is made again when the project opens: its children created from the prefab and its
+  overrides, so that it does not depend on the changes kept in memory.
+
+**The Hierarchy** (`modules/UI/hierarchy`, decisions 2, 5 and 10): its views chosen at the top
+(*Main*, *Files*, *By type*, *Server*, *Groups & prefabs*), a field of search and the filters below
+it, then the tree.
+
+- **The main view**: the map; its zones, their subzones, as the chain of the areas; in each, *Terrain*
+  (its chunks), *Water* (its liquids by chunk), then the groups and prefab instances, the
+  buildings (each with its rooms, each room with the doodads it holds, and the doodads of its sets
+  no room holds under the building), the doodads, the server objects, each sorted by name. Beside
+  the map, *Live*: the players, read only, and the live creatures and game objects that no spawn
+  holds (summoned), read only too.
+- **The rows**: an icon of the kind, the name, the eye and the lock at the right; a dot of the colour
+  of a note (decision 20); the live sign. Selected rows in the colour of the selection; a selection
+  made elsewhere unfolds the path to the active entity and brings its row in sight.
+- **Only the rows in sight are drawn**: the tree is made by a job from the snapshot of the registry,
+  again when a piece changes, the places whose pieces changed alone, at most every 100 ms; each node
+  keeps the count of the rows unfolded under it, so that the row at a given line is found by going
+  down from the root, and folding a node changes the counts up its chain only. Nothing is made
+  again at each frame.
+- **Search and filters** (decision 10): by name, kind, model, component and zone, made by a job over
+  the indexes of the registry, the matches shown with their places.
+- **Double click or F** frames the entity (`viewport.frame` with its bounds, or those of the
+  selection); **drag and drop** into a group or a prefab instance.
+- **The other views**: *Files*: the tiles in scope, each with its chunks, its water, its doodads and
+  its buildings as its file lists them, an object listed by several tiles under each, marked;
+  *By type*: one flat list a kind; *Server*: the templates of creatures, then of game objects, each
+  with its spawns, a spawn of several templates (`id2`, `id3`) under its first, the others named by
+  the Inspector; *Groups & prefabs*: the groups and instances with their children, then the
+  prefabs of the project.
+
+**The Inspector** (`modules/UI/properties`, decisions 15 to 18): its header gives the name (edited
+there), the kind and the id, the place and the other zones (decision 3), the tiles and chunks that
+store the entity, the eye and the lock; for several, *N objects* and their kinds. Then each
+component, folded or not, with its menu (*Reset*, *Copy*, *Paste*, *Remove*, *Enable*); at the
+bottom *Add Component*, a search over the types that fit every entity selected (decision 17); at
+the top the lock of the Inspector (it keeps what it shows while the selection changes) and the raw
+mode. The editors of each kind are those of the property grid (8.7b), shared within the module,
+which draws `PropertyGrid` as before. A server component added to a doodad opens the offer of
+decision 21 instead. The extension point *Inspectors, per selection type* of section 3 takes this
+form: the components and their drawings.
+
+**The components built in this work:** *Transform* (every kind placed: a position, a rotation, a
+scale, as each kind keeps them: degrees about the axes of the file for doodads and buildings, a
+quaternion shown as angles for building doodads and game objects, a yaw for creatures; no scale for
+buildings, creatures and game objects), *Model* (a doodad's or a building's file, a building's doodad
+set and name set), *Chunk* (decision 22: textures and masks, zone and flags, water, vertex colours,
+shadow, sounds), *Materials* (decision 23), *Spawn* and *Template* of a creature and of a game object,
+*Live* (read only: its GUID, its current place, its movement), *Quests* (the quests a template gives
+and ends, read from the database, its list with a search drawn by its module), *Notes of the editor*
+(decision 20), *Group*, *Prefab instance* (its prefab, its overrides, *Apply*, *Revert*), and the raw
+parts. The other components of decision 20 size the contract: a list with references covers the
+gossip, the vendor's items, the trainer's spells, the loot, the waypoints and the scripts; the level
+of each (template or spawn) is in *Checked before proposing*.
+
+**The project** (decision 28, section 10). A service of the kernel, as section 5 foresaw:
+
+- *File > New project*, *Open project*, *Save project* (Ctrl+S), *Save project as*, the projects
+  opened last (in the user's settings); without one, an untitled project in memory, saved into a
+  folder chosen when first saved (the picker of Windows, as the client's folder is chosen).
+- **The folder**: `uniwow-project.json`, the project file; later `files\` (the files of the client
+  changed, by their path in the archives) and `sql\` (the changes of the database), before they are
+  exported (decision 28).
+- **The file**: JSON in UTF-8, readable and made to be compared: two spaces of indent, the keys in
+  order, the long lists one entry a line, sorted by id, so that two versions differ only where the
+  project did. `{"format": 1, "name": …, "sections": {"<module>": …}}`: a section a module, written
+  and read by its module alone (F3) through `Module::project_section` and `Module::open_project`,
+  the kernel writing the file whole, atomically (a temporary file, then a rename), as the settings.
+  The section of `scene`: the names given, the eyes and locks (by id, a branch by its area or group),
+  the groups, the prefabs, the instances and their overrides, the next ids of the project and the
+  unique ids given by map. The section of `notes`: the notes by entity.
+- A project changed and not saved is listed by the window of unsaved changes when the editor
+  closes, with the modules' own.
+- Modules of other languages keep their section through the commands `project.section` and
+  `project.set_section`, their own section only.
+
+**The world database** (decision 27):
+
+- **`libs/db`**, in the runtime: a client of MySQL on the crate `mysql` (28.0, MIT or Apache 2.0),
+  without its default features but `minimal-rust` (its compression by `flate2` on `miniz_oxide`,
+  already in the runtime), without TLS for a server on 127.0.0.1. Chosen because it is synchronous
+  (it runs in the jobs and threads of the kernel, with no runtime of its own), written in Rust (no C
+  library to install on Windows), and keeps up with the protocol and the ways of authentication of
+  MySQL 8. The runtime's fingerprint changes once; its symbols are counted (step 15.1).
+- **The module `world-db`**: the address, port, user and database (`127.0.0.1`, 3306, `acore`,
+  `acore_world` by default) in its category of *Settings*; at each start, once they are set, a window
+  of its own asks the password (masked, *Connect* or *Not now*), kept in memory for the session
+  only, to connect again, and never written: not in the settings, the project, the log, the notices,
+  nor a message of failure; a test reads them all after a session. The connection is opened in a
+  thread of its own and set read only for the session (`SET SESSION TRANSACTION READ ONLY`); the
+  service runs only one statement at a time beginning with `SELECT`, `SHOW`, `DESCRIBE` or
+  `EXPLAIN`. Its state (connected, refused and why, no server) is a dot in its panel, as the live
+  world's.
+- **The service `world-db`** (`uniwow_api::world_db`): a query and its parameters, the rows back,
+  from a job only (a query asked on the interface thread is said in the log in debug, as the
+  formats); the command `world-db.query` for every language.
+
+**The server objects and the live world merged** (decisions 6, 8):
+
+- The module `spawns` reads, when a map is shown, the rows of `creature` and `gameobject` of that
+  map by a job (the index on `map`), then the templates they name with their names in the client's
+  locale and their looks; it publishes them by tile, draws them through `models` by their display
+  (the markers of `live-world` for what has none), and serves *Spawn*, *Template* and *Quests*.
+- The registry merges a live entity naming a spawn into that spawn's row: one entity, the live
+  sign, the Inspector's *Live* component giving its place now. The spawn is drawn at its place of
+  the database by `spawns` while no live entity stands for it; while one does, the live one is
+  drawn and the spawn's place is shown, when selected, by its box. The gizmos and the Transform move
+  the spawn's place, not the live creature.
+- Without the database, the live creatures are listed by themselves, read only; without the
+  observer, the spawns alone.
+
+**Every language** (rule E6). Named commands (JSON) and events, as S1:
+
+| Command or event | Runs | What |
+|---|---|---|
+| `scene.entities`, `scene.entity`, `scene.children` | Calling thread | Entities by a filter, paged; one entity whole; the children of a node in a view |
+| `scene.selection`; `scene.select` | Calling; interface | The selection; set, add, toggle, remove, clear |
+| `scene.pick`; `viewport.ray` | Calling | The entities hit by a ray; the ray under a point of the view |
+| `scene.components`, `scene.read` | Calling | The components common to entities, their fields; their values |
+| `scene.write`, `scene.add_component`, `scene.remove_component`, `scene.reset`, `scene.enable` | Interface | Changes, routed to the providers, one undo entry |
+| `scene.create`, `scene.duplicate`, `scene.delete`, `scene.rename`, `scene.hide`, `scene.lock`, `scene.group`, `scene.prefab`, `scene.apply`, `scene.revert` | Interface | As named, each one undo entry |
+| `scene.declare`; `scene.publish`, `scene.withdraw` | Interface; calling | A module's kinds and component types; its entities |
+| `scene.changed`, `scene.selection_changed`, `scene.declared` | Events | Batched, once a frame at most |
+| `project.section`, `project.set_section`; `world-db.query` | Calling; interface; calling | A module's section of the project; a read of the database |
+
+- A module of another language declares its kinds and component types by `scene.declare` once it
+  starts, names the commands that read and write them, and publishes its entities by
+  `scene.publish`; its declarations go with it when it stops or fails.
+- **Objects**: `HierarchyView` (kind 30, drawn by `hierarchy`: the view shown, the filter, the
+  selection shared) and `InspectorView` (kind 31, drawn by `properties`: the Inspector, or locked
+  on given entities), with their properties and signals in `sdk/bindings.toml` and their classes in
+  `sdk/uniwow.hpp` and `sdk/UniWoW.cs`. `uniwow.h` keeps version 5: no function is added, the new
+  kinds, properties and signals being numbers of the bindings, as in step 8.5.
+- **Drawings of their own** of another language: the declaration names a layout of the module's
+  objects, which the kernel draws inside the Inspector (`Host::draw_object`, kernel only).
+- The table of capabilities of section 3 gains, step by step: the entities and their places, the
+  selection, picking and the selection shown in 3D, the components, the gizmos (*not planned* for
+  other languages: they are the user's), the Hierarchy and the Inspector as objects, the project,
+  the world database.
+
+**Additions to the core** (`core/api` and `core/kernel`; each step that touches `core/api` changes
+the runtime's fingerprint once):
+
+- `uniwow_api::scene` (ids, records, pieces, the selection, `Picker`, `ComponentDrawer`, the
+  declarations of kinds and components, the kinds of field), `uniwow_api::world_db`.
+- The groups of a gesture (`Context::begin_gesture`, `end_gesture`, the calls made with it) and
+  their tests against the model of S4, as the groups were stress-tested.
+- The project: `Module::project_section`, `Module::open_project`, the file, the menus, the unsaved
+  project; the settings per project of section 5 left for later.
+- The viewport's contract: `Tool`, `Viewport::add_tool`, `Viewport::last_view`, `Layer::draw_mask`,
+  `Viewport::set_outline` and the pass of the outline; `models::Instance::highlight`,
+  `Models::mark`, `Models::intersect`; `Formats::areas`, `Formats::wmo_areas`, and the raw fields
+  of placements and chunks.
+- The shell: a panel may ask to be the tab shown first in its area (`PanelSpec::first`), so that
+  the Inspector shows on the right before the nine panels already there, and the Hierarchy alone on
+  the left, at first start or once the layout is reset (decision 29); an existing layout takes the
+  Hierarchy as a returning panel's area is made again.
+- The kernel draws another module's interface object inside a panel (`Host::draw_object`), its
+  lock taken as for the module's own panels.
+
+**Where the work is done:**
+
+| Work | Thread | Lock |
+|---|---|---|
+| A provider's piece of entities made and published | The provider's job (a tile read) | The registry's, the time of a swap |
+| The indexes of the registry (places, chunks, keys, names) | A job of `scene`, again for the pieces changed | None: the pieces are shared |
+| A view's tree made, a search, the filter *on screen* | Jobs of `hierarchy` and `scene`, at most every 100 ms; on screen four times a second | None |
+| The rows of a view drawn, a fold | Interface: the rows in sight, the counts up one chain | The tree of the view, shared |
+| A click or a rectangle picked | A job (`Priority::FIRST`), the providers' `Picker` on it | Their snapshots, briefly |
+| The values of the selection read | The calling thread of the call (a Rust module), or a module's own thread | None on the interface thread |
+| A change typed or dragged | Interface: the gesture's calls; a change under way at each frame | The providers' own |
+| The gizmos and boxes painted, the tools' pointer | Interface, within the view's panel | None |
+| The highlight changed (`Models::mark`) | The provider's thread placing its instances | The arena of the instances |
+| The outline | Interface records the pass; the GPU draws it | — |
+| A query of the database | A job, or the connection's thread | The connection's |
+| The project written | A job, from the sections given on the interface thread | None |
+
+**Targets**, measured on the user's machine in Northrend at the distances by default and in
+Dalaran: 500,000 entities registered; a tile's piece of 3,576 doodads merged in under 5 ms by a
+job; a view's tree made again in under 100 ms; the Hierarchy and the Inspector under 0.5 ms of the
+interface thread a frame, flying or still, whatever the entities; a click answered within 2 frames;
+`+10` typed for 10,000 doodads selected, one undo entry, the change shown within 3 frames; the
+outline under 0.3 ms of the GPU for a view of 2560 × 1440 pixels; no frame of the interface thread
+past 33 ms, as milestone 9.
+
+**Set aside:**
+
+| Alternative | Why not |
+|---|---|
+| Picking by the GPU, an id written by every layer into a buffer of the frame, or in a pass on demand | Every pipeline of every layer would write an id (the terrain, the pool of `models` chosen by the GPU, the indirect draws of the buildings, the water); a target of whole numbers cannot be resolved from the 4 samples of the frame; it would serve the 3D view only, never `scene.pick` from another thread or language. Kept as the remedy should the triangles at rest prove too coarse (foliage keyed by alpha, creatures posed) |
+| The selection and the Inspector in the kernel, as section 5 first listed them | The core names no module's data (R1) and a module can be removed (R4): the scene is a module, its contract in `core/api` |
+| The Hierarchy on the object `TreeView` of 8.7 | Its items are given whole as JSON; 500,000 entities changing as the camera moves would be given again and again. `HierarchyView` is drawn by its module from the registry |
+| A trait of Rust for the writes, not commands | One path for every language (R9), and the commands give the groups of a gesture across modules; the reads of Rust modules stay on the calling thread |
+| The places from the module `terrain` (`terrain.area`) | The full tiles only, and the Hierarchy would need the terrain: the areas are read by `formats` |
+| A project of several files, one a module | The user asked for one file; one section a module keeps F3 |
+| `mysql_async`, `sqlx` | An asynchronous runtime is a second pool of threads, as the `rayon` refused in milestone 9 |
+| `diesel` | The C library of MySQL on every machine |
+| The protocol of MySQL written here | Its handshakes and the authentication of MySQL 8 to keep up with |
+| The selection in the history (Unity) | One history for every module: an undo stepping through choices before changes |
+
+**Not in this milestone**: writing anything (the export of the files and of the rows, a later
+work, which will also check the ids given); the tools of the terrain (decision 30); the components
+of decision 20 but *Quests* and the notes; prefabs within prefabs; the 3D view drawn by other
+languages (step 8.3); any command to the running server.
+
+#### Steps
+
+Each step is built, tested, reviewed and checked by the user before the next one, as in milestone
+9; each says what it adds to the table of capabilities.
+
+| Step | Content |
+|---|---|
+| 15.1 | Verified first, by probes not kept: the depth of the chains of `AreaTable.dbc`; the unique ids listed twice with other data, over the four continents; the memory the triangles at rest of the models and the trees of every group would take in Dalaran and Northrend; `mysql` in the runtime (its crates, the symbols, the fingerprint) and its connection to the user's MySQL (its version, its authentication without TLS); the rows of `creature` and `gameobject` of each continent and the time to read them; the hotkeys (*To decide*, point 1) |
+| 15.2 | The entities and the registry |
+| 15.3 | The selection, picking and the selection shown in 3D |
+| 15.4 | The Hierarchy, its main view |
+| 15.5 | The Inspector: Transform, raw data, several objects; the groups of a gesture |
+| 15.6 | The gizmos |
+| 15.7 | The project |
+| 15.8 | Create, duplicate, delete |
+| 15.9 | Groups and prefabs |
+| 15.10 | The views *Files* and *By type* |
+| 15.11 | The world database, the server objects, the live world merged, *Quests* (in three parts) |
+| 15.12 | Components of every language |
+| 15.13 | Materials and the Inspector of a chunk |
+| 15.14 | A doodad made a game object |
+
+**15.2, the entities and the registry.**
+
+- Content: `uniwow_api::scene`; the module `scene` (registry, pieces, places, names, scope,
+  `scene.changed`); `Formats::areas` and `wmo_areas`; the entities published by `terrain` (chunks of
+  the full tiles), `liquids`, `doodads`, `buildings` (buildings, rooms, building doodads),
+  `live-world` (live, players), `lighting` (lights, zones of light) and `weather`; the commands
+  `scene.entities`, `scene.entity`. No window yet: the Commands panel shows them.
+- Tests: the ids written and read back; a piece swapped while 8 threads read snapshots; the place by
+  the chunk under the origin, the other zones, *No area*; a unique id listed by three tiles once, one
+  listed twice with other data twice; the names; the scope; a provider failing taking its pieces;
+  one event a frame for a burst of tiles; the time to merge 3,576 doodads and to index 500,000.
+- The user checks: `scene.entities` around Goldshire lists the inn, its rooms named as the game
+  names them, its doodads, the trees of Elwynn by their model and unique id, the chunks with their
+  subzone; flown from Goldshire to Stormwind at the default distances, the interface as fluid as
+  before (the statistics of the view against the commit before).
+
+**15.3, the selection, picking and the selection shown in 3D.**
+
+- Content: the selection and its commands; the tools of the viewport and the tool *Selection* of
+  `scene-tools` (a click, Ctrl, Shift, the rectangle and its filter, the parent first, the locks,
+  the chunks locked by default, F); the `Picker` of each provider, `Models::intersect`,
+  `viewport.ray`, `scene.pick`; the three options of the highlight (`Models::mark`, the flag of the
+  buildings, `Layer::draw_mask` and the outline, the chunk framed); the smart selections.
+- Tests: rays against boxes, triangles, BSP trees and heights; the chain of a click and the second
+  click; the rectangle and its filter; a locked entity not picked; on the software adapter, the
+  outline of a model and of a building around their pixels, the tint, a chunk framed, a hidden
+  entity not drawn; picking 500,000 boxes within its target.
+- The user checks: a click on a tree, on the inn (the inn), again on a chair seen in it (the chair),
+  Ctrl and Shift; a rectangle over the fence of Brackwell, doodads only; the terrain not picked, then
+  unlocked, a chunk framed; the outline, the tint and the boxes alone and together, in Dalaran.
+
+**15.4, the Hierarchy, its main view.**
+
+- Content: `modules/UI/hierarchy`, its panel on the left; the main view (decision 2), *Live*;
+  only the rows in sight drawn; search and filters; eyes and locks; the rows in the selection, its
+  path unfolded; double click and F; renaming (kept in memory until 15.7); the layout by default
+  (`PanelSpec::first`).
+- Tests: the tree of a registry of 500,000 entities made by a job within its target; the row at a
+  line found by the counts, a fold changing one chain; a building's rooms and doodads under it, a
+  doodad of no room under the building; an entity once in its subzone; the search; an eye hiding a
+  branch in 3D; the selection followed both ways.
+- The user checks: Elwynn Forest, Goldshire, its inn, its rooms and chairs; Dalaran's building with
+  its 91 rooms; a search for `ElwynnTree`; the eye of a subzone; the interface fluid while flying with
+  the Hierarchy open over Northrend at 45 tiles.
+
+**15.5, the Inspector: Transform, raw data, several objects; the groups of a gesture.**
+
+- Content: the groups of a gesture in the kernel; the window *Inspector* in `properties`; its header;
+  *Transform* of doodads, buildings, building doodads (the warning of their file) and live
+  entities (read only); *Model*; the raw parts; several objects (`—`, a value for all, `+n`, `*n`);
+  the menu of a component, *Copy*, *Paste*; the lock; the changes kept in memory by `doodads` and
+  `buildings`; Pivot and Center, Local and World in the Inspector until the toolbar of 15.6.
+- Tests: a gesture across two modules one entry, undone and redone whole, a module failing in the
+  middle; the S4 stress tests with gestures; `+10` for 10,000 doodads one entry within its target; a
+  doodad moved shown there after its tile is left and read again; a field refused; the raw fields
+  against the bytes of a tile the test writes.
+- The user checks: a tree moved by its position typed, then Ctrl+Z; twenty fences `+2` in Z; a
+  building turned; the raw data of a doodad against what Noggit shows of it.
+
+**15.6, the gizmos.** The tool *Gizmos* of `scene-tools`, the toolbar of the view, W, E, R, Pivot
+and Center, Local and World, the snapping (Ctrl: the grid, the angles, the scale; *Ground*), the same
+writes as the Inspector. Tests: the handles hit on the screen; each gizmo's change in local and in
+world axes, about each pivot and about the middle; the snapping; one entry a drag. The user checks:
+a tree moved along X, along a plane, turned by 15 degrees, a group of fences moved on the ground
+along a slope, Ctrl+Z after each.
+
+**15.7, the project.** The service of the kernel, the menus, the file, the section of `scene` (the
+names, the eyes and locks), the unsaved project; `project.section` for every language. Tests: the
+file written and read back the same, its order stable, atomic; a section given back to its module
+only; a module absent keeping its section untouched in the file. The user checks: a project made in
+a folder, a tree renamed, a branch hidden, the editor closed and opened again on it; the file read in
+a text editor.
+
+**15.8, create, duplicate, delete.** The menu *Create* (group, doodad, building), the search of the
+files, Ctrl+D, Delete; the unique ids given; the changes kept in memory. Tests: the highest unique id
+of a map and those given, never twice across a project closed and opened; a duplicate's values; a
+delete undone. The user checks: an oak created by the inn, duplicated five times, one deleted, all
+undone.
+
+**15.9, groups and prefabs.** Groups (*Create > Group*, drag and drop, moved as one); prefabs made
+from a selection, instances placed, overrides, *Apply*, *Revert*, the prefab changed; the view
+*Groups & prefabs*. Tests: a group moving its children in one entry; an override kept when the prefab
+changes and the others following; *Apply* reaching the other instances; an instance made again from
+the project. The user checks: a camp of three tents and a fire made a prefab, placed three times,
+one instance changed, the prefab changed, *Apply*, *Revert*.
+
+**15.10, the views *Files* and *By type*.** Tests: an object listed by three tiles under each, marked;
+the lists by kind. The user checks: a tile of Elwynn and what it stores, a doodad by the border under
+both tiles.
+
+**15.11, the world database, the server objects, the live world merged, *Quests*.**
+
+- **15.11a**: `libs/db`, the module `world-db`, its window of the password, read only, the service and
+  the command. Tests against a MySQL started by the test where one is at hand (skipped otherwise, as
+  the client's files are), a fake server for the refusals; the password found nowhere after a
+  session. The user checks: the connection to his `acore_world`, a wrong password refused, *Not now*.
+- **15.11b**: the module `spawns`, *Spawn* and *Template*, the view *Server*, creating, duplicating
+  and deleting spawns in memory. The user checks: the guards of Stormwind at their places of the
+  database, under their template in *Server*, one moved and undone.
+- **15.11c**: the live entities merged with their spawns, *Live*; *Quests* read from the four tables
+  of relations, changed in memory, drawn by its module with a search (decision 18). The user checks:
+  a patrolling guard, one row with its live sign, its current place moving in the Inspector; the
+  quests of Marshal Dughan.
+
+**15.12, components of every language.** `scene.declare`, `scene.publish`, the reads and writes by
+the commands a module names; a drawing of its own as a layout of its objects; `HierarchyView`,
+`InspectorView`; the module `notes` (*Notes of the editor*, in Rust, never exported); a component of
+the sample C# module on the doodads, drawn by its fields and by a painting area of its own. Tests of
+the SDK: the C# component read, written as one undo entry, removed when the module stops. The user
+checks: a note on a tree, its colour in the Hierarchy; the C# component edited.
+
+**15.13, materials and the Inspector of a chunk.** *Materials* of models and buildings (textures and
+paths, their previews, how they are drawn, the variants: the textures of a creature's display, the
+doodad sets and name sets of a building), a texture dropped on another kept in memory and drawn;
+*Chunk* (the layers, their previews, alpha maps and order; the area, holes and flags; the water;
+vertex colours, shadow; the sound emitters, `MCSE`, which `formats` gains). Tests: each field against
+a tile and a building the tests write. The user checks: the layers of a chunk of Elwynn as Noggit
+shows them; the doodad set of an inn changed; a texture of a building replaced in memory.
+
+**15.14, a doodad made a game object** (decision 21): adding a server component to a doodad offers
+the change; accepted, one gesture: the doodad deleted, a template (`gameobject_template`, its
+`displayId`, type 2 when it gives quests, 5 otherwise, its `size` the doodad's scale) and a spawn
+(`gameobject`, the place, the quaternion and the yaw of the doodad) created in memory, and, when no
+row of `GameObjectDisplayInfo` names the model, a row prepared for the client's table and the
+server's copy. Tests: the transform kept to a hundredth of a yard and of a degree; a scaled doodad
+given a template of its size; the whole undone. The user checks: a lamp post of Goldshire made a game
+object giving a quest, then undone.
+
+#### Open technical questions
+
+Left to the steps, which answer them by measure or by reading:
+
+1. The picking by the triangles at rest: a tree's leaves keyed by alpha, a creature posed otherwise;
+   whether that is close enough, or the GPU's ids are needed (*Set aside*).
+2. The memory of the triangles kept for picking (15.1), and whether they are read again from the
+   archives on demand instead.
+3. The outline of the hidden parts: the depth of the frame is multisampled; a copy resolved, or the
+   whole outline without depth.
+4. The object dragged follows the gizmo a frame late (a change goes through a call served at the
+   next pass of the kernel); whether it shows at 60 frames a second.
+5. The chains of `AreaTable.dbc` deeper than a zone and a subzone, and the areas of chunks that
+   name another map's area.
+6. The unique ids listed twice with other data: kept as two entities by the tile listing them; what
+   the writing will do with them.
+7. The highest unique id of a map read over every tile, and those another tool (Noggit) gives
+   meanwhile; checked again before writing.
+8. The spawns of several templates (`id2`, `id3`), and those of a pool or a game event, not always
+   in the world: how the views and the 3D view tell them.
+9. The names of the live entities from the observer against the templates' in the client's locale.
+10. A building's doodad changed: the file is shared by every placement; whether a copy of the file
+    for one placement is offered when the writing comes.
+11. A texture replaced belongs to the model's or building's file, every placement of it; the same
+    question.
+12. The scale of a building: the 3.3.5a client has none; whether the modern tiles of WarcraftXL read
+    the flag 0x4 (`modfUseScale`) is to read in its sources.
+13. The cost of `Models::mark` when 10,000 doodads are selected at once, over many owners.
+14. The trees of the views made again while flying fast at 90 tiles, each tile changing its piece;
+    the 100 ms between two trees, or more.
+15. The lock of another module's objects drawn inside the Inspector, against the rule that no lock is
+    held while the kernel calls a module.
+16. The water: whether its surface is picked (locked by default here, as the terrain) and how a
+    liquid of several chunks is one entity.
+
+#### Risks
+
+- **The groups of a gesture** touch the history and the groups of S4, the most tested part of the
+  kernel: built first in 15.5, with stress tests of random interleavings, seeded.
+- **The interface thread** in flight is already near its frame (*The frames measured while the
+  camera moves, after 9.6f2*): any work by entity on it is a regression; the targets above are
+  measured at each step against the commit before.
+- **The runtime** grows: `libs/db` and its crates (the symbols counted by `cargo xtask check`, 50,000
+  at most), and the fingerprint changing at each step that touches `core/api`: every module rebuilt,
+  as expected.
+- **The changes in memory** are lost at close (decision 26): an afternoon's work in groups, prefabs
+  and moves gone with a crash or a *Don't save* (*To decide*, point 2).
+- **The prefabs linked** are the largest part of this work (overrides, apply, revert, instances made
+  again); nested prefabs are left out for that reason.
+- **The database**: the authentication of the user's MySQL without TLS (15.1); a query that is slow
+  on a large table holds a job, never the interface; a session read only also by its user's rights,
+  which the user can make so (a user with `SELECT` only).
+
+#### To decide
+
+1. **E for Rotate and E to fly up.** Proposed, as Unity: the camera flies with its keys only while the
+   right button is held, and W, E and R choose the gizmos otherwise; or the gizmos on other keys by
+   default; or the flying keys moved. Proposed besides: *Edit > Hotkey* says two hotkeys of
+   different modules bound to the same keys when they act over the same panel.
+2. **The changes in memory at close.** As decided, lost (the window of unsaved changes says so);
+   or kept in the project as lists of changes, readable, a section a module (the entities created,
+   moved, changed, deleted, with their values), read again when the project opens: still nothing
+   written to the game's files or the database. Proposed: kept in the project.
+3. **A lock and the Hierarchy**: a locked entity not picked in the 3D view but chosen in the Hierarchy,
+   as Unity (proposed), or chosen nowhere.
+4. **The summoned live creatures and game objects** (no spawn): proposed in *Live* with the players,
+   read only.
+5. **The water locked by default**, as the terrain (proposed), so that a click over a lake picks what
+   is under it.
+6. **The relative values**: `+n`, `-=n`, `*n`, `/n` change, `-n` is a value (proposed), or as Unity
+   `+=n`, `-=n`, `*=n`, `/=n` only.
+7. **The component *Quests* built in 15.11c**, read and changed in memory, as the first drawing of a
+   module's own and the server component that 15.14 needs (proposed); the other components of
+   decision 20 in later works.
+8. **The scope by default**: 2 tiles listed, whatever the modules hold at their distances (proposed),
+   or all they hold.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
@@ -7578,8 +8537,14 @@ the frames; each change one undo entry. Built on the engine and widgets of miles
 ## 10. Open questions
 
 - Project model: what a project contains, where it is stored, how it maps to a WoW-mods module.
+  Settled in part by the user for milestone 15 (decision 28): a folder the user chooses, holding a
+  project file of readable text (groups, prefabs, names, the eyes and locks, notes), later also the
+  files changed before they are exported; its form is proposed there (*The project*). Still open:
+  how a project maps to a WoW-mods module, and its settings of its own.
 - Installations targeted: client with WXL, server, database connection. Milestone 9 settles part of it:
-  the client's folder, and the observer on the same machine (address, port, token).
+  the client's folder, and the observer on the same machine (address, port, token); milestone 15
+  (decision 27) the world database: its address and user in the settings, its password asked at each
+  start and never stored.
 - The licence of UniWoW, none today. warcraft-rs and wow.export, whose code `assets` copies or
   translates, are MIT or Apache; WarcraftXL is GPL-3 and nothing of its code is copied.
 - Order of the features after milestone 1.
