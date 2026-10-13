@@ -27,12 +27,14 @@ use light::{COLOURS, DAY, FOLLOWS_THE_HOUR, Immersion, Mixed, NUMBERS, Tables, W
 /// The settings: the hour, in minutes from midnight; how many minutes of the game pass in a second;
 /// whether the zones of light and the local lights are mixed in; whether the fog is the game's or
 /// the editor's; the far clip of the game, in yards, which bounds its fog (its `farclip`, within
-/// the bounds Wow.exe gives it).
+/// the bounds Wow.exe gives it); whether the hour is the server's, through the live world, when it
+/// is known.
 const HOUR: &str = "hour";
 const SPEED: &str = "speed";
 const LOCAL: &str = "local_lights";
 const FOG: &str = "game_fog";
 const FAR: &str = "far_clip";
+const SERVER_HOUR: &str = "server_hour";
 
 /// The id of the module, as its manifest gives it: the owner of the light it gives the view.
 const OWNER: &str = "lighting";
@@ -80,7 +82,30 @@ fn settings() -> Vec<SettingSpec> {
         ),
         SettingSpec::integer(FOG, "Fog of the game (1) or of the editor (0)", [0, 1], 1),
         SettingSpec::integer(FAR, "Far clip of the game, in yards (its farclip)", [184, 2000], 1277),
+        SettingSpec::integer(
+            SERVER_HOUR,
+            "Hour of the server through the live world when it is known (1), or of the settings (0)",
+            [0, 1],
+            0,
+        ),
     ]
+}
+
+/// The hour of the server, in half-minutes, as the live world gives it (`live-world.time`), or why
+/// it is not known.
+fn server_time(ctx: &Context) -> Result<f32, String> {
+    let answer = ctx
+        .editor()
+        .call("live-world.time", json!({}))
+        .map_err(|why| format!("no live world ({why})"))?;
+    match answer.get("time").and_then(|time| time.as_u64()) {
+        Some(seconds) => Ok((seconds as f32 / 30.0) % DAY),
+        None => Err(answer
+            .get("reason")
+            .and_then(|reason| reason.as_str())
+            .unwrap_or("not known")
+            .to_owned()),
+    }
 }
 
 /// The hour, in minutes from midnight, `from` turned for `seconds` at `speed` minutes of the game in
@@ -149,6 +174,8 @@ struct Shown {
     time: f32,
     liquid: Option<u16>,
     immersion: Immersion,
+    /// The hour of the server, when asked for: none when it was taken, why not otherwise.
+    server_hour: Option<Result<(), String>>,
     building_fog: Option<f32>,
     light: Option<Mixed>,
     given: Option<MapLight>,
@@ -279,14 +306,19 @@ impl LightingModule {
             }
         };
         let specs = settings();
-        let [hour, speed, local, fog, far] = [HOUR, SPEED, LOCAL, FOG, FAR].map(|key| {
+        let [hour, speed, local, fog, far, server] = [HOUR, SPEED, LOCAL, FOG, FAR, SERVER_HOUR].map(|key| {
             specs
                 .iter()
                 .find(|spec| spec.key == key)
                 .expect("declared")
                 .value(ctx.setting(key).as_ref())
         });
-        let time = self.time(hour, speed);
+        // The hour of the server when asked for and known, that of the settings otherwise.
+        let server_hour = (server == 1).then(|| server_time(ctx));
+        let time = match &server_hour {
+            Some(Ok(time)) => *time,
+            _ => self.time(hour, speed),
+        };
         let map = ctx
             .editor()
             .call("terrain.map", json!({}))
@@ -373,6 +405,7 @@ impl LightingModule {
             time,
             liquid,
             immersion,
+            server_hour: server_hour.map(|hour| hour.map(|_| ())),
             building_fog,
             light,
             given,
@@ -492,6 +525,18 @@ impl Module for LightingModule {
             (None, _) => {
                 ui.label(format!("Lights mixed, by their weights: {}", used.join(", ")));
             }
+        }
+        match &shown.server_hour {
+            Some(Ok(())) => {
+                ui.label("The hour of the server, through the live world.");
+            }
+            Some(Err(why)) => {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!("The hour of the server is not known ({why}): that of the settings."),
+                );
+            }
+            None => {}
         }
         if let Some(weight) = shown.building_fog {
             ui.label(format!(

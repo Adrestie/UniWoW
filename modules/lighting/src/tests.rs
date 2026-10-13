@@ -915,7 +915,8 @@ fn the_light_is_a_category_of_the_settings_noon_by_default_still() {
             ("speed", [0, 1440], 0),
             ("local_lights", [0, 1], 1),
             ("game_fog", [0, 1], 1),
-            ("far_clip", [184, 2000], 1277)
+            ("far_clip", [184, 2000], 1277),
+            ("server_hour", [0, 1], 0),
         ]
     );
 }
@@ -1052,6 +1053,8 @@ impl viewport::Viewport for View {
 struct Shown {
     map: Mutex<Value>,
     camera: Mutex<Option<[f64; 3]>>,
+    /// What `live-world.time` answers, none without a live world.
+    server: Mutex<Option<Value>>,
 }
 
 impl EditorBackend for Shown {
@@ -1061,6 +1064,7 @@ impl EditorBackend for Shown {
     fn call(&self, _caller: &str, name: &str, _arguments: Value) -> Result<Value, String> {
         match name {
             "terrain.map" => Ok(self.map.lock().unwrap().clone()),
+            "live-world.time" => self.server.lock().unwrap().clone().ok_or_else(|| "unknown".to_owned()),
             _ => Err("unknown".to_owned()),
         }
     }
@@ -1227,6 +1231,7 @@ fn host(files: Arc<Files>) -> Host {
         editor: Arc::new(Shown {
             map: Mutex::new(Value::Null),
             camera: Mutex::new(None),
+            server: Mutex::new(None),
         }),
     }
 }
@@ -1658,6 +1663,55 @@ fn the_models_of_the_sky_are_placed_at_the_eye_the_building_s_over_those_of_the_
     assert_eq!(host.sky.placed().len(), 2);
     module.shutdown();
     assert!(!host.sky.placed.lock().unwrap().contains_key("lighting"));
+}
+
+#[test]
+fn the_hour_of_the_server_is_taken_through_the_live_world_when_asked_for_and_known() {
+    let files = Arc::new(Files(Mutex::new(VfsState::Ready { archives: 1, files: 1 })));
+    let mut host = host(files);
+    let mut module = crate::LightingModule {
+        client: Some((1, 1)),
+        tables: Some(Ok(Arc::new(tables()))),
+        ..Default::default()
+    };
+    let egui = egui::Context::default();
+    *host.editor.map.lock().unwrap() = json!({ "id": 0, "name": "Azeroth" });
+    *host.editor.camera.lock().unwrap() = Some([-5_000.0, 0.0, 600.0]);
+    // Not asked for: the hour of the settings, noon.
+    *host.editor.server.lock().unwrap() = Some(json!({ "known": true, "time": 6 * 3600 + 15 * 60 }));
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    let shown = module.shown.as_ref().unwrap();
+    assert_eq!((shown.time, &shown.server_hour), (1440.0, &None));
+    // Asked for and known: 6:15, in half-minutes, the sun of that hour.
+    host.settings.insert("server_hour".to_owned(), json!(1));
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    let shown = module.shown.as_ref().unwrap();
+    assert_eq!((shown.time, &shown.server_hour), (750.0, &Some(Ok(()))));
+    assert_eq!(host.seen.0.lock().unwrap().unwrap().sun.direction, sun_direction(750.0));
+    assert!(
+        panel(&mut module, &mut host)
+            .iter()
+            .any(|text| text == "The hour of the server, through the live world.")
+    );
+    // Unknown, or no live world: the hour of the settings, why said.
+    *host.editor.server.lock().unwrap() = Some(json!({
+        "known": false, "time": null, "reason": "no connection to the observer of the server",
+    }));
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    let shown = module.shown.as_ref().unwrap();
+    assert_eq!(shown.time, 1440.0);
+    assert!(
+        panel(&mut module, &mut host).contains(
+            &"The hour of the server is not known (no connection to the observer of the server): that of the settings."
+                .to_owned()
+        )
+    );
+    *host.editor.server.lock().unwrap() = None;
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert_eq!(
+        module.shown.as_ref().unwrap().server_hour,
+        Some(Err("no live world (unknown)".to_owned()))
+    );
 }
 
 /// The texts the panel of `module` draws.

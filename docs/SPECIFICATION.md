@@ -6787,9 +6787,9 @@ made, and what the captures of the game are to tell listed at the end.
   without their vertex colours, the client's not being found in any public source; carried in the
   three high bytes of the slot of each vertex (`liquids::Placed::room`, `mesh::in_room`), the size
   of a vertex unchanged.
-- **Tested** (the GPU tests on the software adapter, run by the CI of Windows; skipped here, on
-  Linux): the glow of the four keys at their hours, between them, past midnight and before it, given
-  with the light of the hour; the view carrying it, 0 without a light; a room lit by its ambient
+- **Tested** (the GPU tests on the software adapter, llvmpipe here, that of Windows in the CI): the
+  glow of the four keys at their hours, between them, past midnight and before it, given with the
+  light of the hour; the view carrying it, 0 without a light; a room lit by its ambient
   colour and its vertex colours turned towards the light inside (a wall 0.96, a floor 1.08 times),
   the sun no part of it; a group outside and a street lit as outside lit by the view, their vertex
   colours added to its ambient light, without colours the view alone; the outer wall of a room and a
@@ -6828,6 +6828,97 @@ made, and what the captures of the game are to tell listed at the end.
      keep, the shiny floors of Dalaran) at 12:00 and 00:00.
   6. The canals of Stormwind, the eye under their surface: the light and fog under the water; the
      fountain of Dalaran; a pool in a room (Dalaran's sewers) at 12:00: its colour against the game's.
+
+#### Step 9.7e, as built: the fogs of the buildings, the models of the sky, the hour of the server
+
+Built as 9.7d was, without captures of the game and the user away: what the client's code would
+decide is taken from the public implementations, *WebWowViewerCpp* and *Noggit Red*, read for their
+facts only and never copied, each choice said where it is made, and what the captures are to tell
+listed at the end.
+
+- **The fogs of the buildings** (`MFOG`, `light::with_building_fog`). In a room (a group inside, not
+  lit as outside), the fog of the building at the eye, mixed by `buildings` as 9.7d left it (as
+  *WebWowViewerCpp* mixes the fogs a group names, `checkFog`: the first fog of the building, then
+  those of the group, each whole within its first radius and nothing at its second, the farthest
+  first, or as a mean where the first fog says 0x1000; none for a building of one fog), weighs over
+  the fog of the light by how far the eye is from the portals of its group, whole 25 yards in, as
+  *WebWowViewerCpp* mixes it into that of the lights (`blendWmoFogIntoFogResult`, the distance to
+  the exit times 0.04): its colour mixed with the light's in gamma, then made linear; the fog of
+  the game, when it is drawn, prepared from the end and the start of the building's as the fog of a
+  light is (`prepared_fog`: 10 yards at least, curved to the far clip from Outland on, twice as
+  steep there in a liquid), its start, end and rate mixed by the same weight; with the fog of the
+  editor, the colour alone. Under the water of the room, its fog under the water; in a liquid of a
+  light of its own (the magma, the slime), the light of the liquid alone, as *WebWowViewerCpp* leaves
+  the fog of the building out there. The sky is left as it is. `lighting` says the weight in its
+  panel. In a street lit as outside or a group outside, the light's alone.
+- **The models of the sky**. The models of `LightSkybox.dbc` the params of the lights name for the
+  slot the eye takes (`LightParamsRecord::skybox`), read with the tables (said in the panel when they
+  cannot be, the light read without them): collected in the order the lights are mixed, by their
+  weights, as *WebWowViewerCpp* collects them (`SkyBoxCollector::addSkyBox`): a model given again
+  takes the greater of its two alphas, every other is faded by what that one weighs, and a light
+  without one changes nothing; the faintest drawn first. Then that of the building (`MOSB`,
+  `Wmo::skybox`) when the group inside the eye is in shows it (its flag 0x40000), whole, over them,
+  as *WebWowViewerCpp* adds it to the models of the sky (*Noggit Red* draws it in place of the sky).
+  None in a liquid, the client drawing no sky then. A model whose flag 0x1 says it follows the hour
+  holds its first animation at the share of the day (the hour in half-minutes over 2,880, as
+  *WebWowViewerCpp* overrides it, `setOverrideAnimationPerc`; `Motion::Share`); the others play it at
+  their pace, with their global sequences. `lighting` places them through `models` at the eye at
+  each frame (the owner `lighting`, taken back once there are none, cleared when it stops) and names
+  them in its panel, with the reason when `models` refuses one.
+- **How `models` draws them**: a look of `Geosets::Sky` (all its submeshes) is made with buffers and
+  textures of its own, never in the pool, its batches drawn by pipelines of the sky (`State::sky`,
+  `vs_sky`, `fs_sky`): around the eye, the translation of its instance replaced by the eye, turned
+  and scaled by the rest of its transform (scale 1, as the client places a model of the sky on the
+  camera, `M2Object::update`); at infinity (reverse Z: depth 0), only where the depth is still that
+  of the clearing, writing none, so behind everything; its batches in their order, opaque or blended;
+  never fogged, nor cut by the end of the fog of the game (it stands at infinity; whether the
+  client fogs it is to check); lit as its materials say by the light of the view; posed by its bones
+  and its materials that move as the looks of their own are, with the pool. A layer of its own
+  (`sky`) draws them in a new stage of the view, `Stage::Sky`, after the sky of the ground and
+  before every blended batch of the scene, at the start of the first blended phase. The alpha of a
+  model fades its blended batches, its opaque ones drawn whole while it is above 0, as for any
+  instance, the strongest drawn last: whether the client fades those too is to check. The stars, the
+  sun, the moons and the clouds are still not drawn (9.7), so the flag 0x2 of a model (the stars drawn
+  over it) changes nothing.
+- **The hour of the server** (the setting `server_hour` of *Light*, off by default): the observer now
+  sends the hour of the clock of the server in its local time, what the client is given at login and
+  counts on from (`SMSG_LOGIN_SETTIMESPEED`, the weather below), and the live world gives it
+  (`live-world.time`), counted on from the last received; `lighting` takes it in place of the hour
+  of the settings while it is known, and says so in its panel, or why it is not (no live world, no
+  connection, an observer not built again).
+- **The rest of point 6**: the zones of light of Northrend are read from Wow.exe since 9.7a3;
+  nothing else is left of it.
+- **Tested** (the GPU tests on the software adapter, llvmpipe here): the fog of a building mixed by
+  its weight, its colour in gamma, its start, end and rate, none at a weight of 0 or under, curved
+  from Outland on and twice as steep in a liquid there, the fog of the editor kept none; in a room
+  12.5 yards from its portals, half of it, said in the panel; whole deep in; under the water, its fog
+  under the water over that of the lights there; nothing in a liquid lit by its own light, in a
+  street lit as outside or in a room without fog; the models of the sky of the lights collected by
+  their weights, the global light's alone, that of a local light the eye is wholly in, half of each
+  halfway, one given again by a nearer light, a light without one, none in a liquid, none without
+  the table; placed at the eye as looks of the sky, the global light's at noon halfway through its
+  animation, the building's over it at its pace, a refusal said, none under the water, all cleared
+  when the module stops; the table of the models of the sky not read said in the panel; a look of
+  the sky loaded of its own with its pipelines of the sky whether the pool is there or not; drawn by
+  its layer alone around the eye wherever its instance stands, behind a model before it, never
+  fogged nor cut by the end of the fog, nothing once taken away, with the pool and without; the
+  state of a material in a model of the sky; a motion held at a share of its sequence, there however
+  long passes, within the sequence, without blending; the hour of the server taken when asked for and
+  known, that of the settings otherwise, the reason said.
+- **To check by the user**, the editor at the same place and hour as the game (the setting *Hour*,
+  the speed 0, or the hour of the server once AzerothCore is built with the observer of this step):
+  1. The fogs of the buildings: a cave or a hall whose fog is its own, entered from outside (the
+     panel of *Lighting* says when the fog of a building weighs and how much): the colour and the
+     distance of the fog inside, against the game's; how the fog changes over the first 25 yards
+     past the door.
+  2. The models of the sky: Netherstorm and Shadowmoon Valley (Outland) and the Scarlet Enclave, the
+     land of the death knights (the map 609), at 12:00 and 00:00, if their lights name models of the
+     sky as the panel lists them: the sky against the game's, how it turns or changes over the hour;
+     at the edge of a local light naming another model, the passage from one to the other.
+  3. A building showing its own sky (the panel says "the building's"): from inside the group, the sky
+     against the game's.
+  4. The hour of the server: with a character logged in at the same moment, the setting on, the
+     light of the editor and the game's at once.
 
 #### Tests
 
