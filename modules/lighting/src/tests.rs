@@ -2128,3 +2128,38 @@ fn the_sun_the_moon_and_their_glares_are_given_to_the_layers_of_the_sky_with_the
     module.shutdown();
     assert_eq!(crate::sky::lock(&module.drawn).heavens, None);
 }
+
+#[test]
+fn the_heavens_are_taken_from_the_layers_whenever_there_is_no_light() {
+    let files = Arc::new(Files(Mutex::new(VfsState::Ready { archives: 1, files: 1 })));
+    let mut host = host(files.clone());
+    let tables = || Some(Ok(Arc::new(skied_with(0x2).with_liquids(&liquids()))));
+    let mut module = crate::LightingModule {
+        client: Some((1, 1)),
+        tables: tables(),
+        layered: true,
+        ..Default::default()
+    };
+    let egui = egui::Context::default();
+    let azeroth = json!({ "id": 0, "name": "Azeroth" });
+    *host.editor.map.lock().unwrap() = azeroth.clone();
+    *host.editor.camera.lock().unwrap() = Some([-5_000.0, 0.0, 600.0]);
+    let drawn = |module: &mut crate::LightingModule, host: &mut Host| {
+        module.windows_ui(&egui, &mut Context::new(host, "lighting"));
+        crate::sky::lock(&module.drawn).heavens.is_some()
+    };
+    assert!(drawn(&mut module, &mut host));
+    // No map: none, then again with it.
+    *host.editor.map.lock().unwrap() = Value::Null;
+    assert!(!drawn(&mut module, &mut host), "without a map");
+    *host.editor.map.lock().unwrap() = azeroth;
+    assert!(drawn(&mut module, &mut host));
+    // The tables failed: none.
+    module.tables = Some(Err("unread".to_owned()));
+    assert!(!drawn(&mut module, &mut host), "without the tables");
+    module.tables = tables();
+    assert!(drawn(&mut module, &mut host));
+    // The client folder changed to one without a client: none.
+    *files.0.lock().unwrap() = VfsState::NoClient("none".to_owned());
+    assert!(!drawn(&mut module, &mut host), "without a client");
+}

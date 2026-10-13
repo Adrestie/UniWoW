@@ -607,7 +607,7 @@ fn the_sun_is_drawn_where_it_stands_tinted_by_its_colour_over_the_sky_only() {
 }
 
 #[test]
-fn a_body_is_clipped_under_the_horizon_and_faded_just_over_it() {
+fn a_body_is_clipped_under_the_horizon_and_faded_from_it_as_the_corners_of_its_quad() {
     let Some(gpu) = device() else {
         eprintln!("skipped: no software adapter");
         return;
@@ -615,22 +615,78 @@ fn a_body_is_clipped_under_the_horizon_and_faded_just_over_it() {
     let drawn = Arc::new(Mutex::new(Drawn::default()));
     let (mut layer, _, _) = layers(&gpu, &drawn);
     sky::lock(&drawn).images = Some((1, images(&gpu)));
-    let view = view_towards(Vec3::X, 0.0);
-    // The sun on the horizon, ahead: its upper half drawn, faded over the first 1.9°.
-    sky::lock(&drawn).heavens = Some(heavens([1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]));
-    let pixels = render(&gpu, &mut layer, &view, 0.0);
-    assert_eq!(
-        pixel(&pixels, SIZE / 2, SIZE / 2 + 4),
-        [0, 0, 0, 255],
-        "under the horizon"
-    );
-    let just_over = pixel(&pixels, SIZE / 2, SIZE / 2 - 1);
-    let well_over = pixel(&pixels, SIZE / 2, SIZE / 2 - 6);
-    assert!(
-        just_over[0] > 0 && just_over[0] < well_over[0],
-        "{just_over:?} {well_over:?}"
-    );
-    assert!(near(well_over[0], 255, 2), "{well_over:?}");
+    let gamma = |linear: f32| {
+        if linear <= 0.003_130_8 {
+            linear * 12.92
+        } else {
+            1.055 * linear.powf(1.0 / 2.4) - 0.055
+        }
+    };
+    // The alpha of a corner of the quad `height` yards over the eye: 2.5 times its height within
+    // the 0.4 yard over the horizon, that of the body above.
+    let corner = |height: f32, alpha: f32| {
+        if 2.5 * height < 1.0 {
+            (2.5 * height).clamp(0.0, 1.0)
+        } else {
+            alpha
+        }
+    };
+    // The sun on the horizon, its lower half under it, cut there, its corners 2 yards up of its own
+    // alpha, whole then left 0.4 by a storm: from none at the horizon to its own at the top. Then
+    // its quad 0.2 yard over the horizon, its lower corners 0.5 by the ramp, its upper ones 0.4 under
+    // the storm: from the one to the other, no step where the ramp ends, 0.4 yard up. Then the same
+    // seen 35° up, the quad facing the camera, its corners 1.64 yards from its middle in height: all
+    // over the ramp. Then the sun on the horizon seen 25° up, its top corners 1.81 yards up.
+    let ahead = Vec3::X;
+    let raised = Vec3::new(1.0, 0.0, 35f32.to_radians().tan());
+    let less = Vec3::new(1.0, 0.0, 25f32.to_radians().tan());
+    for (looking, height, alpha) in [
+        (ahead, 0.0, 1.0),
+        (ahead, 0.0, 0.4),
+        (ahead, 2.2, 0.4),
+        (raised, 2.2, 0.4),
+        (less, 0.0, 1.0),
+    ] {
+        let view = view_towards(looking, 0.0);
+        let rise = height / (144.0f32 - height * height).sqrt();
+        let mut given = heavens([1.0, 0.0, rise], [-1.0, 0.0, 0.0]);
+        given.sun.alpha = alpha;
+        sky::lock(&drawn).heavens = Some(given);
+        let pixels = render(&gpu, &mut layer, &view, 0.0);
+        if looking == ahead {
+            assert_eq!(
+                pixel(&pixels, SIZE / 2, SIZE / 2 + 4),
+                [0, 0, 0, 255],
+                "under the horizon"
+            );
+        }
+        let centre = Vec3::new(1.0, 0.0, rise).normalize() * 12.0;
+        let to_world = view.view.inverse();
+        let forward = to_world.transform_vector3(-Vec3::Z);
+        let up = to_world.transform_vector3(Vec3::Y);
+        let (lowest, highest) = ((centre.z - 2.0 * up.z).max(0.0), centre.z + 2.0 * up.z);
+        let mut tested = 0;
+        for row in 0..SIZE {
+            // Where the middle of the row meets the plane of the quad.
+            let across = 1.0 / SIZE as f32;
+            let down = 1.0 - (row as f32 + 0.5) * 2.0 / SIZE as f32;
+            let towards = to_world.transform_vector3(Vec3::new(across, down, -30f32.to_radians().tan().recip()));
+            let point = towards * (centre.dot(forward) / towards.dot(forward));
+            if (point - centre).dot(up).abs() > 1.9 || point.z < lowest + 0.05 || point.z > highest - 0.1 {
+                continue;
+            }
+            let share = (point.z - lowest) / (highest - lowest);
+            let seen = corner(lowest, alpha) + (corner(highest, alpha) - corner(lowest, alpha)) * share;
+            let wanted = (gamma(seen) * 255.0).round() as i32;
+            let red = pixel(&pixels, SIZE / 2, row)[0];
+            assert!(
+                near(red, wanted, 2),
+                "{height} yards up, alpha {alpha}, row {row}: {red} against {wanted}"
+            );
+            tested += 1;
+        }
+        assert!(tested >= 8, "{tested}");
+    }
 }
 
 #[test]

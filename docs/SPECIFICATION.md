@@ -7514,8 +7514,11 @@ clients).
     sun; each a quad facing the eye 12 yards from it (`[0x80c4e8]`), of side 1 for 4.77° of the
     view; the sun's twice as large at 6 h and 21 h as from 6 h 45 to 20 h 15 (`0xce8cac`), the
     moon's 1.75 times a curve from 1 at 1 h to 1.5 at 4 h and 22 h (`0xce8c8c`); blended, tinted by
-    the band 9 of the light, clipped at the horizon and faded over the 1.9° above it, its own alpha
-    above (`0x6d1960`). In a 12340 too, the band 9 colours the sun and the moon alone (`0x7F36F6`,
+    the band 9 of the light, clipped at the horizon (`0x6d1960`): each corner of its quad of an
+    alpha 2.5 times its height in yards within the 0.4 yard over the horizon (1.9°), of the body's
+    own alpha above, the horizon cutting the quad with corners of none, the alphas interpolated over
+    the quad (*benilla*'s reading, `0x6d1ac5`), so that under a storm the corners in that band keep
+    their ramp. In a 12340 too, the band 9 colours the sun and the moon alone (`0x7F36F6`,
     *coa-vfog*). A third body, `Moon02.blp`, is drawn black, its colour written by nothing; a 12340
     draws a single moon (*coa-vfog*: the `Extensions.dll` of a custom server draws a second).
     WebWowViewerCpp's tables, of later clients, differ (the sun setting at 19 h, the moon rising at
@@ -7595,9 +7598,10 @@ clients).
     each glare goes towards, and the images not read. The params of storm now weigh `min(1, 4 d)`,
     where the weather of 9.7 mixed them by the intensity itself; the panel says their weight.
 - **Choices of the editor**: the tables of 1.12.1 for 3.3.5a, the client's own not read; the quads
-  facing the camera, as WebWowViewerCpp and *benilla* draw them; the fade at the horizon by the
-  height of each pixel, the client's by that of each vertex; the bodies and the clouds mixed in
-  gamma among themselves but over what is drawn in the linear space of the view, the glare added in
+  facing the camera, as WebWowViewerCpp and *benilla* draw them; the alphas of the corners at the
+  horizon interpolated by the height of each point seen between the lowest and the highest, as
+  *benilla* does, the client's over its two triangles; the bodies and the clouds mixed in gamma
+  among themselves but over what is drawn in the linear space of the view, the glare added in
   linear, the client adding bytes in gamma; the sun, the moon and the clouds drawn over the models
   of the sky that let them be (the client draws them under), faded by what those hiding them leave
   rather than drawn under them as they fade in; the glare hidden with them, which *benilla* leaves
@@ -7628,26 +7632,32 @@ clients).
   after four; the colour of a covered texel by its thinness, its glow nearer the body, none without
   its envelope, a texel not covered of no alpha; the cover towards a direction. Drawn: the sun where
   it stands, tinted, 18.9° wide, not where something is drawn, nor without its image, half over half
-  the sky, nothing over none or without heavens; clipped under the horizon and faded just over it;
-  the moon over the sun, the clouds over both mixed in gamma, alone over the black; the glare's
-  envelope rising by 0.4 in a tenth of a second, to a half with half the quad in sight, drawn half
-  as strong, falling at its pace, none looking away, whole again, added over the sky in the colour
-  of the sun times its image, not over what is drawn, falling without heavens, a body ahead under
-  the horizon not in sight; its width and alpha as the view turns onto its body. The module: the
-  stars first at midnight, by bytes at 3 h 45, under a model of the sky letting them be drawn, none
-  under one hiding them, by day or under the water; the heavens given to the layers only once they
-  are added, the sun and the moon of the hour in the colour of the band 9, the glares, the clouds
-  made, said in the panel; no glare in a room, again in a street open to the sky, the bodies faded
-  under a storm; none under a model of the sky hiding them nor under the water; nothing once
-  stopped; the params of storm four times the intensity of the weather, whole at a half. 39 changes
-  made on purpose: 37 caught at once, the two others once the glare was drawn at half its envelope
-  and a body ahead of the eye tested under the horizon.
+  the sky, nothing over none or without heavens; clipped under the horizon and faded from it by the
+  corners of its quad, whole and under a storm, its lower corners in the band or cut by the horizon,
+  without a step where the band ends, seen ahead, 25° and 35° up; the moon over the sun, the clouds
+  over both mixed in gamma, alone over the black; the glare's envelope rising by 0.4 in a tenth of a
+  second, to a half with half the quad in sight, drawn half as strong, falling at its pace, none
+  looking away, whole again, added over the sky in the colour of the sun times its image, not over
+  what is drawn, falling without heavens, a body ahead under the horizon not in sight; its width and
+  alpha as the view turns onto its body. The module: the stars first at midnight, by bytes at 3 h
+  45, under a model of the sky letting them be drawn, none under one hiding them, by day or under
+  the water; the heavens given to the layers only once they are added, the sun and the moon of the
+  hour in the colour of the band 9, the glares, the clouds made, said in the panel; no glare in a
+  room, again in a street open to the sky, the bodies faded under a storm; none under a model of the
+  sky hiding them nor under the water; nothing once stopped, nor once the light is gone (no map, the
+  tables failed, no client); the params of storm four times the intensity of the weather, whole at a
+  half. 39 changes made on purpose: 37 caught at once, the two others once the glare was drawn at
+  half its envelope and a body ahead of the eye tested under the horizon. After a review, the fade
+  at the horizon by the corners (the alpha of the body replaced, not multiplied, within the band: no
+  more a step) and the heavens taken from the layers whenever there is no light: 10 more changes,
+  all caught.
 - **To check by the user**, with captures of the game (`jeu.ps1`) at the places and hours noted, the
   editor at the same place and hour (the setting *Hour*, the speed 0, or the hour of the server):
   1. The sun in Elwynn Forest, the camera looking to the north-west, at 6 h, 7 h, 12 h, 18 h, 20 h
      and 21 h: its height (the panel says it), its size, its colour, how it sets at the horizon;
      against the game, whether 3.3.5a's table is that of 1.12.1 (setting at 21 h 30) or of the later
-     clients (at 19 h).
+     clients (at 19 h); at 20 h 25 under rain (`.wchange 1 0.3`), the disc faded by the storm but
+     its lower part by the horizon alone, as *benilla* reads the client.
   2. The moon over Elwynn and over Mount Hyjal at 22 h 30, 0 h and 3 h: its height (55° at midnight
      here), its size, its colour; a single moon.
   3. The stars at 0 h, 3 h 45 (half) and 4 h 30 (gone), and under the sky of Netherstorm or of

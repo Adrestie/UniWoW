@@ -278,10 +278,13 @@ impl LightingModule {
         half_minutes(from, speed, 0.0)
     }
 
-    /// At each frame: the light of the map shown given to the view, none while there is none; its
-    /// models of the sky placed at the eye.
+    /// At each frame: the light of the map shown given to the view, none while there is none, nor
+    /// then any heavens to the layers of the sky; its models of the sky placed at the eye.
     fn steer(&mut self, ctx: &mut Context) {
         let given = self.light(ctx);
+        if given.is_none() {
+            sky::lock(&self.drawn).heavens = None;
+        }
         self.view = ctx.service(viewport::SERVICE);
         if let Some(view) = &self.view {
             view.set_light(OWNER, given);

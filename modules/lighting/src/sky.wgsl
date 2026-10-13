@@ -63,13 +63,28 @@ fn on_quad(towards: vec3<f32>, body: vec4<f32>) -> vec2<f32> {
     return vec2<f32>(dot(hit, heavens.across.xyz) / body.w + 0.5, 0.5 - dot(hit, heavens.up.xyz) / body.w);
 }
 
-// A body seen towards `towards`, premultiplied, in gamma: its texel tinted by its colour, clipped
-// at the horizon and faded over the 1.9° above it, its own alpha above that (`0x6d1960`).
-fn body_seen(towards: vec3<f32>, place: vec2<f32>, texel: vec4<f32>, tint: vec4<f32>) -> vec4<f32> {
+// The alpha the client gives a corner of the quad of a body `height` yards over the eye, 12 yards
+// from it (`0x6d1960`): 2.5 times its height within the 0.4 yard over the horizon, the alpha of the
+// body `alpha` above.
+fn corner_alpha(height: f32, alpha: f32) -> f32 {
+    let ramp = 2.5 * height;
+    return select(alpha, clamp(ramp, 0.0, 1.0), ramp < 1.0);
+}
+
+// The body of quad `body` seen at `place` on it, premultiplied, in gamma: its texel tinted by its
+// colour; its alpha that of the corners of the quad as the client gives them and interpolates them,
+// from its lowest, or the horizon where it cuts the quad, none under it, to its highest, by the
+// height of the point seen. The camera never rolls: across the quad, the height stays.
+fn body_seen(body: vec4<f32>, place: vec2<f32>, texel: vec4<f32>, tint: vec4<f32>) -> vec4<f32> {
     let inside = all(place >= vec2<f32>(0.0)) && all(place <= vec2<f32>(1.0));
-    let ramp = 30.0 * towards.z;
-    let horizon = select(tint.a, clamp(ramp, 0.0, 1.0), ramp < 1.0);
-    let alpha = select(0.0, texel.a * horizon, inside);
+    let centre = body.z * DISTANCE;
+    let reach = 0.5 * body.w * abs(heavens.up.z);
+    let height = centre - body.w * heavens.up.z * (place.y - 0.5);
+    let lowest = max(centre - reach, 0.0);
+    let highest = centre + reach;
+    let share = clamp((height - lowest) / max(highest - lowest, 1e-6), 0.0, 1.0);
+    let faded = mix(corner_alpha(lowest, tint.a), corner_alpha(highest, tint.a), share);
+    let alpha = select(0.0, texel.a * faded, inside);
     return vec4<f32>(tint.rgb * texel.rgb * alpha, alpha);
 }
 
@@ -112,14 +127,14 @@ fn fs_heavens(in: ScreenOut) -> @location(0) vec4<f32> {
     let towards = normalize((heavens.sky_from_screen * vec4<f32>(in.screen, 1.0, 0.0)).xyz);
     let sun_place = on_quad(towards, heavens.sun);
     let sun = body_seen(
-        towards,
+        heavens.sun,
         sun_place,
         textureSampleLevel(sun_texture, sky_sampler, clamp(sun_place, vec2<f32>(0.0), vec2<f32>(1.0)), 0.0),
         heavens.sun_colour,
     );
     let moon_place = on_quad(towards, heavens.moon);
     let moon = body_seen(
-        towards,
+        heavens.moon,
         moon_place,
         textureSampleLevel(moon_texture, sky_sampler, clamp(moon_place, vec2<f32>(0.0), vec2<f32>(1.0)), 0.0),
         heavens.moon_colour,
