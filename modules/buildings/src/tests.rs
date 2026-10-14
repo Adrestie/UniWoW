@@ -1327,19 +1327,21 @@ fn outside_a_face_is_lit_in_gamma_by_the_ambient_light_turned_and_the_diffuse_th
         "{pixel:?}"
     );
     // Unlit and unfogged: its white within the fog of the game; beyond its end at 4.5 yards from the
-    // eye, not on the ground, not drawn; the fog of the editor ending nothing.
+    // eye, not on the ground, not drawn; under the fog of the editor, measured on the ground, within
+    // its end: drawn.
     let mut unfogged = bench(&gpu, square(material(0x3, 0), false, None)).unwrap();
     assert_eq!(row_of(&gpu, &mut unfogged, &fogged, &Phase::ALL)[16], [255; 4]);
     fogged.fog.end = 4.5;
+    fogged.fog.middle = 4.5;
     assert_eq!(row_of(&gpu, &mut unfogged, &fogged, &Phase::ALL)[16], [0, 0, 0, 255]);
     fogged.fog.rate = 0.0;
     assert_eq!(row_of(&gpu, &mut unfogged, &fogged, &Phase::ALL)[16], [255; 4]);
-    // Beyond the end, lit and unfogged: not drawn; unlit and fogged: the colour of the fog.
+    // Beyond the end, nothing drawn, fogged or not, lit or not, as Noggit draws nothing there.
     fogged.fog.rate = 2.0;
-    for (flags, beyond) in [(0x2, [0, 0, 0, 255]), (0x1, [255, 0, 0, 255])] {
+    for flags in [0x0, 0x1, 0x2] {
         let mut other = bench(&gpu, square(material(flags, 0), false, None)).unwrap();
         let pixel = row_of(&gpu, &mut other, &fogged, &Phase::ALL)[16];
-        assert_eq!(pixel, beyond, "flags {flags:#x}");
+        assert_eq!(pixel, [0, 0, 0, 255], "flags {flags:#x}");
     }
 }
 

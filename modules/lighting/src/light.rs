@@ -638,6 +638,7 @@ pub fn map_light(values: &Values, time: f32, game_fog: Option<[f32; 3]>, immerse
         },
         fog_colour: fog,
         fog: game_fog,
+        reach: game_fog.map(|[_, end, _]| end),
         sky: match immersed {
             true => [fog; 6],
             false => std::array::from_fn(|band| values.colours[2 + band].unwrap_or(fog)),

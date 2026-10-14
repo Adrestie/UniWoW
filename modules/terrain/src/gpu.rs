@@ -210,6 +210,8 @@ impl Shared {
                 depth_compare: target.depth_compare,
             },
         );
+        // Painted over the sky before the world, in the colour of the fog, writing its depth, which
+        // hides what stands behind it and the glare of a body set behind it.
         let horizon_pipeline = make_pipeline(
             device,
             &horizon_shader,
@@ -220,14 +222,15 @@ impl Shared {
                 buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: size_of::<HorizonVertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Snorm8x4, 2 => Uint32],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Uint32],
                 })],
                 cull: Some(wgpu::Face::Back),
                 depth_write: true,
                 depth_compare: target.depth_compare,
             },
         );
-        // Behind everything: only where the depth is still at infinity, where it was cleared.
+        // Painted first, before the world, as Noggit paints the sky: the depth neither tested nor
+        // written.
         let sky_pipeline = make_pipeline(
             device,
             &horizon_shader,
@@ -238,7 +241,7 @@ impl Shared {
                 buffers: &[],
                 cull: None,
                 depth_write: false,
-                depth_compare: wgpu::CompareFunction::Equal,
+                depth_compare: wgpu::CompareFunction::Always,
             },
         );
         let sampler = |address: wgpu::AddressMode, mipmaps: wgpu::MipmapFilterMode| {

@@ -448,12 +448,14 @@ impl LightingModule {
                     }
                     None => clear,
                 };
-                Some(match thinned {
-                    Some(kept) => [fog[0] * kept, fog[1] * kept, fog[2]],
-                    None => fog,
-                })
+                Some(fog)
             });
-            light::map_light(&light.values, time, game_fog.flatten(), immersion != Immersion::Dry)
+            // The weather brings the fog nearer, not the reach of the lights.
+            let mut given = light::map_light(&light.values, time, game_fog.flatten(), immersion != Immersion::Dry);
+            if let (Some(kept), Some([start, end, rate])) = (thinned, given.fog) {
+                given.fog = Some([start * kept, end * kept, rate]);
+            }
+            given
         });
         let weather = effect.map(|effect| {
             (

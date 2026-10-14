@@ -113,7 +113,8 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
         shape = clamp(1.0 - length(in.quad), 0.0, 1.0);
     }
     let alpha = camera.colour.a * shape * in.shown;
-    if alpha <= 1.0 / 255.0 {
+    // Nor beyond the end of the fog, where nothing is drawn.
+    if alpha <= 1.0 / 255.0 || beyond_fog(in.world) {
         discard;
     }
     // Lit by the light of the view from above, then fogged as the view fogs.

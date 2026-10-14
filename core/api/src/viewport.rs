@@ -52,13 +52,16 @@ pub trait Viewport: Send + Sync {
 
 /// The light of the map at the place of the camera and the hour: its sun, the colour of its fog in
 /// gamma, where its fog starts and ends, in yards, and its rate when the fog of the game is drawn
-/// (`Fog`), none for the editor's, its sky (`Sky`), the light of its water (`Water`), and how much
-/// the materials of the buildings that glow at night glow at that hour, from 0 to 1 (`View::night`).
+/// (`Fog`), none for the editor's, and then how far its lights alone end their fog, past which
+/// nothing is drawn, which a building or the weather bringing the fog nearer leaves as it is; its sky
+/// (`Sky`), the light of its water (`Water`), and how much the materials of the buildings that glow
+/// at night glow at that hour, from 0 to 1 (`View::night`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapLight {
     pub sun: Sun,
     pub fog_colour: [f32; 3],
     pub fog: Option<[f32; 3]>,
+    pub reach: Option<f32>,
     pub sky: Sky,
     pub water: Water,
     pub night: f32,
@@ -113,10 +116,15 @@ fn fog_mix(colour: vec3<f32>, fog: vec3<f32>, amount: f32) -> vec3<f32> {
     return mix(colour, fog, amount);
 }
 
-// Whether `position` lies beyond the end of the fog of the game, past which Noggit leaves out the
-// models wholly beyond it.
+// Whether `position` lies beyond the end of the fog, past which nothing is drawn, as Noggit draws
+// nothing beyond it: by the depth along the view under the game's fog, past the end of the fog of
+// the lights alone (its `middle`), never short of its end; on the ground under the editor's, past
+// its end.
 fn beyond_fog(position: vec3<f32>) -> bool {
-    return camera.fog.w > 0.0 && view_depth(position) > camera.fog.z;
+    if camera.fog.w > 0.0 {
+        return view_depth(position) > max(camera.fog.y, camera.fog.z);
+    }
+    return length(position.xy - camera.eye.xy) > camera.fog.z;
 }
 ";
 
@@ -136,7 +144,8 @@ pub const NEAR_FOG: f32 = 0.55;
 /// The fog of the view and its colour, that of the sky without the light of a map, in gamma. The
 /// editor's when `rate` is 0: by the distance on the ground from the eye, none up to `start`,
 /// `NEAR_FOG` of it at `middle`, all of it from `end`. The game's otherwise, as the client draws
-/// it: by the depth along the view, 1 − ((end − depth) / (end − start))^rate, `middle` unused.
+/// it: by the depth along the view, 1 − ((end − depth) / (end − start))^rate, nothing drawn past
+/// `middle`, the end of the fog of the lights alone (`MapLight::reach`), nor short of `end`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Fog {
     pub colour: [f32; 3],
@@ -352,16 +361,18 @@ pub enum Drawing {
 }
 
 /// When a layer is drawn among the others in each phase: the ground first, then the models of the
-/// sky, the sun, the moon and the clouds, the water, the scene, then the glare of the sun. Layers of
-/// one stage are drawn in the order they were added.
+/// sky, the sun, the moon and the clouds, the horizon, the water, the scene, then the glare of the
+/// sun. Layers of one stage are drawn in the order they were added.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Stage {
     /// The terrain and its sky.
     Ground,
-    /// The models of the sky, over the sky of the ground and behind the rest.
+    /// The models of the sky, over the sky of the ground.
     Sky,
-    /// The sun, the moon and the clouds, over the models of the sky and behind the rest.
+    /// The sun, the moon and the clouds, over the models of the sky.
     Celestial,
+    /// The horizon of the map, over the sky, as Noggit paints it.
+    Horizon,
     /// The liquids.
     Water,
     /// What stands on the ground, by default.
@@ -371,18 +382,20 @@ pub enum Stage {
     Glare,
 }
 
-/// The phases a frame is drawn in, over two passes. The first draws what every layer draws opaque,
-/// writing the depth, such as what it saw at the frame before; the depth it leaves is reduced to a
+/// The phases a frame is drawn in, over two passes. The first paints the sky (`Sky`), as Noggit and
+/// the client paint it before the world, neither testing the depth nor writing it, then draws what
+/// every layer draws opaque, writing the depth, such as what it saw at the frame before, over the
+/// sky; nothing is drawn beyond the end of the fog (`beyond_fog`). The depth it leaves is reduced to a
 /// pyramid (`Pyramid`), which the layers test the rest of what they draw against between the two
 /// passes (`Layer::occlude`). The second draws the opaque they found in sight so (`Revealed`), then
 /// what every layer blends over it all, split at the surface of the water
 /// (`liquids::Surfaces::phase`) so that a blended batch under the water is seen through it: what
 /// lies beyond the surface from the eye, under it from over it and over it from under it; the
 /// water; then what lies on the eye's side. A blended batch of a layer is drawn over the opaque ones
-/// of every other, whatever their order. The sky of the ground begins the first blended phase, where
-/// nothing opaque is drawn.
+/// of every other, whatever their order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
+    Sky,
     Opaque,
     Revealed,
     Beyond,
@@ -392,16 +405,24 @@ pub enum Phase {
 
 impl Phase {
     /// The phases, in the order they are drawn.
-    pub const ALL: [Phase; 5] = [Phase::Opaque, Phase::Revealed, Phase::Beyond, Phase::Water, Phase::Near];
+    pub const ALL: [Phase; 6] = [
+        Phase::Sky,
+        Phase::Opaque,
+        Phase::Revealed,
+        Phase::Beyond,
+        Phase::Water,
+        Phase::Near,
+    ];
 
-    /// Whether what is drawn in it is blended over what is drawn before.
+    /// Whether what is drawn in it is blended over what the world drew before; the sky, painted
+    /// first, is blended over itself only.
     pub fn blended(self) -> bool {
-        !matches!(self, Phase::Opaque | Phase::Revealed)
+        !matches!(self, Phase::Sky | Phase::Opaque | Phase::Revealed)
     }
 
     /// Whether it is drawn in the first pass, whose depth the pyramid is made of.
     pub fn first_pass(self) -> bool {
-        self == Phase::Opaque
+        matches!(self, Phase::Sky | Phase::Opaque)
     }
 }
 
@@ -562,16 +583,19 @@ pub struct LayerStats {
 
 #[cfg(test)]
 mod tests {
-    use super::{Allowance, BAND, BANDS, Demand, Phase, allow};
+    use super::{Allowance, BAND, BANDS, Demand, Phase, Stage, allow};
 
     #[test]
-    fn the_opaque_is_drawn_in_the_first_pass_what_is_revealed_after_it_then_the_blended() {
-        assert_eq!(Phase::ALL[0], Phase::Opaque);
-        assert_eq!(Phase::ALL[1], Phase::Revealed);
+    fn the_sky_then_the_opaque_are_drawn_in_the_first_pass_what_is_revealed_after_them_then_the_blended() {
+        assert_eq!(Phase::ALL[0], Phase::Sky);
+        assert_eq!(Phase::ALL[1], Phase::Opaque);
+        assert_eq!(Phase::ALL[2], Phase::Revealed);
         let first: Vec<Phase> = Phase::ALL.into_iter().filter(|phase| phase.first_pass()).collect();
-        assert_eq!(first, [Phase::Opaque]);
+        assert_eq!(first, [Phase::Sky, Phase::Opaque]);
         let blended: Vec<Phase> = Phase::ALL.into_iter().filter(|phase| phase.blended()).collect();
         assert_eq!(blended, [Phase::Beyond, Phase::Water, Phase::Near]);
+        // The horizon over the sky, its models and its bodies, before the water and the scene.
+        assert!(Stage::Celestial < Stage::Horizon && Stage::Horizon < Stage::Water);
     }
 
     /// A demand of `fixed` bytes, wanting `bytes` in each of the bands `wanted` and holding `held`.

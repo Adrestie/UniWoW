@@ -76,7 +76,7 @@ fn vs_main(in: VertexIn, @builtin(instance_index) index: u32) -> VertexOut {
 }
 
 // A vertex of a model of the sky: around the eye, wherever its instance stands, turned and scaled
-// by its transform; at infinity, where the depth was cleared (reverse Z: 0), behind everything.
+// by its transform; at infinity (reverse Z: 0), so that no plane of the view clips it.
 @vertex
 fn vs_sky(in: VertexIn, @builtin(instance_index) index: u32) -> VertexOut {
     let eye = camera.eye.xyz;

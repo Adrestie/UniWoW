@@ -1,9 +1,8 @@
 //! The layer of the models of the sky (step 9.7e): the instances of the looks drawn as the sky
 //! (`Geosets::Sky`), the models of `LightSkybox.dbc` and those of the buildings (`MOSB`), drawn
-//! around the eye, at infinity, where the depth is still that of the clearing, so behind
-//! everything, over the sky of the ground and under every blended batch of the scene: in a stage of
-//! its own (`Stage::Sky`), at the start of the first blended phase, each model in the order its
-//! owner gave it, its batches in theirs. The layer of the models finds them and poses them with the
+//! around the eye, painted before the world over the sky of the ground, as Noggit paints them: in a
+//! stage of its own (`Stage::Sky`) of the phase of the sky, each model in the order its owner gave
+//! it, its batches in theirs. The layer of the models finds them and poses them with the
 //! looks of their own; this one draws what it found for the frame, from the pass.
 
 use std::ops::Range;
@@ -78,7 +77,7 @@ impl Layer for SkyLayer {
         phase: Phase,
         pass: &mut wgpu::RenderPass<'_>,
     ) {
-        if phase != Phase::Beyond {
+        if phase != Phase::Sky {
             return;
         }
         // Taken once the layer of the models has prepared the frame, which every layer does before

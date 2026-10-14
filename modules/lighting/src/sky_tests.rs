@@ -427,6 +427,17 @@ fn images(gpu: &egui_wgpu::RenderState) -> Arc<Images> {
 /// What the layer `layer` draws seen by `view`, `SIZE` × `SIZE` pixels cleared to black, its depth
 /// cleared to `depth` (0 at infinity, nothing drawn), every phase in its order.
 fn render(gpu: &egui_wgpu::RenderState, layer: &mut dyn Layer, view: &View, depth: f32) -> Vec<u8> {
+    render_in(gpu, layer, view, depth, &Phase::ALL)
+}
+
+/// What `render` draws, of the phases `phases` only.
+fn render_in(
+    gpu: &egui_wgpu::RenderState,
+    layer: &mut dyn Layer,
+    view: &View,
+    depth: f32,
+    phases: &[Phase],
+) -> Vec<u8> {
     layer.prepare(gpu, view);
     assert_eq!(layer.drawing(), Drawing::Pass);
     let texture = |format, usage| {
@@ -479,7 +490,7 @@ fn render(gpu: &egui_wgpu::RenderState, layer: &mut dyn Layer, view: &View, dept
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        for phase in Phase::ALL {
+        for phase in phases.iter().copied() {
             layer.draw_pass(gpu, &TARGET, view, phase, &mut pass);
         }
     }
@@ -587,9 +598,15 @@ fn the_sun_is_drawn_where_it_stands_tinted_by_its_colour_over_the_sky_only() {
     );
     // The quad 4 yards wide 12 yards away spans 18.9° of the 60° of the view: a corner is out of it.
     assert_eq!(pixel(&pixels, 2, 2), [0, 0, 0, 255]);
-    // Where something is drawn, nothing.
-    let covered = render(&gpu, &mut layer, &view, 0.5);
-    assert_eq!(pixel(&covered, SIZE / 2, SIZE / 2), [0, 0, 0, 255]);
+    // Painted before the world, testing no depth: drawn whatever depth is there, the world drawn
+    // after it covering it.
+    let under = render(&gpu, &mut layer, &view, 0.5);
+    assert_eq!(pixel(&under, SIZE / 2, SIZE / 2), middle);
+    // In the phase of the sky, none other.
+    let sky = render_in(&gpu, &mut layer, &view, 0.0, &[Phase::Sky]);
+    assert_eq!(pixel(&sky, SIZE / 2, SIZE / 2), middle);
+    let others = render_in(&gpu, &mut layer, &view, 0.0, &Phase::ALL[1..]);
+    assert_eq!(pixel(&others, SIZE / 2, SIZE / 2), [0, 0, 0, 255]);
     // Without its image, nothing.
     sky::lock(&drawn).images = None;
     let unread = render(&gpu, &mut layer, &view, 0.0);

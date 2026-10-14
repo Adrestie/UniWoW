@@ -686,10 +686,10 @@ impl Module for TerrainModule {
         let Some(gpu) = ctx.gpu().cloned() else {
             return;
         };
-        view.add_layer(
-            ctx.module_id(),
-            Box::new(TerrainLayer::new(self.incoming.clone(), self.scene.clone())),
-        );
+        let layer = TerrainLayer::new(self.incoming.clone(), self.scene.clone());
+        let horizon = layer.horizon_layer();
+        view.add_layer(ctx.module_id(), Box::new(layer));
+        view.add_layer(ctx.module_id(), Box::new(horizon));
         let target = view.target();
         self.view = Some(view);
         self.setup = Some(ctx.spawn("Build the terrain's pipeline", move |_| {

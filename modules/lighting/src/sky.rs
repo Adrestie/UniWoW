@@ -1,5 +1,6 @@
-//! The layers of the sky of the module: the sun, the moon and the clouds, drawn over the models of
-//! the sky and behind the rest (`Stage::Celestial`), and the glare of the sun or of the moon, over
+//! The layers of the sky of the module: the sun, the moon and the clouds, painted over the models of
+//! the sky before the world (`Stage::Celestial` of the phase of the sky), and the glare of the sun or
+//! of the moon, over
 //! everything (`Stage::Glare`), as the client draws it last (`0x4f9213` in 12340), additive, where
 //! the depth is that of the sky, its envelope following how much of its body the depth of the first
 //! pass leaves in sight, as the client follows the share of its body an occlusion query finds
@@ -328,7 +329,13 @@ impl Gpu {
             label: Some("sky"),
             source: wgpu::ShaderSource::Wgsl(include_str!("sky.wgsl").into()),
         });
-        let render = |label, bind: &wgpu::BindGroupLayout, entries: (&str, &str), blend: wgpu::BlendState| {
+        // A pipeline of the sky drawn by `entries` through `bind`, blended by `blend`, where the depth
+        // passes `depth`, writing none.
+        let render = |label,
+                      bind: &wgpu::BindGroupLayout,
+                      entries: (&str, &str),
+                      blend: wgpu::BlendState,
+                      depth: wgpu::CompareFunction| {
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some(label),
                 bind_group_layouts: &[Some(bind)],
@@ -344,11 +351,10 @@ impl Gpu {
                     buffers: &[],
                 },
                 primitive: wgpu::PrimitiveState::default(),
-                // At infinity: only where the depth is still that of the clearing, writing none.
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: target.depth_format,
                     depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::Equal),
+                    depth_compare: Some(depth),
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
@@ -375,6 +381,8 @@ impl Gpu {
             &heavens_layout,
             ("vs_heavens", "fs_heavens"),
             wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
+            // Painted before the world, testing nothing.
+            wgpu::CompareFunction::Always,
         );
         // Added to what is drawn, as the client adds its glare (`D3DBLEND_SRCALPHA`, `D3DBLEND_ONE`).
         let added = wgpu::BlendComponent {
@@ -395,6 +403,8 @@ impl Gpu {
                 color: added,
                 alpha: kept,
             },
+            // Last, where the depth is still that of the clearing: over the sky only.
+            wgpu::CompareFunction::Equal,
         );
         let seen_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sky seen"),
@@ -614,7 +624,7 @@ impl Layer for HeavensLayer {
         phase: Phase,
         pass: &mut wgpu::RenderPass<'_>,
     ) {
-        if phase != Phase::Beyond || !self.drawing {
+        if phase != Phase::Sky || !self.drawing {
             return;
         }
         let (Some(gpu), Some((_, group))) = (&self.gpu, &self.group) else {

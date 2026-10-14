@@ -629,6 +629,11 @@ const SIZE: u32 = 128;
 /// What `layer` draws seen from `eye` towards +X at `time`, `SIZE` × `SIZE` pixels of RGBA cleared to
 /// black, its depth to infinity, every phase in its order, in the pass.
 fn render(gpu: &egui_wgpu::RenderState, layer: &mut FallLayer, eye: Vec3, time: f32) -> Vec<u8> {
+    render_fogged(gpu, layer, eye, time, Fog::default())
+}
+
+/// What `render` draws in the fog `fog`.
+fn render_fogged(gpu: &egui_wgpu::RenderState, layer: &mut FallLayer, eye: Vec3, time: f32, fog: Fog) -> Vec<u8> {
     let view_matrix = Mat4::look_at_rh(eye, eye + Vec3::X, Vec3::Z);
     let view = View {
         view_proj: Mat4::perspective_infinite_reverse_rh(60f32.to_radians(), 1.0, 0.1) * view_matrix,
@@ -636,7 +641,7 @@ fn render(gpu: &egui_wgpu::RenderState, layer: &mut FallLayer, eye: Vec3, time: 
         eye,
         size: [SIZE, SIZE],
         time,
-        fog: Fog::default(),
+        fog,
         sun: Sun::default(),
         sky: None,
         water: None,
@@ -766,6 +771,23 @@ fn what_falls_is_drawn_around_the_eye_in_one_draw_moving_with_the_time_not_where
         render(&gpu, &mut layer, eye, 1.0);
         assert_eq!(layer.stats().triangles, count, "{kind:?}");
     }
+    // Nothing beyond the end of the fog: under a fog of the game ending a yard away, nothing.
+    lock(&falling).effect = Some(Effect {
+        kind: Kind::Rain,
+        intensity: 1.0,
+    });
+    let near = Fog {
+        start: 0.5,
+        middle: 0.75,
+        end: 1.0,
+        rate: 1.0,
+        ..Fog::default()
+    };
+    assert_eq!(
+        lit(&render_fogged(&gpu, &mut layer, eye, 1.0, near)),
+        0,
+        "beyond the fog"
+    );
     // Under the water: nothing; over it, still.
     lock(&falling).effect = Some(Effect {
         kind: Kind::Snow,

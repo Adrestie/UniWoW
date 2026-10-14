@@ -80,6 +80,11 @@ fn layer_colour(code: u32, uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> vec
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    // Nothing beyond the end of the fog, where the sky painted before shows; tested first, sparing
+    // the reads of its textures.
+    if beyond_fog(in.world) {
+        discard;
+    }
     let weights = textureSample(blend, blend_sampler, in.uv, in.chunk);
     // A texture repeats eight times across a chunk.
     let tiled = in.uv * 8.0;

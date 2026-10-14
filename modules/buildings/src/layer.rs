@@ -605,7 +605,7 @@ impl Layer for BuildingsLayer {
             Phase::Revealed if second.is_some() => (&self.opaque, second),
             Phase::Beyond => (&self.beyond, second.or(self.commands.buffer.as_ref())),
             Phase::Near => (&self.near, second.or(self.commands.buffer.as_ref())),
-            Phase::Revealed | Phase::Water => return,
+            Phase::Sky | Phase::Revealed | Phase::Water => return,
         };
         let (Some((_, camera)), Some((group, _)), Some(commands), Some((vertices, _)), Some((indices, _))) = (
             &self.camera,

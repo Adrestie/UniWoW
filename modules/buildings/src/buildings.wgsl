@@ -255,8 +255,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if reference != LEAST_ALPHA {
         alpha = 1.0;
     }
-    // Unfogged, not drawn beyond the end of the fog of the game, which would not hide it.
-    if shading.z > 0.5 && beyond_fog(in.world) {
+    // Nothing beyond the end of the fog, where the sky painted before shows.
+    if beyond_fog(in.world) {
         discard;
     }
     let fog = select(fog_amount(in.world), 0.0, shading.z > 0.5);

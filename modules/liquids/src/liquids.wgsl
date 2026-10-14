@@ -202,6 +202,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         gamma = clamp(texel.rgb + colour.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
         alpha = colour.a;
     }
+    // Nothing beyond the end of the fog, where the sky painted before shows.
+    if beyond_fog(in.world) {
+        discard;
+    }
     let rgb = fog_mix(gamma, camera.fog_colour.rgb, fog_amount(in.world));
     return vec4<f32>(rgb, alpha);
 }

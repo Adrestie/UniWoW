@@ -8143,6 +8143,45 @@ drawn in the colour of its swatch, darker than before. The pipeline of the wrong
 - **To check by the user**: the background, the grid and the markers look as before; in the world, the vertex colours and the shadows of the terrain stronger, the water and
   what is blended less milky, the clouds and what falls less white than before.
 
+#### The sky painted first, nothing beyond the fog, as Noggit
+
+Asked by the user with the view in gamma: the sky was drawn last, by three modules, only where the
+depth was still that of the clearing, and what stood beyond the end of the fog was drawn in its
+colour, which cut the sky and its clouds along the straight edges of far geometry (flat pale pans in
+the Arathi Highlands and in Stormwind). As Noggit and the client, the sky is now painted first: a
+phase of its own, `Phase::Sky`, begins the first pass, neither testing the depth nor writing it, its
+stages in their order: the dome of the terrain (`Stage::Ground`), the models of the sky
+(`Stage::Sky`), the sun, the moon and the clouds (`Stage::Celestial`), then the horizon of the WDL in
+the colour of the fog, as Noggit paints it (`Stage::Horizon`, a layer of its own of the terrain,
+`HorizonLayer`, its vertices without normals nor fade), writing its depth, which hides what stands
+behind it and the glare of a body set behind it; the grid of the editor over the sky; the world
+over them. Nothing is drawn beyond the end of the fog (`beyond_fog`: by the depth along the view
+under the game's fog, past the end of the fog of the lights alone, `MapLight::reach`, given to the
+view in the `middle` of its fog, which a building or the weather bringing the fog nearer leaves as
+it is; on the ground under the editor's): the tiles, the models but those of the sky, the buildings,
+the water and what falls are left out there, fogged or not, where Noggit culls them, the tiles
+wholly beyond it before they are drawn (`layer::wholly_beyond_fog`). The horizon is left out only
+where a tile drawn in detail shows itself, short of that end; past it, the horizon stands in the
+place of the tile. The glare of the sun and of the moon is still drawn last, where the depth is that
+of the clearing.
+
+- **Tested**: on the software adapter, a layer of the phase of the sky added last at the last
+  stage painted under one of the world; the stages, the horizon between the bodies and the water;
+  the dome and the horizon of the terrain, the models of the sky and the heavens painted in the
+  phase of the sky only, the heavens whatever the depth; the horizon in the colour of the fog; the
+  tiles, the models fogged or not, the buildings, the water and what falls not drawn beyond the end
+  of the fog of the game (by the depth along the view) nor of the editor (on the ground), the sky
+  never; after the review, the reach of the lights given to the view and kept when the weather or
+  a building brings the fog nearer, the horizon standing for a tile drawn in detail past the end of
+  the fog, a ridge of the horizon hiding the tile behind it, a box wholly beyond the end not drawn.
+  24 changes made on purpose, all caught. Testing `Always` or `Equal` is alike for the dome, the
+  models of the sky and the heavens, nothing having written the depth before them; the grid drawn
+  after the sky is not tested, the view of the tests drawing no grid.
+- **To check by the user**: in the Arathi Highlands and in Stormwind looking up, no flat pale pan in
+  the sky; the far mountains as the horizon in the colour of the fog against the sky; in Hellfire
+  Peninsula, the horizon in front of the nebula; where the view ends, the sky, not silhouettes of the
+  colour of the fog.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

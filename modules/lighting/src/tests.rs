@@ -782,6 +782,7 @@ fn the_fog_of_a_building_is_mixed_into_that_of_the_light_by_its_weight() {
         whole.fog_colour
     );
     assert_eq!(whole.fog, Some([20.0, 100.0, 1.0]));
+    assert_eq!(whole.reach, given.reach, "the reach of the lights kept");
     assert_eq!((whole.sun, whole.sky, whole.night), (given.sun, given.sky, given.night));
     // Half: halfway in gamma, from black to 0.4, and halfway along the fogs.
     let half = with_building_fog(given, fog, 0.5, 0, false, 1_277.0);
@@ -1785,8 +1786,10 @@ fn the_weather_given_mixes_in_the_params_of_storm_and_brings_the_fog_nearer() {
             host.seen.0.lock().unwrap().unwrap().fog.unwrap(),
         )
     };
-    // Fine weather: the clear params, the fog from a quarter of 500 yards.
+    // Fine weather: the clear params, the fog from a quarter of 500 yards, nothing drawn past it.
     assert_eq!(seen(&mut module, &mut host), (100.0, [125.0, 500.0, 1.0]));
+    let reach = || host.seen.0.lock().unwrap().unwrap().reach;
+    assert_eq!(reach(), Some(500.0));
     // Rain at 0.1: the params of storm weigh four times it, their fog too.
     *host.sent.0.lock().unwrap() = Some(Effect {
         kind: Kind::Rain,
@@ -1821,6 +1824,11 @@ fn the_weather_given_mixes_in_the_params_of_storm_and_brings_the_fog_nearer() {
         intensity: 1.0,
     });
     assert_eq!(seen(&mut module, &mut host), (100.0, [31.25, 125.0, 1.0]));
+    assert_eq!(
+        host.seen.0.lock().unwrap().unwrap().reach,
+        Some(500.0),
+        "the fog nearer, not the reach of the lights"
+    );
     assert!(
         panel(&mut module, &mut host)
             .contains(&"Weather: fog at 1.00; the fog of the game 0.25 times as far.".to_owned())
@@ -1851,6 +1859,7 @@ fn a_flash_of_lightning_lights_every_face_and_turns_the_sky_the_fog_and_the_wate
         },
         fog_colour: [0.1, 0.2, 0.3],
         fog: Some([10.0, 100.0, 2.0]),
+        reach: Some(100.0),
         sky: [[0.1, 0.2, 0.3]; 6],
         water: Water {
             river: [[0.1, 0.2, 0.3, 0.5]; 2],

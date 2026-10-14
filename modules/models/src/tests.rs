@@ -1134,7 +1134,7 @@ const BEHIND: Vec3 = Vec3::new(-5.0, 0.0, 1.0);
 pub const AIM: Vec3 = Vec3::new(0.0, 0.0, 1.0);
 
 #[test]
-fn an_unfogged_batch_is_not_drawn_beyond_the_end_of_the_fog_of_the_game() {
+fn a_batch_is_not_drawn_beyond_the_end_of_the_fog_fogged_or_not() {
     // Unlit and unfogged, 5 yards from an eye 3 yards up and 4 away on the ground.
     let Some(mut bench) = bench(square(0x3, 0), [255, 0, 0, 255]) else {
         return;
@@ -1151,31 +1151,37 @@ fn an_unfogged_batch_is_not_drawn_beyond_the_end_of_the_fog_of_the_game() {
         rate: 2.0,
     };
     assert_eq!(middle(&render(&mut bench, eye, AIM)), red);
-    // Beyond its end at 4.5 yards from the eye, not on the ground: not drawn.
-    bench.fog.end = 4.5;
-    assert_eq!(middle(&render(&mut bench, eye, AIM)), BLACK);
-    // The fog of the editor ends nothing.
-    bench.fog.rate = 0.0;
-    assert_eq!(middle(&render(&mut bench, eye, AIM)), red);
     // Facing the eye 5 yards ahead, its corners some 5.2 yards from it: cut by the depth along the
     // view, not by the distance from the eye, so wholly drawn for an end at 5.1 yards.
     let reds = |pixels: &[u8]| pixels.chunks(4).filter(|pixel| *pixel == red).count();
     let whole = reds(&render(&mut bench, FRONT, AIM));
     assert!(whole > 50, "{whole}");
     bench.fog.end = 5.1;
-    bench.fog.rate = 2.0;
+    bench.fog.middle = 5.1;
     assert_eq!(reds(&render(&mut bench, FRONT, AIM)), whole);
+    // Beyond its end and the reach of its lights at 4.5 yards from the eye, not on the ground: not
+    // drawn; within the reach farther, drawn.
+    bench.fog.end = 4.5;
+    bench.fog.middle = 6.0;
+    assert_eq!(middle(&render(&mut bench, eye, AIM)), red);
+    bench.fog.middle = 4.5;
+    assert_eq!(middle(&render(&mut bench, eye, AIM)), BLACK);
+    // The fog of the editor, measured on the ground, 4 yards: drawn within its end, not beyond it.
     bench.fog.rate = 0.0;
-    // Beyond the end, lit and unfogged: not drawn; unlit and fogged: the colour of the fog.
-    for (flags, beyond) in [(0x2, BLACK), (0x1, [0, 0, 255, 255])] {
+    assert_eq!(middle(&render(&mut bench, eye, AIM)), red);
+    bench.fog.end = 3.5;
+    assert_eq!(middle(&render(&mut bench, eye, AIM)), BLACK);
+    // Beyond the end, nothing drawn, fogged or not, lit or not, as Noggit draws nothing there.
+    for flags in [0x0, 0x1, 0x2] {
         let mut other = crate::tests::bench(square(flags, 0), red).expect("as above");
         other.service.place("test", &[instance(1, 0, Vec3::ZERO, 1.0)]);
         other.fog = Fog {
+            middle: 4.5,
             end: 4.5,
             rate: 2.0,
             ..bench.fog
         };
-        assert_eq!(middle(&render(&mut other, eye, AIM)), beyond, "flags {flags:#x}");
+        assert_eq!(middle(&render(&mut other, eye, AIM)), BLACK, "flags {flags:#x}");
     }
 }
 

@@ -936,6 +936,11 @@ fn the_water_is_drawn_over_what_lies_under_it_without_hiding_what_is_blended_bey
         seen[0].abs_diff(64) <= 2 && seen[1] == 0 && seen[2].abs_diff(191) <= 2,
         "{seen:?}"
     );
+    // Beyond the end of the fog and the reach of its lights, 22 yards from the eye past 15: not
+    // drawn.
+    fogged.fog.end = 15.0;
+    fogged.fog.middle = 15.0;
+    assert_eq!(middle(&gpu, &mut magma, &fogged, None), [0, 0, 0, 255]);
     // Under the shallow water, seen through it: tinted.
     let (mut liquids, surfaces) = bench(
         &gpu,

@@ -127,17 +127,17 @@ fn a_model_of_the_sky_is_drawn_around_the_eye_behind_everything_unfogged() {
         let seen = middle(&behind);
         assert!(seen[0] > 100 && seen[2] < 30, "the square: {seen:?}");
         assert_eq!(corner(&behind), BLUE);
-        // Never fogged, nor cut by the end of the fog of the game, past which the square is wholly
-        // in the fog.
+        // Never fogged, nor cut by the end of the fog of the game, even nearer than all it shows;
+        // the square beyond that end not drawn, the sky seen in its place.
         bench.fog = Fog {
             colour: [0.0, 1.0, 0.0],
-            start: 0.5,
-            middle: 1.0,
-            end: 1.5,
+            start: 0.01,
+            middle: 0.02,
+            end: 0.05,
             rate: 2.0,
         };
         let fogged = render_sky(&mut bench, &mut sky);
-        assert_eq!((middle(&fogged), corner(&fogged)), ([0, 255, 0, 255], BLUE));
+        assert_eq!((middle(&fogged), corner(&fogged)), (BLUE, BLUE));
         // Taken away: nothing drawn.
         bench.fog = Fog::default();
         bench.service.place("lighting", &[]);

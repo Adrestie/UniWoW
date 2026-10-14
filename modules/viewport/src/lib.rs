@@ -143,8 +143,9 @@ impl Lighting {
 
     /// The fog, the sun, the sky, the light of the water and the glow at night of the view: the
     /// light's sun, sky, water, glow and colour of the fog over the terrain's fog, and the light's
-    /// distances and rate of the game when it gives them; the fixed light, a sky of the colour of
-    /// the fog, the fixed colours of the water and no glow, as at noon, without it.
+    /// distances and rate of the game when it gives them, its reach in the middle; the fixed light, a
+    /// sky of the colour of the fog, the fixed colours of the water and no glow, as at noon, without
+    /// it.
     fn resolved(&self) -> Resolved {
         let Some((_, light)) = self.light else {
             return (self.fog, Sun::default(), None, None, 0.0);
@@ -156,7 +157,7 @@ impl Lighting {
         if let Some([start, end, rate]) = light.fog {
             fog = Fog {
                 start,
-                middle: (start + end) / 2.0,
+                middle: light.reach.unwrap_or(end).max(end),
                 end,
                 rate,
                 ..fog
@@ -1068,11 +1069,11 @@ fn project(view_proj: &Mat4, rect: egui::Rect, position: Vec3) -> Option<egui::P
 }
 
 /// Draws a frame: each layer prepared, its computing recorded into an encoder of its own and its
-/// bundles recorded, or kept for its version unless the device is `new_device`; then the pass into
-/// `targets`: `grid`, then in each phase, the opaque then the blended, the layers by their stage,
-/// in the order they were added within one, their bundles of the phase run or their drawing of the
-/// phase recorded in it; everything submitted, the computing first. The layers that panicked or
-/// failed are removed.
+/// bundles recorded, or kept for its version unless the device is `new_device`; then the passes into
+/// `targets`: the sky, `grid` over it, then in each phase, the opaque then the blended, the layers by
+/// their stage, in the order they were added within one, their bundles of the phase run or their
+/// drawing of the phase recorded in it; everything submitted, the computing first. The layers that
+/// panicked or failed are removed.
 fn draw_frame(
     layers: &Layers,
     gpu: &egui_wgpu::RenderState,
@@ -1115,8 +1116,8 @@ fn draw_frame(
     let submitting = Instant::now();
     let mut panicked: Vec<Option<String>> = vec![None; entries.len()];
     let mut drawing_in_pass = Duration::ZERO;
-    // The first pass: the opaque phase, its colour and depth kept for the second; then the pyramid
-    // of the depth it leaves.
+    // The first pass: the sky, the grid over it and the opaque phase, its colour and depth kept for
+    // the second; then the pyramid of the depth it leaves.
     let mut first = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("viewport first pass"),
     });
@@ -1145,12 +1146,23 @@ fn draw_frame(
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        drawing_in_pass += draw_phases(
+            &mut pass,
+            &[Phase::Sky],
+            &mut entries,
+            &mut prepared,
+            &mut panicked,
+            gpu,
+            view,
+            timer.as_deref(),
+        );
+        // Over the sky, which writes no depth, so that what it writes hides what is behind it.
         if let Some(grid) = grid {
             grid.draw(&mut pass);
         }
         drawing_in_pass += draw_phases(
             &mut pass,
-            true,
+            &[Phase::Opaque],
             &mut entries,
             &mut prepared,
             &mut panicked,
@@ -1211,9 +1223,10 @@ fn draw_frame(
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        let second: Vec<Phase> = Phase::ALL.into_iter().filter(|phase| !phase.first_pass()).collect();
         drawing_in_pass += draw_phases(
             &mut pass,
-            false,
+            &second,
             &mut entries,
             &mut prepared,
             &mut panicked,
@@ -1286,13 +1299,13 @@ fn draw_frame(
     }
 }
 
-/// Draws the phases of the first pass, or of the second, of every layer in its order, each phase
-/// of a layer between its timestamps when the frame times it; a layer that panicked is not drawn
-/// again. Returns the time the layers drawing in the pass took.
+/// Draws the phases `phases`, in their order, of every layer in its order, each phase of a layer
+/// between its timestamps when the frame times it; a layer that panicked is not drawn again.
+/// Returns the time the layers drawing in the pass took.
 #[allow(clippy::too_many_arguments)]
 fn draw_phases(
     pass: &mut wgpu::RenderPass<'_>,
-    first: bool,
+    phases: &[Phase],
     entries: &mut [Entry],
     prepared: &mut [Prepared],
     panicked: &mut [Option<String>],
@@ -1301,10 +1314,11 @@ fn draw_phases(
     timer: Option<&GpuTimer>,
 ) -> Duration {
     let mut drawing_in_pass = Duration::ZERO;
-    for (index, phase) in Phase::ALL.into_iter().enumerate() {
-        if phase.first_pass() != first {
-            continue;
-        }
+    for phase in phases.iter().copied() {
+        let index = Phase::ALL
+            .iter()
+            .position(|each| *each == phase)
+            .expect("a phase of the frame");
         for ((entry, layer), panic) in entries.iter_mut().zip(prepared.iter_mut()).zip(panicked.iter_mut()) {
             // A layer that panicked in a phase is not drawn in the next.
             if panic.is_some() {
@@ -1845,6 +1859,7 @@ mod tests {
             sun,
             fog_colour: [0.0, 0.0, 1.0],
             fog: None,
+            reach: None,
             sky,
             water,
             night: 0.75,
@@ -1862,16 +1877,23 @@ mod tests {
                 ..set
             }
         );
-        // The fog of the game: its distances and its rate, as the light gives them.
-        service.set_light(
-            "lighting",
-            Some(viewport::MapLight {
-                fog: Some([125.0, 500.0, 2.5]),
-                ..light
-            }),
-        );
-        let fog = super::view(&Camera::default(), [64, 64], 0.0, lighting.lock().unwrap().resolved()).fog;
-        assert_eq!([fog.start, fog.middle, fog.end, fog.rate], [125.0, 312.5, 500.0, 2.5]);
+        // The fog of the game: its distances and its rate, as the light gives them, the reach of
+        // its lights in the middle, never short of its end.
+        let fog_of = |fog, reach| {
+            service.set_light(
+                "lighting",
+                Some(viewport::MapLight {
+                    fog: Some(fog),
+                    reach,
+                    ..light
+                }),
+            );
+            super::view(&Camera::default(), [64, 64], 0.0, lighting.lock().unwrap().resolved()).fog
+        };
+        let fog = fog_of([125.0, 500.0, 2.5], Some(800.0));
+        assert_eq!([fog.start, fog.middle, fog.end, fog.rate], [125.0, 800.0, 500.0, 2.5]);
+        assert_eq!(fog_of([125.0, 500.0, 2.5], None).middle, 500.0);
+        assert_eq!(fog_of([125.0, 500.0, 2.5], Some(300.0)).middle, 500.0);
         // Taken back only by the module that gave it: the fixed light again.
         service.set_light("terrain", None);
         assert_eq!(
@@ -3084,13 +3106,13 @@ fn cs_main() {
         let targets = Targets::new(&gpu);
         // Half red, blended in front without writing the depth, as a blended batch of the models,
         // added before the terrain as their module starts first. Behind it, the ground, green,
-        // writing its depth; or the sky, blue, where the depth is still cleared.
+        // writing its depth; or the sky, blue, painted first.
         let half_red = [1.0, 0.0, 0.0, 0.5];
         let greater = wgpu::CompareFunction::Greater;
         let ground = Painter::new(Drawing::Bundle, GREEN).deep(0.25, true, greater);
         let sky = Painter::new(Drawing::Bundle, [0.0, 0.0, 1.0, 1.0])
-            .deep(0.0, false, wgpu::CompareFunction::Equal)
-            .in_phase(Phase::Beyond);
+            .deep(0.0, false, wgpu::CompareFunction::Always)
+            .in_phase(Phase::Sky);
         for (under, channel) in [(ground, 1), (sky, 2)] {
             let layers = Layers::default();
             put(
@@ -3271,6 +3293,37 @@ fn cs_main() {
     }
 
     #[test]
+    fn the_sky_is_painted_first_and_the_world_over_it_whatever_their_stages() {
+        let Some(gpu) = gpu() else {
+            eprintln!("skipped: no software adapter for a device");
+            return;
+        };
+        let view = view(
+            &Camera::default(),
+            [8, 8],
+            0.0,
+            (viewport::Fog::default(), viewport::Sun::default(), None, None, 0.0),
+        );
+        let targets = Targets::new(&gpu);
+        // The world in green at the first stage, the sky in red at the last, added after it: the
+        // phase of the sky first, the world over it.
+        let layers = Layers::default();
+        put(&layers, "world", Painter::new(Drawing::Bundle, GREEN).at(Stage::Ground));
+        put(
+            &layers,
+            "sky",
+            Painter::new(Drawing::Pass, RED).in_phase(Phase::Sky).at(Stage::Glare),
+        );
+        let drawn = targets.draw(&layers, &gpu, &view, false, None);
+        assert!(drawn.failures.is_empty(), "{:?}", drawn.failures);
+        assert_eq!(targets.middle(&gpu), [0, 255, 0, 255]);
+        // The sky alone: seen.
+        lock(&layers).layers.retain(|entry| entry.owner == "sky");
+        targets.draw(&layers, &gpu, &view, false, None);
+        assert_eq!(targets.middle(&gpu), [255, 0, 0, 255]);
+    }
+
+    #[test]
     fn a_layer_failing_to_compute_or_to_draw_in_the_pass_is_removed_and_reported() {
         let Some(gpu) = gpu() else {
             eprintln!("skipped: no software adapter for a device");
@@ -3301,7 +3354,11 @@ fn cs_main() {
             put(&layers, "faulty", faulty);
             let drawn = targets.draw(&layers, &gpu, &view, false, None);
             if fault == Fault::PanicDrawing {
-                assert_eq!(calls.load(Ordering::Relaxed), 1, "not drawn again in the blended phase");
+                assert_eq!(
+                    calls.load(Ordering::Relaxed),
+                    2,
+                    "called in the phase of the sky, then panicking in the opaque: not called again"
+                );
             }
             assert_eq!(drawn.failures.len(), 1, "{:?}", drawn.failures);
             assert_eq!(drawn.failures[0].0, "faulty");
@@ -3723,10 +3780,12 @@ fn main() {
     #[test]
     fn a_layer_is_timed_computing_and_drawing_in_every_phase_and_the_pyramid_apart() {
         // The passes, the pyramid 4 ticks, then a layer: its computing 2 ticks, against the pyramid
-        // 1, its drawing 3, 5, 7, 11 and 13 in the five phases.
-        let ticks = [0, 100, 60, 64, 10, 12, 13, 14, 20, 23, 30, 35, 40, 47, 50, 61, 70, 83];
+        // 1, its drawing 2, 3, 5, 7, 11 and 13 in the six phases.
+        let ticks = [
+            0, 100, 60, 64, 10, 12, 13, 14, 16, 18, 20, 23, 30, 35, 40, 47, 50, 61, 70, 83,
+        ];
         let (total, pyramid, layers) = crate::stats::spans(&ticks, 1, 1e6);
-        assert_eq!((total, pyramid, layers), (100.0, 4.0, vec![(3.0, 39.0)]));
+        assert_eq!((total, pyramid, layers), (100.0, 4.0, vec![(3.0, 41.0)]));
     }
 
     #[test]

@@ -17,7 +17,7 @@ use uniwow_api::{JobId, JobOutcome, bytemuck, egui, egui_wgpu, wgpu};
 
 use crate::gpu::{self, Shared};
 use crate::horizon;
-use crate::layer::{Scene, TerrainLayer, block_of, in_sight, tiles_away};
+use crate::layer::{HorizonLayer, Scene, TerrainLayer, block_of, in_sight, tiles_away, wholly_beyond_fog};
 use crate::loading::{self, Costs, Held, Inputs, Kind, Plan};
 use crate::mesh::{self, CHUNKS, LODS, SKIRT_DEPTH, TILE_VERTICES, VERTICES, Vertex};
 use crate::model::{CHUNK, ORIGIN, STEP, TILE, TileId, TileModel, chunk_bounds};
@@ -728,24 +728,6 @@ fn the_horizon_is_a_mesh_of_the_heights_of_the_wdl_facing_up_its_tiles_drawn_in_
     let last = vertices[289 + 288].position;
     assert!((last[0] - (corner[0] - TILE)).abs() < 1e-3 && (last[1] - (corner[1] - TILE)).abs() < 1e-3);
     assert_eq!(last[2], 160.0);
-    // Rising row by row, down in X: the ground faces towards higher X.
-    let normal = vertices[289 + 5 * 17 + 5].normal;
-    assert!(normal[0] > 10 && normal[1] == 0 && normal[2] > 100, "{normal:?}");
-
-    // Alone, the tile fades into the fog: all of it at its sides, two thirds in its middle, half a
-    // tile from them; in the middle of a block of 7 × 7 tiles, not at all.
-    assert_eq!(vertices[289].normal[3], 127);
-    assert_eq!(vertices[289 + 8 * 17 + 8].normal[3], 85);
-    let block: Vec<((u32, u32), Height)> = (0..49)
-        .map(|i| ((10 + i % 7, 20 + i / 7), Box::new(|_, _| 0i16) as Height))
-        .collect();
-    let (block, _) = horizon::mesh(&wdl(&block));
-    let middle = &block[24 * 289..25 * 289];
-    assert_eq!(middle[8 * 17 + 8].normal[3], 0);
-    assert!(
-        block[..289].iter().all(|vertex| vertex.normal[3] > 0),
-        "the corner tile fades"
-    );
 
     let bits = horizon::mask([id(5, 1), id(32, 48), id(63, 63)].into_iter());
     assert_eq!(bits[2], 1 << 5, "the tile 69, the bit 5 of the word 2");
@@ -1170,10 +1152,25 @@ fn render_fogged(
 }
 
 /// What `render_in` draws, `place` the eye and where it looks, in the fog `fog`, under the sky
-/// `sky` of a light.
+/// `sky` of a light: the layer and that of its horizon.
 fn render_lit(
     gpu: &egui_wgpu::RenderState,
     layer: &mut TerrainLayer,
+    target: &Target,
+    eyes: (Vec3, Vec3),
+    phases: &[Phase],
+    light: (viewport::Fog, Option<Sky>),
+) -> Vec<u8> {
+    let mut horizon = layer.horizon_layer();
+    render_both(gpu, layer, &mut horizon, target, eyes, phases, light)
+}
+
+/// What `render_lit` draws, `horizon` the layer of the horizon of `layer`: in each phase the ground
+/// then the horizon, as the view orders their stages.
+fn render_both(
+    gpu: &egui_wgpu::RenderState,
+    layer: &mut TerrainLayer,
+    horizon: &mut HorizonLayer,
     target: &Target,
     (eye, look): (Vec3, Vec3),
     phases: &[Phase],
@@ -1245,6 +1242,7 @@ fn render_lit(
         // Drawn in the pass, as the view draws it, its phases in their order.
         for phase in phases.iter().copied() {
             layer.draw_pass(gpu, target, &view, phase, &mut pass);
+            horizon.draw_pass(gpu, target, &view, phase, &mut pass);
         }
     }
     gpu.queue.submit([encoder.finish()]);
@@ -1320,7 +1318,8 @@ fn a_tile_is_one_draw_its_chunks_textured_from_two_arrays_and_the_horizon_beyond
     );
     let [red, green, _, ground, _] = counts(&above);
     assert!(red > 1200 && green > 1200, "red {red}, green {green}, ground {ground}");
-    // In a blue fog of the game covering all past a yard: blue.
+    // In a blue fog of the game ending past a yard: the tile not drawn beyond it, the horizon under
+    // it in the colour of the fog in its place, as under a tile not loaded.
     let fog = viewport::Fog {
         colour: [0.0, 0.0, 1.0],
         start: 0.0,
@@ -1330,11 +1329,12 @@ fn a_tile_is_one_draw_its_chunks_textured_from_two_arrays_and_the_horizon_beyond
     };
     let eyes = (Vec3::new(x + 1.0, y, 250.0), Vec3::new(x, y, 0.0));
     let fogged = render_fogged(&gpu, &mut layer, &target, eyes, &Phase::ALL, fog);
-    let [red, green, blue, _, _] = counts(&fogged);
+    let [red, green, blue, ground, _] = counts(&fogged);
     assert!(
-        red == 0 && green == 0 && blue > 2400,
-        "red {red}, green {green}, blue {blue}"
+        red + green + ground == 0 && blue == 64 * 64,
+        "red {red}, green {green}, blue {blue}, ground {ground}"
     );
+    assert_eq!(layer.stats().draws, 0, "the tile wholly beyond the end, not drawn");
     // From 243 yards over the tile, at the height 7, in a fog of the game from 100 to 400 yards:
     // 1 − (157 / 300)² of it, by the depth along the view, as much at the edge of the view, some
     // 320 yards from the eye, as in its middle, none there by the distance on the ground; mixed in
@@ -1345,7 +1345,16 @@ fn a_tile_is_one_draw_its_chunks_textured_from_two_arrays_and_the_horizon_beyond
         end: 400.0,
         ..fog
     };
-    let fogged = render_fogged(&gpu, &mut layer, &target, eyes, &Phase::ALL, fog);
+    let mut horizon_layer = layer.horizon_layer();
+    let fogged = render_both(
+        &gpu,
+        &mut layer,
+        &mut horizon_layer,
+        &target,
+        eyes,
+        &Phase::ALL,
+        (fog, None),
+    );
     let [red, green, blue, _, _] = counts(&fogged);
     assert!(
         red == 0 && green == 0 && blue > 4000,
@@ -1356,14 +1365,22 @@ fn a_tile_is_one_draw_its_chunks_textured_from_two_arrays_and_the_horizon_beyond
         assert!(pixel[2].abs_diff(185) <= 2, "{row}, {column}: {pixel:?}");
     }
     let stats = layer.stats();
-    assert_eq!(stats.draws, 2, "the tile in one draw, and the horizon");
+    assert_eq!(stats.draws, 1, "the tile in one draw");
     assert_eq!(
         stats.triangles,
-        u64::from(tile.lods[0].len() as u32 / 3 + horizon.count / 3),
+        u64::from(tile.lods[0].len() as u32 / 3),
         "the tile at its finest, near"
     );
+    let stats = horizon_layer.stats();
+    assert_eq!(
+        (stats.draws, stats.triangles),
+        (1, u64::from(horizon.count / 3)),
+        "the horizon in one draw of its own layer"
+    );
+    assert_eq!(horizon_layer.stage(), Stage::Horizon);
 
-    // From high above both: the neighbour drawn as the horizon, the tile still seen through its own.
+    // From high above both: the neighbour drawn as the horizon, in the colour of the fog, the tile
+    // still seen through its own.
     let wide = render(
         &gpu,
         &mut layer,
@@ -1371,11 +1388,25 @@ fn a_tile_is_one_draw_its_chunks_textured_from_two_arrays_and_the_horizon_beyond
         Vec3::new(x + 1.0, 0.0, 1200.0),
         Vec3::new(x, 0.0, 0.0),
     );
-    let [red, green, _, ground, _] = counts(&wide);
-    // A tile is some 200 pixels from there; the neighbour as many.
+    let [red, green, blue, _, _] = counts(&wide);
+    // A tile is some 200 pixels from there; the neighbour as many, of the bluish fog of the editor.
     assert!(
-        red > 80 && green > 80 && ground > 150,
-        "red {red}, green {green}, ground {ground}"
+        red > 80 && green > 80 && blue > 150,
+        "red {red}, green {green}, blue {blue}"
+    );
+    // The horizon painted in the phase of the sky only, before the world: none in the opaque one.
+    let opaque = render_in(
+        &gpu,
+        &mut layer,
+        &target,
+        Vec3::new(x + 1.0, 0.0, 1200.0),
+        Vec3::new(x, 0.0, 0.0),
+        &[Phase::Opaque],
+    );
+    let [red, green, blue, _, _] = counts(&opaque);
+    assert!(
+        red > 80 && green > 80 && blue == 0,
+        "red {red}, green {green}, blue {blue}"
     );
 
     // A map shown: the sky in the colour of the fog where nothing is drawn.
@@ -1389,7 +1420,17 @@ fn a_tile_is_one_draw_its_chunks_textured_from_two_arrays_and_the_horizon_beyond
     );
     let [_, _, blue, _, black] = counts(&sky);
     assert!(blue > 500 && black == 0, "sky {blue}, black {black}");
-    // The sky in the blended phase, where nothing opaque was drawn: none in the opaque one.
+    // The sky painted in the phase of the sky, before the world; none in the opaque one.
+    let painted = render_in(
+        &gpu,
+        &mut layer,
+        &target,
+        Vec3::new(x, y, 50.0),
+        Vec3::new(x + 100.0, y, 60.0),
+        &[Phase::Sky],
+    );
+    let [_, _, blue, _, _] = counts(&painted);
+    assert!(blue > 500, "sky {blue}");
     let opaque = render_in(
         &gpu,
         &mut layer,
@@ -1411,8 +1452,107 @@ fn a_tile_is_one_draw_its_chunks_textured_from_two_arrays_and_the_horizon_beyond
     );
     let [_, _, _, _, black] = counts(&later);
     assert!(black == later.len() / 4, "black {black}");
-    assert_eq!(layer.stats().draws, 3, "and the sky");
+    assert_eq!(layer.stats().draws, 2, "the tile and the sky");
     assert_eq!(layer.stage(), Stage::Ground, "drawn with its sky before the scene");
+}
+
+#[test]
+fn the_horizon_hides_what_stands_behind_it_writing_its_depth() {
+    let Some(gpu) = device() else {
+        eprintln!("skipped: no software adapter for a device");
+        return;
+    };
+    let target = Target {
+        sample_count: 1,
+        ..TARGET
+    };
+    let shared = Arc::new(Shared::new(&gpu, &target).unwrap());
+    let formats = Fake::default();
+    let model = TileModel::new(id(32, 32), two_textures());
+    let tile = Arc::new(gpu::build_tile(&shared, &formats, &model, &|| false).unwrap().unwrap());
+    // A ridge of the WDL 300 yards high across the tile between the eye and the tile drawn in detail,
+    // its slope facing the eye.
+    let block: Vec<((u32, u32), Height)> = [(32, 32), (32, 33), (32, 34)]
+        .into_iter()
+        .map(|tile| {
+            let height: Height = if tile == (32, 33) {
+                Box::new(|row, _| 300 - (row as i16 - 8).abs() * 37)
+            } else {
+                Box::new(|_, _| 0)
+            };
+            (tile, height)
+        })
+        .collect();
+    let horizon = Arc::new(horizon::build(&shared, &wdl(&block)).unwrap());
+    let scene = Arc::new(Mutex::new(Scene {
+        tiles: vec![tile],
+        horizon: Some(horizon),
+        reach: 100_000.0,
+        ..Scene::default()
+    }));
+    let mut layer = TerrainLayer::new(Arc::new(Mutex::new(Some(shared))), scene);
+    let ([ex, ey], [tx, ty]) = (id(32, 34).centre(), id(32, 32).centre());
+    let pixels = render(
+        &gpu,
+        &mut layer,
+        &target,
+        Vec3::new(ex, ey, 50.0),
+        Vec3::new(tx, ty, 0.0),
+    );
+    // The ridge in the colour of the fog, the tile behind it hidden.
+    let at = (32 * 64 + 32) * 4;
+    let seen = [pixels[at], pixels[at + 1], pixels[at + 2]];
+    let fog = viewport::Fog::default()
+        .colour
+        .map(|channel| (channel * 255.0).round() as u8);
+    assert!(
+        seen.iter().zip(fog).all(|(a, b)| a.abs_diff(b) <= 2),
+        "{seen:?} against the fog {fog:?}"
+    );
+}
+
+#[test]
+fn a_box_wholly_beyond_the_end_of_the_fog_is_not_drawn() {
+    let eye = Vec3::new(0.0, 0.0, 10.0);
+    let look = Mat4::look_at_rh(eye, eye + Vec3::X, Vec3::Z);
+    let mut view = View {
+        view_proj: Mat4::perspective_infinite_reverse_rh(90f32.to_radians(), 1.0, 0.1) * look,
+        view: look,
+        eye,
+        size: [64, 64],
+        time: 0.0,
+        fog: viewport::Fog {
+            start: 10.0,
+            middle: 50.0,
+            end: 50.0,
+            rate: 2.0,
+            ..viewport::Fog::default()
+        },
+        sun: Default::default(),
+        sky: None,
+        water: None,
+        night: 0.0,
+    };
+    let (near, far) = (
+        [[40.0, -5.0, 0.0], [60.0, 5.0, 10.0]],
+        [[100.0, -5.0, 0.0], [110.0, 5.0, 10.0]],
+    );
+    // The game's fog, along the view, past the farther of its end and the reach of its lights.
+    assert!(!wholly_beyond_fog(&view, near));
+    assert!(wholly_beyond_fog(&view, far));
+    view.fog.middle = 120.0;
+    assert!(!wholly_beyond_fog(&view, far));
+    // The editor's, on the ground: the far box 100 yards away.
+    view.fog = viewport::Fog {
+        start: 10.0,
+        middle: 30.0,
+        end: 105.0,
+        rate: 0.0,
+        ..viewport::Fog::default()
+    };
+    assert!(!wholly_beyond_fog(&view, far));
+    view.fog.end = 90.0;
+    assert!(wholly_beyond_fog(&view, far));
 }
 
 #[test]

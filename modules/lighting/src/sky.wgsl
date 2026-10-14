@@ -1,8 +1,9 @@
 // The sun, the moon and the clouds over the models of the sky (`vs_heavens`, `fs_heavens`), the
 // glare of the sun and of the moon over everything (`vs_glare`, `fs_glare`), and how much of each
 // body the depth of the first pass leaves in sight, which its glare follows (`cs_seen`). Each body
-// is a quad facing the eye, `DISTANCE` yards from it, at infinity; what is drawn is drawn where the
-// depth is still that of the clearing, writing none.
+// is a quad facing the eye, `DISTANCE` yards from it, at infinity. The heavens are painted before
+// the world; the glare is drawn last, where the depth is still that of the clearing; neither writes
+// the depth.
 
 struct Heavens {
     view_proj: mat4x4<f32>,
@@ -37,12 +38,11 @@ const PI: f32 = 3.14159265;
 const RING_RADIUS: f32 = 0.041666667;
 
 struct ScreenOut {
-    // The same depth on every machine, which the test of the depth for equality needs.
-    @builtin(position) @invariant clip: vec4<f32>,
+    @builtin(position) clip: vec4<f32>,
     @location(0) screen: vec2<f32>,
 };
 
-// A triangle over the whole view, at infinity, where the depth is 0.
+// A triangle over the whole view.
 @vertex
 fn vs_heavens(@builtin(vertex_index) index: u32) -> ScreenOut {
     let corner = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));

@@ -1,10 +1,12 @@
-//! The layer of the terrain in the 3D view: the tiles in sight a draw each at their level of detail,
-//! the horizon in one draw, its tiles drawn in detail left out, and last the sky, where nothing was
-//! drawn. Drawn in the pass at each frame: the tiles in sight by blocks of `BLOCK` × `BLOCK` tiles of
-//! the map, each block a render bundle of its own, kept while the tiles of the block in sight, their
-//! levels and the arrays of textures stay the same, and recorded again alone once one of them
-//! changes; the horizon and the sky drawn in the pass as they are. The camera, which moves at every
-//! frame, is written in `prepare` into its buffer, which the bundles read.
+//! The layers of the terrain in the 3D view: the sky painted first, before the world, then the tiles
+//! in sight a draw each at their level of detail; and the horizon in one draw, its tiles drawn in
+//! detail left out, painted over the sky, its models and its bodies, in a layer of its own
+//! (`HorizonLayer`, `Stage::Horizon`). Drawn in the pass at each frame: the tiles in sight by blocks
+//! of `BLOCK` × `BLOCK` tiles of the map, each block a render bundle of its own, kept while the tiles
+//! of the block in sight, their levels and the arrays of textures stay the same, and recorded again
+//! alone once one of them changes; the sky and the horizon drawn in the pass as they are. The
+//! camera, which moves at every frame, is written in `prepare` into its buffer, which the bundles
+//! and the horizon read.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -46,6 +48,95 @@ pub struct Scene {
 
 pub fn lock<T>(shared: &Mutex<T>) -> MutexGuard<'_, T> {
     shared.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// What the layer of the terrain hands to that of the horizon at each frame: what the terrain
+/// shares, its pipeline among it, the bind groups of the camera and of the tiles drawn in detail,
+/// and the horizon of the map shown.
+#[derive(Clone, Default)]
+pub struct HorizonFrame {
+    pub shared: Option<Arc<Shared>>,
+    pub camera: Option<wgpu::BindGroup>,
+    pub mask: Option<wgpu::BindGroup>,
+    pub horizon: Option<Arc<HorizonGpu>>,
+}
+
+/// The horizon of the map in the colour of the fog, painted over the sky, its models, the sun, the
+/// moon and the clouds, before the world, as Noggit paints it: what the layer of the terrain
+/// prepared for the frame.
+pub struct HorizonLayer {
+    frame: Arc<Mutex<HorizonFrame>>,
+    stats: LayerStats,
+}
+
+impl Layer for HorizonLayer {
+    fn stage(&self) -> Stage {
+        Stage::Horizon
+    }
+
+    fn drawing(&self) -> Drawing {
+        Drawing::Pass
+    }
+
+    fn draw_pass(
+        &mut self,
+        _gpu: &egui_wgpu::RenderState,
+        _target: &Target,
+        _view: &View,
+        phase: Phase,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        if phase != Phase::Sky {
+            return;
+        }
+        // Taken once the layer of the terrain has prepared the frame, which every layer does before
+        // any draws.
+        let frame = lock(&self.frame).clone();
+        let (Some(shared), Some(camera), Some(mask), Some(horizon)) =
+            (frame.shared, frame.camera, frame.mask, frame.horizon)
+        else {
+            self.stats = LayerStats::default();
+            return;
+        };
+        self.stats = LayerStats {
+            draws: 1,
+            triangles: u64::from(horizon.count / 3),
+            items: "the horizon".to_owned(),
+            ..LayerStats::default()
+        };
+        pass.set_pipeline(&shared.horizon_pipeline);
+        pass.set_bind_group(0, &camera, &[]);
+        pass.set_bind_group(1, &mask, &[]);
+        pass.set_vertex_buffer(0, horizon.vertices.slice(..));
+        pass.set_index_buffer(horizon.indices.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..horizon.count, 0, 0..1);
+    }
+
+    fn stats(&self) -> LayerStats {
+        self.stats.clone()
+    }
+}
+
+/// Whether the box `bounds` lies wholly beyond the end of the fog of `view`, past which nothing is
+/// drawn (`beyond_fog` of the shaders): its nearest corner, along the view, past the end of the fog
+/// of the lights under the game's fog, never short of its end; its nearest point on the ground past
+/// the end of the editor's.
+pub fn wholly_beyond_fog(view: &View, bounds: [[f32; 3]; 2]) -> bool {
+    let fog = view.fog;
+    if fog.rate > 0.0 {
+        let nearest = (0..8)
+            .map(|i| {
+                let pick = |axis: usize| bounds[(i >> axis) & 1][axis];
+                (view.view_proj * Vec4::new(pick(0), pick(1), pick(2), 1.0)).w
+            })
+            .fold(f32::INFINITY, f32::min);
+        return nearest > fog.middle.max(fog.end);
+    }
+    let outside = |axis: usize| {
+        let eye = view.eye[axis];
+        (bounds[0][axis] - eye).max(eye - bounds[1][axis]).max(0.0)
+    };
+    outside(0).hypot(outside(1)) > fog.end
 }
 
 /// Whether the box `bounds` may be in sight through `view_proj`: no side of the view has its
@@ -181,10 +272,11 @@ pub struct TerrainLayer {
     masked: Option<u64>,
     /// The bind group of the arrays of textures, and their generation.
     arrays: Option<(u64, wgpu::BindGroup)>,
-    /// The tiles in sight with their levels of detail, the horizon and whether a map is shown.
+    /// The tiles in sight with their levels of detail, and whether a map is shown.
     drawn: Vec<(Arc<TileGpu>, usize)>,
-    horizon: Option<Arc<HorizonGpu>>,
     sky: bool,
+    /// What the layer of the horizon draws at each frame.
+    horizon: Arc<Mutex<HorizonFrame>>,
     /// The level of each tile in sight at the last frame.
     lods: HashMap<TileId, usize>,
     /// The bundles of the blocks, kept while their tiles are in the scene, those of the blocks in
@@ -209,14 +301,22 @@ impl TerrainLayer {
             masked: None,
             arrays: None,
             drawn: Vec::new(),
-            horizon: None,
             sky: false,
+            horizon: Arc::default(),
             lods: HashMap::new(),
             blocks: HashMap::new(),
             shown: Vec::new(),
             kept_for: None,
             recorded_now: 0,
             recordings: 0,
+            stats: LayerStats::default(),
+        }
+    }
+
+    /// The layer of the horizon this one prepares the frames of.
+    pub fn horizon_layer(&self) -> HorizonLayer {
+        HorizonLayer {
+            frame: self.horizon.clone(),
             stats: LayerStats::default(),
         }
     }
@@ -325,7 +425,7 @@ impl Layer for TerrainLayer {
         self.drawn = scene
             .tiles
             .iter()
-            .filter(|tile| in_sight(view.view_proj, tile.bounds))
+            .filter(|tile| in_sight(view.view_proj, tile.bounds) && !wholly_beyond_fog(view, tile.bounds))
             .map(|tile| {
                 let lod = mesh::lod(tiles_away(view.eye, tile.bounds), lods.get(&tile.id).copied());
                 (tile.clone(), lod)
@@ -346,17 +446,22 @@ impl Layer for TerrainLayer {
             gpu.queue.write_buffer(mask, 0, bytemuck::cast_slice(&bits));
             self.masked = Some(scene.generation);
         }
-        self.horizon = scene.horizon.clone();
+        let horizon = scene.horizon.clone();
         self.sky = scene.map.is_some();
         gpu.queue
             .write_buffer(camera, 0, bytemuck::cast_slice(&camera_values(view)));
+        *lock(&self.horizon) = HorizonFrame {
+            shared: Some(shared.clone()),
+            camera: self.camera.as_ref().map(|(_, group)| group.clone()),
+            mask: self.mask.as_ref().map(|(_, group)| group.clone()),
+            horizon,
+        };
 
         let tile_triangles: u64 = self
             .drawn
             .iter()
             .map(|(tile, lod)| u64::from(tile.lods[*lod].len() as u32 / 3))
             .sum();
-        let horizon_triangles = self.horizon.as_ref().map_or(0, |horizon| u64::from(horizon.count / 3));
         let full = scene.tiles.iter().filter(|tile| tile.kind == Kind::Full).count();
         let textures = shared.textures.counts();
         let limited = scene.limited.map_or_else(String::new, |reach| {
@@ -366,8 +471,8 @@ impl Layer for TerrainLayer {
         drop(scene);
         self.record_blocks(&shared);
         self.stats = LayerStats {
-            draws: self.drawn.len() as u64 + u64::from(self.horizon.is_some()) + u64::from(self.sky),
-            triangles: tile_triangles + horizon_triangles + u64::from(self.sky),
+            draws: self.drawn.len() as u64 + u64::from(self.sky),
+            triangles: tile_triangles + u64::from(self.sky),
             bytes,
             items: format!(
                 "{} tiles in sight of {loaded} loaded ({full} full, {} light), levels {:?}, in {} blocks, {} recorded again\n  models {:.0} MB in memory; textures {} placed, {} unreadable, {} waiting for room, {} of {} arrays{limited}",
@@ -397,35 +502,25 @@ impl Layer for TerrainLayer {
         phase: Phase,
         pass: &mut wgpu::RenderPass<'_>,
     ) {
-        let (Some(shared), Some((_, camera)), Some((_, mask))) = (&self.shared, &self.camera, &self.mask) else {
+        let (Some(shared), Some((_, camera))) = (&self.shared, &self.camera) else {
             return;
         };
-        // The ground first in each phase: the sky begins the first blended one, where nothing
-        // opaque was drawn; the depth is still at infinity there only.
-        if phase == Phase::Beyond {
-            if self.sky {
+        // The sky first of all, before the world; the tiles in the opaque phase, over it.
+        match phase {
+            Phase::Sky if self.sky => {
                 pass.set_pipeline(&shared.sky_pipeline);
                 pass.set_bind_group(0, camera, &[]);
                 pass.draw(0..3, 0..1);
             }
-            return;
-        }
-        if phase != Phase::Opaque {
-            return;
-        }
-        let blocks = &self.blocks;
-        pass.execute_bundles(
-            self.shown
-                .iter()
-                .filter_map(|key| blocks.get(key).map(|block| &block.bundle)),
-        );
-        if let Some(horizon) = &self.horizon {
-            pass.set_pipeline(&shared.horizon_pipeline);
-            pass.set_bind_group(0, camera, &[]);
-            pass.set_bind_group(1, mask, &[]);
-            pass.set_vertex_buffer(0, horizon.vertices.slice(..));
-            pass.set_index_buffer(horizon.indices.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..horizon.count, 0, 0..1);
+            Phase::Opaque => {
+                let blocks = &self.blocks;
+                pass.execute_bundles(
+                    self.shown
+                        .iter()
+                        .filter_map(|key| blocks.get(key).map(|block| &block.bundle)),
+                );
+            }
+            _ => {}
         }
     }
 

@@ -134,8 +134,8 @@ impl State {
         }
     }
 
-    /// The state of `material` drawn in a model of the sky: around the eye, behind everything,
-    /// only where the depth is still at infinity, writing none, unfogged (`vs_sky`, `fs_sky`).
+    /// The state of `material` drawn in a model of the sky: around the eye, painted before the
+    /// world, the depth neither tested nor written, unfogged (`vs_sky`, `fs_sky`).
     pub fn of_sky(material: &formats::Material) -> Self {
         Self {
             depth_test: true,
@@ -151,7 +151,7 @@ impl State {
 
     /// The pipeline of this state drawing into `target`, by `shader` laid out by `layout`, its
     /// vertices read from `buffers`: a model of the sky by the entry points of the sky of `shader`,
-    /// where the depth is still that of infinity, at which they place it.
+    /// painted before the world, testing no depth.
     pub fn pipeline(
         &self,
         device: &wgpu::Device,
@@ -177,9 +177,9 @@ impl State {
                 format: target.depth_format,
                 depth_write_enabled: Some(self.depth_write),
                 // Or equal, as the client tests the depth: the layers of a submesh lie on its first.
-                // The sky only where the depth is still at infinity, where it was cleared.
+                // The sky painted first, testing nothing.
                 depth_compare: Some(if self.sky {
-                    wgpu::CompareFunction::Equal
+                    wgpu::CompareFunction::Always
                 } else if self.depth_test {
                     or_equal(target.depth_compare)
                 } else {
