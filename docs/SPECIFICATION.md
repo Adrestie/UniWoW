@@ -8182,6 +8182,67 @@ of the clearing.
   Peninsula, the horizon in front of the nebula; where the view ends, the sky, not silhouettes of the
   colour of the fog.
 
+#### The sky of 3.3.5a, as Wow.exe 12340 has it
+
+Asked by the user with the two steps before: the sun, the moon, their glares, the clouds and the
+storm were taken from the client 1.12.1, as the public implementation benilla reads it. Wow.exe
+12340, read for this step (its addresses in the comments), places the bodies from the same tables, to
+the bit (`0xd39108` to `0xd391e0`: the sun 5° from the top at noon, to the north-west), and makes its
+clouds by the same noise, curve and colours; it differs in what follows, which the editor now does
+as 12340:
+
+- the glow of the body on the clouds is whole at every hour (its table at `0xaf4be0` holds only
+  ones): `heavens::sun_glows` only says which body glows;
+- the tile of the clouds lies on its dome at `i / 22` of its side a ring, not `i / 24`; a body is
+  found on it linearly up to 45° from the top over the eye lifted by cos 45° (`clouds::on_tile`),
+  where it meets the dome for its glow (`glowing_from`), at its quad 12 yards away for the cover
+  that dims its glare (`covered_at`); the lengths of the glow are taken by the bits of the floats,
+  without a step of Newton (`rough_inverse_root`); a byte of the noise is rounded to the nearest, the
+  first texel of a row not covered left as it was;
+- eight rows of the tile are made at each frame into a tile apart, the step of the noise read once
+  it is whole, two steps a second of the time gone by, and the tile shown only when the step moved
+  on;
+- the weight of the storm is four times the intensity by the column 3 of the row of `Weather.dbc`
+  of the weather (`Tables::transition`, 1 where it names none; read with the tables, why not said),
+  whole from a quarter: every weather of the server weighs it but the black snow and the like, the
+  fog among them; the alpha of the bodies under it is rounded to the nearest;
+- the stars, then the sun, the moon and the clouds, are painted before the models of the sky, which
+  are drawn over them by their alpha, as 12340 draws them (`0x7f0b43`, `0x7f0c1a`): the stars in a
+  stage of their own before the bodies (`Stage::Stars`, `Geosets::Stars`, a second layer of the
+  models of the sky), the models of the sky after them (`Stage::Sky`);
+- the stars, the bodies and the clouds are drawn over all the sky or none, none under a model of the
+  sky past 0.99 that hides them (`heavens::share`); the glares are dimmed by the strongest model of
+  the sky whatever its flag, none under a building's own sky, and by a tenth a yard under the
+  surface of the liquid the eye was found in, the terrain's or a building's (`Immersed`, given by
+  `Liquids::liquid_at` and `Eye::liquid`), none from 10 yards (`heavens::glare_share`), none in a
+  room as before;
+- the glare of the moon is twice its side (1.75 times its curve), not twice its curve.
+
+Not taken: the second moon (`moon02`, of no colour), the sine and cosine of 12340 a little off
+(0.6° at most), the fade of a body at the horizon by the vertices it adds, the tables of its noise
+(the client's, the editor's own kept), and the brightening of the dome towards the sun at dawn and
+dusk that 12340 also does (`0x7f0530`). The sun 47° high seen in the client at noon is not what
+12340 places: that client's hour, or its sun, is to be read in it (`0xd38b04`, `0xd37f98`).
+
+- **Tested**: the glowing body by the hour; the weight of the storm by the column 3 of the weather,
+  the black snow weighing nothing, a weather unknown whole, the fog bringing the params of storm;
+  the alpha of a storm rounded; the share of the sky all or none; the glares under the models of
+  the sky whatever their flag, under a building's sky and by the depth under a liquid, the moon's
+  twice its side; the dome at `i / 22`; a body found linearly up to 45°, its glow where it meets the
+  dome, its cover at its quad; the lengths by the bits of the floats; eight rows a frame, the tile
+  shown once whole and the step moved on, two a second; the byte rounded, the first texel of a row
+  left; the order of the stages, the stars given as such and drawn by their layer alone, the other
+  models of the sky by theirs, pooled or not; the depth under the terrain's liquid and a building's,
+  given to the glares. 33 changes made on purpose, all caught; the radius of the rings in the shader
+  of the heavens, the same as in the module, is not drawn by a test.
+- **To check by the user**: at noon in Mulgore or the Barrens, the clouds as dense and as lit as
+  before, moving on in small steps; under a thunderstorm (`.wchange 86 0.8`) the sky of the storm,
+  and under the fog (`.wchange 1 1`) as well; under a model of the sky (Hellfire Peninsula), no glare
+  of the sun; where the model of the sky of a local light fades in (towards Hellfire Peninsula),
+  the sun and the clouds fading under it, not cut at once; at night under clouds, the stars hidden
+  by them; under the water a yard deep, the glare fainter, none 10 yards down, in a canal of
+  Stormwind as in a lake.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

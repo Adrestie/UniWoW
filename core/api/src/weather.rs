@@ -74,11 +74,6 @@ impl Kind {
         self != Kind::Fog
     }
 
-    /// Whether it brings the params of storm of the lights: all that falls.
-    pub fn stormy(self) -> bool {
-        self.falls()
-    }
-
     /// Whether it thickens the fog: the fog and the sandstorm.
     pub fn foggy(self) -> bool {
         matches!(self, Kind::Fog | Kind::Sandstorm)
@@ -203,7 +198,7 @@ mod tests {
         assert_eq!(Effect::of_state(state::HEAVY_RAIN, f32::NAN).unwrap().intensity, 0.0);
         assert_eq!(Effect::state_name(state::MEDIUM_SANDSTORM), Some("medium sandstorm"));
         assert_eq!(Effect::state_name(2), None);
-        assert!(Kind::Rain.falls() && Kind::Rain.stormy() && !Kind::Rain.foggy());
+        assert!(Kind::Rain.falls() && !Kind::Rain.foggy());
         assert!(!Kind::Fog.falls() && Kind::Fog.foggy() && Kind::Sandstorm.foggy());
         assert_eq!(
             Kind::ALL.iter().filter(|kind| kind.flashes()).collect::<Vec<_>>(),

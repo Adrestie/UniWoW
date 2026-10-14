@@ -3,8 +3,8 @@
 //! by jobs of the pool, the nearest first, as many as the shared budget of the view holds, their
 //! models and textures read once whoever asks; drawn by the layer of the module instanced, a draw
 //! per group of instances and batch, their bones posed by a thread of their own at each frame; the
-//! looks drawn as the sky (`Geosets::Sky`) around the eye, behind everything, by a layer of their
-//! own (`sky`). Its panel sets how far an instance is drawn and previews a display before the
+//! looks drawn as the sky (`Geosets::Sky`, `Geosets::Stars`) around the eye, behind everything, by
+//! two layers of their own, the stars and the others (`sky`). Its panel sets how far an instance is drawn and previews a display before the
 //! camera. Nothing is changed: no undo entry, no file written.
 
 mod animator;
@@ -384,7 +384,11 @@ fn load(
     look: &Look,
     refused: &mut Vec<String>,
 ) -> Result<Ready, String> {
-    if let Some(pool) = shared.pool.as_ref().filter(|_| look.geosets != Geosets::Sky) {
+    if let Some(pool) = shared
+        .pool
+        .as_ref()
+        .filter(|_| !matches!(look.geosets, Geosets::Sky | Geosets::Stars))
+    {
         match pooled::look(pool, formats, caches, look) {
             Ok(pooled) => return Ok(Ready::Pooled(pooled)),
             Err(why) => log::info!("models: {:?} drawn on the path of 9.4c: {why}", look.model),
@@ -1045,8 +1049,9 @@ impl Module for ModelsModule {
         };
         let _ = self.service.gpu.set((gpu.device.clone(), gpu.queue.clone()));
         let layer = ModelsLayer::new(self.service.clone(), self.scene.clone(), self.incoming.clone());
-        let sky = layer.sky_layer();
+        let (stars, sky) = (layer.sky_layer(true), layer.sky_layer(false));
         view.add_layer("models", Box::new(layer));
+        view.add_layer("models", Box::new(stars));
         view.add_layer("models", Box::new(sky));
         let target = view.target();
         self.view = Some(view);

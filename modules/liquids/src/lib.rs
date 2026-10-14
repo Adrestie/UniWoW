@@ -25,7 +25,7 @@ use uniwow_api::arena::{self, Refusal};
 use uniwow_api::formats::{self, LiquidLayer, TILE, TileId, Wdt};
 use uniwow_api::glam::Vec3;
 use uniwow_api::journal;
-use uniwow_api::liquids::{self, Grid, Liquids, Placed, Surfaces};
+use uniwow_api::liquids::{self, Grid, Immersed, Liquids, Placed, Surfaces};
 use uniwow_api::serde_json::json;
 use uniwow_api::viewport::Demand;
 use uniwow_api::{
@@ -94,7 +94,7 @@ impl Liquids for Water {
         lock(&self.placed).insert(owner.to_owned(), None);
     }
 
-    fn liquid_at(&self, at: [f32; 3]) -> Option<u16> {
+    fn liquid_at(&self, at: [f32; 3]) -> Option<Immersed> {
         let layers = journal::lock(&self.layers, "liquids layers").clone();
         mesh::liquid_at(layers.get(&Surfaces::tile(Surfaces::cell(at[0], at[1])))?, at)
     }

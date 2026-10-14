@@ -360,17 +360,20 @@ pub enum Drawing {
     Pass,
 }
 
-/// When a layer is drawn among the others in each phase: the ground first, then the models of the
-/// sky, the sun, the moon and the clouds, the horizon, the water, the scene, then the glare of the
-/// sun. Layers of one stage are drawn in the order they were added.
+/// When a layer is drawn among the others in each phase: the ground first, then the stars, the sun,
+/// the moon and the clouds, the models of the sky over them, as the client draws them (`0x7f0b43`,
+/// `0x7f0c1a` in 12340), the horizon, the water, the scene, then the glare of the sun. Layers of one
+/// stage are drawn in the order they were added.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Stage {
     /// The terrain and its sky.
     Ground,
-    /// The models of the sky, over the sky of the ground.
-    Sky,
-    /// The sun, the moon and the clouds, over the models of the sky.
+    /// The stars, over the sky of the ground.
+    Stars,
+    /// The sun, the moon and the clouds, over the stars.
     Celestial,
+    /// The models of the sky, over the sun, the moon and the clouds.
+    Sky,
     /// The horizon of the map, over the sky, as Noggit paints it.
     Horizon,
     /// The liquids.
@@ -594,8 +597,10 @@ mod tests {
         assert_eq!(first, [Phase::Sky, Phase::Opaque]);
         let blended: Vec<Phase> = Phase::ALL.into_iter().filter(|phase| phase.blended()).collect();
         assert_eq!(blended, [Phase::Beyond, Phase::Water, Phase::Near]);
-        // The horizon over the sky, its models and its bodies, before the water and the scene.
-        assert!(Stage::Celestial < Stage::Horizon && Stage::Horizon < Stage::Water);
+        // The stars, the bodies and the clouds, the models of the sky over them, then the horizon,
+        // before the water and the scene.
+        assert!(Stage::Ground < Stage::Stars && Stage::Stars < Stage::Celestial);
+        assert!(Stage::Celestial < Stage::Sky && Stage::Sky < Stage::Horizon && Stage::Horizon < Stage::Water);
     }
 
     /// A demand of `fixed` bytes, wanting `bytes` in each of the bands `wanted` and holding `held`.

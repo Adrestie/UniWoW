@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::ServiceKey;
 use crate::formats::{FileRef, FogBand};
+use crate::liquids::Immersed;
 
 /// Provide with `Registrar::provide(SERVICE, …)`, ask with `Context::service(SERVICE)`.
 pub const SERVICE: ServiceKey<Handle> = ServiceKey::new("buildings");
@@ -25,12 +26,12 @@ pub trait Buildings: Send + Sync {
 pub struct Eye {
     /// The group inside of a building the eye is in, none outside every building.
     pub group: Option<EyeGroup>,
-    /// The type of the liquid of `LiquidType.dbc` the eye lies in as the buildings decide it, as
-    /// the client finds the one its camera is in (0x790920): in a group inside, that of that group
-    /// alone, `Some(None)` where its surface is not over the eye; otherwise that of a group outside
-    /// of a building whose bounds hold the eye, its surface over it; `None` leaves it to the liquids
-    /// of the terrain.
-    pub liquid: Option<Option<u16>>,
+    /// The liquid the eye lies in as the buildings decide it, as the client finds the one its
+    /// camera is in (0x790920), the depth in the axes of its building: in a group inside, that of
+    /// that group alone, `Some(None)` where its surface is not over the eye; otherwise that of a
+    /// group outside of a building whose bounds hold the eye, its surface over it; `None` leaves it
+    /// to the liquids of the terrain.
+    pub liquid: Option<Option<Immersed>>,
 }
 
 /// The group inside of a building the eye is in.

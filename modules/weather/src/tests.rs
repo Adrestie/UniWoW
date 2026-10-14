@@ -18,7 +18,7 @@ use uniwow_api::formats::{
     Wmo,
 };
 use uniwow_api::glam::{Mat4, Vec3};
-use uniwow_api::liquids::{Liquids, Surfaces};
+use uniwow_api::liquids::{Immersed, Liquids, Surfaces};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::vfs::{Vfs, VfsState};
 use uniwow_api::viewport::{Drawing, Fog, Layer, Phase, Sun, Target, View};
@@ -172,7 +172,7 @@ fn as_many_fall_as_the_intensity_asks_and_none_where_the_eye_is_sheltered() {
     rooms.0.lock().unwrap().group = Some(group(0x2000 | 0x40));
     assert_eq!(fall::sheltered(None, Some(&buildings), [0.0; 3]), (None, f32::MIN));
     // In a liquid of a building, nothing.
-    rooms.0.lock().unwrap().liquid = Some(Some(5));
+    rooms.0.lock().unwrap().liquid = Some(Some(Immersed { liquid: 5, depth: 1.0 }));
     assert!(fall::sheltered(None, Some(&buildings), [0.0; 3]).0.is_some());
     // Without the services: it falls.
     assert_eq!(fall::sheltered(None, None, [0.0; 3]), (None, f32::MIN));

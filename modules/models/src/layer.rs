@@ -343,10 +343,10 @@ impl ModelsLayer {
         }
     }
 
-    /// The layer drawing the models of the sky this layer finds, in a stage of its own, over the
-    /// sky of the ground and behind the rest.
-    pub fn sky_layer(&self) -> SkyLayer {
-        SkyLayer::new(self.sky.clone())
+    /// The layer drawing the models of the sky this layer finds, the stars alone when `stars` says,
+    /// the others otherwise, in a stage of their own, behind the rest.
+    pub fn sky_layer(&self, stars: bool) -> SkyLayer {
+        SkyLayer::new(self.sky.clone(), stars)
     }
 
     fn pool(&self) -> Option<Arc<Pool>> {
@@ -596,6 +596,7 @@ impl Layer for ModelsLayer {
                         look: look.clone(),
                         buffer: buffer.clone(),
                         instances: start..start + group.count,
+                        stars: look.stars(),
                     });
                     continue;
                 }

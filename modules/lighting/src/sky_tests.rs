@@ -38,8 +38,6 @@ fn the_tables_of_the_day_are_read_between_their_keys_past_the_last_towards_the_f
     assert!((heavens::day_table(&wrapping, 0.875) - 75.0).abs() < 1e-3);
     assert!((heavens::day_table(&wrapping, 0.125) - 25.0).abs() < 1e-3);
     // Keys stored out of order are read in the order stored, as the client reads them: past 22 h 10
-    // the envelope of the glow on the clouds wraps back to 1.
-    assert_eq!(heavens::cloud_glow(at(22.0, 30.0)).0, 1.0);
 }
 
 #[test]
@@ -125,26 +123,29 @@ fn the_glare_of_the_sun_is_of_the_day_that_of_the_moon_of_the_night() {
     assert_eq!(flares(0.0, 0.0), [0.0, 1.0]);
     assert_eq!(flares(1.0, 30.0), [0.0, 1.0]);
     assert_eq!(flares(2.0, 37.5), [0.0, 0.5]);
-    // The glow on the clouds: the sun's from 4 h 50 to 22 h 10, its envelope out at the notch.
-    assert_eq!(heavens::cloud_glow(at(12.0, 0.0)), (1.0, true));
-    assert_eq!(heavens::cloud_glow(at(4.0, 45.0)), (0.0, false));
-    assert!(heavens::cloud_glow(at(4.0, 51.0)).1);
-    assert!(!heavens::cloud_glow(at(2.0, 0.0)).1);
+    // The glow on the clouds: the sun's from 4 h 50 to 22 h 10, the moon's otherwise.
+    assert!(heavens::sun_glows(at(12.0, 0.0)));
+    assert!(!heavens::sun_glows(at(4.0, 45.0)));
+    assert!(heavens::sun_glows(at(4.0, 51.0)));
+    assert!(!heavens::sun_glows(at(2.0, 0.0)));
 }
 
 #[test]
 fn a_storm_weighs_four_times_its_intensity_and_fades_the_bodies_by_bytes() {
-    assert_eq!(heavens::storm_share(0.1), 0.4);
-    assert_eq!(heavens::storm_share(0.25), 1.0);
-    assert_eq!(heavens::storm_share(0.8), 1.0);
-    assert_eq!(heavens::storm_share(0.0), 0.0);
+    assert_eq!(heavens::storm_share(0.1, 1.0), 0.4);
+    assert_eq!(heavens::storm_share(0.25, 1.0), 1.0);
+    assert_eq!(heavens::storm_share(0.8, 1.0), 1.0);
+    assert_eq!(heavens::storm_share(0.0, 1.0), 0.0);
+    // By the column 3 of the row of the weather: none for the black snow, half at a half.
+    assert_eq!(heavens::storm_share(1.0, 0.0), 0.0);
+    assert_eq!(heavens::storm_share(0.1, 0.5), 0.2);
     assert_eq!(heavens::storm_alpha(0.0), 1.0);
-    assert_eq!(heavens::storm_alpha(0.5), 127.0 / 255.0);
+    assert_eq!(heavens::storm_alpha(0.5), 128.0 / 255.0, "rounded to the nearest");
     assert_eq!(heavens::storm_alpha(1.0), 0.0);
     let [sun, moon] = heavens::bodies(at(12.0, 0.0), [1.0, 0.5, 0.25], 0.5);
     assert_eq!(
         (sun.colour, sun.alpha, moon.alpha),
-        ([1.0, 0.5, 0.25], 127.0 / 255.0, 127.0 / 255.0)
+        ([1.0, 0.5, 0.25], 128.0 / 255.0, 128.0 / 255.0)
     );
     assert_eq!(sun.side, 1.0);
     assert_eq!(moon.side, heavens::moon_side(at(12.0, 0.0)));
@@ -167,19 +168,24 @@ fn the_view_turns_onto_a_body_from_45_degrees_away() {
 #[test]
 fn the_bodies_and_the_clouds_are_drawn_but_under_a_model_of_the_sky_that_hides_them() {
     assert_eq!(heavens::share(&[], false, false), 1.0);
-    assert!((heavens::share(&[(0.4, false)], false, false) - 0.6).abs() < 1e-6);
-    assert!(
-        (heavens::share(&[(0.4, false), (0.7, false)], false, false) - 0.3).abs() < 1e-6,
-        "the strongest"
-    );
+    // All or none: a model of the sky half seen leaves them whole.
+    assert_eq!(heavens::share(&[(0.4, false)], false, false), 1.0);
+    assert_eq!(heavens::share(&[(0.4, false), (0.7, false)], false, false), 1.0);
     assert_eq!(
         heavens::share(&[(1.0, true)], false, false),
         1.0,
-        "one that lets them be drawn"
+        "a model that lets them be drawn"
     );
     assert_eq!(heavens::share(&[(0.995, false)], false, false), 0.0, "past 0.99");
     assert_eq!(heavens::share(&[], true, false), 0.0, "a building's own sky");
     assert_eq!(heavens::share(&[], false, true), 0.0, "in a liquid");
+    // The glares under what the strongest model of the sky leaves, whatever its flag; none under a
+    // building's own sky; a tenth less a yard under a liquid, none from 10 yards.
+    assert_eq!(heavens::glare_share(&[], false, 0.0), 1.0);
+    assert!((heavens::glare_share(&[(0.4, false), (0.7, true)], false, 0.0) - 0.3).abs() < 1e-6);
+    assert_eq!(heavens::glare_share(&[], true, 0.0), 0.0);
+    assert!((heavens::glare_share(&[], false, 5.0) - 0.5).abs() < 1e-6);
+    assert_eq!(heavens::glare_share(&[], false, 12.0), 0.0);
 }
 
 /// A direction from the eye meeting the dome of the clouds at the co-latitude `turns`, in turns of
@@ -200,14 +206,14 @@ fn the_dome_puts_the_top_of_the_sky_in_the_middle_of_the_tile_and_its_edge_on_th
     // On the horizon, the edge: the ring 11, of no alpha.
     let ([u, v], alpha) = clouds::on_dome([1.0, 0.0, 0.0]);
     assert!(
-        (u - (0.5 + 11.0 / 24.0) * 128.0).abs() < 1e-2 && (v - 64.0).abs() < 1e-3,
+        (u - (0.5 + 11.0 / 22.0) * 128.0).abs() < 1e-2 && (v - 64.0).abs() < 1e-3,
         "{u} {v}"
     );
     assert_eq!(alpha, 0.0);
     // The ninth ring whole, the tenth half, and between them halfway.
     let ([u, _], alpha) = clouds::on_dome(on_dome_at(0.205));
     assert!(
-        (u - (0.5 + 8.0 / 24.0) * 128.0).abs() < 0.05 && (alpha - 1.0).abs() < 1e-3,
+        (u - (0.5 + 8.0 / 22.0) * 128.0).abs() < 0.05 && (alpha - 1.0).abs() < 1e-3,
         "{u} {alpha}"
     );
     let (_, alpha) = clouds::on_dome(on_dome_at(0.23));
@@ -218,7 +224,7 @@ fn the_dome_puts_the_top_of_the_sky_in_the_middle_of_the_tile_and_its_edge_on_th
     let [x, y, z] = on_dome_at(0.1);
     let ([u, v], _) = clouds::on_dome([y, x, z]);
     assert!(
-        (u - 64.0).abs() < 1e-3 && (v - (0.5 + 4.0 / 24.0) * 128.0).abs() < 0.05,
+        (u - 64.0).abs() < 1e-3 && (v - (0.5 + 4.0 / 22.0) * 128.0).abs() < 0.05,
         "{u} {v}"
     );
     // Under the horizon, the edge still, of no alpha.
@@ -233,7 +239,6 @@ fn palette() -> Palette {
         body: [0.0, 0.0, 0.2],
         storm: 0.0,
         towards: [0.0, 0.0, 1.0],
-        envelope: 1.0,
     }
 }
 
@@ -258,22 +263,59 @@ fn the_clouds_cover_nothing_without_density_all_at_full_density_and_more_the_den
 }
 
 #[test]
-fn the_tile_is_made_again_a_band_each_tenth_of_a_second_moving_on_in_time_after_four() {
+fn eight_rows_are_made_a_frame_the_tile_shown_once_whole_and_the_time_moved_on_two_steps_a_second() {
     let mut field = Field::default();
-    assert!(field.tick(0.0, 0.5, &palette()));
-    assert_eq!(field.step(), 1, "the whole tile made: a step on");
+    assert!(field.tick(0.0, 0.5, &palette()), "made whole and shown the first time");
+    assert_eq!(field.step(), 0);
     let first: Vec<u8> = field.cover().to_vec();
-    assert!(!field.tick(0.05, 0.5, &palette()), "not before a tenth of a second");
-    assert!(field.tick(0.06, 0.5, &palette()));
-    for _ in 0..2 {
-        assert!(field.tick(0.1, 0.5, &palette()));
+    // Sixty frames a second: the tile apart whole every 16 frames, shown once the step moved on,
+    // at the second time, half a second gone; the tile shown the same until then.
+    let mut shown = None;
+    for frame in 1..=64 {
+        if field.tick(1.0 / 60.0, 0.5, &palette()) {
+            shown = Some(frame);
+            break;
+        }
+        assert_eq!(field.cover(), first.as_slice(), "frame {frame}");
     }
+    assert_eq!(shown, Some(32));
     assert_eq!(field.step(), 1);
-    assert!(field.tick(0.1, 0.5, &palette()));
-    assert_eq!(field.step(), 2, "a step on once the whole tile was made again");
-    // A step moves the clouds a little, not wholly.
+    // Five seconds on, the step read at the end of the last whole tile, 5.33 seconds gone: ten
+    // steps; the clouds moved a little, not wholly.
+    for _ in 0..300 {
+        field.tick(1.0 / 60.0, 0.5, &palette());
+    }
+    assert_eq!(field.step(), 10);
     let same = first.iter().zip(field.cover()).filter(|(a, b)| a == b).count();
     assert!(same > SIDE * SIDE / 2 && same < SIDE * SIDE, "{same}");
+}
+
+#[test]
+fn the_byte_of_the_noise_is_rounded_and_the_first_texel_of_a_row_not_covered_left_as_it_was() {
+    assert_eq!(clouds::noise_byte(0.01), 129, "128.64 to the nearest");
+    assert_eq!(clouds::noise_byte(-0.01), 127);
+    assert_eq!(clouds::noise_byte(0.0), 128);
+    // Wholly covered, then made again without clouds into the tile it was first made in: its
+    // first texels keep their colour and their cover, the others none.
+    let mut field = Field::default();
+    assert!(field.tick(0.0, 1.0, &palette()));
+    let covered: Vec<[u8; 4]> = field.texels().to_vec();
+    let mut swaps = 0;
+    for _ in 0..200 {
+        let density = if swaps == 0 { 1.0 } else { 0.0 };
+        if field.tick(1.0 / 60.0, density, &palette()) {
+            swaps += 1;
+            if swaps == 2 {
+                break;
+            }
+        }
+    }
+    assert_eq!(swaps, 2);
+    let texels = field.texels();
+    for row in 0..SIDE {
+        assert_eq!(texels[row * SIDE], covered[row * SIDE], "row {row}");
+        assert_eq!(texels[row * SIDE + 1][3], 0, "row {row}");
+    }
 }
 
 #[test]
@@ -288,8 +330,12 @@ fn a_covered_texel_is_coloured_by_its_thinness_and_glows_towards_the_body() {
         }
         assert_eq!(texel[3], *cover);
         let thinness = f32::from(((255 - cover) >> 1) + 64) / 255.0;
-        assert_eq!(texel[0], (thinness * 255.0) as u8, "the colour added by the thinness");
-        assert_eq!(texel[2], (0.2f32 * 255.0) as u8, "the colour of the clouds");
+        assert_eq!(
+            texel[0],
+            (thinness * 255.0).round() as u8,
+            "the colour added by the thinness"
+        );
+        assert_eq!(texel[2], (0.2f32 * 255.0).round() as u8, "the colour of the clouds");
     }
     // The body over the middle of the tile: the slopes near it glow more than those far from it.
     let glow = |rows: std::ops::Range<usize>| {
@@ -308,39 +354,60 @@ fn a_covered_texel_is_coloured_by_its_thinness_and_glows_towards_the_body() {
     };
     let (near, far) = (glow(56..72), glow(0..16));
     assert!(near > far + 20.0, "{near} {far}");
-    // None without the envelope of the glow.
-    let mut dark = Field::default();
-    dark.tick(
+    // The lengths taken by the bits of the floats, as 12340 takes them: 0.975 for 1, not 1.
+    assert!((clouds::rough_inverse_root(1.0) - 0.974_97).abs() < 1e-4);
+    assert!((clouds::rough_inverse_root(4.0) - 0.487_49).abs() < 1e-4);
+    // A storm dims the glow to a quarter at most.
+    let mut stormy = Field::default();
+    stormy.tick(
         0.0,
         0.6,
         &Palette {
-            envelope: 0.0,
+            storm: 1.0,
             ..palette()
         },
     );
+    let glowing = |field: &Field| field.texels().iter().map(|texel| u32::from(texel[1])).sum::<u32>();
     assert!(
-        dark.texels()
-            .iter()
-            .filter(|texel| texel[3] > 0)
-            .all(|texel| texel[1] == 0)
+        glowing(&stormy) < glowing(&field) / 2,
+        "{} {}",
+        glowing(&stormy),
+        glowing(&field)
     );
 }
 
 #[test]
-fn the_cover_towards_a_direction_is_that_of_the_texel_the_dome_puts_there() {
+fn a_body_is_found_on_the_tile_linearly_up_to_45_degrees_its_cover_read_at_its_quad() {
     let mut field = Field::default();
     field.tick(0.0, 0.5, &palette());
     let cover = field.cover();
+    // Straight up, the middle of the tile; on the horizon, its edge.
     assert_eq!(
         field.cover_towards([0.0, 0.0, 1.0]),
         f32::from(cover[64 * SIDE + 64]) / 255.0
     );
-    let towards = on_dome_at(0.1);
-    let ([u, v], _) = clouds::on_dome(towards);
+    let [u, v] = clouds::covered_at([1.0, 0.0, 0.0]);
+    assert!((u - 128.0).abs() < 1e-3 && (v - 64.0).abs() < 1e-3, "{u} {v}");
+    // 61° high, its quad 27.5° from the top over the eye lifted: some 0.3 of the side from the middle.
+    let high = on_dome_at(0.05);
+    let [u, v] = clouds::covered_at(high);
+    assert!(
+        (u - (0.5 + 0.306) * 128.0).abs() < 0.5 && (v - 64.0).abs() < 1e-3,
+        "{u} {v}"
+    );
     assert_eq!(
-        field.cover_towards(towards),
+        field.cover_towards(high),
         f32::from(cover[v as usize * SIDE + u as usize]) / 255.0
     );
+    let towards = on_dome_at(0.1);
+    // Where it glows from: 18° from the top of the dome, a fifth of the side from the middle,
+    // linearly, where the rings of the dome put the clouds 4 / 22 of it away.
+    let [u, _] = clouds::glowing_from(towards);
+    assert!((u - (0.5 + 0.2) * 128.0).abs() < 0.05, "{u}");
+    let ([ringed, _], _) = clouds::on_dome(towards);
+    assert!((ringed - (0.5 + 4.0 / 22.0) * 128.0).abs() < 0.05, "{ringed}");
+    let [u, _] = clouds::glowing_from([1.0, 0.0, 0.0]);
+    assert!((u - 128.0).abs() < 1e-3, "{u}");
 }
 
 fn resolved<F: Future>(future: F) -> Option<F::Output> {

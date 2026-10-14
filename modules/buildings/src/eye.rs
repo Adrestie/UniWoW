@@ -6,7 +6,7 @@
 
 use uniwow_api::formats::{FileRef, FogBand, Wmo, WmoFog};
 use uniwow_api::glam::{Vec3, Vec4Swizzles};
-use uniwow_api::liquids::CELL;
+use uniwow_api::liquids::{CELL, Immersed};
 
 use crate::cells::Cells;
 use crate::liquid;
@@ -36,10 +36,10 @@ pub struct Surface {
 }
 
 impl Surface {
-    /// The type of the liquid `point` lies in: the cell under it drawn, and the point under its
-    /// surface there, read between the heights of the corners of the cell along X then Y, or no
-    /// more than a hundredth of a yard over it.
-    pub fn liquid_at(&self, point: Vec3) -> Option<u16> {
+    /// The liquid `point` lies in, and how deep under it: the cell under it drawn, and the point
+    /// under its surface there, read between the heights of the corners of the cell along X then Y,
+    /// or no more than a hundredth of a yard over it.
+    pub fn liquid_at(&self, point: Vec3) -> Option<Immersed> {
         let [x, y] = [(point.x - self.corner.x) / CELL, (point.y - self.corner.y) / CELL];
         if !(0.0..self.cells[0] as f32).contains(&x) || !(0.0..self.cells[1] as f32).contains(&y) {
             return None;
@@ -55,7 +55,11 @@ impl Surface {
         let [along, across] = [y - row as f32, x - column as f32];
         let near = height(row, column) + (height(row, column + 1) - height(row, column)) * across;
         let far = height(row + 1, column) + (height(row + 1, column + 1) - height(row + 1, column)) * across;
-        (point.z < near + (far - near) * along + OVER).then_some(kind)
+        let surface = near + (far - near) * along;
+        (point.z < surface + OVER).then_some(Immersed {
+            liquid: kind,
+            depth: surface - point.z,
+        })
     }
 }
 
@@ -237,14 +241,13 @@ impl Lights {
         Some(mixed)
     }
 
-    /// The type of the liquid of the group `group` that `eye` lies in.
-    pub fn liquid(&self, group: usize, eye: Vec3) -> Option<u16> {
+    /// The liquid of the group `group` that `eye` lies in.
+    pub fn liquid(&self, group: usize, eye: Vec3) -> Option<Immersed> {
         self.groups.get(group)?.surface.as_ref()?.liquid_at(eye)
     }
 
-    /// The type of the liquid of a group outside whose bounds in `cells` hold `eye`, that `eye`
-    /// lies in.
-    pub fn liquid_outside(&self, cells: &Cells, eye: Vec3) -> Option<u16> {
+    /// The liquid of a group outside whose bounds in `cells` hold `eye`, that `eye` lies in.
+    pub fn liquid_outside(&self, cells: &Cells, eye: Vec3) -> Option<Immersed> {
         self.groups.iter().zip(&cells.groups).find_map(|(group, cell)| {
             let [low, high] = cell.bounds;
             if group.flags & OUTSIDE == 0 || eye.cmplt(low).any() || eye.cmpgt(high).any() {

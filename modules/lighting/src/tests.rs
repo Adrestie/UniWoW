@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use uniwow_api::formats::{
     AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef,
     FogBand, Formats, GameObjectDisplay, HairGeoset, LightBand, LightParamsRecord, LightRecord, LightSkyboxRecord,
-    LiquidTypeRecord, MapRecord, Model, Texture, Tile, Wdl, Wdt, Wmo, ZoneLightRecord,
+    LiquidTypeRecord, MapRecord, Model, Texture, Tile, Wdl, Wdt, WeatherRecord, Wmo, ZoneLightRecord,
 };
-use uniwow_api::liquids::{Liquids, Surfaces};
+use uniwow_api::liquids::{Immersed, Liquids, Surfaces};
 use uniwow_api::models::{self, Geosets, Instance, Look, LookId, LookState, Models, Motion};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::vfs::{Vfs, VfsState};
@@ -1125,10 +1125,12 @@ impl EditorBackend for Shown {
     }
 }
 
-/// Liquids where the eye is in the liquid `liquid`, keeping the point last asked.
+/// Liquids where the eye is in the liquid `liquid`, `depth` yards under its surface, keeping the
+/// point last asked.
 #[derive(Default)]
 struct Pond {
     liquid: Mutex<Option<u16>>,
+    depth: Mutex<f32>,
     asked: Mutex<Option<[f32; 3]>>,
 }
 
@@ -1136,9 +1138,10 @@ impl Liquids for Pond {
     fn surfaces(&self) -> Arc<Surfaces> {
         Arc::default()
     }
-    fn liquid_at(&self, at: [f32; 3]) -> Option<u16> {
+    fn liquid_at(&self, at: [f32; 3]) -> Option<Immersed> {
         *self.asked.lock().unwrap() = Some(at);
-        *self.liquid.lock().unwrap()
+        let depth = *self.depth.lock().unwrap();
+        self.liquid.lock().unwrap().map(|liquid| Immersed { liquid, depth })
     }
 }
 
@@ -1373,7 +1376,7 @@ fn the_tables_are_read_once_the_client_is_open_and_again_once_it_changes() {
     assert_eq!(host.cancelled, [JobId(2)]);
     assert_eq!(host.started.len(), 2);
     // A job of before coming back is not taken.
-    let read: Result<crate::Read, String> = Ok((Arc::new(Tables::default()), None, None, None));
+    let read: Result<crate::Read, String> = Ok((Arc::new(Tables::default()), None, None, None, None));
     module.on_job(
         JobId(2),
         JobOutcome::Done(Box::new(read)),
@@ -1408,14 +1411,20 @@ fn the_tables_are_read_once_the_client_is_open_and_again_once_it_changes() {
         module.tables.as_ref().map(|read| read.clone().err()),
         Some(Some("boom".to_owned()))
     );
-    // Read without the zones of light: the tables taken, why said; forgotten once the client changes.
+    // Read without the zones of light nor the weathers: the tables taken, why said; forgotten once the
+    // client changes.
     *files.0.lock().unwrap() = VfsState::Ready {
         archives: 7,
         files: 150,
     };
     module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
-    let read: Result<crate::Read, String> =
-        Ok((Arc::new(Tables::default()), Some("no Wow.exe".to_owned()), None, None));
+    let read: Result<crate::Read, String> = Ok((
+        Arc::new(Tables::default()),
+        Some("no Wow.exe".to_owned()),
+        None,
+        None,
+        Some("no Weather.dbc".to_owned()),
+    ));
     module.on_job(
         JobId(5),
         JobOutcome::Done(Box::new(read)),
@@ -1423,12 +1432,13 @@ fn the_tables_are_read_once_the_client_is_open_and_again_once_it_changes() {
     );
     assert!(matches!(module.tables, Some(Ok(_))));
     assert_eq!(module.zones_unread.as_deref(), Some("no Wow.exe"));
+    assert_eq!(module.weathers_unread.as_deref(), Some("no Weather.dbc"));
     *files.0.lock().unwrap() = VfsState::Ready {
         archives: 8,
         files: 160,
     };
     module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
-    assert_eq!(module.zones_unread, None);
+    assert_eq!((module.zones_unread, module.weathers_unread), (None, None));
     assert_eq!(host.started.len(), 6);
 }
 
@@ -1505,7 +1515,7 @@ fn the_light_is_that_of_the_map_shown_at_the_camera_s_place_on_it() {
     module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
     assert_eq!(module.shown.as_ref().unwrap().immersion, Immersion::Dry);
     *host.pond.liquid.lock().unwrap() = None;
-    host.rooms.0.lock().unwrap().liquid = Some(Some(3));
+    host.rooms.0.lock().unwrap().liquid = Some(Some(Immersed { liquid: 3, depth: 0.5 }));
     module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
     assert_eq!(module.shown.as_ref().unwrap().immersion, Immersion::Lit(4));
     *host.pond.liquid.lock().unwrap() = Some(5);
@@ -1763,11 +1773,9 @@ fn the_hour_of_the_server_is_taken_through_the_live_world_when_asked_for_and_kno
 #[test]
 fn the_weather_given_mixes_in_the_params_of_storm_and_brings_the_fog_nearer() {
     // The global light's params of storm, 5: a diffuse of 200, the fog to 250 yards from a quarter.
-    let (mut lights, mut records, mut colours, mut fog) = parts();
-    lights[0].params[2] = 5;
-    records.push(params(5, 0.2));
-    colours.push(greys(73, &[(0, 200)]));
-    fog.extend([numbers(25, &[(0, 9_000.0)]), numbers(26, &[(0, 0.25)])]);
+    let (lights, mut records, mut colours, mut fog) = parts();
+    lights_with_storm(&mut records, &mut colours, &mut fog);
+    let lights = storm_lights(lights);
     let files = Arc::new(Files(Mutex::new(VfsState::Ready { archives: 1, files: 1 })));
     let mut host = host(files);
     let mut module = crate::LightingModule {
@@ -1818,20 +1826,23 @@ fn the_weather_given_mixes_in_the_params_of_storm_and_brings_the_fog_nearer() {
         (lit - 200.0).abs() < 1e-3 && (fogged[1] - 250.0).abs() < 1e-3,
         "{lit} {fogged:?}"
     );
-    // The fog at 1: the clear params, the fog a quarter as far.
+    // The fog at 1, its row of Weather.dbc unknown, weighing whole: the params of storm, the fog a
+    // quarter as far.
     *host.sent.0.lock().unwrap() = Some(Effect {
         kind: Kind::Fog,
         intensity: 1.0,
     });
-    assert_eq!(seen(&mut module, &mut host), (100.0, [31.25, 125.0, 1.0]));
+    assert_eq!(seen(&mut module, &mut host), (200.0, [15.625, 62.5, 1.0]));
     assert_eq!(
         host.seen.0.lock().unwrap().unwrap().reach,
-        Some(500.0),
-        "the fog nearer, not the reach of the lights"
+        Some(250.0),
+        "the reach of the params of storm of the lights, not brought nearer as the fog"
     );
     assert!(
-        panel(&mut module, &mut host)
-            .contains(&"Weather: fog at 1.00; the fog of the game 0.25 times as far.".to_owned())
+        panel(&mut module, &mut host).contains(
+            &"Weather: fog at 1.00; the params of storm mixed in by 1.00; the fog of the game 0.25 times as far."
+                .to_owned()
+        )
     );
     // A sandstorm both.
     *host.sent.0.lock().unwrap() = Some(Effect {
@@ -1843,6 +1854,24 @@ fn the_weather_given_mixes_in_the_params_of_storm_and_brings_the_fog_nearer() {
         (lit - 200.0).abs() < 1e-3 && (fogged[1] - 62.5).abs() < 1e-3,
         "{lit} {fogged:?}"
     );
+    // The black snow, its row of Weather.dbc weighing nothing: the clear params.
+    let (lights, mut records, mut colours, mut fog) = parts();
+    lights_with_storm(&mut records, &mut colours, &mut fog);
+    module.tables = Some(Ok(Arc::new(
+        Tables::new(&storm_lights(lights), &records, &colours, &fog, &[]).with_weathers(&[WeatherRecord {
+            id: uniwow_api::weather::state::BLACK_SNOW,
+            sound: 0,
+            effect: 2,
+            transition_sky: 0.0,
+            colour: [0.0; 3],
+            texture: String::new(),
+        }]),
+    )));
+    *host.sent.0.lock().unwrap() = Some(Effect {
+        kind: Kind::BlackSnow,
+        intensity: 1.0,
+    });
+    assert_eq!(seen(&mut module, &mut host), (100.0, [125.0, 500.0, 1.0]));
     // Without the service: the clear light.
     host.weather = None;
     assert_eq!(seen(&mut module, &mut host), (100.0, [125.0, 500.0, 1.0]));
@@ -2101,6 +2130,30 @@ fn the_zones_of_light_are_read_with_the_tables_and_said_in_the_panel() {
 }
 
 /// Tables of `parts` whose params 1, 2 and 3 name the model of the sky 7 of the flags `flags`.
+/// The lights of `parts`, the global one with the params of storm 5 (`lights_with_storm`).
+fn storm_lights(mut lights: Vec<LightRecord>) -> Vec<LightRecord> {
+    lights[0].params[2] = 5;
+    lights
+}
+
+/// The params of storm 5: a diffuse of 200, the fog to 250 yards from a quarter.
+fn lights_with_storm(
+    records: &mut Vec<LightParamsRecord>,
+    colours: &mut Vec<LightBand<[u8; 3]>>,
+    fog: &mut Vec<LightBand<f32>>,
+) {
+    records.push(params(5, 0.2));
+    colours.push(greys(73, &[(0, 200)]));
+    fog.extend([numbers(25, &[(0, 9_000.0)]), numbers(26, &[(0, 0.25)])]);
+}
+
+/// The tables of `parts` with the colour of the sun and the moon, and no model of the sky.
+fn unskied() -> Tables {
+    let (lights, records, mut colours, fog) = parts();
+    colours.push(greys(10, &[(0, 200)]));
+    Tables::new(&lights, &records, &colours, &fog, &[])
+}
+
 fn skied_with(flags: u32) -> Tables {
     let (lights, mut records, mut colours, fog) = parts();
     for record in records.iter_mut().filter(|record| record.id <= 3) {
@@ -2137,7 +2190,7 @@ fn the_stars_are_placed_first_at_night_faded_by_the_hour_not_under_a_model_of_th
         Look {
             model: FileRef::Path("Environments\\Stars\\Stars.m2".to_owned()),
             textures: Vec::new(),
-            geosets: Geosets::Sky,
+            geosets: Geosets::Stars,
         }
     );
     assert_eq!(
@@ -2204,7 +2257,8 @@ fn the_sun_the_moon_and_their_glares_are_given_to_the_layers_of_the_sky_with_the
     module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
     let given = crate::sky::lock(&module.drawn).heavens.unwrap();
     // At noon: the sun near the top, in the colour of the band 9, the moon under the horizon; the
-    // whole sky, a model of the sky letting them be drawn; the glare of the sun whole, no clouds.
+    // whole sky, a model of the sky letting them be drawn; no glare under that whole model, whatever
+    // its flag, as 12340 dims the glares; no clouds.
     assert_eq!(given.sun.towards, crate::heavens::sun_towards(1440.0));
     assert_eq!(given.moon.towards, crate::heavens::moon_towards(1440.0));
     assert_eq!(
@@ -2212,18 +2266,25 @@ fn the_sun_the_moon_and_their_glares_are_given_to_the_layers_of_the_sky_with_the
         ([200.0 / 255.0; 3], 1.0, 1.0)
     );
     assert_eq!(given.share, 1.0);
-    assert_eq!(given.flares, [1.0, 0.0]);
+    assert_eq!(given.flares, [0.0, 0.0]);
     assert_eq!(given.glares[0].sides, [3.0, 20.0]);
-    assert_eq!(given.glares[1].sides, [2.0 * 1.5; 2]);
+    assert_eq!(
+        given.glares[1].sides,
+        [2.0 * 1.75 * 1.5; 2],
+        "twice the side of the moon"
+    );
     assert!(crate::sky::lock(&module.drawn).clouds.is_some(), "the clouds made");
     let texts = panel(&mut module, &mut host);
     assert!(
         texts.iter().any(|text| text.contains(
-            "The sky: the sun 85° high, the moon under the horizon; drawn over 1.00 of it; the clouds of density 0.00; the glare of the sun towards 1.00, of the moon 0.00"
+            "The sky: the sun 85° high, the moon under the horizon; drawn over 1.00 of it; the clouds of density 0.00; the glare of the sun towards 0.00, of the moon 0.00"
         )),
         "{texts:?}"
     );
-    // In a room, no glare.
+    // Without the model of the sky, the glare of the sun whole; in a room, none.
+    module.tables = Some(Ok(Arc::new(unskied().with_liquids(&liquids()))));
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    assert_eq!(crate::sky::lock(&module.drawn).heavens.unwrap().flares, [1.0, 0.0]);
     host.rooms.0.lock().unwrap().group = Some(uniwow_api::buildings::EyeGroup {
         flags: 0x2000,
         fog: None,
@@ -2248,9 +2309,16 @@ fn the_sun_the_moon_and_their_glares_are_given_to_the_layers_of_the_sky_with_the
     module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
     let given = crate::sky::lock(&module.drawn).heavens.unwrap();
     assert_eq!((given.share, given.flares), (0.0, [0.0, 0.0]));
-    // Under the water, none; once stopped, nothing given.
-    module.tables = Some(Ok(Arc::new(skied_with(0x2).with_liquids(&liquids()))));
+    // Under the water, none of the sky; without a model of the sky, the glare a tenth fainter a yard
+    // under its surface, none 12 yards down, by the depth the liquid gives.
+    module.tables = Some(Ok(Arc::new(unskied().with_liquids(&liquids()))));
     *host.pond.liquid.lock().unwrap() = Some(5);
+    *host.pond.depth.lock().unwrap() = 1.0;
+    module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
+    let given = crate::sky::lock(&module.drawn).heavens.unwrap();
+    assert_eq!(given.share, 0.0);
+    assert!((given.flares[0] - 0.9).abs() < 1e-6, "{:?}", given.flares);
+    *host.pond.depth.lock().unwrap() = 12.0;
     module.windows_ui(&egui, &mut Context::new(&mut host, "lighting"));
     let given = crate::sky::lock(&module.drawn).heavens.unwrap();
     assert_eq!((given.share, given.flares), (0.0, [0.0, 0.0]));

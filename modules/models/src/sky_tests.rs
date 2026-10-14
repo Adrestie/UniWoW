@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use uniwow_api::formats::{FileRef, Model, ModelTextureSource};
 use uniwow_api::glam::Vec3;
 use uniwow_api::models::{Geosets, Look, Models};
-use uniwow_api::viewport::{Fog, Layer, Sun};
+use uniwow_api::viewport::{Fog, Layer, Stage, Sun};
 
 use crate::gpu::Shared;
 use crate::layer::ModelsLayer;
@@ -36,8 +36,9 @@ fn sky_model() -> Model {
     model
 }
 
-/// The bench of the tests with two looks: the square, red and lit (look 0), and the model of the
-/// sky (look 1); with the pool when `pooled` says; and the layer of the sky.
+/// The bench of the tests with three looks: the square, red and lit (look 0), the model of the
+/// sky (look 1) and the same drawn as the stars (look 2); with the pool when `pooled` says; and the
+/// layer of the other models of the sky.
 fn bench(pooled: bool) -> Option<(Bench, SkyLayer)> {
     let gpu = device()?;
     let shared = Arc::new(Shared::new(&gpu, &crate::tests::TARGET, pooled.then_some(pool::SLOTS)));
@@ -49,7 +50,12 @@ fn bench(pooled: bool) -> Option<(Bench, SkyLayer)> {
         textures: HashMap::from([("red.blp".to_owned(), plain(RED)), ("blue.blp".to_owned(), plain(BLUE))]),
         ..Fake::default()
     };
-    let looks = [("square.m2", Geosets::All), ("sky.m2", Geosets::Sky)].map(|(model, geosets)| Look {
+    let looks = [
+        ("square.m2", Geosets::All),
+        ("sky.m2", Geosets::Sky),
+        ("sky.m2", Geosets::Stars),
+    ]
+    .map(|(model, geosets)| Look {
         model: FileRef::Path(model.to_owned()),
         textures: Vec::new(),
         geosets,
@@ -62,20 +68,23 @@ fn bench(pooled: bool) -> Option<(Bench, SkyLayer)> {
         assert!(refused.is_empty(), "{refused:?}");
         ready.insert(id, Arc::new(made));
     }
-    let sky = &ready[&service.look(&looks[1])];
-    assert!(sky.sky(), "of its own, whether the pool is there or not");
-    let Ready::Own(own) = &**sky else {
-        unreachable!("a model of the sky");
-    };
-    assert!(
-        own.skins[0]
-            .iter()
-            .all(|batch| batch.state.sky && !batch.state.depth_write)
-    );
+    for (look, stars) in [(&looks[1], false), (&looks[2], true)] {
+        let sky = &ready[&service.look(look)];
+        assert!(sky.sky(), "of its own, whether the pool is there or not");
+        assert_eq!(sky.stars(), stars);
+        let Ready::Own(own) = &**sky else {
+            unreachable!("a model of the sky");
+        };
+        assert!(
+            own.skins[0]
+                .iter()
+                .all(|batch| batch.state.sky && !batch.state.depth_write)
+        );
+    }
     assert!(!ready[&service.look(&looks[0])].sky());
     let scene = Arc::new(Mutex::new(scene(&gpu.device, ready)));
     let layer = ModelsLayer::new(service.clone(), scene.clone(), Arc::new(Mutex::new(Some(shared))));
-    let sky = layer.sky_layer();
+    let sky = layer.sky_layer(false);
     Some((
         Bench {
             gpu,
@@ -143,5 +152,29 @@ fn a_model_of_the_sky_is_drawn_around_the_eye_behind_everything_unfogged() {
         bench.service.place("lighting", &[]);
         bench.service.place("test", &[]);
         assert_eq!(corner(&render_sky(&mut bench, &mut sky)), BLACK);
+    }
+}
+
+#[test]
+fn the_stars_are_drawn_by_a_layer_of_their_own_before_the_bodies_the_other_models_after() {
+    for pooled in [true, false] {
+        let Some((mut bench, mut sky)) = bench(pooled) else {
+            return;
+        };
+        let mut stars = bench.layer.sky_layer(true);
+        assert_eq!((stars.stage(), sky.stage()), (Stage::Stars, Stage::Sky));
+        let by = |bench: &mut Bench, layer: &mut SkyLayer| {
+            render_with(bench, FRONT, AIM, Some(layer as &mut dyn Layer));
+            render_with(bench, FRONT, AIM, Some(layer as &mut dyn Layer))
+        };
+        // The model of the stars, by the layer of the stars alone.
+        bench.service.place("lighting", &[instance(1, 2, FRONT, 1.0)]);
+        assert_eq!(corner(&by(&mut bench, &mut stars)), BLUE, "pooled {pooled}");
+        assert_eq!(stars.stats().items, "1 models of the stars");
+        assert_eq!(corner(&by(&mut bench, &mut sky)), BLACK);
+        // A model of the sky, by the other alone.
+        bench.service.place("lighting", &[instance(1, 1, FRONT, 1.0)]);
+        assert_eq!(corner(&by(&mut bench, &mut sky)), BLUE);
+        assert_eq!(corner(&by(&mut bench, &mut stars)), BLACK);
     }
 }

@@ -1,9 +1,9 @@
-// The sun, the moon and the clouds over the models of the sky (`vs_heavens`, `fs_heavens`), the
-// glare of the sun and of the moon over everything (`vs_glare`, `fs_glare`), and how much of each
-// body the depth of the first pass leaves in sight, which its glare follows (`cs_seen`). Each body
-// is a quad facing the eye, `DISTANCE` yards from it, at infinity. The heavens are painted before
-// the world; the glare is drawn last, where the depth is still that of the clearing; neither writes
-// the depth.
+// The sun, the moon and the clouds over the stars and under the models of the sky (`vs_heavens`,
+// `fs_heavens`), the glare of the sun and of the moon over everything (`vs_glare`, `fs_glare`), and
+// how much of each body the depth of the first pass leaves in sight, which its glare follows
+// (`cs_seen`). Each body is a quad facing the eye, `DISTANCE` yards from it, at infinity. The
+// heavens are painted before the world; the glare is drawn last, where the depth is still that of
+// the clearing; neither writes the depth.
 
 struct Heavens {
     view_proj: mat4x4<f32>,
@@ -35,7 +35,7 @@ const DISTANCE: f32 = 12.0;
 const PI: f32 = 3.14159265;
 
 // The radius of the tile at a ring of the dome of the clouds (`clouds::on_dome`).
-const RING_RADIUS: f32 = 0.041666667;
+const RING_RADIUS: f32 = 0.045454545;
 
 struct ScreenOut {
     @builtin(position) clip: vec4<f32>,

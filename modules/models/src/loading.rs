@@ -112,8 +112,10 @@ pub struct LookGpu {
     pub moving: Vec<Moving>,
     /// The bytes of its own, outside its model and textures.
     pub bytes: u64,
-    /// Whether it is a model of the sky (`Geosets::Sky`), drawn by the layer of the sky.
+    /// Whether it is a model of the sky (`Geosets::Sky` or `Geosets::Stars`), drawn by a layer of the
+    /// sky, and whether it is the stars.
     pub sky: bool,
+    pub stars: bool,
 }
 
 impl LookGpu {
@@ -139,6 +141,11 @@ impl Ready {
     /// Whether it is a model of the sky, always of its own (`load`).
     pub fn sky(&self) -> bool {
         matches!(self, Ready::Own(look) if look.sky)
+    }
+
+    /// Whether it is the model of the stars, drawn under the sun, the moon and the clouds.
+    pub fn stars(&self) -> bool {
+        matches!(self, Ready::Own(look) if look.stars)
     }
 
     /// What it is made of, with the setting `reach`.
@@ -230,7 +237,7 @@ pub fn key(file: &FileRef) -> String {
 /// Which submeshes of `ids` the look shows.
 pub fn shown(ids: &[u16], geosets: Geosets) -> Vec<bool> {
     match geosets {
-        Geosets::All | Geosets::Sky => vec![true; ids.len()],
+        Geosets::All | Geosets::Sky | Geosets::Stars => vec![true; ids.len()],
         Geosets::Default => formats::default_geosets(ids),
         Geosets::Creature(chosen) => formats::creature_geosets(ids, chosen),
         Geosets::Character { hair, facial } => {
@@ -411,7 +418,7 @@ pub fn plan(data: &Model, look: &Look) -> (Vec<Vec<Planned>>, Vec<Moving>) {
                     Planned {
                         indices: submesh.start..submesh.start + submesh.count,
                         state: match look.geosets {
-                            Geosets::Sky => State::of_sky(material),
+                            Geosets::Sky | Geosets::Stars => State::of_sky(material),
                             _ => State::of(material),
                         },
                         params: BatchParams {
@@ -527,6 +534,7 @@ pub fn look(
         skins,
         moving,
         bytes,
-        sky: look.geosets == Geosets::Sky,
+        sky: matches!(look.geosets, Geosets::Sky | Geosets::Stars),
+        stars: look.geosets == Geosets::Stars,
     })
 }

@@ -4,6 +4,7 @@
 use uniwow_api::buildings::Buildings as _;
 use uniwow_api::formats::{BspNode, FileRef, FogBand, Portal, PortalRef, Wmo, WmoFog, WmoGroup, WmoLiquid};
 use uniwow_api::glam::{Mat4, Vec3};
+use uniwow_api::liquids::Immersed;
 
 use crate::cells::Cells;
 use crate::eye::{self, Lights};
@@ -195,18 +196,20 @@ fn the_eye_is_measured_from_the_portals_of_its_group_and_lies_in_the_liquid_of_i
     );
     // In the pool, under its surface or a hundredth over it: water of the buildings; over it, beside
     // it, or in its cell not drawn, none.
-    assert_eq!(lights.liquid(0, Vec3::new(2.0, 2.0, 1.0)), Some(13));
-    assert_eq!(lights.liquid(0, Vec3::new(2.0, 2.0, 2.005)), Some(13));
-    assert_eq!(lights.liquid(0, Vec3::new(2.0, 2.0, 2.5)), None);
-    assert_eq!(lights.liquid(0, Vec3::new(2.0, 8.0, 1.0)), None);
-    assert_eq!(lights.liquid(0, Vec3::new(7.0, 2.0, 1.0)), None, "its cell not drawn");
-    // The magma of the group outside holding the eye, as its type gives it.
-    assert_eq!(lights.liquid_outside(&cells, Vec3::new(21.0, 1.0, 0.5)), Some(19));
+    let kind = |eye: Vec3| lights.liquid(0, eye).map(|found| found.liquid);
     assert_eq!(
-        lights.liquid_outside(&cells, Vec3::new(2.0, 2.0, 1.0)),
-        None,
-        "in the room"
+        lights.liquid(0, Vec3::new(2.0, 2.0, 1.0)),
+        Some(Immersed { liquid: 13, depth: 1.0 }),
+        "a yard under its surface"
     );
+    assert_eq!(kind(Vec3::new(2.0, 2.0, 2.005)), Some(13));
+    assert_eq!(kind(Vec3::new(2.0, 2.0, 2.5)), None);
+    assert_eq!(kind(Vec3::new(2.0, 8.0, 1.0)), None);
+    assert_eq!(kind(Vec3::new(7.0, 2.0, 1.0)), None, "its cell not drawn");
+    // The magma of the group outside holding the eye, as its type gives it.
+    let outside = |eye: Vec3| lights.liquid_outside(&cells, eye).map(|found| found.liquid);
+    assert_eq!(outside(Vec3::new(21.0, 1.0, 0.5)), Some(19));
+    assert_eq!(outside(Vec3::new(2.0, 2.0, 1.0)), None, "in the room");
     // A room, its sky shown; the group outside neither.
     assert!(lights.room(0) && !lights.room(1));
     assert_eq!(lights.skybox(0), wmo.skybox);
@@ -261,14 +264,19 @@ fn the_layer_finds_where_the_eye_stands_among_the_buildings() {
         Some(None),
         "in the room, out of its pool: none, not the terrain's"
     );
-    assert_eq!(at(Vec3::new(102.0, 2.0, 1.0)).liquid, Some(Some(13)));
+    let kind = |eye: uniwow_api::buildings::Eye| eye.liquid.map(|found| found.map(|found| found.liquid));
+    assert_eq!(
+        at(Vec3::new(102.0, 2.0, 1.0)).liquid,
+        Some(Some(Immersed { liquid: 13, depth: 1.0 }))
+    );
     // In the group outside, in its magma: the magma, no group.
     let eye = at(Vec3::new(121.0, 1.0, 0.5));
-    assert_eq!((eye.group, eye.liquid), (None, Some(Some(19))));
+    assert_eq!(eye.group, None);
+    assert_eq!(kind(eye), Some(Some(19)));
     // Out of the building: nothing, the liquid left to the terrain.
     assert_eq!(at(Vec3::new(50.0, 5.0, 1.0)), uniwow_api::buildings::Eye::default());
     // Given by the service as the layer left it.
     let scene = std::sync::Arc::new(std::sync::Mutex::new(crate::layer::Scene::default()));
     scene.lock().unwrap().eye = at(Vec3::new(102.0, 2.0, 1.0));
-    assert_eq!(crate::Seen(scene).eye().liquid, Some(Some(13)));
+    assert_eq!(kind(crate::Seen(scene).eye()), Some(Some(13)));
 }

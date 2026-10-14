@@ -1,12 +1,11 @@
-//! The layers of the sky of the module: the sun, the moon and the clouds, painted over the models of
-//! the sky before the world (`Stage::Celestial` of the phase of the sky), and the glare of the sun or
-//! of the moon, over
-//! everything (`Stage::Glare`), as the client draws it last (`0x4f9213` in 12340), additive, where
-//! the depth is that of the sky, its envelope following how much of its body the depth of the first
-//! pass leaves in sight, as the client follows the share of its body an occlusion query finds
-//! drawn (`0x7e5220`, 1.12.1). Their pipelines are built by a job, the images of the bodies read and
-//! sent by another; the texels of the clouds are written by the interface thread as the module makes
-//! them.
+//! The layers of the sky of the module: the sun, the moon and the clouds, painted over the stars
+//! and under the models of the sky before the world (`Stage::Celestial` of the phase of the sky),
+//! and the glare of the sun or of the moon, over everything (`Stage::Glare`), as the client draws
+//! it last (`0x4f9213` in 12340), additive, where the depth is that of the sky, its envelope
+//! following how much of its body the depth of the first pass leaves in sight, as the client
+//! follows the share of its body an occlusion query finds drawn (`0x7e5220`, 1.12.1). Their
+//! pipelines are built by a job, the images of the bodies read and sent by another; the texels of
+//! the clouds are written by the interface thread as the module makes them.
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -493,7 +492,7 @@ fn uniform_buffer(device: &wgpu::Device, label: &str) -> wgpu::Buffer {
     })
 }
 
-/// The sun, the moon and the clouds, over the models of the sky.
+/// The sun, the moon and the clouds, over the stars and under the models of the sky.
 pub struct HeavensLayer {
     drawn: Arc<Mutex<Drawn>>,
     incoming: Arc<Mutex<Option<Arc<Gpu>>>>,

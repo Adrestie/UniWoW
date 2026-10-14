@@ -100,38 +100,36 @@ fn the_liquid_at_a_point_is_the_first_whose_cell_there_is_covered_and_its_surfac
     // The point a quarter of a cell down the rows and a cell and a half across: its surface at 5.
     let at = |row: f32, column: f32, z: f32| [corner[0] - row * CELL, corner[1] - column * CELL, z];
     let layers = std::slice::from_ref(&water);
-    assert_eq!(mesh::liquid_at(layers, at(0.25, 1.5, 4.99)), Some(5));
+    let kind = |layers: &[LiquidLayer], at: [f32; 3]| mesh::liquid_at(layers, at).map(|found| found.liquid);
+    assert_eq!(kind(layers, at(0.25, 1.5, 4.99)), Some(5));
+    let depth = mesh::liquid_at(layers, at(0.25, 1.5, 4.0)).map(|found| found.depth);
+    assert!(
+        depth.is_some_and(|depth| (depth - 1.0).abs() < 1e-4),
+        "a yard under it: {depth:?}"
+    );
     assert_eq!(
-        mesh::liquid_at(layers, at(0.25, 1.5, 5.005)),
+        kind(layers, at(0.25, 1.5, 5.005)),
         Some(5),
         "a hundredth of a yard over it at most"
     );
-    assert_eq!(mesh::liquid_at(layers, at(0.25, 1.5, 5.02)), None);
-    assert_eq!(
-        mesh::liquid_at(layers, at(1.5, 0.5, -100.0)),
-        None,
-        "a cell not covered"
-    );
+    assert_eq!(kind(layers, at(0.25, 1.5, 5.02)), None);
+    assert_eq!(kind(layers, at(1.5, 0.5, -100.0)), None, "a cell not covered");
     for (row, column) in [(-0.5, 0.5), (0.5, -0.5), (8.5, 0.5), (0.5, 8.5)] {
-        assert_eq!(
-            mesh::liquid_at(layers, at(row, column, -100.0)),
-            None,
-            "out of its chunk"
-        );
+        assert_eq!(kind(layers, at(row, column, -100.0)), None, "out of its chunk");
     }
     // A cell whose far corner alone is higher, at 5: at its middle, the mean of its corners, 2.
     let mut bump = layer(6, corner, 1.0, 1, 0);
     bump.heights[LIQUID_SIDE + 1] = 5.0;
     let bump = std::slice::from_ref(&bump);
-    assert_eq!(mesh::liquid_at(bump, at(0.5, 0.5, 1.98)), Some(6));
-    assert_eq!(mesh::liquid_at(bump, at(0.5, 0.5, 2.02)), None);
+    assert_eq!(kind(bump, at(0.5, 0.5, 1.98)), Some(6));
+    assert_eq!(kind(bump, at(0.5, 0.5, 2.02)), None);
     // Under a magma too, deeper: the first in their order.
     let magma = layer(7, corner, -5.0, 1, 255);
     let deep = at(0.25, 0.5, -6.0);
-    assert_eq!(mesh::liquid_at(&[water.clone(), magma.clone()], deep), Some(5));
-    assert_eq!(mesh::liquid_at(&[magma.clone(), water.clone()], deep), Some(7));
+    assert_eq!(kind(&[water.clone(), magma.clone()], deep), Some(5));
+    assert_eq!(kind(&[magma.clone(), water.clone()], deep), Some(7));
     assert_eq!(
-        mesh::liquid_at(&[magma, water.clone()], at(0.25, 0.5, 0.0)),
+        kind(&[magma, water.clone()], at(0.25, 0.5, 0.0)),
         Some(5),
         "over the magma"
     );
@@ -152,7 +150,7 @@ fn the_liquid_at_a_point_is_the_first_whose_cell_there_is_covered_and_its_surfac
     assert_eq!(module.water.liquid_at(point), None, "not yet given");
     module.changed = true;
     module.publish();
-    assert_eq!(module.water.liquid_at(point), Some(5));
+    assert_eq!(module.water.liquid_at(point).map(|found| found.liquid), Some(5));
 }
 
 #[test]
@@ -853,7 +851,12 @@ fn a_tile_read_gives_the_water_over_it_by_its_place_in_the_world() {
     // The liquid at a point, by the layers of its tile.
     let water = crate::Water::default();
     *water.layers.lock().unwrap() = Arc::new(crate::layers(&held));
-    assert_eq!(water.liquid_at([corner[0] - 1.0, corner[1] - 1.0, 2.0]), Some(5));
+    assert_eq!(
+        water
+            .liquid_at([corner[0] - 1.0, corner[1] - 1.0, 2.0])
+            .map(|found| found.liquid),
+        Some(5)
+    );
     assert_eq!(
         water.liquid_at([corner[0] - 1.0, corner[1] - 1.0, 3.0]),
         None,

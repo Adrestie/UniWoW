@@ -41,8 +41,11 @@ pub enum Geosets {
     },
     /// All of them, the model drawn as a model of the sky (`LightSkybox.dbc`, or a building's,
     /// `MOSB`): around the eye, wherever its instance stands, behind everything, over the sky of
-    /// the ground, its batches in their order; never culled.
+    /// the ground, the sun, the moon and the clouds, its batches in their order; never culled.
     Sky,
+    /// As `Sky`, the model of the stars: under the sun, the moon and the clouds, as the client draws
+    /// its stars before them (`0x7f0b48` in 12340).
+    Stars,
 }
 
 /// A look, as `Models::look` numbers it.

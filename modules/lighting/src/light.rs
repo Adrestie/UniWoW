@@ -7,7 +7,8 @@
 use std::collections::HashMap;
 
 use uniwow_api::formats::{
-    FogBand, LightBand, LightParamsRecord, LightRecord, LightSkyboxRecord, LiquidTypeRecord, TILE, ZoneLightRecord,
+    FogBand, LightBand, LightParamsRecord, LightRecord, LightSkyboxRecord, LiquidTypeRecord, TILE, WeatherRecord,
+    ZoneLightRecord,
 };
 use uniwow_api::viewport::{Fog, MapLight, Sun, Water};
 
@@ -191,6 +192,8 @@ pub struct Tables {
     liquids: HashMap<u32, u32>,
     /// The models of the sky (`LightSkybox.dbc`), by id.
     skyboxes: HashMap<u32, LightSkyboxRecord>,
+    /// The weight of the storm of each weather (`Weather.dbc`, its column 3), by the id of its row.
+    transitions: HashMap<u32, f32>,
 }
 
 /// A model of the sky the lights give (`LightSkybox.dbc`): its id, its model, its flags (0x1 its
@@ -302,7 +305,23 @@ impl Tables {
             zones: by_zone,
             liquids: HashMap::new(),
             skyboxes: HashMap::new(),
+            transitions: HashMap::new(),
         }
+    }
+
+    /// The tables with the weathers `weathers`.
+    pub fn with_weathers(mut self, weathers: &[WeatherRecord]) -> Self {
+        self.transitions = weathers
+            .iter()
+            .map(|record| (record.id, record.transition_sky))
+            .collect();
+        self
+    }
+
+    /// How much the weather of the row `state` of `Weather.dbc` weighs the storm: its column 3, 1
+    /// where the tables name no such weather, as 12340 takes it (`0x784a01`).
+    pub fn transition(&self, state: u32) -> f32 {
+        self.transitions.get(&state).copied().unwrap_or(1.0)
     }
 
     /// The tables with the models of the sky `skyboxes`.

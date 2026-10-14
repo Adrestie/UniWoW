@@ -4,9 +4,9 @@
 //! to the view (`Viewport::set_light`) and said in the panel; taken back when the module stops.
 //! They are read by a job once the client's archives are open, and again whenever they change. The
 //! models of the sky the lights name, and that of the building whose group the eye is in, are
-//! placed at the eye through the service `models`, which draws them around it, the stars first. The
-//! sun, the moon and the clouds are drawn by layers of its own (`sky`), over the models of the sky,
-//! and their glare over everything. The weather the service `weather` gives mixes in the params of
+//! placed at the eye through the service `models`, which draws them around it, the stars apart. The
+//! sun, the moon and the clouds are drawn by layers of its own (`sky`), over the stars and under the
+//! models of the sky, and their glare over everything. The weather the service `weather` gives mixes in the params of
 //! storm of the lights and brings the fog nearer; its flashes of lightning light the scene.
 
 mod clouds;
@@ -133,7 +133,13 @@ fn half_minutes(from: f64, speed: i64, seconds: f64) -> f32 {
 
 /// The tables read, and why the zones of light, the lights of the liquids and the models of the sky
 /// could not be, if so.
-type Read = (Arc<Tables>, Option<String>, Option<String>, Option<String>);
+type Read = (
+    Arc<Tables>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 
 /// Whose a model of the sky is: a light's (`LightSkybox.dbc`, by its id), the building's (`MOSB`),
 /// or the stars of the night.
@@ -182,12 +188,15 @@ impl Sky {
         }
     }
 
-    /// Its look: its model, drawn as the sky.
+    /// Its look: its model, drawn as the stars or as a model of the sky.
     fn look(&self) -> Look {
         Look {
             model: self.model.clone(),
             textures: Vec::new(),
-            geosets: Geosets::Sky,
+            geosets: match self.whose {
+                Whose::Stars => Geosets::Stars,
+                _ => Geosets::Sky,
+            },
         }
     }
 }
@@ -232,6 +241,9 @@ struct LightingModule {
     liquids_unread: Option<String>,
     /// Why the models of the sky could not be read, the tables read without them.
     skyboxes_unread: Option<String>,
+    /// Why the weathers could not be read, the tables read without them, every weather weighing
+    /// the storm whole.
+    weathers_unread: Option<String>,
     /// Whether models of the sky were placed last, taken back once there are none, and the service
     /// they were placed through, cleared when the module stops.
     skies_placed: bool,
@@ -335,6 +347,7 @@ impl LightingModule {
             self.zones_unread = None;
             self.liquids_unread = None;
             self.skyboxes_unread = None;
+            self.weathers_unread = None;
             self.images_unread = None;
             sky::lock(&self.drawn).images = None;
             self.shown = None;
@@ -362,6 +375,7 @@ impl LightingModule {
                         let zones = formats.zone_lights();
                         let liquids = formats.liquid_types();
                         let skyboxes = formats.light_skyboxes();
+                        let weathers = formats.weathers();
                         let tables = Tables::new(
                             &formats.lights()?,
                             &formats.light_params()?,
@@ -370,8 +384,15 @@ impl LightingModule {
                             zones.as_deref().map(Vec::as_slice).unwrap_or_default(),
                         )
                         .with_liquids(liquids.as_deref().map(Vec::as_slice).unwrap_or_default())
-                        .with_skyboxes(skyboxes.as_deref().map(Vec::as_slice).unwrap_or_default());
-                        Ok::<_, String>((Arc::new(tables), zones.err(), liquids.err(), skyboxes.err()))
+                        .with_skyboxes(skyboxes.as_deref().map(Vec::as_slice).unwrap_or_default())
+                        .with_weathers(weathers.as_deref().map(Vec::as_slice).unwrap_or_default());
+                        Ok::<_, String>((
+                            Arc::new(tables),
+                            zones.err(),
+                            liquids.err(),
+                            skyboxes.err(),
+                            weathers.err(),
+                        ))
                     }));
                 }
                 return None;
@@ -407,27 +428,34 @@ impl LightingModule {
         let place = [x as f32, y as f32];
         // The liquid the eye is in as the buildings decide it, the terrain's otherwise (0x790920).
         let among = ctx.service(buildings::SERVICE).map(|buildings| buildings.eye());
-        let liquid = match among.as_ref().and_then(|eye| eye.liquid) {
+        let immersed = match among.as_ref().and_then(|eye| eye.liquid) {
             Some(decided) => decided,
             None => ctx
                 .service(liquids::SERVICE)
                 .and_then(|liquids| liquids.liquid_at([x as f32, y as f32, z as f32])),
         };
+        let liquid = immersed.map(|found| found.liquid);
         let immersion = tables.immersion(liquid);
         let mut light = tables.light_in(map, place, time, local == 1, immersion);
-        // The weather the module `weather` applies: one that brings a storm mixes in the params of
-        // storm of the lights by its intensity (their third slot, the fourth under the water), but
-        // in a liquid lit by its own light; the fog or a sandstorm brings the fog of the game nearer.
+        // The weather the module `weather` applies mixes in the params of storm of the lights by its
+        // weight (their third slot, the fourth under the water), but in a liquid lit by its own
+        // light; the fog or a sandstorm brings the fog of the game nearer.
         let weather_given = ctx.service(weather::SERVICE);
         let effect = weather_given.as_ref().and_then(|weather| weather.current());
-        // Their weight four times the intensity, whole from a quarter, as the client weighs them
-        // (`heavens::storm_share`).
+        // Their weight four times the intensity by the column 3 of its row of `Weather.dbc`, whole
+        // from a quarter, as 12340 weighs them (`heavens::storm_share`).
         let storm = effect
-            .filter(|effect| effect.kind.stormy() && effect.intensity > 0.0)
+            .map(|effect| {
+                (
+                    effect,
+                    heavens::storm_share(effect.intensity, tables.transition(effect.state())),
+                )
+            })
+            .filter(|(_, share)| *share > 0.0)
             .filter(|_| !matches!(immersion, Immersion::Lit(_)))
-            .and_then(|effect| {
+            .and_then(|(_, share)| {
                 let storm = tables.light_at(map, place, time, light::storm_slot(immersion), local == 1)?;
-                Some((heavens::storm_share(effect.intensity), storm))
+                Some((share, storm))
             });
         if let (Some(clear), Some((share, storm))) = (&mut light, &storm) {
             clear.values = light::mix_values(&clear.values, &storm.values, *share);
@@ -518,7 +546,8 @@ impl LightingModule {
             .iter()
             .map(|sky| (sky.alpha, sky.flags & light::DRAWN_UNDER != 0))
             .collect();
-        let share = heavens::share(&hiding, building_sky.is_some(), immersion != Immersion::Dry);
+        let own_sky = building_sky.is_some();
+        let share = heavens::share(&hiding, own_sky, immersion != Immersion::Dry);
         let stars = heavens::stars(time) * share;
         let mut skies: Vec<Sky> = Vec::new();
         if stars > 0.0 {
@@ -543,22 +572,24 @@ impl LightingModule {
                 whose: Whose::Building,
             });
         }
-        // The sun, the moon and the clouds for the layers of the sky; the glares none in a room or a
-        // liquid.
+        // The sun, the moon and the clouds for the layers of the sky; the glares none in a room,
+        // under the models of the sky by the strongest, fading under a liquid by the depth of the eye
+        // under the surface of the liquid it was found in (`0x7909b9`).
         let in_room = among
             .as_ref()
             .and_then(|eye| eye.group.as_ref())
             .is_some_and(|group| group.room());
+        let depth = match immersion {
+            Immersion::Dry => 0.0,
+            _ => immersed.map_or(0.0, |found| found.depth.max(0.0)),
+        };
+        let glare = match in_room {
+            true => 0.0,
+            false => heavens::glare_share(&hiding, own_sky, depth),
+        };
         let storm_weight = storm.as_ref().map_or(0.0, |(share, _)| *share);
         let (heavens, density) = match &light {
-            Some(light) => self.heavens(
-                &light.values,
-                time,
-                share,
-                storm_weight,
-                flash,
-                in_room || immersion != Immersion::Dry,
-            ),
+            Some(light) => self.heavens(&light.values, time, share, storm_weight, flash, glare),
             None => (None, 0.0),
         };
         sky::lock(&self.drawn).heavens = heavens;
@@ -584,10 +615,10 @@ impl LightingModule {
     }
 
     /// The sun, the moon and their glares at `time` from the values of the light `values`, drawn over
-    /// the share `share` of the sky, under a storm of weight `storm`, the glares none when
-    /// `sheltered`; the clouds made on as the time passed, given to the layers when they change, lit
-    /// by a flash of lightning of `flash`, which takes its colours from the light as they do; and the
-    /// density of the clouds. None while the sky is not drawn.
+    /// the share `share` of the sky, under a storm of weight `storm`, the glares drawn by `glare`
+    /// (`heavens::glare_share`); the clouds made on as the time passed, given to the layers when they
+    /// change, lit by a flash of lightning of `flash`, which takes its colours from the light as they
+    /// do; and the density of the clouds. None while the sky is not drawn.
     fn heavens(
         &mut self,
         values: &light::Values,
@@ -595,7 +626,7 @@ impl LightingModule {
         share: f32,
         storm: f32,
         flash: f32,
-        sheltered: bool,
+        glare: f32,
     ) -> (Option<sky::Heavens>, f32) {
         let band = |band: usize| values.colours[band].unwrap_or([0.0; 3]);
         let density = values.numbers[3].unwrap_or(0.0).clamp(0.0, 1.0);
@@ -603,14 +634,16 @@ impl LightingModule {
             return (None, density);
         }
         let [sun, moon] = heavens::bodies(time, band(9), storm);
-        let (envelope, sun_glows) = heavens::cloud_glow(time);
         let palette = clouds::Palette {
             glow: band(10),
             thin: band(11),
             body: band(12),
             storm,
-            towards: if sun_glows { sun.towards } else { moon.towards },
-            envelope,
+            towards: if heavens::sun_glows(time) {
+                sun.towards
+            } else {
+                moon.towards
+            },
         };
         let now = Instant::now();
         let seconds = self
@@ -622,18 +655,14 @@ impl LightingModule {
             sky::lock(&self.drawn).clouds = Some((self.clouds_given, Arc::new(self.clouds.texels().to_vec())));
         }
         let [sun_flare, moon_flare] = heavens::flares(time);
-        let flares = if sheltered {
-            [0.0; 2]
-        } else {
-            // The glare of the sun dims as the clouds cover it; the moon's blooms in thin clouds only,
-            // none in clear sky nor under full cover (`0x6cf7b0`, `0x6cf7d0`).
-            let sun_cover = self.clouds.cover_towards(sun.towards);
-            let moon_cover = self.clouds.cover_towards(moon.towards);
-            [
-                sun_flare * (1.0 - sun_cover) * share,
-                moon_flare * (1.0 - (2.0 * moon_cover - 1.0).abs()) * share,
-            ]
-        };
+        // The glare of the sun dims as the clouds cover it; the moon's blooms in thin clouds only,
+        // none in clear sky nor under full cover (`0x7f1020`, `0x7f1040`).
+        let sun_cover = self.clouds.cover_towards(sun.towards);
+        let moon_cover = self.clouds.cover_towards(moon.towards);
+        let flares = [
+            sun_flare * (1.0 - sun_cover) * glare,
+            moon_flare * (1.0 - (2.0 * moon_cover - 1.0).abs()) * glare,
+        ];
         let heavens = sky::Heavens {
             sun,
             moon,
@@ -644,7 +673,7 @@ impl LightingModule {
                     alphas: heavens::SUN_GLARE_ALPHA,
                 },
                 sky::Glare {
-                    sides: [heavens::MOON_GLARE_SIZE * heavens::moon_size(time); 2],
+                    sides: [heavens::MOON_GLARE_SIZE * heavens::moon_side(time); 2],
                     alphas: heavens::MOON_GLARE_ALPHA,
                 },
             ],
@@ -865,6 +894,9 @@ impl Module for LightingModule {
         if let Some(reason) = &self.skyboxes_unread {
             ui.colored_label(ui.visuals().warn_fg_color, format!("No models of the sky: {reason}"));
         }
+        if let Some(reason) = &self.weathers_unread {
+            ui.colored_label(ui.visuals().warn_fg_color, format!("No weathers: {reason}"));
+        }
         egui::Grid::new("lighting colours").striped(true).show(ui, |ui| {
             for (name, colour) in COLOUR_NAMES.iter().zip(&light.values.colours) {
                 ui.label(*name);
@@ -978,12 +1010,15 @@ impl Module for LightingModule {
             // Cancelled from the jobs: not read again before the client's archives change.
             JobOutcome::Cancelled => Err("their reading was cancelled".to_owned()),
             outcome => match outcome.take::<Result<Read, String>>() {
-                Some(read) => read.map(|(tables, zones_unread, liquids_unread, skyboxes_unread)| {
-                    self.zones_unread = zones_unread;
-                    self.liquids_unread = liquids_unread;
-                    self.skyboxes_unread = skyboxes_unread;
-                    tables
-                }),
+                Some(read) => read.map(
+                    |(tables, zones_unread, liquids_unread, skyboxes_unread, weathers_unread)| {
+                        self.zones_unread = zones_unread;
+                        self.liquids_unread = liquids_unread;
+                        self.skyboxes_unread = skyboxes_unread;
+                        self.weathers_unread = weathers_unread;
+                        tables
+                    },
+                ),
                 None => return,
             },
         });
@@ -998,6 +1033,9 @@ impl Module for LightingModule {
         }
         if let Some(reason) = &self.skyboxes_unread {
             log::warn!("the models of the sky are not read: {reason}");
+        }
+        if let Some(reason) = &self.weathers_unread {
+            log::warn!("the weathers are not read: {reason}");
         }
     }
 }

@@ -9,7 +9,7 @@
 
 use uniwow_api::formats::{LIQUID_SIDE, LiquidLayer};
 use uniwow_api::glam::Vec3;
-use uniwow_api::liquids::{CELL, Placed, Surfaces};
+use uniwow_api::liquids::{CELL, Immersed, Placed, Surfaces};
 
 /// The kinds of a type of liquid that are not water.
 const MAGMA: u32 = 2;
@@ -245,11 +245,11 @@ fn build(layers: &[LiquidLayer], kind: impl Fn(u16) -> Option<(u32, bool)>, leve
     meshes
 }
 
-/// The type of the first of `layers` the point `at` lies in, as the client finds the liquid the eye
-/// is in (0x7A0820, 0x7CE1F0, 0x7CE0B0): the cell of its chunk holding the point covered, and the
-/// point under its surface there, read between the heights of the corners of that cell along the
-/// columns then the rows, or no more than `OVER` over it.
-pub fn liquid_at(layers: &[LiquidLayer], at: [f32; 3]) -> Option<u16> {
+/// The first of `layers` the point `at` lies in, and how deep under it, as the client finds the
+/// liquid the eye is in (0x7A0820, 0x7CE1F0, 0x7CE0B0): the cell of its chunk holding the point
+/// covered, and the point under its surface there, read between the heights of the corners of that
+/// cell along the columns then the rows, or no more than `OVER` over it.
+pub fn liquid_at(layers: &[LiquidLayer], at: [f32; 3]) -> Option<Immersed> {
     layers.iter().find_map(|layer| {
         let [row, column] = [(layer.corner[0] - at[0]) / CELL, (layer.corner[1] - at[1]) / CELL];
         if !(0.0..8.0).contains(&row) || !(0.0..8.0).contains(&column) {
@@ -264,7 +264,10 @@ pub fn liquid_at(layers: &[LiquidLayer], at: [f32; 3]) -> Option<u16> {
         let near = height(r, c) + (height(r, c + 1) - height(r, c)) * across;
         let far = height(r + 1, c) + (height(r + 1, c + 1) - height(r + 1, c)) * across;
         let surface = near + (far - near) * down;
-        (at[2] < surface + OVER).then_some(layer.liquid)
+        (at[2] < surface + OVER).then_some(Immersed {
+            liquid: layer.liquid,
+            depth: surface - at[2],
+        })
     })
 }
 
