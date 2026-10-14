@@ -8115,6 +8115,34 @@ the panel is drawn.
   is written over the view; the panel torn off into its own window, the numbers moving as the view
   draws; the arrow of a module folding and unfolding its lines.
 
+#### The view in gamma, as the client
+
+Asked by the user after comparing the sky of 72 zones with the game and with Noggit: the view drew
+into a target of sRGB, the textures of the terrain read as sRGB, and the light, the fog, the sky and
+every blending were computed in linear, where the client and Noggit draw everything in gamma. The
+target of the view is now `Rgba8Unorm`, resolved and shown by egui as it is stored; every texture is
+read as it is stored (`TextureArrays::new` has lost its argument `srgb`); the light (`LIGHT_WGSL`),
+the fog (`fog_mix`), the terrain, the models, the buildings, the water, the dome of the sky, the sun,
+the moon, the clouds, their glare and what falls are computed in gamma, and the GPU blends and
+resolves in gamma; `LINEAR_WGSL` is gone. A mod2x batch is drawn as it is: the target doubles in
+gamma, as the client's. The colour of the fog given to the view (`MapLight::fog_colour`,
+`Fog::default`) is in gamma. The editor's own colours keep their look: the background, the colour
+of the fog without a map, the grid and the ground of the horizon are given in gamma; the markers of
+the live world, lit by the editor's light in linear, are encoded to gamma at the end. The editor's
+fog mixes in gamma as the game's, thinner halfway than it was; the cube of the sample module is
+drawn in the colour of its swatch, darker than before. The pipeline of the wrong format of
+`sample-faulty` takes a format the view does not draw into, whatever its own.
+
+- **Tested**: on the software adapter, the bytes stored as written (0.5 stored 128, not 188); the
+  textures of every format read as stored; a grey texel lit, fogged, blended over another, doubled
+  by mod2x and under a model of the sky, in gamma, in the terrain, the models, the buildings, the
+  water and the sky; a building lit as one adding its ambient colour as it is; the colours of the
+  fog of a light, of a building and of a flash in gamma; the markers lit then encoded. 23 changes
+  made on purpose, 21 caught; not caught, the colour of the ground of the horizon (drawn in the
+  colour of the fog in the next step) and the colour of what falls (the editor's own, untested).
+- **To check by the user**: the background, the grid and the markers look as before; in the world, the vertex colours and the shadows of the terrain stronger, the water and
+  what is blended less milky, the clouds and what falls less white than before.
+
 #### Tests
 
 The protocol of the observer against a fake server; the interpolation; the loading of tiles around

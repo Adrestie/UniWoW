@@ -619,7 +619,7 @@ fn device() -> Option<egui_wgpu::RenderState> {
 }
 
 const TARGET: Target = Target {
-    color_format: wgpu::TextureFormat::Rgba8UnormSrgb,
+    color_format: wgpu::TextureFormat::Rgba8Unorm,
     depth_format: wgpu::TextureFormat::Depth32Float,
     sample_count: 1,
     depth_compare: wgpu::CompareFunction::Greater,

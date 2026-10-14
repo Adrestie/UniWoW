@@ -586,8 +586,8 @@ fn the_light_given_to_the_view_is_the_fixed_one_where_the_tables_give_none() {
         (Sun::default().colour, Sun::default().ambient)
     );
     assert!(
-        (given.fog_colour[0] - 0.2158).abs() < 1e-3,
-        "a grey fog, made linear: {:?}",
+        (given.fog_colour[0] - 128.0 / 255.0).abs() < 1e-6,
+        "a grey fog, in gamma: {:?}",
         given.fog_colour
     );
     // Its sky the bands 2 to 7 in gamma, the colour of its fog where it lacks one.
@@ -605,12 +605,8 @@ fn the_light_given_to_the_view_is_the_fixed_one_where_the_tables_give_none() {
     assert_eq!(sky, [[1.0; 3], [grey; 3], [grey; 3], [grey; 3], [0.2; 3], [grey; 3]]);
     // Without a colour of fog either, that of the fixed fog, in gamma.
     let values = tables.light_at(0, [-5_000.0, 0.0], 0.0, 0, true).unwrap().values;
-    let fixed = viewport::Fog::default().colour;
     let sky = map_light(&values, 0.0, None, false).sky;
-    for (channel, linear) in sky[3].iter().zip(fixed) {
-        let back = ((channel + 0.055) / 1.055).powf(2.4);
-        assert!((back - linear).abs() < 1e-4, "{sky:?}");
-    }
+    assert_eq!(sky[3], viewport::Fog::default().colour, "{sky:?}");
     assert!(
         sky[0] == [1.0; 3] && sky[1..].iter().all(|colour| *colour == sky[1]),
         "its top its own, the bands it lacks of the fixed fog: {sky:?}"
@@ -777,10 +773,9 @@ fn the_fog_of_a_building_is_mixed_into_that_of_the_light_by_its_weight() {
         start: 0.2,
         colour: [102, 102, 102, 255],
     };
-    // Whole: its colour, made linear, and its fog, straight before Outland, the rest of the light
-    // kept.
+    // Whole: its colour, in gamma, and its fog, straight before Outland, the rest of the light kept.
     let whole = with_building_fog(given, fog, 1.0, 0, false, 1_277.0);
-    let grey = |value: f32| (value - 0.1329).abs() < 1e-3;
+    let grey = |value: f32| (value - 0.4).abs() < 1e-6;
     assert!(
         whole.fog_colour.iter().all(|channel| grey(*channel)),
         "{:?}",
@@ -791,7 +786,7 @@ fn the_fog_of_a_building_is_mixed_into_that_of_the_light_by_its_weight() {
     // Half: halfway in gamma, from black to 0.4, and halfway along the fogs.
     let half = with_building_fog(given, fog, 0.5, 0, false, 1_277.0);
     assert!(
-        half.fog_colour.iter().all(|channel| (channel - 0.0331).abs() < 1e-3),
+        half.fog_colour.iter().all(|channel| (channel - 0.2).abs() < 1e-6),
         "{:?}",
         half.fog_colour
     );
@@ -1889,15 +1884,8 @@ fn a_flash_of_lightning_lights_every_face_and_turns_the_sky_the_fog_and_the_wate
     assert!((lit.water.river[0][0] - toward(0.1, 0)).abs() < 1e-6);
     assert_eq!((lit.water.river[1][3], lit.water.ocean[0][3]), (0.5, 0.75));
     assert_eq!(lit.water.sun, given.water.sun);
-    let srgb = |value: f32| {
-        if value <= 0.003_130_8 {
-            value * 12.92
-        } else {
-            1.055 * value.powf(1.0 / 2.4) - 0.055
-        }
-    };
     for (channel, (lit, given)) in lit.fog_colour.iter().zip(given.fog_colour).enumerate() {
-        assert!((srgb(*lit) - toward(srgb(given), channel)).abs() < 1e-4, "{lit}");
+        assert!((lit - toward(given, channel)).abs() < 1e-6, "{lit}");
     }
     // The distances of the fog and the glow at night kept; half a flash halfway in the sky.
     assert_eq!((lit.fog, lit.night), (given.fog, given.night));

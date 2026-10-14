@@ -184,13 +184,7 @@ pub fn camera_values(view: &View, highlighted: bool) -> [f32; CAMERA] {
 
 /// The shader, after `buildings.wgsl`: its arrays read by slot.
 fn shader(slots: usize) -> String {
-    let mut source = [
-        viewport::LINEAR_WGSL,
-        viewport::FOG_WGSL,
-        viewport::LIGHT_WGSL,
-        include_str!("buildings.wgsl"),
-    ]
-    .concat();
+    let mut source = [viewport::FOG_WGSL, viewport::LIGHT_WGSL, include_str!("buildings.wgsl")].concat();
     for slot in 0..slots {
         let _ = writeln!(
             source,
@@ -361,7 +355,7 @@ impl Shared {
                 size_of::<MaterialGpu>() as u64,
                 1 << 10,
             ),
-            arrays: TextureArrays::new(device, queue, "the buildings", SLOTS, false),
+            arrays: TextureArrays::new(device, queue, "the buildings", SLOTS),
             testing: Testing::new(gpu).map(Arc::new),
             device: device.clone(),
             camera_layout,

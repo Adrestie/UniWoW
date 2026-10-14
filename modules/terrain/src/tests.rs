@@ -895,7 +895,7 @@ fn device() -> Option<egui_wgpu::RenderState> {
 }
 
 const TARGET: Target = Target {
-    color_format: wgpu::TextureFormat::Rgba8UnormSrgb,
+    color_format: wgpu::TextureFormat::Rgba8Unorm,
     depth_format: wgpu::TextureFormat::Depth32Float,
     sample_count: 4,
     depth_compare: wgpu::CompareFunction::Greater,
@@ -1476,11 +1476,10 @@ fn the_sky_of_a_light_is_drawn_on_noggit_s_dome_where_nothing_else_is() {
     assert_eq!(seen(&mut layer, -60.0, Some(sky)), [255, 0, 255]);
     let over = seen(&mut layer, 1.5, Some(sky));
     assert!(near(over, [51, 255, 204]), "{over:?}");
-    // Without the light of a map: the colour of the fog everywhere.
-    let fog = viewport::Fog::default().colour.map(|channel| {
-        let gamma = 1.055 * channel.powf(1.0 / 2.4) - 0.055;
-        (gamma * 255.0).round() as u8
-    });
+    // Without the light of a map: the colour of the fog everywhere, in gamma.
+    let fog = viewport::Fog::default()
+        .colour
+        .map(|channel| (channel * 255.0).round() as u8);
     assert!(near(seen(&mut layer, 54.0, None), fog));
 }
 

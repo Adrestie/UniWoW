@@ -471,7 +471,7 @@ fn device_with(largest: u64) -> Option<egui_wgpu::RenderState> {
 }
 
 const TARGET: Target = Target {
-    color_format: wgpu::TextureFormat::Rgba8UnormSrgb,
+    color_format: wgpu::TextureFormat::Rgba8Unorm,
     depth_format: wgpu::TextureFormat::Depth32Float,
     sample_count: 1,
     depth_compare: wgpu::CompareFunction::Greater,
@@ -946,7 +946,15 @@ fn the_water_is_drawn_over_what_lies_under_it_without_hiding_what_is_blended_bey
         ],
     );
     let through = middle(&gpu, &mut liquids, &view(above, down), None);
-    assert!(through[0] > 150 && through[0] < 250 && through[1] > 20, "{through:?}");
+    // The shallow colour of the water, 0.65 of it, blended in gamma over the red.
+    let tinted = [0.35 + 0.65 * 0.24, 0.65 * 0.35, 0.65 * 0.31].map(|value: f32| (value * 255.0).round() as u8);
+    assert!(
+        through
+            .iter()
+            .zip(tinted)
+            .all(|(seen, wanted)| seen.abs_diff(wanted) <= 2),
+        "{through:?} against {tinted:?}"
+    );
     // A green half seen through, under the surface or over it: beyond the water from the eye, drawn
     // before it and tinted; on the eye's side, drawn over it. From under the water, the other way.
     let painter = Painter::new(&gpu, [0.0, 1.0, 0.0, 0.5], 0.5);
@@ -975,23 +983,6 @@ fn the_water_is_drawn_over_what_lies_under_it_without_hiding_what_is_blended_bey
         ),
         through
     );
-}
-
-/// The value in gamma of a linear value, as an sRGB target encodes it, and back.
-fn srgb(value: f32) -> f32 {
-    if value <= 0.003_130_8 {
-        value * 12.92
-    } else {
-        1.055 * value.powf(1.0 / 2.4) - 0.055
-    }
-}
-
-fn linear(gamma: f32) -> f32 {
-    if gamma <= 0.040_45 {
-        gamma / 12.92
-    } else {
-        ((gamma + 0.055) / 1.055).powf(2.4)
-    }
 }
 
 #[test]
@@ -1057,7 +1048,7 @@ fn under_the_light_of_a_map_the_water_is_its_ramp_lit_plus_its_texel_and_the_sun
         0.6 * deep[1] + glint[1] + glint[3] * 0.25,
         0.6 * deep[2] + glint[3] * 0.25,
     ];
-    let expected = lit.map(|gamma| srgb(linear(gamma) * 128.0 / 255.0));
+    let expected = lit.map(|gamma| gamma * 128.0 / 255.0);
     assert!(near(drawn, expected), "{drawn:?} against {expected:?}");
     // The river, of the black texel of `lake_a`, opaque, its depths by the table of the rivers: at
     // 21, halfway, between its rows 31 and 32, (62, 31) and (64, 32); stretched twice, its last row,

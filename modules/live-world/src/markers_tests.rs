@@ -228,7 +228,7 @@ fn device() -> Option<egui_wgpu::RenderState> {
 }
 
 const TARGET: Target = Target {
-    color_format: wgpu::TextureFormat::Rgba8UnormSrgb,
+    color_format: wgpu::TextureFormat::Rgba8Unorm,
     depth_format: wgpu::TextureFormat::Depth32Float,
     sample_count: 1,
     depth_compare: wgpu::CompareFunction::Greater,
@@ -386,6 +386,15 @@ fn the_markers_are_written_by_their_thread_to_a_buffer_that_grows_and_drawn_in_o
     assert!(
         centre[0] > 150 && centre[1] > 40 && centre[2] < 60,
         "orange at the centre: {centre:?}"
+    );
+    // Lit in linear by its shade, then stored in gamma: from the shade its red gives, its green and
+    // blue those of its colour so lit and encoded.
+    let decoded = |byte: u8| ((f32::from(byte) / 255.0 + 0.055) / 1.055).powf(2.4);
+    let encoded = |value: f32| ((1.055 * value.powf(1.0 / 2.4) - 0.055) * 255.0).round() as u8;
+    let shade = decoded(centre[0]);
+    assert!(
+        centre[1].abs_diff(encoded(0.55 * shade)) <= 2 && centre[2].abs_diff(encoded(0.1 * shade)) <= 2,
+        "lit in linear, stored in gamma: {centre:?}"
     );
     assert_eq!(layer.stats().draws, 1);
     assert_eq!(layer.stats().triangles, 8);

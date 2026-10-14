@@ -424,17 +424,10 @@ fn half(id: u64, look: u32, x: f32) -> uniwow_api::models::Instance {
     placed
 }
 
-/// Whether the red and blue of `seen` are, once stored, `red` and `blue` in light, within 12.
+/// Whether the red and blue of `seen` are `red` and `blue`, blended and stored in gamma, within 12.
 fn stored(seen: [u8; 4], red: f32, blue: f32) -> bool {
-    let srgb = |light: f32| {
-        let value = if light <= 0.0031308 {
-            light * 12.92
-        } else {
-            1.055 * light.powf(1.0 / 2.4) - 0.055
-        };
-        (value * 255.0).round() as u8
-    };
-    seen[0].abs_diff(srgb(red)) <= 12 && seen[2].abs_diff(srgb(blue)) <= 12 && seen[1] < 10
+    let byte = |value: f32| (value * 255.0).round() as u8;
+    seen[0].abs_diff(byte(red)) <= 12 && seen[2].abs_diff(byte(blue)) <= 12 && seen[1] < 10
 }
 
 #[test]

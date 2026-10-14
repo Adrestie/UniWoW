@@ -1,4 +1,4 @@
-// What falls around the eye (after the linear, fog and light WGSL of the view): rain, snow or sand,
+// What falls around the eye (after the fog and light WGSL of the view): rain, snow or sand,
 // each particle a quad made by the vertex shader from its instance alone, its place in a box around
 // the eye computed from its number and the time, so that the CPU writes one uniform a frame
 // whatever their count. The particles stay where they are in the world as the eye moves, the box
@@ -12,7 +12,7 @@ struct Camera {
     ambient: vec4<f32>,
     // The eye, and the time in seconds.
     eye: vec4<f32>,
-    // The colour of the fog, linear; where it starts, its middle and its end, and the rate of the
+    // The colour of the fog, in gamma; where it starts, its middle and its end, and the rate of the
     // game's fog, 0 for the editor's.
     fog_colour: vec4<f32>,
     fog: vec4<f32>,
@@ -117,6 +117,6 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
         discard;
     }
     // Lit by the light of the view from above, then fogged as the view fogs.
-    let lit = linear(camera.colour.rgb) * light(vec3<f32>(0.0, 0.0, 1.0));
+    let lit = camera.colour.rgb * light(vec3<f32>(0.0, 0.0, 1.0));
     return vec4<f32>(fog_mix(lit, camera.fog_colour.rgb, fog_amount(in.world)), alpha);
 }

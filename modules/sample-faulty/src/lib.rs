@@ -206,7 +206,11 @@ fn create(device: &wgpu::Device, target: &Target) -> Gpu {
     };
     Gpu {
         valid: pipeline(target.color_format),
-        wrong_format: pipeline(wgpu::TextureFormat::Rgba8Unorm),
+        // A format the view does not draw into, whatever its own.
+        wrong_format: pipeline(match target.color_format {
+            wgpu::TextureFormat::Rgba16Float => wgpu::TextureFormat::Rgba8Unorm,
+            _ => wgpu::TextureFormat::Rgba16Float,
+        }),
         globals,
         bind_group,
     }

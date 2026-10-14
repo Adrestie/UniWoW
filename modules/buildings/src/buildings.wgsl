@@ -260,12 +260,12 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         discard;
     }
     let fog = select(fog_amount(in.world), 0.0, shading.z > 0.5);
-    // A mod2x batch doubles what is drawn in gamma, as the models draw it.
+    // A mod2x batch doubles what is drawn: its colour, grey in the fog.
     if shading.w > 2.5 {
-        let gamma = mix(combined.lit.rgb, vec3<f32>(0.5), fog);
-        return vec4<f32>(pow(gamma * 2.0, vec3<f32>(2.2)) * 0.5, alpha);
+        return vec4<f32>(mix(combined.lit.rgb, vec3<f32>(0.5), fog), alpha);
     }
-    var rgb = linear(clamp(combined.lit.rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
+    // In gamma, as the client: lit, then fogged.
+    var rgb = clamp(combined.lit.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
     // The highlight of the specular and metal materials, by their share of the light outside.
     var shining = vec3<f32>(0.0);
     if shading.y < 0.5 {
@@ -292,25 +292,24 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             outside = 1.0;
             vertex = vec3<f32>(0.0);
         }
-        var lit = linear(batch_light(in.normal, vertex, in.ambient, outside));
+        var lit = batch_light(in.normal, vertex, in.ambient, outside);
         // A building lit as one: outside, its ambient colour added at the drawing.
         if (in.group & LIT_AS_ONE) != 0u {
-            lit = light(in.normal) + linear(in.ambient);
+            lit = light(in.normal) + in.ambient;
         }
         rgb = rgb * lit;
         if shader == 1u || shader == 2u {
             shining = highlight(shader, one, in.normal, in.world) * outside;
         }
     }
-    // Added after the light, in gamma: the environment, the highlight, and the emissive colour of a
-    // material glowing at night by how much it is night, as Noggit Red adds it (read for the facts
-    // only).
+    // Added after the light: the environment, the highlight, and the emissive colour of a material
+    // glowing at night by how much it is night, as Noggit Red adds it (read for the facts only).
     var added = combined.added + shining;
     if (material.flags.x & GLOWS_AT_NIGHT) != 0u {
         added = added + unpack4x8unorm(material.flags.z).rgb * camera.glow.x;
     }
     if any(added > vec3<f32>(0.0)) {
-        rgb = linear(clamp(srgb(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0))) + added, vec3<f32>(0.0), vec3<f32>(1.0)));
+        rgb = clamp(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)) + added, vec3<f32>(0.0), vec3<f32>(1.0));
     }
     return vec4<f32>(fog_mix(rgb, fog_colour(shading.w), fog), alpha);
 }

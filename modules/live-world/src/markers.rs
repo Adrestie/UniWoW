@@ -57,8 +57,15 @@ fn vs_main(
     var out: Out;
     out.position = camera.view_proj * vec4<f32>(centre + corner * vec3<f32>(reach * 0.6, reach * 0.6, reach), 1.0);
     let light = normalize(vec3<f32>(0.4, 0.3, 0.85));
-    out.colour = colour.rgb * (0.35 + 0.65 * max(dot(normal, light), 0.0));
+    out.colour = encoded(colour.rgb * (0.35 + 0.65 * max(dot(normal, light), 0.0)));
     return out;
+}
+
+// A colour lit in linear, as the markers are, in the gamma the target stores.
+fn encoded(value: vec3<f32>) -> vec3<f32> {
+    let low = value * 12.92;
+    let high = 1.055 * pow(value, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    return select(high, low, value <= vec3<f32>(0.0031308));
 }
 
 @fragment

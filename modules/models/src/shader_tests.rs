@@ -416,8 +416,8 @@ fn a_mod2x_layer_doubles_what_is_under_it_in_gamma() {
         return;
     };
     // An opaque grey of 128, then on the same triangles a layer of mod2x blending, of 64 on the
-    // first set, which stays apart: 128 times 64 doubled, 64 in gamma (62 as the curve of the
-    // target is not quite a power of 2.2); 128 were the layer not drawn on its first.
+    // first set, which stays apart: 128 times 64 doubled, 64 in gamma; 128 were the layer not
+    // drawn on its first.
     let batches = [[0, 0, 1, 0, 0, 0], [1, 1, 1, 1, 0, 0]];
     let model = named(
         shaded(&[(PLAIN, 0), (PLAIN, 6)], &batches, &[0], &[]),
@@ -430,7 +430,7 @@ fn a_mod2x_layer_doubles_what_is_under_it_in_gamma() {
         &[("one.blp", grey(128, 255)), ("two.blp", grey(64, 255))],
         0.0,
     );
-    assert!(near(seen, [62.0; 3], 4.0), "{seen:?}");
+    assert!(near(seen, [64.0; 3], 2.0), "{seen:?}");
 }
 
 #[test]
@@ -440,7 +440,7 @@ fn an_alpha_layer_then_a_mod_layer_are_drawn_in_that_order() {
     };
     // An opaque grey of 128, then a red alpha layer of half its alpha, then a mod layer of a grey
     // of 128, each apart: the pool gathers the draws by state, alpha before mod as their batches
-    // come. Mixed then darkened, a red of about 100; darkened then mixed, about 190.
+    // come. Mixed then darkened, a red of about 100; darkened then mixed, about 160.
     let batches = [[0, 0, 1, 0, 0, 0], [1, 1, 1, 1, 0, 0], [2, 2, 1, 2, 0, 0]];
     let model = named(
         shaded(&[(PLAIN, 0), (PLAIN, 2), (PLAIN, 5)], &batches, &[0], &[]),

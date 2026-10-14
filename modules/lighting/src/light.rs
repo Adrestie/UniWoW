@@ -614,27 +614,9 @@ pub fn night_glow(time: f32) -> f32 {
     }
 }
 
-/// The linear value of a value in gamma, as an sRGB target encodes it back.
-fn linear(gamma: f32) -> f32 {
-    if gamma <= 0.04045 {
-        gamma / 12.92
-    } else {
-        ((gamma + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-/// The value in gamma of a linear value, as an sRGB target encodes it.
-fn gamma(linear: f32) -> f32 {
-    if linear <= 0.003_130_8 {
-        linear * 12.92
-    } else {
-        1.055 * linear.powf(1.0 / 2.4) - 0.055
-    }
-}
-
 /// The light of `values` at `time` the view draws with: its sun, in the direction of the hour, its
-/// diffuse and ambient light (the fixed light's where it has none); the colour of its fog, made
-/// linear (the fixed one where it has none); the fog of the game `game_fog`, where it starts and
+/// diffuse and ambient light (the fixed light's where it has none); the colour of its fog (the
+/// fixed one where it has none); the fog of the game `game_fog`, where it starts and
 /// ends and its rate, when it is drawn (`Tables::fog_of_the_game`); its sky, the bands 2 to 7 in
 /// gamma, the colour of its fog where it has none, or that colour all over when the eye is
 /// `immersed` in a liquid, the client drawing no sky then (0x79ACAF); the light of its water, its
@@ -642,7 +624,7 @@ fn gamma(linear: f32) -> f32 {
 /// at night of the buildings at that hour (`night_glow`).
 pub fn map_light(values: &Values, time: f32, game_fog: Option<[f32; 3]>, immersed: bool) -> MapLight {
     let fixed = Sun::default();
-    let fog = values.colours[7].unwrap_or(Fog::default().colour.map(gamma));
+    let fog = values.colours[7].unwrap_or(Fog::default().colour);
     let band = |band: usize| values.colours[band].unwrap_or([0.0; 3]);
     let with = |at: usize, alpha: f32| {
         let [red, green, blue] = band(at);
@@ -654,7 +636,7 @@ pub fn map_light(values: &Values, time: f32, game_fog: Option<[f32; 3]>, immerse
             colour: values.colours[0].unwrap_or(fixed.colour),
             ambient: values.colours[1].unwrap_or(fixed.ambient),
         },
-        fog_colour: values.colours[7].map_or(Fog::default().colour, |colour| colour.map(linear)),
+        fog_colour: fog,
         fog: game_fog,
         sky: match immersed {
             true => [fog; 6],
@@ -724,8 +706,11 @@ pub const WHOLE_INSIDE: f32 = 25.0;
 pub fn with_building_fog(given: MapLight, fog: FogBand, weight: f32, map: u32, immersed: bool, far: f32) -> MapLight {
     let weight = weight.clamp(0.0, 1.0);
     let colour: [f32; 3] = std::array::from_fn(|channel| {
-        let kept = gamma(given.fog_colour[channel]);
-        linear(mix(kept, f32::from(fog.colour[channel]) / 255.0, weight))
+        mix(
+            given.fog_colour[channel],
+            f32::from(fog.colour[channel]) / 255.0,
+            weight,
+        )
     });
     let fog = given.fog.map(|kept| {
         let [end, share, rate] = prepared_fog(fog.end, fog.start, map, far);
@@ -807,8 +792,8 @@ pub const FLASH_SKY: f32 = 0.7;
 /// The light `given` of the map lit by a flash of lightning of `flash`, from 0 to 1, as the service
 /// `weather` gives it: its colour added to the ambient light, each channel bounded to 1, so that
 /// every face, lit by the sun or not, is lit by it, much by night and little at noon; the sky, the
-/// colour of the fog and the colours of the water turned to it, the fog's in gamma then made
-/// linear, the alphas of the water kept. Unchanged at 0.
+/// colour of the fog and the colours of the water turned to it, the alphas of the water kept.
+/// Unchanged at 0.
 pub fn with_flash(given: MapLight, flash: f32) -> MapLight {
     let flash = flash.clamp(0.0, 1.0);
     if flash <= 0.0 {
@@ -824,7 +809,7 @@ pub fn with_flash(given: MapLight, flash: f32) -> MapLight {
         (given.sun.ambient[channel] + FLASH_COLOUR[channel] * FLASH_AMBIENT * flash).min(1.0)
     });
     lit.sky = given.sky.map(toward);
-    lit.fog_colour = toward(given.fog_colour.map(gamma)).map(linear);
+    lit.fog_colour = toward(given.fog_colour);
     lit.water.river = given.water.river.map(water);
     lit.water.ocean = given.water.ocean.map(water);
     lit

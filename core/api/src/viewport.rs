@@ -51,7 +51,7 @@ pub trait Viewport: Send + Sync {
 }
 
 /// The light of the map at the place of the camera and the hour: its sun, the colour of its fog in
-/// linear, where its fog starts and ends, in yards, and its rate when the fog of the game is drawn
+/// gamma, where its fog starts and ends, in yards, and its rate when the fog of the game is drawn
 /// (`Fog`), none for the editor's, its sky (`Sky`), the light of its water (`Water`), and how much
 /// the materials of the buildings that glow at night glow at that hour, from 0 to 1 (`View::night`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -79,26 +79,9 @@ pub struct Water {
     pub sun: [f32; 3],
 }
 
-/// The WGSL of a colour in gamma made linear (`linear`) and back (`srgb`), which the shaders of the
-/// view share.
-pub const LINEAR_WGSL: &str = r"// The linear value of a value in gamma, as an sRGB target encodes it back.
-fn linear(gamma: vec3<f32>) -> vec3<f32> {
-    let low = gamma / 12.92;
-    let high = pow((gamma + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
-    return select(high, low, gamma <= vec3<f32>(0.04045));
-}
-
-// The value in gamma of a linear value, as an sRGB target encodes it.
-fn srgb(value: vec3<f32>) -> vec3<f32> {
-    let low = value * 12.92;
-    let high = 1.055 * pow(value, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
-    return select(high, low, value <= vec3<f32>(0.0031308));
-}
-";
-
 /// The WGSL of the fog of the view (`fog_amount`, `fog_mix`, `beyond_fog`), which the shaders of the
 /// view share, for a uniform `camera` with a perspective `view_proj`, an `eye` and a `fog` as `Fog`
-/// gives them: where it starts, its middle, where it ends and its rate; with `LINEAR_WGSL`.
+/// gives them: where it starts, its middle, where it ends and its rate.
 pub const FOG_WGSL: &str = r"// The share of the editor's fog at its middle.
 const NEAR_FOG: f32 = 0.55;
 
@@ -121,12 +104,11 @@ fn fog_amount(position: vec3<f32>) -> f32 {
         + (1.0 - NEAR_FOG) * smoothstep(camera.fog.y, camera.fog.z, distance);
 }
 
-// `colour`, linear, under the fog of the colour `fog` by `amount`: the game's mixed in gamma as the
-// client draws, the colour bounded to 1 first; the editor's in linear.
+// `colour` under the fog of the colour `fog` by `amount`, both in gamma as the client mixes them:
+// the colour bounded to 1 first under the game's fog.
 fn fog_mix(colour: vec3<f32>, fog: vec3<f32>, amount: f32) -> vec3<f32> {
     if camera.fog.w > 0.0 {
-        let bounded = clamp(colour, vec3<f32>(0.0), vec3<f32>(1.0));
-        return linear(mix(srgb(bounded), srgb(fog), amount));
+        return mix(clamp(colour, vec3<f32>(0.0), vec3<f32>(1.0)), fog, amount);
     }
     return mix(colour, fog, amount);
 }
@@ -139,19 +121,19 @@ fn beyond_fog(position: vec3<f32>) -> bool {
 ";
 
 /// The WGSL of the light of the view (`light`), which the shaders of the view share, for a uniform
-/// `camera` with a `sun`, a `sun_colour` and an `ambient` as `Sun` gives them; with `LINEAR_WGSL`.
-pub const LIGHT_WGSL: &str = r"// The light of a face of `normal`, as Noggit lights it and the client in gamma: the ambient light
-// from 0.9 to 1.1 times as the face turns to the sun, plus the diffuse by the angle; made linear.
+/// `camera` with a `sun`, a `sun_colour` and an `ambient` as `Sun` gives them.
+pub const LIGHT_WGSL: &str = r"// The light of a face of `normal`, in gamma, as Noggit lights it and the client: the ambient light
+// from 0.9 to 1.1 times as the face turns to the sun, plus the diffuse by the angle.
 fn light(normal: vec3<f32>) -> vec3<f32> {
     let facing = clamp(dot(normalize(normal), camera.sun.xyz), 0.0, 1.0);
-    return linear(camera.ambient.rgb * (0.9 + 0.2 * facing) + camera.sun_colour.rgb * facing);
+    return camera.ambient.rgb * (0.9 + 0.2 * facing) + camera.sun_colour.rgb * facing;
 }
 ";
 
 /// The share of the editor's fog at its middle distance (`FOG_WGSL`).
 pub const NEAR_FOG: f32 = 0.55;
 
-/// The fog of the view and its colour, that of the sky without the light of a map, in linear. The
+/// The fog of the view and its colour, that of the sky without the light of a map, in gamma. The
 /// editor's when `rate` is 0: by the distance on the ground from the eye, none up to `start`,
 /// `NEAR_FOG` of it at `middle`, all of it from `end`. The game's otherwise, as the client draws
 /// it: by the depth along the view, 1 − ((end − depth) / (end − start))^rate, `middle` unused.
@@ -168,7 +150,7 @@ impl Default for Fog {
     /// No fog within any map, until a layer sets it.
     fn default() -> Self {
         Self {
-            colour: [0.36, 0.43, 0.52],
+            colour: [0.634, 0.687, 0.748],
             start: 1.0e9,
             middle: 2.0e9,
             end: 4.0e9,
@@ -180,7 +162,7 @@ impl Default for Fog {
 /// The light of the sun: the direction towards it, its colour on the ground (diffuse) and the light
 /// everywhere (ambient), both in gamma. A face is lit, as Noggit lights it and the client in gamma,
 /// by the ambient light from 0.9 to 1.1 times as the face turns to the sun, plus the diffuse by the
-/// angle, made linear once, then multiplying its colour.
+/// angle, multiplying its colour.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sun {
     pub direction: [f32; 3],
@@ -189,8 +171,8 @@ pub struct Sun {
 }
 
 impl Default for Sun {
-    /// The light the terrain had before the lights of the maps: as bright as it, 0.45 in linear,
-    /// on a face turned away from the sun, and 1 on one facing it.
+    /// The light the terrain had before the lights of the maps: 0.7 on a face turned away from the
+    /// sun, and 1 on one facing it.
     fn default() -> Self {
         Self {
             direction: glam::Vec3::new(0.4, 0.3, 0.85).normalize().to_array(),
@@ -323,7 +305,8 @@ pub struct Frame {
     pub time: f32,
 }
 
-/// Formats of the render target a layer draws into; its pipelines must match them.
+/// Formats of the render target a layer draws into, its colour in gamma as the client's, blended and
+/// resolved so; its pipelines must match them.
 #[derive(Clone, Copy, Debug)]
 pub struct Target {
     pub color_format: wgpu::TextureFormat,

@@ -191,8 +191,6 @@ pub struct TextureArrays {
     /// Who holds the arrays, for what the log says and the labels of the GPU.
     owner: &'static str,
     slots: usize,
-    /// Whether the textures are read as sRGB, made linear by the GPU, or as they are stored.
-    srgb: bool,
     /// Whether the textures stored as BC go to the GPU so.
     block_compression: bool,
     max_layers: u32,
@@ -216,14 +214,26 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The format a texture stored as `format` is read in: as it is stored, in gamma, never decoded
+/// from sRGB, as the client reads its textures.
+fn gpu_format(format: TextureFormat) -> wgpu::TextureFormat {
+    match format {
+        TextureFormat::Rgba8 => wgpu::TextureFormat::Rgba8Unorm,
+        TextureFormat::Bc1 => wgpu::TextureFormat::Bc1RgbaUnorm,
+        TextureFormat::Bc2 => wgpu::TextureFormat::Bc2RgbaUnorm,
+        TextureFormat::Bc3 => wgpu::TextureFormat::Bc3RgbaUnorm,
+    }
+}
+
 /// The capacity an array of `capacity` layers grows to, at most `max`: twice, then 32 more.
 fn grown(capacity: u32, max: u32) -> u32 {
     (if capacity < 32 { capacity * 2 } else { capacity + 32 }).min(max)
 }
 
 impl TextureArrays {
-    /// The arrays of `owner`, `slots` of them at most, their textures read as sRGB when `srgb` says.
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, owner: &'static str, slots: usize, srgb: bool) -> Self {
+    /// The arrays of `owner`, `slots` of them at most, their textures read as they are stored, in
+    /// gamma.
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, owner: &'static str, slots: usize) -> Self {
         let mut arrays = Arrays::default();
         arrays.slots.resize_with(slots, || None);
         Self {
@@ -231,7 +241,6 @@ impl TextureArrays {
             queue: queue.clone(),
             owner,
             slots,
-            srgb,
             block_compression: device.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
             max_layers: device.limits().max_texture_array_layers,
             arrays: Mutex::new(arrays),
@@ -357,16 +366,7 @@ impl TextureArrays {
     /// Writes `texture` to a free layer of an array of its class, growing one or making one when
     /// none is free: its levels copied from a buffer of their own, in a submission of its own.
     pub fn place(&self, texture: &Texture) -> Result<Placed, String> {
-        let format = match (texture.format, self.srgb) {
-            (TextureFormat::Rgba8, true) => wgpu::TextureFormat::Rgba8UnormSrgb,
-            (TextureFormat::Bc1, true) => wgpu::TextureFormat::Bc1RgbaUnormSrgb,
-            (TextureFormat::Bc2, true) => wgpu::TextureFormat::Bc2RgbaUnormSrgb,
-            (TextureFormat::Bc3, true) => wgpu::TextureFormat::Bc3RgbaUnormSrgb,
-            (TextureFormat::Rgba8, false) => wgpu::TextureFormat::Rgba8Unorm,
-            (TextureFormat::Bc1, false) => wgpu::TextureFormat::Bc1RgbaUnorm,
-            (TextureFormat::Bc2, false) => wgpu::TextureFormat::Bc2RgbaUnorm,
-            (TextureFormat::Bc3, false) => wgpu::TextureFormat::Bc3RgbaUnorm,
-        };
+        let format = gpu_format(texture.format);
         if texture.levels.is_empty() || texture.width == 0 || texture.height == 0 {
             return Err("a texture without texels".to_owned());
         }
@@ -636,5 +636,24 @@ impl TextureArrays {
         let arrays = lock(&self.arrays);
         let array = arrays.slots[slot as usize].as_ref()?;
         Some((array.texture.clone(), array.used.len()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TextureFormat, gpu_format};
+
+    #[test]
+    fn every_texture_is_read_as_it_is_stored_in_gamma() {
+        for format in [
+            TextureFormat::Rgba8,
+            TextureFormat::Bc1,
+            TextureFormat::Bc2,
+            TextureFormat::Bc3,
+        ] {
+            let read = gpu_format(format);
+            assert!(!read.is_srgb(), "{format:?} read as {read:?}");
+            assert_eq!(read, read.remove_srgb_suffix());
+        }
     }
 }

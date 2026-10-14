@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use uniwow_api::formats::{FileRef, Formats, Texture, TextureFormat};
 use uniwow_api::glam::{Mat3, Mat4, Vec3};
-use uniwow_api::viewport::{self, Drawing, Layer, LayerStats, Phase, Pyramid, Stage, Target, View};
+use uniwow_api::viewport::{Drawing, Layer, LayerStats, Phase, Pyramid, Stage, Target, View};
 use uniwow_api::wgpu::util::DeviceExt;
 use uniwow_api::{bytemuck, egui_wgpu, journal, uploads, wgpu};
 
@@ -326,7 +326,7 @@ impl Gpu {
         );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("sky"),
-            source: wgpu::ShaderSource::Wgsl([viewport::LINEAR_WGSL, include_str!("sky.wgsl")].concat().into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("sky.wgsl").into()),
         });
         let render = |label, bind: &wgpu::BindGroupLayout, entries: (&str, &str), blend: wgpu::BlendState| {
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

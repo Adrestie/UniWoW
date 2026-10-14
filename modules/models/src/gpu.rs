@@ -377,7 +377,6 @@ impl Shared {
             label: Some("models"),
             source: wgpu::ShaderSource::Wgsl(
                 [
-                    viewport::LINEAR_WGSL,
                     viewport::FOG_WGSL,
                     viewport::LIGHT_WGSL,
                     include_str!("common.wgsl"),

@@ -374,7 +374,7 @@ fn device() -> Option<egui_wgpu::RenderState> {
 }
 
 const TARGET: Target = Target {
-    color_format: wgpu::TextureFormat::Rgba8UnormSrgb,
+    color_format: wgpu::TextureFormat::Rgba8Unorm,
     depth_format: wgpu::TextureFormat::Depth32Float,
     sample_count: 1,
     depth_compare: wgpu::CompareFunction::Greater,
@@ -595,11 +595,12 @@ fn the_sun_is_drawn_where_it_stands_tinted_by_its_colour_over_the_sky_only() {
     let unread = render(&gpu, &mut layer, &view, 0.0);
     assert_eq!(pixel(&unread, SIZE / 2, SIZE / 2), [0, 0, 0, 255]);
     sky::lock(&drawn).images = Some((2, images(&gpu)));
-    // Half drawn over half of the sky; nothing over none of it, nor without heavens.
+    // Half drawn over half of the sky, blended in gamma; nothing over none of it, nor without
+    // heavens.
     sky::lock(&drawn).heavens.as_mut().unwrap().share = 0.5;
     let half = render(&gpu, &mut layer, &view, 0.0);
     let middle = pixel(&half, SIZE / 2, SIZE / 2);
-    assert!(near(middle[0], 188, 3), "{middle:?}");
+    assert!(near(middle[0], 128, 2), "{middle:?}");
     sky::lock(&drawn).heavens.as_mut().unwrap().share = 0.0;
     let none = render(&gpu, &mut layer, &view, 0.0);
     assert_eq!(pixel(&none, SIZE / 2, SIZE / 2), [0, 0, 0, 255]);
@@ -617,13 +618,6 @@ fn a_body_is_clipped_under_the_horizon_and_faded_from_it_as_the_corners_of_its_q
     let drawn = Arc::new(Mutex::new(Drawn::default()));
     let (mut layer, _, _) = layers(&gpu, &drawn);
     sky::lock(&drawn).images = Some((1, images(&gpu)));
-    let gamma = |linear: f32| {
-        if linear <= 0.003_130_8 {
-            linear * 12.92
-        } else {
-            1.055 * linear.powf(1.0 / 2.4) - 0.055
-        }
-    };
     // The alpha of a corner of the quad `height` yards over the eye: 2.5 times its height within
     // the 0.4 yard over the horizon, that of the body above.
     let corner = |height: f32, alpha: f32| {
@@ -679,7 +673,7 @@ fn a_body_is_clipped_under_the_horizon_and_faded_from_it_as_the_corners_of_its_q
             }
             let share = (point.z - lowest) / (highest - lowest);
             let seen = corner(lowest, alpha) + (corner(highest, alpha) - corner(lowest, alpha)) * share;
-            let wanted = (gamma(seen) * 255.0).round() as i32;
+            let wanted = (seen * 255.0).round() as i32;
             let red = pixel(&pixels, SIZE / 2, row)[0];
             assert!(
                 near(red, wanted, 2),
@@ -715,13 +709,13 @@ fn the_moon_is_drawn_over_the_sun_and_the_clouds_over_both() {
     let pixels = render(&gpu, &mut layer, &view, 0.0);
     let middle = pixel(&pixels, SIZE / 2, SIZE / 2);
     assert!(near(middle[0], 127, 3) && near(middle[2], 128, 3), "{middle:?}");
-    // Where neither body is, the clouds alone over the black: a half of blue, blended in linear.
+    // Where neither body is, the clouds alone over the black: a half of blue, blended in gamma.
     let corner = pixel(&pixels, 2, 2);
-    assert!(corner[0] < 3 && near(corner[2], 188, 4), "{corner:?}");
+    assert!(corner[0] < 3 && near(corner[2], 128, 2), "{corner:?}");
     // The same clouds again: not written again.
     sky::lock(&drawn).clouds = Some((1, Arc::new(vec![[0, 0, 0, 0]; SIDE * SIDE])));
     let pixels = render(&gpu, &mut layer, &view, 0.0);
-    assert!(near(pixel(&pixels, 2, 2)[2], 188, 4));
+    assert!(near(pixel(&pixels, 2, 2)[2], 128, 2));
 }
 
 #[test]
@@ -864,12 +858,12 @@ fn the_glare_follows_the_share_of_its_body_in_sight_rising_and_falling_at_their_
     let [sun, moon] = sky::envelopes(&gpu, &resources);
     assert!((sun - 0.4).abs() < 1e-4 && moon == 0.0, "{sun} {moon}");
     // Half in sight: up to a half, rising by 0.4 at most; its glare drawn half as strong: a half of
-    // the colour of the sun times the grey of its image, made linear.
+    // the colour of the sun times the grey of its image, in gamma.
     see(&gpu, &mut layer, &view_towards(towards, 0.2), &half, 2);
     assert!((sky::envelopes(&gpu, &resources)[0] - 0.5).abs() < 1e-4);
     let pixels = render(&gpu, &mut layer, &view_towards(towards, 0.2), 0.0);
     let middle = pixel(&pixels, SIZE / 2, SIZE / 2);
-    assert!(near(middle[0], 93, 3) && near(middle[1], 44, 3), "{middle:?}");
+    assert!(near(middle[0], 64, 2) && near(middle[1], 32, 2), "{middle:?}");
     // Hidden: falling by 50/33 a second, a quarter of a second at most.
     see(&gpu, &mut layer, &view_towards(towards, 0.3), &all, 3);
     let fallen = 0.5 - 50.0 / 33.0 * 0.1;

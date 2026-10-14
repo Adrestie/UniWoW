@@ -42,14 +42,15 @@ impl Grid {
         let extent = HALF_EXTENT as f32;
         for i in -HALF_EXTENT..=HALF_EXTENT {
             let t = i as f32;
-            let shade = if i % 10 == 0 { 0.16 } else { 0.05 };
+            // In gamma, as the target stores them.
+            let shade = if i % 10 == 0 { 0.44 } else { 0.248 };
             let x_axis = if i == 0 {
-                [0.6, 0.06, 0.06, 1.0]
+                [0.798, 0.272, 0.272, 1.0]
             } else {
                 [shade, shade, shade, 1.0]
             };
             let y_axis = if i == 0 {
-                [0.06, 0.5, 0.06, 1.0]
+                [0.272, 0.735, 0.272, 1.0]
             } else {
                 [shade, shade, shade, 1.0]
             };

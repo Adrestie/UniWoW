@@ -25,7 +25,6 @@ pub const SLOTS: usize = 12;
 /// The shader of the tiles, or of the horizon, `shader`, after what it shares.
 fn source(shader: &str) -> String {
     [
-        viewport::LINEAR_WGSL,
         viewport::FOG_WGSL,
         viewport::LIGHT_WGSL,
         include_str!("common.wgsl"),
@@ -265,7 +264,7 @@ impl Shared {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                format: wgpu::TextureFormat::Rgba8Unorm,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             },
@@ -289,7 +288,7 @@ impl Shared {
                 dimension: Some(wgpu::TextureViewDimension::D2Array),
                 ..Default::default()
             }),
-            textures: TextureArrays::new(device, &gpu.queue, "the terrain", SLOTS, true),
+            textures: TextureArrays::new(device, &gpu.queue, "the terrain", SLOTS),
         })
     }
 

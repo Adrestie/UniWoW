@@ -179,14 +179,9 @@ pub fn create(device: &wgpu::Device, target: &Target) -> Gpu {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("weather"),
         source: wgpu::ShaderSource::Wgsl(
-            [
-                viewport::LINEAR_WGSL,
-                viewport::FOG_WGSL,
-                viewport::LIGHT_WGSL,
-                include_str!("fall.wgsl"),
-            ]
-            .concat()
-            .into(),
+            [viewport::FOG_WGSL, viewport::LIGHT_WGSL, include_str!("fall.wgsl")]
+                .concat()
+                .into(),
         ),
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

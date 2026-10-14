@@ -173,7 +173,7 @@ pub fn camera_values(view: &View) -> [f32; CAMERA] {
 
 /// The shader, after `liquids.wgsl`: its arrays read by slot.
 fn shader(slots: usize) -> String {
-    let mut source = [viewport::LINEAR_WGSL, viewport::FOG_WGSL, include_str!("liquids.wgsl")].concat();
+    let mut source = [viewport::FOG_WGSL, include_str!("liquids.wgsl")].concat();
     for slot in 0..slots {
         let _ = writeln!(
             source,
@@ -396,7 +396,7 @@ impl Shared {
                 .get_downlevel_capabilities()
                 .flags
                 .contains(wgpu::DownlevelFlags::INDIRECT_EXECUTION),
-            arrays: TextureArrays::new(device, queue, "the liquids", SLOTS, false),
+            arrays: TextureArrays::new(device, queue, "the liquids", SLOTS),
             types: Mutex::default(),
             table: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("liquids types"),

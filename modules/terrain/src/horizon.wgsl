@@ -6,7 +6,7 @@
 @group(1) @binding(0) var<uniform> drawn: array<vec4<u32>, 32>;
 
 // The ground of the horizon, before its light and its fog.
-const GROUND: vec3<f32> = vec3<f32>(0.20, 0.19, 0.15);
+const GROUND: vec3<f32> = vec3<f32>(0.485, 0.473, 0.424);
 
 struct HorizonIn {
     @location(0) position: vec3<f32>,
@@ -89,5 +89,5 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
         return vec4<f32>(camera.fog_colour.rgb, 1.0);
     }
     let towards = camera.sky_from_screen * vec4<f32>(in.screen, 1.0, 0.0);
-    return vec4<f32>(linear(sky_colour(towards.xyz)), 1.0);
+    return vec4<f32>(sky_colour(towards.xyz), 1.0);
 }

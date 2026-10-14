@@ -47,13 +47,7 @@ pub const ENTRY: u64 = 8;
 /// The shader of the pool, after `common.wgsl` and `skin.wgsl`: its bindings, its arrays read by
 /// slot, its entry points.
 fn shader(slots: usize) -> String {
-    let mut source = [
-        viewport::LINEAR_WGSL,
-        viewport::FOG_WGSL,
-        viewport::LIGHT_WGSL,
-        include_str!("common.wgsl"),
-    ]
-    .concat();
+    let mut source = [viewport::FOG_WGSL, viewport::LIGHT_WGSL, include_str!("common.wgsl")].concat();
     source.push_str(include_str!("skin.wgsl"));
     source.push_str(include_str!("pool.wgsl"));
     for slot in 0..slots {
@@ -258,7 +252,7 @@ impl Pool {
                 size_of::<MaterialGpu>() as u64,
                 1 << 12,
             ),
-            arrays: TextureArrays::new(device, queue, "the models", slots, false),
+            arrays: TextureArrays::new(device, queue, "the models", slots),
             device: device.clone(),
             layout,
             skin_layout,

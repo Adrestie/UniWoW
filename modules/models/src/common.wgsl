@@ -1,7 +1,7 @@
 // What the shaders of the models share: the camera, a vertex placed by its instance, the
 // environment mapped as WotLK maps it, the pixel shaders of WotLK, which combine the textures in
-// gamma, and the end of a pixel: its alpha tested as WotLK tests it, then lit by the sun in the
-// linear space of the view and fogged as the view says.
+// gamma, and the end of a pixel: its alpha tested as WotLK tests it, then lit by the sun and fogged
+// as the view says, in gamma as the client.
 
 struct Camera {
     view_proj: mat4x4<f32>,
@@ -53,15 +53,15 @@ fn towards_inside(inside: f32) -> vec3<f32> {
 }
 
 // The light of a face of `normal` of an instance whose `extra` is read as `groups::as_gpu` writes
-// it, in linear: by the light of the view (`light`); or, inside a building, by its own light
+// it, in gamma: by the light of the view (`light`); or, inside a building, by its own light
 // everywhere from 0.9 to 1.1 times as the face turns to its light (`towards_inside`), plus its
-// diffuse by the angle, in gamma, made linear once, as the client lights the doodads of the rooms.
+// diffuse by the angle, as the client lights the doodads of the rooms.
 fn instance_light(normal: vec3<f32>, extra: vec4<f32>) -> vec3<f32> {
     if extra.w < 0.5 {
         return light(normal);
     }
     let facing = clamp(dot(normalize(normal), towards_inside(extra.w)), 0.0, 1.0);
-    return linear(unpacked(extra.y) * (0.9 + 0.2 * facing) + unpacked(extra.z) * facing);
+    return unpacked(extra.y) * (0.9 + 0.2 * facing) + unpacked(extra.z) * facing;
 }
 
 // The coordinates of the environment, as WotLK maps them (wowdev, M2/.skin): the position and the
@@ -199,7 +199,7 @@ fn combine(shader: u32, colour: vec4<f32>, one: vec4<f32>, two: vec4<f32>) -> ve
 // The pixel of a batch whose textures are `combined` in gamma, `element` the alpha of the batch and
 // its instance; `flags` its alpha key (0 for none), whether unlit, whether unfogged (1, or 2 for a
 // model of the sky, at infinity), and the colour of its fog (0 the view's, 1 black, 2 white, 3 grey
-// for mod2x); `lit` its light in linear (`instance_light`). Not drawn under its alpha as WotLK
+// for mod2x); `lit` its light in gamma (`instance_light`). Not drawn under its alpha as WotLK
 // tests it: the alpha key times `element`, or 1/255; nor, unfogged, beyond the end of the fog of
 // the game, which would not hide it, but for the sky.
 fn shade(combined: vec4<f32>, element: f32, flags: vec4<f32>, lit: vec3<f32>, world: vec3<f32>) -> vec4<f32> {
@@ -209,14 +209,12 @@ fn shade(combined: vec4<f32>, element: f32, flags: vec4<f32>, lit: vec3<f32>, wo
         discard;
     }
     let fog = select(fog_amount(world), 0.0, flags.z > 0.5);
-    // A mod2x batch doubles what is drawn in gamma: its colour, grey in the fog, made such that the
-    // target's own doubling in linear gives the same, as far as a colour of 1 reaches.
+    // A mod2x batch doubles what is drawn: its colour, grey in the fog.
     if flags.w > 2.5 {
-        let gamma = mix(combined.rgb, vec3<f32>(0.5), fog);
-        return vec4<f32>(pow(gamma * 2.0, vec3<f32>(2.2)) * 0.5, alpha);
+        return vec4<f32>(mix(combined.rgb, vec3<f32>(0.5), fog), alpha);
     }
-    // In the linear space of the view, as the terrain: lit, then fogged as the view mixes its fog.
-    var rgb = linear(clamp(combined.rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
+    // In gamma, as the client: lit, then fogged.
+    var rgb = clamp(combined.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
     if flags.y < 0.5 {
         rgb = rgb * lit;
     }

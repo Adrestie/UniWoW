@@ -745,7 +745,7 @@ fn device_with(largest: u64) -> Option<egui_wgpu::RenderState> {
 }
 
 pub(crate) const TARGET: Target = Target {
-    color_format: wgpu::TextureFormat::Rgba8UnormSrgb,
+    color_format: wgpu::TextureFormat::Rgba8Unorm,
     depth_format: wgpu::TextureFormat::Depth32Float,
     sample_count: 1,
     depth_compare: wgpu::CompareFunction::Greater,
@@ -1300,7 +1300,7 @@ fn outside_a_face_is_lit_in_gamma_by_the_ambient_light_turned_and_the_diffuse_th
     seen.sun = sun(-1.0);
     let behind = row_of(&gpu, &mut lit, &seen, &Phase::ALL)[16];
     assert!(behind[0].abs_diff(92) <= 1, "{behind:?}");
-    // So dark that it is made linear by its low part: black.
+    // So dark that it rounds to black.
     seen.sun.ambient = [0.0011; 3];
     let dark = row_of(&gpu, &mut lit, &seen, &Phase::ALL)[16];
     assert!(dark[0] <= 1, "{dark:?}");
@@ -1566,6 +1566,16 @@ fn a_building_lit_as_one_is_lit_as_outside_whatever_its_batches() {
         reddened[0] > lit[0] && reddened[1] == lit[1],
         "{reddened:?} against {lit:?}"
     );
+    // Added as it is, in gamma: a red of 30 adds 30.
+    let mut faint = square(material(0, 0), true, Some([2, 2, 2, 255]));
+    faint.flags = 0xF;
+    faint.ambient = [30, 0, 0, 255];
+    let mut layer = bench(&gpu, faint).unwrap();
+    let added = middle(&gpu, &mut layer, Vec3::new(5.0, 0.0, 0.0));
+    assert!(
+        (i32::from(added[0]) - i32::from(lit[0]) - 30).abs() <= 2,
+        "{added:?} against {lit:?}"
+    );
 }
 
 #[test]
@@ -1657,21 +1667,7 @@ fn the_environment_is_added_after_the_light() {
         ambient: [0.1; 3],
         ..facing_sun()
     };
-    let linear = |gamma: f32| {
-        if gamma <= 0.04045 {
-            gamma / 12.92
-        } else {
-            ((gamma + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    let gamma = |linear: f32| {
-        if linear <= 0.003_130_8 {
-            linear * 12.92
-        } else {
-            1.055 * linear.powf(1.0 / 2.4) - 0.055
-        }
-    };
-    let grey = gamma(linear(128.0 / 255.0) * linear(0.11));
+    let grey = 128.0 / 255.0 * 0.11;
     let lit = row_of(&gpu, &mut layer, &seen, &Phase::ALL)[16];
     assert!(near(lit, [grey, grey + 64.0 / 255.0, grey]), "{lit:?}");
     let mut metal = bench(&gpu, environment(5)).unwrap();
@@ -1723,9 +1719,7 @@ fn the_specular_and_metal_materials_are_highlighted_by_the_colour_of_the_sun_out
     let lit = highlighted(&mut masked, true, &sunny);
     assert!(near(lit, [0.64; 3]), "{lit:?}");
     // Grey: the specular by its alpha alone, the metal by its red four times its alpha.
-    let linear = |gamma: f32| ((gamma + 0.055) / 1.055).powf(2.4);
-    let gamma = |linear: f32| 1.055 * linear.powf(1.0 / 2.4) - 0.055;
-    let grey = gamma(linear(128.0 / 255.0) * linear(0.64));
+    let grey = 128.0 / 255.0 * 0.64;
     let mut specular = bench(&gpu, shining(1, Some("grey.blp"), false)).unwrap();
     let lit = highlighted(&mut specular, true, &sunny);
     assert!(near(lit, [grey + 0.125, grey + 0.0625, grey]), "{lit:?}");

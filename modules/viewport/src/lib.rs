@@ -42,16 +42,16 @@ use stats::{GpuTimer, LayerTiming, Sample, Stats};
 const STATISTICS: &str = "statistics";
 
 const TARGET: Target = Target {
-    color_format: wgpu::TextureFormat::Rgba8UnormSrgb,
+    color_format: wgpu::TextureFormat::Rgba8Unorm,
     depth_format: wgpu::TextureFormat::Depth32Float,
     sample_count: 4,
     depth_compare: wgpu::CompareFunction::Greater,
 };
 
 const BACKGROUND: wgpu::Color = wgpu::Color {
-    r: 0.012,
-    g: 0.014,
-    b: 0.02,
+    r: 0.112,
+    g: 0.123,
+    b: 0.152,
     a: 1.0,
 };
 
@@ -458,16 +458,13 @@ impl Default for CameraKeys {
     }
 }
 
-/// The texture the frame is resolved into, of `extent` and `usage`: its view for the pass, which
-/// encodes to sRGB, and the view egui shows, which reads the bytes as stored. egui takes the values
-/// of a texture as already encoded: through a view of sRGB they would be decoded twice, and the
-/// whole view darkened.
+/// The texture the frame is resolved into, of `extent` and `usage`, and its view, which the pass
+/// resolves into and egui shows: its bytes in gamma, as egui takes them.
 fn resolve_target(
     device: &wgpu::Device,
     extent: wgpu::Extent3d,
     usage: wgpu::TextureUsages,
-) -> (wgpu::Texture, wgpu::TextureView, wgpu::TextureView) {
-    let stored = TARGET.color_format.remove_srgb_suffix();
+) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("viewport colour"),
         size: extent,
@@ -476,14 +473,10 @@ fn resolve_target(
         dimension: wgpu::TextureDimension::D2,
         format: TARGET.color_format,
         usage,
-        view_formats: &[stored],
+        view_formats: &[],
     });
-    let resolve = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let shown = texture.create_view(&wgpu::TextureViewDescriptor {
-        format: Some(stored),
-        ..wgpu::TextureViewDescriptor::default()
-    });
-    (texture, resolve, shown)
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
 }
 
 /// Offscreen textures, recreated when the panel changes size.
@@ -831,7 +824,7 @@ impl ViewportModule {
             TARGET.sample_count,
             wgpu::TextureUsages::RENDER_ATTACHMENT,
         );
-        let (_, resolved, shown) = resolve_target(
+        let (_, resolved) = resolve_target(
             device,
             extent,
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
@@ -854,13 +847,13 @@ impl ViewportModule {
             Some(old) => {
                 renderer.update_egui_texture_from_wgpu_texture(
                     device,
-                    &shown,
+                    &resolved,
                     wgpu::FilterMode::Linear,
                     old.texture_id,
                 );
                 old.texture_id
             }
-            None => renderer.register_native_texture(device, &shown, wgpu::FilterMode::Linear),
+            None => renderer.register_native_texture(device, &resolved, wgpu::FilterMode::Linear),
         };
         self.targets = Some(Targets {
             size,
@@ -2971,7 +2964,7 @@ fn cs_main() {
     const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
 
     #[test]
-    fn egui_is_shown_the_bytes_the_frame_stores_in_srgb() {
+    fn egui_is_shown_the_bytes_the_frame_stores_in_gamma() {
         let Some(gpu) = gpu() else {
             return;
         };
@@ -2980,7 +2973,7 @@ fn cs_main() {
             height: 1,
             depth_or_array_layers: 1,
         };
-        let (texture, resolve, shown) = super::resolve_target(
+        let (texture, view) = super::resolve_target(
             &gpu.device,
             extent,
             wgpu::TextureUsages::RENDER_ATTACHMENT
@@ -3031,10 +3024,8 @@ fn cs_main() {
             gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
             buffer.slice(..).get_mapped_range().expect("mapped")[0]
         };
-        // Through the view of the pass, encoded to sRGB; through the view egui shows, as it is:
-        // what egui reads there is what is stored.
-        assert_eq!(stored(&resolve), 188);
-        assert_eq!(stored(&shown), 128);
+        // Stored as written, in gamma, as egui reads it: not encoded to sRGB (188).
+        assert_eq!(stored(&view), 128);
     }
 
     #[test]
@@ -3148,9 +3139,13 @@ fn cs_main() {
         );
         let drawn = targets.draw(&layers, &gpu, &view, false, None);
         assert!(drawn.failures.is_empty(), "{:?}", drawn.failures);
-        // Linear: red, then (0.5, 0, 0.5), then (0.25, 0.5, 0.25).
+        // In gamma: red, then (0.5, 0, 0.5), then (0.25, 0.5, 0.25).
         let seen = targets.middle(&gpu);
-        assert!(seen[1] > seen[0] && seen[0] == seen[2] && seen[0] > 100, "{seen:?}");
+        let wanted = [64u8, 128, 64];
+        assert!(
+            seen.iter().zip(wanted).all(|(seen, wanted)| seen.abs_diff(wanted) <= 2),
+            "{seen:?}"
+        );
     }
 
     #[test]

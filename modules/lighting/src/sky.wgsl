@@ -123,7 +123,7 @@ fn on_dome(towards: vec3<f32>) -> vec3<f32> {
 @group(0) @binding(4) var sky_sampler: sampler;
 
 // The sun, the moon over it and the clouds over both, mixed in gamma as the client blends them,
-// faded by the share of the sky they are drawn over; given premultiplied, made linear. The clouds
+// faded by the share of the sky they are drawn over; given premultiplied. The clouds
 // turned to the colour of a flash of lightning as the sky is.
 @fragment
 fn fs_heavens(in: ScreenOut) -> @location(0) vec4<f32> {
@@ -149,11 +149,7 @@ fn fs_heavens(in: ScreenOut) -> @location(0) vec4<f32> {
     var colour = sun;
     colour = moon + colour * (1.0 - moon.a);
     colour = vec4<f32>(cloud * cloud_alpha, cloud_alpha) + colour * (1.0 - cloud_alpha);
-    colour = colour * heavens.across.w;
-    if colour.a <= 0.0 {
-        return vec4<f32>(0.0);
-    }
-    return vec4<f32>(linear(colour.rgb / colour.a) * colour.a, colour.a);
+    return colour * heavens.across.w;
 }
 
 // The envelopes of the glares, the sun's then the moon's, kept from frame to frame.
@@ -197,7 +193,7 @@ fn fs_glare(in: GlareOut) -> @location(0) vec4<f32> {
     let texel = select(sun, moon, in.body == 1u);
     let tint = select(heavens.sun_colour, heavens.moon_colour, in.body == 1u);
     let alpha = texel.a * heavens.glares[in.body].y * envelopes[in.body];
-    return vec4<f32>(linear(tint.rgb * texel.rgb) * alpha, 0.0);
+    return vec4<f32>(tint.rgb * texel.rgb * alpha, 0.0);
 }
 
 var<workgroup> seen: atomic<u32>;
