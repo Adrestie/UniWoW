@@ -329,7 +329,7 @@ mod picking {
     use std::sync::Arc;
 
     use uniwow_api::glam::{Mat4, Vec3};
-    use uniwow_api::scene::{Entity, EntityId, EntityRef, Kind, Picked, Picker, PieceBuilder, PieceKey, flags};
+    use uniwow_api::scene::{Entity, EntityId, EntityRef, Kind, Locks, Picked, Picker, PieceBuilder, PieceKey, flags};
     use uniwow_api::viewport::{Ray, Seen};
 
     use super::{ELWYNN, middle};
@@ -381,7 +381,8 @@ mod picking {
             direction: Vec3::NEG_Z,
         };
         let none = HashMap::new();
-        let locked = [Kind::Chunk];
+        let locked = Locks::of_kinds(&[Kind::Chunk]);
+        let open = Locks::default();
         assert_eq!(
             pick(&snapshot, &ray, &locked, &none).unwrap().id,
             EntityId::doodad(0, 2)
@@ -390,14 +391,17 @@ mod picking {
         let hit = pick(&snapshot, &ray, &locked, &pickers).unwrap();
         assert_eq!(hit.id, EntityId::doodad(0, 1), "the doodad 2 missed by its picker");
         assert!((hit.distance - 89.5).abs() < 1e-3, "{}", hit.distance);
-        assert_eq!(pick(&snapshot, &ray, &[], &pickers).unwrap().id, EntityId::doodad(0, 1));
+        assert_eq!(
+            pick(&snapshot, &ray, &open, &pickers).unwrap().id,
+            EntityId::doodad(0, 1)
+        );
         let below = Ray {
             origin: Vec3::from(up(5.0)),
             direction: Vec3::NEG_Z,
         };
         assert_eq!(pick(&snapshot, &below, &locked, &none), None, "the chunk locked");
         assert_eq!(
-            pick(&snapshot, &below, &[], &none).unwrap().id,
+            pick(&snapshot, &below, &open, &none).unwrap().id,
             EntityId::chunk(0, ELWYNN, [5, 5])
         );
 
@@ -428,7 +432,14 @@ mod picking {
             origin: Vec3::from(up(52.0)),
             direction: Vec3::NEG_Z,
         };
-        let hit = pick(&snapshot, &inside, &[], &pickers).unwrap();
+        let mut parent = Locks::default();
+        parent.entities.insert(EntityId::room(0, 9, 1));
+        assert_eq!(
+            pick(&snapshot, &inside, &parent, &pickers),
+            None,
+            "the chair under a room locked"
+        );
+        let hit = pick(&snapshot, &inside, &Locks::default(), &pickers).unwrap();
         assert_eq!(
             hit.chain,
             [
@@ -478,10 +489,22 @@ mod picking {
             eye,
             size: [400.0, 400.0],
         };
-        let mut found = within(&snapshot, &seen, [[150.0, 150.0], [250.0, 250.0]], &[], &[Kind::Chunk]);
+        let mut found = within(
+            &snapshot,
+            &seen,
+            [[150.0, 150.0], [250.0, 250.0]],
+            &[],
+            &Locks::of_kinds(&[Kind::Chunk]),
+        );
         found.sort();
         assert_eq!(found, [EntityId::doodad(0, 1), EntityId::doodad(0, 2)]);
-        let chunks = within(&snapshot, &seen, [[150.0, 150.0], [250.0, 250.0]], &[Kind::Chunk], &[]);
+        let chunks = within(
+            &snapshot,
+            &seen,
+            [[150.0, 150.0], [250.0, 250.0]],
+            &[Kind::Chunk],
+            &Locks::default(),
+        );
         assert_eq!(chunks, [EntityId::chunk(0, ELWYNN, [5, 5])]);
     }
 }

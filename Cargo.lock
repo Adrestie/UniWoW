@@ -3870,6 +3870,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "uniwow-module-hierarchy"
+version = "0.1.0"
+dependencies = [
+ "uniwow-api",
+]
+
+[[package]]
 name = "uniwow-module-lighting"
 version = "0.1.0"
 dependencies = [

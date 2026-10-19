@@ -148,6 +148,17 @@ mod gpu {
             fn ask(&self, _: Question) -> std::sync::mpsc::Receiver<Answer> {
                 std::sync::mpsc::channel().1
             }
+            fn locks(&self) -> Arc<Locks> {
+                Arc::default()
+            }
+            fn set_locked(&self, _: &[EntityId], _: &[u32], _: bool) {}
+            fn names(&self) -> Arc<std::collections::HashMap<EntityId, String>> {
+                Arc::default()
+            }
+            fn rename(&self, _: EntityId, _: Option<String>) {}
+            fn scope(&self) -> Option<(u32, uniwow_api::formats::TileId, u32)> {
+                None
+            }
         }
         let id = EntityId::doodad(0, 1);
         let mut builder = PieceBuilder::new(Vec::new());

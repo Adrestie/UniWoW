@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.3 done; milestones 10 to 14 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.4 done; milestones 10 to 14 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -8288,7 +8288,7 @@ On the user's machine, with the client and the server on it:
 the sources of AzerothCore at the commit of the user's server (bc9198ce7) and against WoWDBDefs;
 validated by the user (decision 31), with his answers to the points the proposal left to decide
 (*Decided by the user after the proposal*); its technical specification written once validated, at
-his request. Being built: steps 15.1 to 15.3 as built, at the end of this milestone.*
+his request. Being built: steps 15.1 to 15.4 as built, at the end of this milestone.*
 
 The world of milestone 9, shown, becomes a world the user edits as a scene of Unity: a window
 *Hierarchy* left of the 3D view lists what is loaded around the camera, by the places of the game;
@@ -9941,6 +9941,67 @@ of a chunk met at its heights, missed beside it; a ray against a mesh.
 - *Same model* with a tree selected: the trees of that model around; F frames them.
 - In Dalaran, a click on a building: the first a fraction of a second (its file read), the next at
   once.
+
+#### Step 15.4, as built: the Hierarchy, its main view
+
+Built after 73d9e53, on `main`.
+
+**The module `hierarchy`** (`modules/UI/hierarchy`, category *Interface*), its panel *Hierarchy* in
+the left area of the dock:
+
+- **The main view**: the map (named as the terrain names it), its zones and their subzones as the
+  chain of the areas, *No area*; in each place *Terrain* (its chunks) and *Water*, then the subzones,
+  then the buildings (each with its rooms, each room with the doodads it holds, the doodads of no room
+  under the building), the doodads and the rest, each sorted by name; beside the map, *Live*, the
+  live entities (merged with their spawns in 15.11c).
+- **Made by a job** from the snapshot of the registry, its selection, its names and its scope, again
+  when one of them changes, one job at a time, the job of an older state cancelled; the entities
+  within the scope of the scene, and those selected wherever they are. **Only the rows in sight are
+  drawn** (`ScrollArea::show_rows`, a row 20 points high). The rows are made again from the tree
+  when it comes or when a node is folded or unfolded, a list of the rows unfolded (some
+  microseconds a row): not the counts of the specification, the rows within a scope of 2 tiles some
+  27,000 at most when every node is unfolded.
+- **The selection both ways**: a click selects (Ctrl toggles, Shift selects the range of rows, with
+  Ctrl added); a selection made elsewhere unfolds the path to its active entity and brings its row in
+  sight; a click on a place or a folder folds or unfolds it.
+- **Search and filter**: a text, in the name given or by default or in the label, the matches kept
+  with their game parents; a filter of kinds (terrain, water, buildings, doodads, live, lights).
+- **Double click** on an entity frames it in the 3D view; its menu: *Rename* (Enter keeps it, Escape
+  leaves it), *Default name*, *Frame*, *Lock* or *Unlock*. A place's menu locks or unlocks it: what
+  lies in it and in its subzones is then not picked in the 3D view. A lock shows as 🔒.
+
+**The scene** gains: the locks of entities and of areas besides those of kinds (`Locks`, `holds`: by
+its kind, itself, a game parent or an area of its place), picking and rectangles leaving them out;
+the names given by the user (`names`, `rename`, the command `scene.rename`), kept in memory until the
+project keeps them (15.7), shown by `scene.entities` and `scene.entity`; `scope`, the map, the tile of
+the camera and the scope in tiles, for the views; `scene.lock` taking `ids` and `areas`.
+
+**Not in 15.4, set aside**: **the eyes** (an entity or a branch hidden in the 3D view): each provider
+leaving out of what it draws the entities hidden, the terrain drawing a hidden chunk as holes, is work
+in the drawing of five modules, set aside with the tint and the outline of 15.3; the locks are shown
+and kept, the eyes not offered. **`PanelSpec::first`**: the Hierarchy takes its place in the left
+area as the panels do, beside the sample *Events*; the layout by default with the Inspector comes
+with it in 15.5. **F over the Hierarchy**: the hotkey F is that of `scene-tools` over the view; in the
+Hierarchy, the double click and *Frame* frame. Renaming is not an undo entry yet (15.5 brings the
+groups of a gesture).
+
+**Measured** (release, the benchmark of the tests): a tree of 500,000 entities in one subzone made
+from nothing in 359 ms by the job, against 100 ms targeted; the scope by default holds some 27,000,
+some 20 ms. The sorting of each place made again alone, as the specification plans, is left until a
+flight shows the trees late.
+
+**Tests**: the main view of a building, its room and chair, a tree, a chunk under *Terrain*, *No
+area*, *Live*; a search keeping the parents of its matches; the scope leaving a far doodad out; a
+name given shown and searched; the rows following the folds, the path to a node unfolded; a pick
+leaving out a chair under a room locked; the benchmark.
+
+**The user checks**: Elwynn Forest > Goldshire > its inn, its rooms and their chairs; in Dalaran, its
+buildings with their rooms; a search for `ElwynnTree`; a click on a row selecting it in the 3D view,
+a click in the 3D view unfolding the Hierarchy to it; the lock of Goldshire, then a click on its inn
+in the view selecting nothing; a tree renamed; the interface fluid while flying over Northrend with
+the Hierarchy open.
+
+### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
 hosts them through a contract of the core open to the module of any language: their own Lua state

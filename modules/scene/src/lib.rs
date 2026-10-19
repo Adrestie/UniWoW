@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use uniwow_api::formats::{self, Formats, TileId};
 use uniwow_api::scene::{
-    self, Answer, Area, EntityId, EntityRef, Hit, Kind, Picker, PieceKey, Question, Select, Selection, Snapshot,
+    self, Answer, Area, EntityId, EntityRef, Hit, Kind, Locks, Picker, PieceKey, Question, Select, Selection, Snapshot,
     chunk_at,
 };
 use uniwow_api::serde_json::{self, Value, json};
@@ -54,7 +54,8 @@ struct Shared {
     camera: Mutex<Option<(u32, [f32; 3])>>,
     scope: AtomicU32,
     selection: Mutex<Arc<Selection>>,
-    locked: Mutex<Vec<Kind>>,
+    locks: Mutex<Arc<Locks>>,
+    names: Mutex<Arc<HashMap<EntityId, String>>>,
     pickers: Mutex<HashMap<String, Arc<dyn Picker>>>,
     /// The questions to the thread of `scene`, each with where its answer goes; none until it runs.
     questions: Mutex<Option<Sender<Asked>>>,
@@ -76,7 +77,7 @@ const LOCKED: [Kind; 6] = [
 impl Shared {
     fn answer(&self, question: Question) -> Answer {
         let snapshot = lock(&self.published).clone();
-        let locked = lock(&self.locked).clone();
+        let locked = lock(&self.locks).clone();
         match question {
             Question::Pick(ray) => {
                 let pickers = lock(&self.pickers).clone();
@@ -128,15 +129,63 @@ impl scene::Scene for Service {
     }
 
     fn locked_kinds(&self) -> Vec<Kind> {
-        lock(&self.0.locked).clone()
+        lock(&self.0.locks).kinds.clone()
     }
 
     fn set_kind_locked(&self, kind: Kind, locked: bool) {
-        let mut kinds = lock(&self.0.locked);
-        kinds.retain(|kept| *kept != kind);
+        let mut locks = lock(&self.0.locks);
+        let mut changed = (**locks).clone();
+        changed.kinds.retain(|kept| *kept != kind);
         if locked {
-            kinds.push(kind);
+            changed.kinds.push(kind);
         }
+        changed.generation += 1;
+        *locks = Arc::new(changed);
+    }
+
+    fn locks(&self) -> Arc<Locks> {
+        lock(&self.0.locks).clone()
+    }
+
+    fn set_locked(&self, ids: &[EntityId], areas: &[u32], locked: bool) {
+        let mut locks = lock(&self.0.locks);
+        let mut changed = (**locks).clone();
+        for id in ids {
+            if locked {
+                changed.entities.insert(*id);
+            } else {
+                changed.entities.remove(id);
+            }
+        }
+        for area in areas {
+            if locked {
+                changed.areas.insert(*area);
+            } else {
+                changed.areas.remove(area);
+            }
+        }
+        changed.generation += 1;
+        *locks = Arc::new(changed);
+    }
+
+    fn names(&self) -> Arc<HashMap<EntityId, String>> {
+        lock(&self.0.names).clone()
+    }
+
+    fn rename(&self, id: EntityId, name: Option<String>) {
+        let mut names = lock(&self.0.names);
+        let mut changed = (**names).clone();
+        match name.filter(|name| !name.trim().is_empty()) {
+            Some(name) => changed.insert(id, name),
+            None => changed.remove(&id),
+        };
+        *names = Arc::new(changed);
+    }
+
+    fn scope(&self) -> Option<(u32, TileId, u32)> {
+        let (map, [x, y, _]) = (*lock(&self.0.camera))?;
+        let (tile, _) = chunk_at(x, y)?;
+        Some((map, tile, self.0.scope.load(Ordering::Relaxed).max(1)))
     }
 
     fn pick(&self, ray: &Ray) -> Option<Hit> {
@@ -347,17 +396,44 @@ fn pick(arguments: Value, shared: &Shared) -> Result<Value, String> {
     })
 }
 
-/// `scene.lock`: a kind locked or not; the kinds locked.
+/// `scene.lock`: a kind, entities or areas locked or not; the locks.
 fn lock_kind(arguments: Value, shared: &Arc<Shared>) -> Result<Value, String> {
     use scene::Scene as _;
     let service = Service(shared.clone());
+    let locked = arguments.get("locked").and_then(Value::as_bool).unwrap_or(true);
     if let Some(kind) = arguments.get("kind").and_then(Value::as_str) {
         let kind = Kind::parse(kind).ok_or_else(|| format!("no kind '{kind}'"))?;
-        let locked = arguments.get("locked").and_then(Value::as_bool).unwrap_or(true);
         service.set_kind_locked(kind, locked);
     }
-    let kinds: Vec<&str> = service.locked_kinds().into_iter().map(Kind::name).collect();
-    Ok(json!({ "locked": kinds }))
+    let ids = read_ids(&arguments)?;
+    let areas: Vec<u32> = arguments
+        .get("areas")
+        .and_then(Value::as_array)
+        .map(|areas| areas.iter().filter_map(Value::as_u64).map(|area| area as u32).collect())
+        .unwrap_or_default();
+    if !ids.is_empty() || !areas.is_empty() {
+        service.set_locked(&ids, &areas, locked);
+    }
+    let locks = service.locks();
+    let kinds: Vec<&str> = locks.kinds.iter().copied().map(Kind::name).collect();
+    let mut areas: Vec<u32> = locks.areas.iter().copied().collect();
+    areas.sort_unstable();
+    Ok(
+        json!({ "locked": kinds, "entities": texts(&locks.entities.iter().copied().collect::<Vec<_>>()), "areas": areas }),
+    )
+}
+
+/// `scene.rename`: the entity `id` named `name`, or given back its default name without one.
+fn rename(arguments: Value, shared: &Arc<Shared>) -> Result<Value, String> {
+    use scene::Scene as _;
+    let id: EntityId = arguments
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or("'id' is the id of an entity")?
+        .parse()?;
+    let name = arguments.get("name").and_then(Value::as_str).map(str::to_owned);
+    Service(shared.clone()).rename(id, name);
+    Ok(json!({ "id": id.to_string(), "name": lock(&shared.names).get(&id) }))
 }
 
 /// `scene.select_like`: the entities within the scope like the active one: of the same model, or of
@@ -543,11 +619,16 @@ fn entities(arguments: Value, shared: &Shared) -> Result<Value, String> {
     let offset = arguments.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
     let limit = (arguments.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize).min(PAGE);
     let snapshot = lock(&shared.published).clone();
+    let names = lock(&shared.names).clone();
     let mut total = 0;
     let mut page = Vec::new();
     for entity in snapshot.entities().filter(|entity| filter.keeps(entity)) {
         if total >= offset && page.len() < limit {
-            page.push(describe(&entity, false));
+            let mut described = describe(&entity, false);
+            if let Some(name) = names.get(&entity.id()) {
+                described["name"] = json!(name);
+            }
+            page.push(described);
         }
         total += 1;
     }
@@ -571,6 +652,9 @@ fn entity(arguments: Value, shared: &Shared) -> Result<Value, String> {
         .get(&id)
         .ok_or_else(|| format!("no entity {id} in the scene"))?;
     let mut described = describe(&entity, true);
+    if let Some(name) = lock(&shared.names).get(&id) {
+        described["name"] = json!(name);
+    }
     described["generation"] = json!(snapshot.generation);
     Ok(described)
 }
@@ -579,7 +663,16 @@ impl Module for SceneModule {
     fn register(&mut self, reg: &mut Registrar) {
         self.registry = Some(Box::default());
         self.shared.scope.store(2, Ordering::Relaxed);
-        *lock(&self.shared.locked) = LOCKED.to_vec();
+        *lock(&self.shared.locks) = Arc::new(Locks::of_kinds(&LOCKED));
+        let for_rename = self.shared.clone();
+        reg.command_on_caller(
+            "scene.rename",
+            "Names the entity 'id' 'name', or gives it back its default name without one; kept in memory until the \
+             project keeps it.",
+            json!({ "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": ["string", "null"] } }, "required": ["id"] }),
+            json!({ "type": "object" }),
+            Arc::new(move |arguments| rename(arguments, &for_rename)),
+        );
         let (for_selection, for_select, for_pick, for_lock, for_like) = (
             self.shared.clone(),
             self.shared.clone(),
@@ -622,10 +715,11 @@ impl Module for SceneModule {
         )
         .command_on_caller(
             "scene.lock",
-            "Locks a kind of entity, or unlocks it with 'locked': false: its entities are then not picked in the 3D \
-             view; without a kind, only the kinds locked. The chunks, the water, the lights, the zones of light, the \
-             weathers and the areas are locked at first.",
-            json!({ "type": "object", "properties": { "kind": { "type": "string" }, "locked": { "type": "boolean" } } }),
+            "Locks a kind of entity, the entities 'ids' or the areas 'areas' (what lies in them), or unlocks them with \
+             'locked': false: they are then not picked in the 3D view, but can be chosen in the Hierarchy; without \
+             any, only the locks. The chunks, the water, the lights, the zones of light, the weathers and the areas \
+             are locked at first.",
+            json!({ "type": "object", "properties": { "kind": { "type": "string" }, "ids": { "type": "array" }, "areas": { "type": "array" }, "locked": { "type": "boolean" } } }),
             json!({ "type": "object", "properties": { "locked": { "type": "array" } } }),
             Arc::new(move |arguments| lock_kind(arguments, &for_lock)),
         )

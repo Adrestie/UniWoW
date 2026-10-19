@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use uniwow_api::glam::Vec3;
-use uniwow_api::scene::{EntityId, EntityRef, Hit, Kind, Picked, Picker, Snapshot};
+use uniwow_api::scene::{EntityId, EntityRef, Hit, Kind, Locks, Picked, Picker, Snapshot};
 use uniwow_api::viewport::{Ray, Seen};
 
 /// The chain of the game parents of `id`, from the outermost down to it.
@@ -25,12 +25,7 @@ pub fn chain(snapshot: &Snapshot, id: EntityId) -> Vec<EntityId> {
 }
 
 /// The nearest entity `ray` hits among those of `snapshot` whose kind is not `locked`.
-pub fn pick(
-    snapshot: &Snapshot,
-    ray: &Ray,
-    locked: &[Kind],
-    pickers: &HashMap<String, Arc<dyn Picker>>,
-) -> Option<Hit> {
+pub fn pick(snapshot: &Snapshot, ray: &Ray, locks: &Locks, pickers: &HashMap<String, Arc<dyn Picker>>) -> Option<Hit> {
     let mut boxes: Vec<(f32, u32, usize)> = Vec::new();
     for (slot, placed) in snapshot.slots.iter().enumerate() {
         let Some(placed) = placed else {
@@ -41,11 +36,14 @@ pub fn pick(
         }
         for row in 0..placed.piece.len() {
             let id = placed.piece.ids[row];
-            if locked.contains(&id.kind) || !snapshot.is_first(slot as u32, row as u32, &id) {
+            if locks.kinds.contains(&id.kind) || !snapshot.is_first(slot as u32, row as u32, &id) {
                 continue;
             }
             if let Some(distance) = ray.hits_box(placed.piece.bounds[row]) {
-                boxes.push((distance, slot as u32, row));
+                let entity = EntityRef { snapshot, placed, row };
+                if !locks.holds(&entity) {
+                    boxes.push((distance, slot as u32, row));
+                }
             }
         }
     }
@@ -81,7 +79,7 @@ pub fn pick(
 
 /// The entities of `snapshot` not `locked`, of `kinds` when given, whose origin falls in front of
 /// the eye within `rect` of `seen`.
-pub fn within(snapshot: &Snapshot, seen: &Seen, rect: [[f32; 2]; 2], kinds: &[Kind], locked: &[Kind]) -> Vec<EntityId> {
+pub fn within(snapshot: &Snapshot, seen: &Seen, rect: [[f32; 2]; 2], kinds: &[Kind], locks: &Locks) -> Vec<EntityId> {
     let [low, high] = [
         [rect[0][0].min(rect[1][0]), rect[0][1].min(rect[1][1])],
         [rect[0][0].max(rect[1][0]), rect[0][1].max(rect[1][1])],
@@ -90,7 +88,7 @@ pub fn within(snapshot: &Snapshot, seen: &Seen, rect: [[f32; 2]; 2], kinds: &[Ki
         .entities()
         .filter(|entity| {
             let kind = entity.id().kind;
-            !locked.contains(&kind) && (kinds.is_empty() || kinds.contains(&kind))
+            !locks.kinds.contains(&kind) && (kinds.is_empty() || kinds.contains(&kind)) && !locks.holds(entity)
         })
         .filter(|entity| {
             seen.project(Vec3::from(entity.origin()))

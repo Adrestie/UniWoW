@@ -70,6 +70,68 @@ pub trait Scene: Send + Sync {
     /// Asks `question` of the thread of `scene`, never queued behind the jobs of the pool: its
     /// answer comes through the receiver.
     fn ask(&self, question: Question) -> Receiver<Answer>;
+
+    /// The locks: of kinds, of entities and of areas (an area locking what lies in it and in its
+    /// subzones). A locked entity is not picked in the 3D view but can be chosen in the Hierarchy.
+    fn locks(&self) -> Arc<Locks>;
+
+    /// Locks, or unlocks, the entities `ids` and the areas `areas`.
+    fn set_locked(&self, ids: &[EntityId], areas: &[u32], locked: bool);
+
+    /// The names the user gave, by entity, kept in memory until the project keeps them (15.7).
+    fn names(&self) -> Arc<HashMap<EntityId, String>>;
+
+    /// Names the entity `id`, or gives it back its default name with none.
+    fn rename(&self, id: EntityId, name: Option<String>);
+
+    /// The map the terrain shows, the tile of the camera and the scope in tiles around it, within
+    /// which the views list the entities; none without a map or a camera.
+    fn scope(&self) -> Option<(u32, TileId, u32)>;
+}
+
+/// The locks of the scene.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Locks {
+    pub generation: u64,
+    pub kinds: Vec<Kind>,
+    pub entities: std::collections::HashSet<EntityId>,
+    pub areas: std::collections::HashSet<u32>,
+}
+
+impl Locks {
+    /// Locks of the kinds `kinds` alone.
+    pub fn of_kinds(kinds: &[Kind]) -> Self {
+        Self {
+            kinds: kinds.to_vec(),
+            ..Self::default()
+        }
+    }
+
+    /// Whether `entity` is locked: by its kind, itself, its game parents, or an area of the chain of
+    /// its place.
+    pub fn holds(&self, entity: &EntityRef<'_>) -> bool {
+        let id = entity.id();
+        if self.kinds.contains(&id.kind) || self.entities.contains(&id) {
+            return true;
+        }
+        if !self.entities.is_empty() {
+            let mut parent = entity.parent();
+            let mut depth = 0;
+            while let Some(at) = parent {
+                if self.entities.contains(&at) || depth > 16 {
+                    return depth <= 16;
+                }
+                parent = entity.snapshot.get(&at).and_then(|found| found.parent());
+                depth += 1;
+            }
+        }
+        !self.areas.is_empty()
+            && entity
+                .snapshot
+                .place(entity.area())
+                .iter()
+                .any(|(area, _)| self.areas.contains(area))
+    }
 }
 
 /// Topic published by the module `scene` at the end of a frame its selection changed in. Payload:
