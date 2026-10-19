@@ -282,6 +282,7 @@ fills it, or *not planned* when no milestone does yet.
 | Sounds played: a file of the client, its category of volume, its volume and fades, looped or once | The service `audio` of the module `audio` (`Clip::decode`, `Audio::play`, `set_volume`, `stop`; *The lightning and the sounds of the weather, as built*) | The commands `audio.play`, `audio.volume`, `audio.stop`, `audio.state` through `call` | The same, through `call` | Scripts: the same, through `uniwow.call` |
 | Splitting work over the cores, `parallel_for` | `uniwow_api::parallel_for` (step 9.2a) | — not planned; compiled modules run threads of their own (T7) | — | — |
 | The entities of the scene: published by their providers, listed with their places and names | The service `scene` (`Scene::publish`, `withdraw`, `withdraw_provider`, `snapshot`; `uniwow_api::scene`), step 15.2 | The commands `scene.entities`, `scene.entity` and the event `scene.changed` through `call` and `subscribe`; publishing entities, `scene.publish`: step 15.12 | The same, through `call` and `subscribe` | Scripts: the same, through `uniwow.call` and `uniwow.subscribe`; modules: milestones 10 and 11 |
+| The world database of AzerothCore, read only | The service `world-db` (`uniwow_api::world_db`), step 15.11a | The commands `world-db.query`, `world-db.state` through `call` | The same, through `call` | Scripts: the same, through `uniwow.call` |
 | Picking in the 3D view, the selection shown in 3D | The service `scene` (`select`, `selection`, `pick`, `within`, `ask`, `add_picker`, `locked_kinds`), the tools of the viewport (`Viewport::add_tool`, `last_view`), the module `scene-tools`: step 15.3; the tint and the outline to come | The commands `scene.selection`, `scene.select`, `scene.select_like`, `scene.pick`, `scene.lock`, `viewport.ray` and the event `scene.selection_changed` through `call` and `subscribe`; the narrow phase of picking for Rust modules only (other languages picked by their boxes) | The same, through `call` and `subscribe` | Scripts: the same, through `uniwow.call` and `uniwow.subscribe` |
 | The terrain of a map shown in the 3D view, with its horizon | The module `terrain` (steps 9.2c, 9.2e, 9.2f) | — not planned yet | — | — |
 | The statistics of the 3D view: the times of the frames, of the interface thread and of the GPU, what each layer drew | `Layer::stats`; shown in their own panel, *Statistics* (step 9.2e) | — not planned yet | — | — |
@@ -10225,6 +10226,35 @@ kind with its counts.
 
 **The user checks**: *Files*: a tile of Elwynn and what it stores, a doodad by the border under both
 tiles; *By type*: the doodads, the buildings, the chunks.
+
+#### Step 15.11a, as built: the world database, before its first connection
+
+Built after 302212c, on `main`; tested without a server, the real connection waiting for the user's
+account (below).
+
+- **`libs/db`**, in the runtime: the crate `mysql` 28.0.4 without its default features but
+  `minimal-rust`, without TLS (the server on this machine). `Connection::open` (the address, the port,
+  the user, the database, the password given, a timeout) sets the session read only
+  (`SET SESSION TRANSACTION READ ONLY`); `query` runs one statement beginning with `SELECT`, `SHOW`,
+  `DESCRIBE` or `EXPLAIN` (`allowed`, a semicolon outside quotes refused), its `?` given JSON values,
+  its rows back as JSON. An error never holds the password. The runtime grows by the crates of
+  `mysql` (counted in 15.1); its fingerprint changes once.
+- **`uniwow_api::world_db`**: the service (`state`, `query` from a job, refused on the interface
+  thread) and its states (waiting, connecting, connected with the version, refused and why).
+- **The module `world-db`** (category *Data*): its panel *World database* (the state as a dot, the
+  address, port, user and database, 127.0.0.1, 3306, `acore`, `acore_world` by default, kept in its
+  settings; *Apply*; *Connect…*); at each start a window asks the password, masked, *Connect* or *Not
+  now*; the password goes to the thread of the connection alone, which keeps it for the session to
+  connect again once lost, and is never written. The commands `world-db.query` and `world-db.state`
+  for every language.
+
+**Tests**: the statements allowed and refused; a connection refused said without its password; the
+values both ways; the queries refused while not connected and those that write before they go; the
+real database read when `UNIWOW_MYSQL` names it (`user:password@host:port/database`), skipped
+otherwise.
+
+**Waiting for the user**: the account and the real test (the version, the creatures of Northrend read
+and the time, a write refused by the session read only).
 
 ### Milestone 10: Lua modules (outline)
 

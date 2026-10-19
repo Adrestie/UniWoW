@@ -1,0 +1,9 @@
+[package]
+name = "uniwow-db"
+description = "The client of MySQL for the world database of AzerothCore, read only, without TLS for a server of this machine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mysql = { version = "28.0.4", default-features = false, features = ["minimal-rust"] }
+serde_json.workspace = true

@@ -18,6 +18,7 @@ serde_json.workspace = true
 uniwow-audio.workspace = true
 uniwow-lua.workspace = true
 uniwow-server-link.workspace = true
+uniwow-db.workspace = true
 miniz_oxide.workspace = true
 rfd.workspace = true
 

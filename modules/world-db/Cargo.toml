@@ -1,0 +1,22 @@
+[package]
+name = "uniwow-module-world-db"
+description = "The world database of AzerothCore, read only: its connection, its password asked at each start and never kept, its queries for every language"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Only uniwow-api and the crates of libs/ are allowed, here and in dev or build dependencies
+# (cargo xtask check). Any other crate, even one the runtime already contains, can make Cargo
+# rebuild the runtime and so make every module incompatible. Ask for it to be added to the runtime.
+uniwow-api.workspace = true
+
+[package.metadata.uniwow]
+id = "world-db"
+name = "World database"
+category = "Data"
+# Services the module cannot work without, and services it uses when present.
+requires = []
+uses = []

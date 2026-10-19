@@ -21,6 +21,8 @@ pub use serde_json;
 /// The playback of sounds (`libs/audio`, rodio), part of the runtime, which the service `audio`
 /// offers.
 pub use uniwow_audio::rodio;
+/// The client of MySQL of the world database (`libs/db`), part of the runtime.
+pub use uniwow_db as db;
 /// Lua 5.1 (`libs/lua`), part of the runtime.
 pub use uniwow_lua::mlua;
 /// The client of the observer of the server (`libs/server-link`), part of the runtime.
@@ -80,6 +82,7 @@ pub mod uploads;
 pub mod vfs;
 pub mod viewport;
 pub mod weather;
+pub mod world_db;
 
 pub use command::{AppliedChange, Command};
 pub use commands::{CallId, CommandHandler, CommandInfo, CommandSpec, RunsOn, decode_arguments};
