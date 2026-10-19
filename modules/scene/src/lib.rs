@@ -5,6 +5,7 @@
 //! `scene` from any thread; one job at a time indexes them, and `scene.changed` says so once a
 //! frame at most. Nothing is changed: it lists.
 
+mod groups;
 mod picking;
 mod registry;
 #[cfg(test)]
@@ -18,8 +19,8 @@ use std::time::Duration;
 
 use uniwow_api::formats::{self, Formats, TileId};
 use uniwow_api::scene::{
-    self, Answer, Area, EntityId, EntityRef, Hit, Kind, Locks, Picker, PieceKey, Question, Select, Selection, Snapshot,
-    chunk_at,
+    self, Answer, Area, EntityId, EntityRef, Group, Groups, Hit, Kind, Locks, Picker, PieceKey, Prefab, Question,
+    Select, Selection, Snapshot, chunk_at,
 };
 use uniwow_api::serde_json::{self, Value, json};
 use uniwow_api::viewport::{Ray, Seen};
@@ -57,6 +58,8 @@ struct Shared {
     locks: Mutex<Arc<Locks>>,
     names: Mutex<Arc<HashMap<EntityId, String>>>,
     pickers: Mutex<HashMap<String, Arc<dyn Picker>>>,
+    /// The groups and the prefabs of the editor.
+    groups: Mutex<Arc<Groups>>,
     /// The questions to the thread of `scene`, each with where its answer goes; none until it runs.
     questions: Mutex<Option<Sender<Asked>>>,
 }
@@ -81,7 +84,15 @@ impl Shared {
         match question {
             Question::Pick(ray) => {
                 let pickers = lock(&self.pickers).clone();
-                Answer::Picked(picking::pick(&snapshot, &ray, &locked, &pickers))
+                let mut hit = picking::pick(&snapshot, &ray, &locked, &pickers);
+                // A group first, then what it holds.
+                if let Some(hit) = &mut hit
+                    && let Some(first) = hit.chain.first()
+                    && let Some(group) = lock(&self.groups).of(first)
+                {
+                    hit.chain.insert(0, EntityId::group(group.id));
+                }
+                Answer::Picked(hit)
             }
             Question::Within { seen, rect, kinds } => {
                 Answer::Within(picking::within(&snapshot, &seen, rect, &kinds, &locked))
@@ -180,6 +191,10 @@ impl scene::Scene for Service {
             None => changed.remove(&id),
         };
         *names = Arc::new(changed);
+    }
+
+    fn groups(&self) -> Arc<Groups> {
+        lock(&self.0.groups).clone()
     }
 
     fn ground(&self, ray: &Ray) -> Option<f32> {
@@ -290,9 +305,312 @@ struct SceneModule {
     /// The thread answering the questions, and the generation of the selection last said.
     thread: Option<JobId>,
     said: u64,
+    /// The groups given to the registry as entities, by map, to give them again only when they
+    /// change.
+    given_groups: HashMap<u32, Vec<GivenGroup>>,
+    /// The prefabs being placed: the calls creating their objects, by call, with the placement and
+    /// the place of the object in it.
+    creating: HashMap<uniwow_api::CallId, (u32, usize)>,
+    placing: HashMap<u32, Placing>,
+    next_placing: u32,
+}
+
+/// A group as given to the registry: its id, origin, bounds and name.
+type GivenGroup = (EntityId, [f32; 3], [[f32; 3]; 2], String);
+
+/// A prefab being placed: its prefab, its map, the ids of its objects as their calls answer.
+struct Placing {
+    prefab: u32,
+    name: String,
+    map: u32,
+    ids: Vec<Option<EntityId>>,
+    waiting: usize,
+}
+
+impl uniwow_api::Command for groups::SetGroups {
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn apply(&mut self, module: &mut dyn std::any::Any) {
+        let module: &mut SceneModule = module.downcast_mut().expect("the scene");
+        *lock(&module.shared.groups) = self.after.clone();
+    }
+
+    fn revert(&mut self, module: &mut dyn std::any::Any) {
+        let module: &mut SceneModule = module.downcast_mut().expect("the scene");
+        *lock(&module.shared.groups) = self.before.clone();
+    }
 }
 
 impl SceneModule {
+    /// Makes `change` of the groups one undo entry.
+    fn change_groups(&self, label: &str, change: impl FnOnce(&mut Groups), ctx: &mut Context) -> Arc<Groups> {
+        let before = lock(&self.shared.groups).clone();
+        let mut after = (*before).clone();
+        change(&mut after);
+        after.generation = before.generation + 1;
+        let after = Arc::new(after);
+        ctx.execute(groups::SetGroups {
+            label: label.to_owned(),
+            before,
+            after: after.clone(),
+        });
+        after
+    }
+
+    /// The groups given to the registry as entities of the maps they lie on, when they changed.
+    fn give_groups(&mut self) {
+        let snapshot = lock(&self.shared.published).clone();
+        let groups = lock(&self.shared.groups).clone();
+        let mut maps: Vec<u32> = groups.groups.iter().map(|group| group.map).collect();
+        maps.extend(self.given_groups.keys().copied());
+        maps.sort_unstable();
+        maps.dedup();
+        for map in maps {
+            let piece = groups::piece(&groups, &snapshot, map);
+            let now: Vec<GivenGroup> = (0..piece.len())
+                .map(|row| {
+                    (
+                        piece.ids[row],
+                        piece.origins[row],
+                        piece.bounds[row],
+                        piece.label_of(row).to_owned(),
+                    )
+                })
+                .collect();
+            if self.given_groups.get(&map) == Some(&now) {
+                continue;
+            }
+            let key = PieceKey::part("scene", map, 0);
+            let pending = &mut *journal::lock(&self.shared.pending, "scene pending");
+            if now.is_empty() {
+                pending.push(Change::Withdraw(key));
+                self.given_groups.remove(&map);
+            } else {
+                pending.push(Change::Publish(key, Arc::new(piece)));
+                self.given_groups.insert(map, now);
+            }
+        }
+    }
+
+    /// The commands of the groups and the prefabs, on the interface thread.
+    fn group_command(&mut self, name: &str, arguments: &Value, ctx: &mut Context) -> Result<Value, String> {
+        let group_of = |arguments: &Value| -> Result<u32, String> {
+            let id: EntityId = arguments["group"]
+                .as_str()
+                .ok_or("'group' is the id of a group")?
+                .parse()?;
+            (id.kind == Kind::Group)
+                .then_some(id.key as u32)
+                .ok_or_else(|| format!("{id} is not a group"))
+        };
+        let snapshot = lock(&self.shared.published).clone();
+        match name {
+            "scene.group" => {
+                let mut ids = read_ids(arguments)?;
+                let current = lock(&self.shared.groups).clone();
+                ids = current.expanded(&ids);
+                // Only what no game parent holds, and not twice in groups.
+                ids.retain(|id| snapshot.get(id).is_some_and(|entity| entity.parent().is_none()));
+                let map = ids
+                    .first()
+                    .and_then(|id| snapshot.get(id))
+                    .map(|entity| entity.placed.key.map)
+                    .ok_or("nothing to group: the entities named are not held, or held by a game parent")?;
+                let id = groups::next_id(&current);
+                let name = arguments["name"]
+                    .as_str()
+                    .map_or_else(|| format!("Group {id}"), str::to_owned);
+                self.change_groups(
+                    "Group",
+                    |groups| {
+                        for group in &mut groups.groups {
+                            group.children.retain(|child| !ids.contains(child));
+                        }
+                        groups.groups.push(Group {
+                            id,
+                            name,
+                            map,
+                            children: ids,
+                            prefab: None,
+                        });
+                    },
+                    ctx,
+                );
+                Ok(json!({ "group": EntityId::group(id).to_string() }))
+            }
+            "scene.ungroup" => {
+                let id = group_of(arguments)?;
+                self.change_groups("Ungroup", |groups| groups.groups.retain(|group| group.id != id), ctx);
+                Ok(json!({}))
+            }
+            "scene.group_add" | "scene.group_remove" => {
+                let id = group_of(arguments)?;
+                let ids = read_ids(arguments)?;
+                let adding = name == "scene.group_add";
+                self.change_groups(
+                    if adding {
+                        "Add to the group"
+                    } else {
+                        "Take out of the group"
+                    },
+                    |groups| {
+                        if adding {
+                            for group in &mut groups.groups {
+                                group.children.retain(|child| !ids.contains(child));
+                            }
+                        }
+                        if let Some(group) = groups.groups.iter_mut().find(|group| group.id == id) {
+                            if adding {
+                                group.children.extend(ids.iter().copied());
+                            } else {
+                                group.children.retain(|child| !ids.contains(child));
+                            }
+                        }
+                    },
+                    ctx,
+                );
+                Ok(json!({}))
+            }
+            "scene.prefab" => {
+                let id = group_of(arguments)?;
+                let current = lock(&self.shared.groups).clone();
+                let group = current.group(id).ok_or("no such group")?.clone();
+                let read = ctx
+                    .editor()
+                    .call("doodads.read", json!({ "ids": texts(&group.children) }))?;
+                let read = read["entities"].as_array().cloned().unwrap_or_default();
+                let objects = groups::objects(&read);
+                if objects.is_empty() {
+                    return Err("a prefab is made of the doodads of a group, and it holds none".to_owned());
+                }
+                let prefab = groups::next_id(&current);
+                // The group's children in the order of the objects, those it holds not read left out.
+                let children: Vec<EntityId> = read
+                    .iter()
+                    .filter_map(|value| value["id"].as_str()?.parse().ok())
+                    .collect();
+                self.change_groups(
+                    "Make a prefab",
+                    |groups| {
+                        groups.prefabs.push(Prefab {
+                            id: prefab,
+                            name: group.name.clone(),
+                            objects,
+                        });
+                        if let Some(group) = groups.groups.iter_mut().find(|found| found.id == id) {
+                            group.prefab = Some(prefab);
+                            group.children = children;
+                        }
+                    },
+                    ctx,
+                );
+                Ok(json!({ "prefab": prefab }))
+            }
+            "scene.place_prefab" => {
+                let prefab_id = arguments["prefab"]
+                    .as_u64()
+                    .ok_or("'prefab' is the number of a prefab")? as u32;
+                let current = lock(&self.shared.groups).clone();
+                let prefab = current
+                    .prefabs
+                    .iter()
+                    .find(|prefab| prefab.id == prefab_id)
+                    .ok_or("no such prefab")?
+                    .clone();
+                let at = arguments["position"]
+                    .as_array()
+                    .ok_or("'position' is [x, y, z] in the world")?;
+                let at: [f32; 3] = [0, 1, 2].map(|axis| at.get(axis).and_then(Value::as_f64).unwrap_or(0.0) as f32);
+                let map = lock(&self.shared.camera).map(|(map, _)| map).ok_or("no map shown")?;
+                let placement = self.next_placing;
+                self.next_placing += 1;
+                let gesture = ctx.begin_gesture(&format!("Place the prefab {}", prefab.name));
+                for (index, object) in prefab.objects.iter().enumerate() {
+                    let position: [f32; 3] = [0, 1, 2].map(|axis| at[axis] + object.offset[axis]);
+                    let call = ctx.call(
+                        "doodads.create",
+                        json!({ "file": groups::file(object), "position": position, "rotation": object.rotation, "scale": object.scale }),
+                    );
+                    self.creating.insert(call, (placement, index));
+                }
+                ctx.end_gesture(gesture);
+                self.placing.insert(
+                    placement,
+                    Placing {
+                        prefab: prefab.id,
+                        name: prefab.name.clone(),
+                        map,
+                        ids: vec![None; prefab.objects.len()],
+                        waiting: prefab.objects.len(),
+                    },
+                );
+                Ok(json!({}))
+            }
+            "scene.apply" | "scene.revert" => {
+                let id = group_of(arguments)?;
+                let current = lock(&self.shared.groups).clone();
+                let group = current.group(id).ok_or("no such group")?.clone();
+                let prefab_id = group.prefab.ok_or("the group is no instance of a prefab")?;
+                let prefab = current
+                    .prefabs
+                    .iter()
+                    .find(|prefab| prefab.id == prefab_id)
+                    .ok_or("its prefab is gone")?
+                    .clone();
+                let (prefab, instances) = if name == "scene.apply" {
+                    let read = ctx
+                        .editor()
+                        .call("doodads.read", json!({ "ids": texts(&group.children) }))?;
+                    let objects = groups::objects(&read["entities"].as_array().cloned().unwrap_or_default());
+                    let applied = Prefab { objects, ..prefab };
+                    let changed = applied.clone();
+                    self.change_groups(
+                        "Apply to the prefab",
+                        |groups| {
+                            if let Some(found) = groups.prefabs.iter_mut().find(|found| found.id == prefab_id) {
+                                *found = changed;
+                            }
+                        },
+                        ctx,
+                    );
+                    // Its other instances follow it.
+                    let others: Vec<Group> = current
+                        .groups
+                        .iter()
+                        .filter(|other| other.prefab == Some(prefab_id) && other.id != id)
+                        .cloned()
+                        .collect();
+                    (applied, others)
+                } else {
+                    (prefab, vec![group])
+                };
+                let gesture = ctx.begin_gesture(if name == "scene.apply" {
+                    "Apply the instance"
+                } else {
+                    "Revert the instance"
+                });
+                for instance in instances {
+                    let Some(pivot) = groups::middle(&snapshot, &instance.children) else {
+                        continue;
+                    };
+                    for (child, object) in instance.children.iter().zip(&prefab.objects) {
+                        let write = |field: &str, axis: Option<usize>, value: f32| json!({ "ids": [child.to_string()], "field": field, "axis": axis, "change": format!("{value}") });
+                        for (axis, (at, turned)) in pivot.iter().zip(object.rotation).enumerate() {
+                            ctx.call("doodads.write", write("position", Some(axis), at + object.offset[axis]));
+                            ctx.call("doodads.write", write("rotation", Some(axis), turned));
+                        }
+                        ctx.call("doodads.write", write("scale", None, object.scale));
+                    }
+                }
+                ctx.end_gesture(gesture);
+                Ok(json!({}))
+            }
+            _ => Err(format!("'{name}' is not handled")),
+        }
+    }
+
     /// At each frame: the camera and the scope for the commands of other threads; then, while no
     /// job runs, one started for the changes gathered.
     fn steer(&mut self, ctx: &mut Context) {
@@ -312,6 +630,9 @@ impl SceneModule {
         if selection.generation != self.said {
             self.said = selection.generation;
             ctx.publish(scene::SELECTION_CHANGED_TOPIC, selection_json(&selection));
+        }
+        if self.job.is_none() {
+            self.give_groups();
         }
         if self.job.is_some() || journal::lock(&self.shared.pending, "scene pending").is_empty() {
             return;
@@ -671,6 +992,38 @@ impl Module for SceneModule {
         self.registry = Some(Box::default());
         self.shared.scope.store(2, Ordering::Relaxed);
         *lock(&self.shared.locks) = Arc::new(Locks::of_kinds(&LOCKED));
+        let group_object =
+            || json!({ "type": "object", "properties": { "group": { "type": "string" }, "ids": { "type": "array" } } });
+        reg.command(
+            "scene.group",
+            "Makes a group of the entities 'ids' that no game parent holds, named 'name': moved as one, listed \
+             under it; one undo entry. Its id.",
+            json!({ "type": "object", "properties": { "ids": { "type": "array" }, "name": { "type": "string" } }, "required": ["ids"] }),
+            json!({ "type": "object", "properties": { "group": { "type": "string" } } }),
+        )
+        .command("scene.ungroup", "Undoes the group 'group'; its entities left as they are.", group_object(), json!({}))
+        .command("scene.group_add", "Adds the entities 'ids' to the group 'group'.", group_object(), json!({}))
+        .command("scene.group_remove", "Takes the entities 'ids' out of the group 'group'.", group_object(), json!({}))
+        .command(
+            "scene.prefab",
+            "Makes a prefab of the doodads of the group 'group', the group its first instance. Its number.",
+            group_object(),
+            json!({ "type": "object", "properties": { "prefab": { "type": "integer" } } }),
+        )
+        .command(
+            "scene.place_prefab",
+            "Places an instance of the prefab 'prefab' at 'position' in the world: its objects created, a group of \
+             them, selected.",
+            json!({ "type": "object", "properties": { "prefab": { "type": "integer" }, "position": { "type": "array" } }, "required": ["prefab", "position"] }),
+            json!({}),
+        )
+        .command(
+            "scene.apply",
+            "Writes the instance 'group' into its prefab; its other instances follow it.",
+            group_object(),
+            json!({}),
+        )
+        .command("scene.revert", "Gives the instance 'group' back the values of its prefab.", group_object(), json!({}));
         let for_rename = self.shared.clone();
         reg.command_on_caller(
             "scene.rename",
@@ -814,14 +1167,69 @@ impl Module for SceneModule {
     }
 
     fn project_section(&self) -> Option<Value> {
-        Some(section_of(&lock(&self.shared.names), &lock(&self.shared.locks)))
+        let mut section = section_of(&lock(&self.shared.names), &lock(&self.shared.locks));
+        let groups = groups::section(&lock(&self.shared.groups));
+        section["groups"] = groups["groups"].clone();
+        section["prefabs"] = groups["prefabs"].clone();
+        Some(section)
     }
 
     fn open_project(&mut self, section: Option<Value>, _ctx: &mut Context) {
-        let (names, mut locks) = opened(&section.unwrap_or_default());
+        let section = section.unwrap_or_default();
+        let (names, mut locks) = opened(&section);
         locks.generation = lock(&self.shared.locks).generation + 1;
         *lock(&self.shared.names) = Arc::new(names);
         *lock(&self.shared.locks) = Arc::new(locks);
+        let mut opened_groups = groups::of_section(&section);
+        opened_groups.generation = lock(&self.shared.groups).generation + 1;
+        *lock(&self.shared.groups) = Arc::new(opened_groups);
+    }
+
+    fn on_command(&mut self, name: &str, arguments: Value, ctx: &mut Context) -> Result<Value, String> {
+        self.group_command(name, &arguments, ctx)
+    }
+
+    fn on_reply(&mut self, call: uniwow_api::CallId, result: Result<Value, String>, ctx: &mut Context) {
+        let Some((placement, index)) = self.creating.remove(&call) else {
+            return;
+        };
+        let Some(placing) = self.placing.get_mut(&placement) else {
+            return;
+        };
+        placing.waiting = placing.waiting.saturating_sub(1);
+        match result {
+            Ok(answer) => {
+                placing.ids[index] = answer["ids"][0].as_str().and_then(|id| id.parse().ok());
+            }
+            Err(reason) => log::warn!("an object of the prefab {} was not created: {reason}", placing.name),
+        }
+        if placing.waiting > 0 {
+            return;
+        }
+        let Some(placing) = self.placing.remove(&placement) else {
+            return;
+        };
+        let children: Vec<EntityId> = placing.ids.into_iter().flatten().collect();
+        if children.is_empty() {
+            return;
+        }
+        let id = groups::next_id(&lock(&self.shared.groups));
+        let (name, map, prefab) = (placing.name, placing.map, placing.prefab);
+        self.change_groups(
+            "Place the instance",
+            |groups| {
+                groups.groups.push(Group {
+                    id,
+                    name,
+                    map,
+                    children,
+                    prefab: Some(prefab),
+                });
+            },
+            ctx,
+        );
+        use scene::Scene as _;
+        Service(self.shared.clone()).select(Select::Set(vec![EntityId::group(id)]));
     }
 
     fn on_event(&mut self, event: &Event, _ctx: &mut Context) {

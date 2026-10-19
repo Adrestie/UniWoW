@@ -151,12 +151,13 @@ impl Inspector {
         self.scene = ctx.service(scene::SERVICE);
     }
 
-    /// The entities shown: those it is locked on, else the selection.
+    /// The entities shown: those it is locked on, else the selection; a group by what it holds.
     fn ids(&self, scene: &scene::Handle) -> Vec<EntityId> {
-        match &self.locked {
+        let ids = match &self.locked {
             Some(ids) => ids.clone(),
             None => scene.selection().ids.clone(),
-        }
+        };
+        scene.groups().expanded(&ids)
     }
 
     /// The values read again by a job when what they are read for changed.

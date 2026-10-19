@@ -130,8 +130,15 @@ pub fn name_of(entity: &EntityRef, names: &HashMap<EntityId, String>) -> String 
     names.get(&entity.id()).cloned().unwrap_or_else(|| entity.name())
 }
 
-/// The tree of the entities of `snapshot` that `filter` keeps, the map named `map`.
-pub fn build(snapshot: &Snapshot, filter: &Filter, names: &HashMap<EntityId, String>, map: &str) -> Tree {
+/// The tree of the entities of `snapshot` that `filter` keeps, the map named `map`, those of the
+/// groups of `groups` under their group.
+pub fn build(
+    snapshot: &Snapshot,
+    filter: &Filter,
+    names: &HashMap<EntityId, String>,
+    map: &str,
+    groups: &uniwow_api::scene::Groups,
+) -> Tree {
     let in_scope = |entity: &EntityRef| {
         let Some((shown, tile, tiles)) = filter.scope else {
             return true;
@@ -171,8 +178,21 @@ pub fn build(snapshot: &Snapshot, filter: &Filter, names: &HashMap<EntityId, Str
         None,
         None,
     );
-    // The places first, so that the entities find them; parents before children.
+    // The groups kept with the entities they hold kept.
+    for group in &groups.groups {
+        let id = EntityId::group(group.id);
+        if group.children.iter().any(|child| seen.contains(child))
+            && seen.insert(id)
+            && let Some(found) = snapshot.get(&id)
+        {
+            kept.push(found);
+        }
+    }
+    // The groups first, then the places, so that the entities find them; parents before children.
     kept.sort_by_key(|entity| {
+        if entity.id().kind == Kind::Group {
+            return -1;
+        }
         let mut depth = 0;
         let mut at = entity.parent();
         while let Some(parent) = at {
@@ -186,7 +206,14 @@ pub fn build(snapshot: &Snapshot, filter: &Filter, names: &HashMap<EntityId, Str
     });
     for entity in &kept {
         let id = entity.id();
-        let parent = match entity.parent().and_then(|parent| tree.by_entity.get(&parent).copied()) {
+        let in_group = groups
+            .of(&id)
+            .and_then(|group| tree.by_entity.get(&EntityId::group(group.id)).copied());
+        let parent = match entity
+            .parent()
+            .and_then(|parent| tree.by_entity.get(&parent).copied())
+            .or(in_group)
+        {
             Some(parent) => parent,
             None if id.kind == Kind::Live => tree.folder(&mut folders, "live".to_owned(), "Live", None, None),
             None => {

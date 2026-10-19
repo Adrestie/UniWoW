@@ -42,6 +42,7 @@ struct Made {
     generation: u64,
     filter: Filter,
     names: usize,
+    groups: u64,
     map: String,
 }
 
@@ -104,6 +105,7 @@ impl HierarchyModule {
                 },
             },
             names: Arc::as_ptr(&names) as usize,
+            groups: scene.groups().generation,
             map,
         };
         if self.made.as_ref() == Some(&made) || self.job.as_ref().is_some_and(|(_, job)| *job == made) {
@@ -113,8 +115,9 @@ impl HierarchyModule {
             ctx.cancel(job);
         }
         let (filter, map) = (made.filter.clone(), made.map.clone());
+        let groups = scene.groups();
         let job = ctx.spawn("Make the tree of the Hierarchy", move |job| {
-            let tree = tree::build(&snapshot, &filter, &names, &map);
+            let tree = tree::build(&snapshot, &filter, &names, &map, &groups);
             (!job.is_cancelled()).then_some(tree)
         });
         self.job = Some((job, made));
@@ -151,6 +154,38 @@ impl HierarchyModule {
         if let Err(reason) = ctx.editor().call("viewport.frame", json!({ "min": low, "max": high })) {
             log::warn!("{id} is not framed: {reason}");
         }
+    }
+
+    /// The prefabs of the project, each placed on the ground in the middle of the view by a click.
+    fn prefabs_ui(&self, ui: &mut egui::Ui, scene: &scene::Handle, ctx: &mut Context) {
+        let groups = scene.groups();
+        if groups.prefabs.is_empty() {
+            return;
+        }
+        egui::CollapsingHeader::new(format!("Prefabs ({})", groups.prefabs.len()))
+            .id_salt("hierarchy prefabs")
+            .show(ui, |ui| {
+                for prefab in &groups.prefabs {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{} ({} objects)", prefab.name, prefab.objects.len()));
+                        if ui
+                            .small_button("Place")
+                            .on_hover_text("An instance on the ground in the middle of the 3D view")
+                            .clicked()
+                            && let Some(at) = self.middle_of_view(scene, ctx)
+                        {
+                            ctx.call("scene.place_prefab", json!({ "prefab": prefab.id, "position": at }));
+                        }
+                    });
+                }
+            });
+    }
+
+    /// The point of the ground in the middle of the 3D view, or 30 yards ahead of the eye.
+    fn middle_of_view(&self, scene: &scene::Handle, ctx: &mut Context) -> Option<[f32; 3]> {
+        let seen = ctx.service(uniwow_api::viewport::SERVICE)?.last_view()?;
+        let ray = seen.ray([seen.size[0] / 2.0, seen.size[1] / 2.0])?;
+        Some(ray.at(scene.ground(&ray).unwrap_or(30.0)).to_array())
     }
 
     fn header(&mut self, ui: &mut egui::Ui) {
@@ -206,6 +241,17 @@ impl Module for HierarchyModule {
             self.rows = self.tree.rows(&self.unfolded);
         }
         self.header(ui);
+        let selected: Vec<String> = selection.ids.iter().map(ToString::to_string).collect();
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!selected.is_empty(), egui::Button::new("Group the selection"))
+                .on_hover_text("A group of the entities selected, moved as one")
+                .clicked()
+            {
+                ctx.call("scene.group", json!({ "ids": selected }));
+            }
+        });
+        self.prefabs_ui(ui, &scene, ctx);
         ui.separator();
         let locks = scene.locks();
         let tree = self.tree.clone();
@@ -218,6 +264,8 @@ impl Module for HierarchyModule {
         let mut framed: Option<EntityId> = None;
         let mut locking: Option<(Vec<EntityId>, Vec<u32>, bool)> = None;
         let mut renamed: Option<(EntityId, Option<String>)> = None;
+        let mut asked: Vec<(&str, uniwow_api::serde_json::Value)> = Vec::new();
+        let groups = scene.groups();
         area.show_rows(ui, ROW, self.rows.len(), |ui, range| {
             for index in range {
                 let (node_index, depth) = self.rows[index];
@@ -268,6 +316,32 @@ impl Module for HierarchyModule {
                         }
                     }
                     response.context_menu(|ui| {
+                        if let Some(id) = node.entity.filter(|id| id.kind == Kind::Group) {
+                            for (label, command) in [
+                                ("Ungroup", "scene.ungroup"),
+                                ("Make a prefab", "scene.prefab"),
+                                ("Apply to its prefab", "scene.apply"),
+                                ("Revert to its prefab", "scene.revert"),
+                                ("Add the selection", "scene.group_add"),
+                            ] {
+                                if ui.button(label).clicked() {
+                                    let ids: Vec<String> = selection.ids.iter().map(ToString::to_string).collect();
+                                    asked.push((command, json!({ "group": id.to_string(), "ids": ids })));
+                                    ui.close();
+                                }
+                            }
+                            ui.separator();
+                        }
+                        if let Some(id) = node.entity
+                            && let Some(group) = groups.of(&id)
+                            && ui.button("Take out of its group").clicked()
+                        {
+                            asked.push((
+                                "scene.group_remove",
+                                json!({ "group": EntityId::group(group.id).to_string(), "ids": [id.to_string()] }),
+                            ));
+                            ui.close();
+                        }
                         if let Some(id) = node.entity {
                             if ui.button("Rename").clicked() {
                                 self.renaming = Some((id, node.label.clone()));
@@ -339,6 +413,9 @@ impl Module for HierarchyModule {
         if let Some((id, name)) = renamed {
             scene.rename(id, name);
             self.renaming = None;
+        }
+        for (command, arguments) in asked {
+            ctx.call(command, arguments);
         }
     }
 

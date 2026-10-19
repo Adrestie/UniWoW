@@ -551,8 +551,9 @@ impl SceneTools {
             return;
         }
         let (selection, snapshot) = (scene.selection(), scene.snapshot());
+        let ids = scene.groups().expanded(&selection.ids);
         let mut by_provider: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
-        for id in &selection.ids {
+        for id in &ids {
             if let Some(entity) = snapshot.get(id) {
                 by_provider
                     .entry(entity.provider().to_owned())
@@ -561,7 +562,7 @@ impl SceneTools {
             }
         }
         for (label, writes) in drags {
-            let count = selection.ids.len();
+            let count = ids.len();
             let gesture = ctx.begin_gesture(&if count == 1 {
                 label
             } else {

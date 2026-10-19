@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.8 done; milestones 10 to 14 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.9 done; milestones 10 to 14 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -8288,7 +8288,7 @@ On the user's machine, with the client and the server on it:
 the sources of AzerothCore at the commit of the user's server (bc9198ce7) and against WoWDBDefs;
 validated by the user (decision 31), with his answers to the points the proposal left to decide
 (*Decided by the user after the proposal*); its technical specification written once validated, at
-his request. Being built: steps 15.1 to 15.8 as built, at the end of this milestone.*
+his request. Being built: steps 15.1 to 15.9 as built, at the end of this milestone.*
 
 The world of milestone 9, shown, becomes a world the user edits as a scene of Unity: a window
 *Hierarchy* left of the 3D view lists what is loaded around the camera, by the places of the game;
@@ -10167,6 +10167,44 @@ changes (moved, created, deleted, ids given) kept in the project and read back.
 **The user checks**: *Create…*, `oak`, a model clicked: an oak on the ground in the middle of the
 view, selected; Ctrl+D five times (in place: moved with W after each); one deleted with Delete; Ctrl+Z
 back through all of them; the project saved, the editor closed and opened again on it: the oaks back.
+
+#### Step 15.9, as built: groups and prefabs
+
+Built after 436c5c4, on `main`.
+
+- **Groups** (`uniwow_api::scene::Group`, kept by `scene`, `Scene::groups`): an id, a name, a map, its
+  children (entities no game parent holds), the prefab it is an instance of. A group is an entity of
+  its own (`group:12`), at the middle of its children, its bounds theirs, given to the registry when
+  it changes; a click on what it holds selects the group first, then down the chain; a group selected
+  is its children for the gizmos and the Inspector (`Groups::expanded`): moved, turned or scaled, they
+  move as one gesture. In the Hierarchy, its children are listed under it, no longer in their place.
+- **Prefabs**: the doodads of a group made a prefab (their models and places from their middle, their
+  rotations and scales), the group its first instance; *Place* (in the Hierarchy's list of prefabs)
+  creates its objects on the ground in the middle of the view, a group of them linked to it, selected;
+  *Apply* writes an instance into its prefab, its other instances following it; *Revert* gives an
+  instance back its prefab's values. An instance's objects answer to the prefab's in their order.
+- **Commands** (on the interface thread, each one undo entry for the groups): `scene.group`,
+  `scene.ungroup`, `scene.group_add`, `scene.group_remove`, `scene.prefab`, `scene.place_prefab`,
+  `scene.apply`, `scene.revert`. In the Hierarchy: *Group the selection*; a group's menu (*Ungroup*,
+  *Make a prefab*, *Apply to its prefab*, *Revert to its prefab*, *Add the selection*); an entity's
+  *Take out of its group*; the list of the prefabs with *Place*. Kept in the project's section of
+  `scene`.
+
+**Not in 15.9, set aside**: the overrides of an instance kept field by field (an instance is applied or
+reverted whole; changing the prefab itself is done through an instance and *Apply*); objects added to
+or removed from an instance; drag and drop into a group (the menus do it); the view *Groups & prefabs*
+(the prefabs listed at the bottom of the Hierarchy); groups of buildings' or other providers' entities
+in prefabs (a prefab holds doodads); placing an instance as one undo entry (the objects created, then
+the group: two).
+
+**Tests**: a selection with a group being its children; a prefab made of its objects from their
+middle, a FileDataID kept; the groups and prefabs kept in the project and read back; the Hierarchy
+listing a group's children under it, not in their place.
+
+**The user checks**: three tents and a fire selected, *Group the selection*: one row *Group* in
+Goldshire with the four under it; a click on a tent selects the group; W, the group moved as one,
+Ctrl+Z; *Make a prefab*, *Place* three times; a tent of one instance moved, *Apply*: the others follow;
+another moved, *Revert*: back; the project saved and opened again: the groups and the prefab back.
 
 ### Milestone 10: Lua modules (outline)
 

@@ -111,7 +111,13 @@ fn shown(tree: &crate::tree::Tree) -> Vec<String> {
 #[test]
 fn the_main_view_lists_the_map_its_zones_and_subzones_and_what_lies_in_them_and_live_beside() {
     let snapshot = goldshire();
-    let tree = build(&snapshot, &Filter::default(), &HashMap::new(), "Eastern Kingdoms");
+    let tree = build(
+        &snapshot,
+        &Filter::default(),
+        &HashMap::new(),
+        "Eastern Kingdoms",
+        &Default::default(),
+    );
     assert_eq!(
         shown(&tree),
         [
@@ -141,7 +147,13 @@ fn a_search_keeps_the_matches_with_their_parents_and_the_scope_leaves_the_far_on
         text: "chair".to_owned(),
         ..Filter::default()
     };
-    let tree = build(&snapshot, &filter, &HashMap::new(), "Eastern Kingdoms");
+    let tree = build(
+        &snapshot,
+        &filter,
+        &HashMap::new(),
+        "Eastern Kingdoms",
+        &Default::default(),
+    );
     assert_eq!(
         shown(&tree),
         [
@@ -158,7 +170,7 @@ fn a_search_keeps_the_matches_with_their_parents_and_the_scope_leaves_the_far_on
         kinds: vec![Kind::Doodad],
         ..Filter::default()
     };
-    let tree = build(&snapshot, &scoped, &HashMap::new(), "");
+    let tree = build(&snapshot, &scoped, &HashMap::new(), "", &Default::default());
     let labels = shown(&tree);
     assert!(labels.contains(&"    ElwynnTree03 #4521".to_owned()));
     assert!(!labels.iter().any(|label| label.contains("FarTree")), "8 tiles away");
@@ -168,14 +180,56 @@ fn a_search_keeps_the_matches_with_their_parents_and_the_scope_leaves_the_far_on
         text: "old oak".to_owned(),
         ..Filter::default()
     };
-    let tree = build(&snapshot, &named, &names, "");
+    let tree = build(&snapshot, &named, &names, "", &Default::default());
     assert!(shown(&tree).contains(&"    The old oak".to_owned()));
+}
+
+#[test]
+fn the_entities_of_a_group_are_listed_under_it_not_in_their_place() {
+    use uniwow_api::scene::{Group, Groups};
+    let at = middle(ELWYNN);
+    let snapshot = snapshot(&[
+        (entity(EntityId::group(3), None, "Camp", at), 87),
+        (entity(EntityId::doodad(0, 1), None, "Tent", at), 87),
+        (entity(EntityId::doodad(0, 2), None, "Fire", at), 87),
+        (entity(EntityId::doodad(0, 4521), None, "ElwynnTree03", at), 87),
+    ]);
+    let groups = Groups {
+        generation: 1,
+        groups: vec![Group {
+            id: 3,
+            name: "Camp".to_owned(),
+            map: 0,
+            children: vec![EntityId::doodad(0, 1), EntityId::doodad(0, 2)],
+            prefab: None,
+        }],
+        prefabs: Vec::new(),
+    };
+    let tree = build(&snapshot, &Filter::default(), &HashMap::new(), "Map", &groups);
+    assert_eq!(
+        shown(&tree),
+        [
+            "Map",
+            "  Elwynn Forest",
+            "    Goldshire",
+            "      Camp",
+            "        Fire #2",
+            "        Tent #1",
+            "      ElwynnTree03 #4521",
+        ]
+    );
 }
 
 #[test]
 fn the_rows_follow_the_folds_and_the_path_of_a_node_unfolds_to_it() {
     let snapshot = goldshire();
-    let tree = build(&snapshot, &Filter::default(), &HashMap::new(), "Map");
+    let tree = build(
+        &snapshot,
+        &Filter::default(),
+        &HashMap::new(),
+        "Map",
+        &Default::default(),
+    );
     let mut unfolded = HashSet::from(["map".to_owned()]);
     let rows = tree.rows(&unfolded);
     // The map, its zone and No area; Live folded.
@@ -204,7 +258,13 @@ fn a_tree_of_500_000_entities_is_made_in_a_fraction_of_a_second() {
         .collect();
     let snapshot = snapshot(&entities);
     let started = std::time::Instant::now();
-    let tree = build(&snapshot, &Filter::default(), &HashMap::new(), "Map");
+    let tree = build(
+        &snapshot,
+        &Filter::default(),
+        &HashMap::new(),
+        "Map",
+        &Default::default(),
+    );
     let took = started.elapsed();
     assert_eq!(tree.entities, 500_000);
     eprintln!(

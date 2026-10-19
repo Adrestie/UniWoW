@@ -94,6 +94,74 @@ pub trait Scene: Send + Sync {
         let _ = ray;
         None
     }
+
+    /// The groups and the prefabs of the editor (step 15.9); none by default.
+    fn groups(&self) -> Arc<Groups> {
+        Arc::default()
+    }
+}
+
+/// A group of the editor, the empty object of Unity: its entities, moved as one; an instance of a
+/// prefab when it names one, its children made from the prefab's objects in their order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Group {
+    pub id: u32,
+    pub name: String,
+    pub map: u32,
+    pub children: Vec<EntityId>,
+    pub prefab: Option<u32>,
+}
+
+/// An object of a prefab: its model (a path, or `#` and a FileDataID), its place from the prefab's
+/// pivot in the world, its rotation in degrees about the axes of the files, its scale.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PrefabObject {
+    pub file: String,
+    pub offset: [f32; 3],
+    pub rotation: [f32; 3],
+    pub scale: f32,
+}
+
+/// A prefab of the project: its objects, each made again in every instance placed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Prefab {
+    pub id: u32,
+    pub name: String,
+    pub objects: Vec<PrefabObject>,
+}
+
+/// The groups and the prefabs, with a generation.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Groups {
+    pub generation: u64,
+    pub groups: Vec<Group>,
+    pub prefabs: Vec<Prefab>,
+}
+
+impl Groups {
+    pub fn group(&self, id: u32) -> Option<&Group> {
+        self.groups.iter().find(|group| group.id == id)
+    }
+
+    /// The group holding `id`, if one does.
+    pub fn of(&self, id: &EntityId) -> Option<&Group> {
+        self.groups.iter().find(|group| group.children.contains(id))
+    }
+
+    /// `ids` with each group in them replaced by its children, each once.
+    pub fn expanded(&self, ids: &[EntityId]) -> Vec<EntityId> {
+        let mut out = Vec::new();
+        for id in ids {
+            match (id.kind, self.group(id.key as u32)) {
+                (Kind::Group, Some(group)) => out.extend(group.children.iter().copied()),
+                (Kind::Group, None) => {}
+                _ => out.push(*id),
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|id| seen.insert(*id));
+        out
+    }
 }
 
 /// The locks of the scene.
@@ -422,6 +490,11 @@ impl EntityId {
     /// The weather of the zone `zone`.
     pub const fn weather(zone: u32) -> Self {
         Self::new(Kind::Weather, 0, zone as u64, 0)
+    }
+
+    /// A group of the editor, by its id in the project.
+    pub const fn group(id: u32) -> Self {
+        Self::new(Kind::Group, 0, id as u64, 0)
     }
 
     /// The tile and the chunk of a chunk or a water.
@@ -1177,6 +1250,25 @@ mod tests {
         let corner = [32.0 * TILE - TILE * 21.0 - 0.01, 32.0 * TILE - TILE * 30.0 - 0.01];
         assert_eq!(chunk_at(corner[0], corner[1]), Some((tile, [0, 0])));
         assert_eq!(chunk_at(40000.0, 0.0), None);
+    }
+
+    #[test]
+    fn a_selection_with_a_group_is_its_children() {
+        let [a, b, c] = [1, 2, 3].map(|n| EntityId::doodad(0, n));
+        let groups = Groups {
+            generation: 1,
+            groups: vec![Group {
+                id: 4,
+                name: "Camp".to_owned(),
+                map: 0,
+                children: vec![a, b],
+                prefab: None,
+            }],
+            prefabs: Vec::new(),
+        };
+        assert_eq!(groups.expanded(&[EntityId::group(4), b, c]), [a, b, c]);
+        assert_eq!(groups.of(&b).map(|group| group.id), Some(4));
+        assert_eq!("group:4".parse::<EntityId>(), Ok(EntityId::group(4)));
     }
 
     #[test]
