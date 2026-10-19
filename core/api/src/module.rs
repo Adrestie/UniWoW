@@ -31,6 +31,16 @@ pub trait Module: Any {
         Ok(())
     }
 
+    /// The module's section of the project (step 15.7), written by the kernel into the file of the
+    /// project with the others, read back by `open_project`; none for a module keeping none.
+    fn project_section(&self) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// The module's section of the project opened, none for a new project or one without it: what
+    /// it held of the project before is let go.
+    fn open_project(&mut self, _section: Option<serde_json::Value>, _ctx: &mut Context) {}
+
     /// Receives an event whose topic the module subscribed to.
     fn on_event(&mut self, _event: &Event, _ctx: &mut Context) {}
 

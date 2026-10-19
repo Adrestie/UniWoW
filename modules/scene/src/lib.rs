@@ -806,6 +806,17 @@ impl Module for SceneModule {
         self.steer(ctx);
     }
 
+    fn project_section(&self) -> Option<Value> {
+        Some(section_of(&lock(&self.shared.names), &lock(&self.shared.locks)))
+    }
+
+    fn open_project(&mut self, section: Option<Value>, _ctx: &mut Context) {
+        let (names, mut locks) = opened(&section.unwrap_or_default());
+        locks.generation = lock(&self.shared.locks).generation + 1;
+        *lock(&self.shared.names) = Arc::new(names);
+        *lock(&self.shared.locks) = Arc::new(locks);
+    }
+
     fn on_event(&mut self, event: &Event, _ctx: &mut Context) {
         if event.topic == MODULE_FAILED_TOPIC
             && let Some(id) = event.payload.get("id").and_then(Value::as_str)
@@ -857,6 +868,85 @@ impl Module for SceneModule {
                 "many": many,
             }),
         );
+    }
+}
+
+/// The section of the project of the scene: the names given and the locks, in order.
+fn section_of(names: &HashMap<EntityId, String>, locks: &Locks) -> Value {
+    let names: std::collections::BTreeMap<String, &String> =
+        names.iter().map(|(id, name)| (id.to_string(), name)).collect();
+    let mut entities: Vec<String> = locks.entities.iter().map(ToString::to_string).collect();
+    entities.sort();
+    let mut areas: Vec<u32> = locks.areas.iter().copied().collect();
+    areas.sort_unstable();
+    let mut kinds: Vec<&str> = locks.kinds.iter().map(|kind| kind.name()).collect();
+    kinds.sort_unstable();
+    json!({
+        "names": names,
+        "locks": { "kinds": kinds, "entities": entities, "areas": areas },
+    })
+}
+
+/// The names and the locks of the section `section` of the project; the kinds locked at first
+/// without one.
+fn opened(section: &Value) -> (HashMap<EntityId, String>, Locks) {
+    let names: HashMap<EntityId, String> = section["names"]
+        .as_object()
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(|(id, name)| Some((id.parse().ok()?, name.as_str()?.to_owned())))
+                .collect()
+        })
+        .unwrap_or_default();
+    let strings = |key: &str| -> Vec<String> {
+        section["locks"][key]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|value| value.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut locks = match section["locks"]["kinds"].as_array() {
+        Some(_) => Locks::of_kinds(
+            &strings("kinds")
+                .iter()
+                .filter_map(|kind| Kind::parse(kind))
+                .collect::<Vec<_>>(),
+        ),
+        None => Locks::of_kinds(&LOCKED),
+    };
+    locks.entities = strings("entities").iter().filter_map(|id| id.parse().ok()).collect();
+    locks.areas = section["locks"]["areas"]
+        .as_array()
+        .map(|areas| areas.iter().filter_map(Value::as_u64).map(|area| area as u32).collect())
+        .unwrap_or_default();
+    (names, locks)
+}
+
+#[cfg(test)]
+mod project_tests {
+    use super::*;
+
+    #[test]
+    fn the_names_and_the_locks_are_kept_in_the_project_and_read_back() {
+        let names = HashMap::from([(EntityId::doodad(0, 7), "The old oak".to_owned())]);
+        let mut locks = Locks::of_kinds(&[Kind::Chunk, Kind::Water]);
+        locks.entities.insert(EntityId::building(0, 9));
+        locks.areas.insert(87);
+        let section = section_of(&names, &locks);
+        let (read_names, read_locks) = opened(&section);
+        assert_eq!(read_names, names);
+        assert_eq!(read_locks.entities, locks.entities);
+        assert_eq!(read_locks.areas, locks.areas);
+        let mut kinds = read_locks.kinds.clone();
+        kinds.sort();
+        assert_eq!(kinds, [Kind::Chunk, Kind::Water]);
+        let (none, fresh) = opened(&Value::Null);
+        assert!(none.is_empty());
+        assert_eq!(fresh.kinds, LOCKED.to_vec(), "a new project: the kinds locked at first");
     }
 }
 

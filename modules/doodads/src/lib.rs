@@ -470,6 +470,56 @@ impl Module for DoodadsModule {
             );
     }
 
+    fn project_section(&self) -> Option<Value> {
+        let listed = lock(&self.listed);
+        let mut moved: Vec<(&EntityId, &Spot)> = listed.moved.iter().collect();
+        moved.sort_by_key(|(id, _)| **id);
+        let moved: Vec<Value> = moved
+            .into_iter()
+            .map(|(id, spot)| {
+                json!({ "id": id.to_string(), "position": spot.position, "rotation": spot.rotation, "scale": spot.scale })
+            })
+            .collect();
+        Some(json!({ "moved": moved }))
+    }
+
+    fn open_project(&mut self, section: Option<Value>, _ctx: &mut Context) {
+        let vector = |value: &Value| -> Option<[f32; 3]> {
+            let values = value.as_array()?;
+            Some([0, 1, 2].map(|at| values.get(at).and_then(Value::as_f64).unwrap_or(0.0) as f32))
+        };
+        let opened: HashMap<EntityId, Spot> = section
+            .as_ref()
+            .and_then(|section| section["moved"].as_array())
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|entry| {
+                let id: EntityId = entry["id"].as_str()?.parse().ok()?;
+                let spot = Spot {
+                    position: vector(&entry["position"])?,
+                    rotation: vector(&entry["rotation"])?,
+                    scale: entry["scale"].as_f64()? as f32,
+                };
+                Some((id, spot))
+            })
+            .collect();
+        // Those moved before and not in the project put back where their tiles have them.
+        let mut spots: Vec<(EntityId, Spot)> = {
+            let mut listed = lock(&self.listed);
+            let before: Vec<EntityId> = listed.moved.keys().copied().collect();
+            listed.moved.clear();
+            before
+                .into_iter()
+                .filter(|id| !opened.contains_key(id))
+                .filter_map(|id| Some((id, listed.find(&id)?.2)))
+                .collect()
+        };
+        spots.extend(opened.iter().map(|(id, spot)| (*id, *spot)));
+        self.set_spots(spots);
+        lock(&self.listed).moved = opened;
+    }
+
     fn on_command(&mut self, name: &str, arguments: Value, ctx: &mut Context) -> Result<Value, String> {
         match name {
             "doodads.write" => self.write(&arguments, ctx),

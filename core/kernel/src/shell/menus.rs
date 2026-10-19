@@ -24,6 +24,7 @@ impl Shell {
 
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
+                self.project_menu(ui);
                 if ui.button(item(icon::QUIT, "Quit")).clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }

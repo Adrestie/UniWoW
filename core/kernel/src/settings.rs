@@ -28,6 +28,9 @@ pub struct Settings {
     /// The keys the user bound hotkeys to, by `<owner>/<name>`, those other than their own.
     #[serde(default)]
     pub hotkeys: BTreeMap<String, String>,
+    /// The folders of the projects opened last, the last first.
+    #[serde(default)]
+    pub recent_projects: Vec<std::path::PathBuf>,
     /// Never written to disk, for the tests.
     #[serde(skip)]
     pub in_memory: bool,

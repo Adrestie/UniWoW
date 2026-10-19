@@ -4,6 +4,13 @@
 use super::*;
 
 impl Shell {
+    /// The line of the closing window for the project, when it changed since it was saved.
+    pub(super) fn project_unsaved(&mut self) -> Option<String> {
+        let now = project::text(&self.project.name(), &self.project_sections());
+        (!self.project.saved.is_empty() && now != self.project.saved)
+            .then(|| format!("- The project '{}'", self.project.name()))
+    }
+
     /// The unsaved documents of the running modules, with the module's name.
     pub(super) fn unsaved(&mut self) -> Vec<(usize, String, String)> {
         let mut found = Vec::new();
@@ -39,12 +46,17 @@ impl Shell {
             Closing::Open => {}
         }
         let unsaved = self.unsaved();
-        if unsaved.is_empty() {
+        let project = self.project_unsaved();
+        if unsaved.is_empty() && project.is_none() {
             return;
         }
-        let list: Vec<String> = unsaved
-            .iter()
-            .map(|(_, module, document)| format!("- {module}: {document}"))
+        let list: Vec<String> = project
+            .into_iter()
+            .chain(
+                unsaved
+                    .iter()
+                    .map(|(_, module, document)| format!("- {module}: {document}")),
+            )
             .collect();
         let arguments = serde_json::json!({
             "title": "Unsaved changes",
@@ -86,6 +98,20 @@ impl Shell {
         match event.payload["button"].as_str() {
             Some("save") => {
                 let mut failures = Vec::new();
+                if self.project_unsaved().is_some() {
+                    // Untitled: into a folder of its own in the folder of the projects.
+                    let folder = self.project.folder.clone().or_else(|| {
+                        let stamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |since| since.as_secs());
+                        project::default_folder().map(|folder| folder.join(format!("Untitled {stamp}")))
+                    });
+                    match folder.map(|folder| self.save_project_to(folder)) {
+                        Some(Ok(())) => {}
+                        Some(Err(error)) => failures.push(format!("- the project: {error}")),
+                        None => failures.push("- the project: no folder to save it into".to_owned()),
+                    }
+                }
                 let mut saved: Vec<usize> = Vec::new();
                 for (index, module, _) in self.unsaved() {
                     if saved.contains(&index) {

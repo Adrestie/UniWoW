@@ -253,8 +253,9 @@ struct BuildingsModule {
     map_id: u32,
     /// The names of the rooms of `WMOAreaTable.dbc`, read by the first job that needs them.
     room_names: Arc<OnceLock<entities::RoomNames>>,
-    /// The buildings the user moved or turned, kept in memory, by their unique id.
-    moved: HashMap<u32, Building>,
+    /// The buildings the user moved or turned, kept in memory, by their unique id: their position
+    /// and rotation in the axes of the files.
+    moved: HashMap<u32, ([f32; 3], [f32; 3])>,
     /// What the picking needs of each building kept, by its unique id.
     picked: Picks,
     /// The buildings moved whose liquids are to be poured again.
@@ -338,18 +339,45 @@ impl BuildingsModule {
         self.map = map;
     }
 
-    /// The building `id` kept, as the user changed it.
+    /// The building `id` kept, as the user changed it: its bounds following its position.
     fn building(&self, id: u32) -> Option<Building> {
-        self.moved.get(&id).cloned().or_else(|| self.kept.get(id).cloned())
+        let mut building = self.kept.get(id).cloned()?;
+        if let Some((position, rotation)) = self.moved.get(&id) {
+            for corner in &mut building.bounds {
+                for ((value, to), from) in corner.iter_mut().zip(position).zip(building.position) {
+                    *value += to - from;
+                }
+            }
+            building.position = *position;
+            building.rotation = *rotation;
+        }
+        Some(building)
     }
 
     /// Places the buildings `changed` as given: kept in memory; drawn there from the next frame, their
     /// doodads and their liquids placed again, their entities given to the scene again.
     fn set_buildings(&mut self, changed: Vec<(u32, Building)>) {
         for (id, building) in changed {
+            self.place_as(id, building.position, building.rotation);
+        }
+        self.changed = true;
+    }
+
+    /// Places the building `id` at `position`, turned by `rotation`, in the axes of the files: kept in
+    /// memory unless it is where its file has it.
+    fn place_as(&mut self, id: u32, position: [f32; 3], rotation: [f32; 3]) {
+        let original = self
+            .kept
+            .get(id)
+            .is_some_and(|kept| kept.position == position && kept.rotation == rotation);
+        if original {
+            self.moved.remove(&id);
+        } else {
+            self.moved.insert(id, (position, rotation));
+        }
+        if let Some(building) = self.building(id) {
             self.grounds.insert(id, budget::ground(&building));
             lock(&self.picked).insert(id, Arc::new(entities::picked(&building, None)));
-            self.moved.insert(id, building);
             // Their doodads placed again by their jobs, which give the scene their entities whole.
             self.told.remove(&id);
             self.repour.insert(id);
@@ -838,6 +866,47 @@ impl Module for BuildingsModule {
                 }),
                 json!({ "type": "object", "properties": { "changed": { "type": "integer" }, "refused": { "type": "array" } } }),
             );
+    }
+
+    fn project_section(&self) -> Option<Value> {
+        let mut moved: Vec<_> = self.moved.iter().collect();
+        moved.sort_by_key(|(id, _)| **id);
+        let moved: Vec<Value> = moved
+            .into_iter()
+            .map(|(id, (position, rotation))| json!({ "unique id": id, "position": position, "rotation": rotation }))
+            .collect();
+        Some(json!({ "moved": moved }))
+    }
+
+    fn open_project(&mut self, section: Option<Value>, _ctx: &mut Context) {
+        let before: Vec<u32> = self.moved.keys().copied().collect();
+        self.moved.clear();
+        let mut placed: Vec<u32> = before;
+        for entry in section
+            .as_ref()
+            .and_then(|section| section["moved"].as_array())
+            .cloned()
+            .unwrap_or_default()
+        {
+            let vector = |key: &str| -> Option<[f32; 3]> {
+                let values = entry[key].as_array()?;
+                Some([0, 1, 2].map(|at| values.get(at).and_then(Value::as_f64).unwrap_or(0.0) as f32))
+            };
+            let (Some(id), Some(position), Some(rotation)) =
+                (entry["unique id"].as_u64(), vector("position"), vector("rotation"))
+            else {
+                continue;
+            };
+            self.moved.insert(id as u32, (position, rotation));
+            placed.push(id as u32);
+        }
+        // Those held, placed again where they are now.
+        for id in placed {
+            if let Some(building) = self.building(id) {
+                self.place_as(id, building.position, building.rotation);
+            }
+        }
+        self.changed = true;
     }
 
     fn on_command(&mut self, name: &str, arguments: Value, ctx: &mut Context) -> Result<Value, String> {

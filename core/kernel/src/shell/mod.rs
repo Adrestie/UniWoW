@@ -8,6 +8,7 @@ mod history_ops;
 mod hotkey_window;
 mod menus;
 mod modules_panel;
+mod project;
 mod settings_window;
 mod tabs;
 mod toasts;
@@ -119,6 +120,8 @@ pub struct Shell {
     minimised: bool,
     /// The style of the dock, made from the theme once.
     dock_style: egui_dock::Style,
+    /// The project open.
+    project: project::Project,
 }
 
 /// Where the closing of the editor stands while modules have unsaved changes.
@@ -213,6 +216,7 @@ impl Shell {
             themed: false,
             minimised: false,
             dock_style: Theme::DARK.dock_style(),
+            project: project::Project::default(),
         };
         shell.register_all();
         shell.resolve_requirements();

@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.6 done; milestones 10 to 14 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.7 done; milestones 10 to 14 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -8288,7 +8288,7 @@ On the user's machine, with the client and the server on it:
 the sources of AzerothCore at the commit of the user's server (bc9198ce7) and against WoWDBDefs;
 validated by the user (decision 31), with his answers to the points the proposal left to decide
 (*Decided by the user after the proposal*); its technical specification written once validated, at
-his request. Being built: steps 15.1 to 15.6 as built, at the end of this milestone.*
+his request. Being built: steps 15.1 to 15.7 as built, at the end of this milestone.*
 
 The world of milestone 9, shown, becomes a world the user edits as a scene of Unity: a window
 *Hierarchy* left of the 3D view lists what is loaded around the camera, by the places of the game;
@@ -10095,6 +10095,44 @@ drag of the scale handle doubling it; the writes of each handle; the flight on S
 ring dragged with Ctrl, the tree turned by 15 degrees; R, the handle dragged, the tree bigger; twenty
 fence posts moved up together by the Z arrow, one Ctrl+Z; the camera flown up with Space and down with
 C.
+
+#### Step 15.7, as built: the project
+
+Built after 049b224, on `main`.
+
+- **The contract**: `Module::project_section` (the module's section, JSON, none for a module keeping
+  none) and `Module::open_project` (its section opened, none for a new project: what it held of the
+  project before let go).
+- **The kernel** (`core/kernel/src/shell/project.rs`): in the menu *File*, *New project*, *Open
+  project…*, *Open recent* (the eight last, in the user's settings), *Save project* (Ctrl+S, a dot
+  while changed), *Save project as…*. The folder is chosen with the picker of Windows, opened on a
+  thread of its own, **in `Documents\UniWoW\Projects` by default** (made when first asked). The file,
+  `uniwow-project.json`: `{"format": 1, "name", "sections": {"<module>": …}}`, its keys in order, two
+  spaces of indent, a line an entry; written whole into a temporary file renamed over the last; one of
+  a later format refused. Opening gives each running module its section and empties the history:
+  the changes made before belong to the project left. Whether the project changed since it was saved
+  is looked at once a second, from the sections; a project with a folder is saved every minute when it
+  changed. Closing the editor lists the project among the unsaved changes; *Save* saves it, an
+  untitled one into `Documents\UniWoW\Projects\Untitled <seconds>`.
+- **The sections**: `scene`, the names given and the locks (kinds, entities, areas); `doodads`, the
+  doodads changed (their id, position and rotation in the axes of the files, scale); `buildings`, the
+  buildings moved or turned (their unique id, position and rotation). Opened, the doodads and the
+  buildings changed before and not in the project are put back where their tiles have them; those of
+  the project are laid over their tiles as they are read.
+
+**Not in 15.7, set aside**: the commands `project.section` and `project.set_section` for the modules
+of other languages (milestones 10 and 11); the project written by a job (the file is small and
+written on the interface thread, by the menu, the minute and the closing); the autosave as a setting
+(every minute, fixed); the settings per project of section 5.
+
+**Tests**: the file written in order, atomically, read back the same, one of a later format and one
+missing refused; the names and the locks of the scene kept and read back, a new project with the
+kinds locked at first; the kernel's tests of the closing with the project in it.
+
+**The user checks**: *File > Save project as…* into a new folder, a tree renamed in the Hierarchy and
+another moved, Goldshire locked; the editor closed (the project listed unsaved if changed since, *Save*)
+and opened again, *File > Open recent*: the tree's name, its place and the lock back; the file
+`uniwow-project.json` read in a text editor; *File > New project*: the tree back where its tile has it.
 
 ### Milestone 10: Lua modules (outline)
 
