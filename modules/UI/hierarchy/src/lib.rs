@@ -59,6 +59,7 @@ struct HierarchyModule {
     folded: bool,
     text: String,
     kinds: usize,
+    view: tree::View,
     /// The active entity the tree last unfolded to, the row to bring in sight, the row of the last
     /// click for Shift.
     followed: Option<EntityId>,
@@ -92,6 +93,7 @@ impl HierarchyModule {
         let made = Made {
             generation: snapshot.generation,
             filter: Filter {
+                view: self.view,
                 text: self.text.trim().to_lowercase(),
                 kinds: KINDS[self.kinds].1.to_vec(),
                 scope: scene.scope(),
@@ -189,6 +191,15 @@ impl HierarchyModule {
     }
 
     fn header(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            for (view, label, hint) in [
+                (tree::View::Main, "Main", "By the places of the game"),
+                (tree::View::Files, "Files", "By the tiles whose files store them"),
+                (tree::View::ByType, "By type", "A list a kind"),
+            ] {
+                ui.selectable_value(&mut self.view, view, label).on_hover_text(hint);
+            }
+        });
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.text)

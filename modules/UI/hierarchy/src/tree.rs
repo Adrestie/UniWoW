@@ -35,6 +35,8 @@ pub struct Tree {
 /// What the tree keeps.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Filter {
+    /// The view the tree is made for.
+    pub view: View,
     /// In the name or the label, in lower case.
     pub text: String,
     /// The kinds, every one when empty.
@@ -43,6 +45,18 @@ pub struct Filter {
     pub scope: Option<(u32, TileId, u32)>,
     /// Kept whatever the scope: the entities selected.
     pub kept: Vec<EntityId>,
+}
+
+/// The views of the Hierarchy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum View {
+    /// The places of the game: map, zones, subzones.
+    #[default]
+    Main,
+    /// The tiles, each with what its file stores.
+    Files,
+    /// A flat list a kind.
+    ByType,
 }
 
 /// The order of the entities of a place by their kind: the terrain and the water in their folders
@@ -68,7 +82,8 @@ impl Tree {
             None => self.roots.push(at),
         }
         if let Some(entity) = node.entity {
-            self.by_entity.insert(entity, at);
+            // An entity listed under several nodes is found by its first.
+            self.by_entity.entry(entity).or_insert(at);
         }
         self.nodes.push(node);
         at
@@ -130,8 +145,135 @@ pub fn name_of(entity: &EntityRef, names: &HashMap<EntityId, String>) -> String 
     names.get(&entity.id()).cloned().unwrap_or_else(|| entity.name())
 }
 
-/// The tree of the entities of `snapshot` that `filter` keeps, the map named `map`, those of the
-/// groups of `groups` under their group.
+/// The label of a kind in the views.
+fn kind_label(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Map => "Maps",
+        Kind::Area => "Areas",
+        Kind::Chunk => "Chunks",
+        Kind::Water => "Water",
+        Kind::Doodad => "Doodads",
+        Kind::Building => "Buildings",
+        Kind::Room => "Rooms",
+        Kind::BuildingDoodad => "Doodads of the buildings",
+        Kind::Creature => "Creatures",
+        Kind::GameObject => "Game objects",
+        Kind::Live => "Live",
+        Kind::Light => "Lights",
+        Kind::LightZone => "Zones of light",
+        Kind::Weather => "Weathers",
+        Kind::Group => "Groups",
+        Kind::Prefab => "Prefabs",
+        Kind::Instance => "Instances",
+    }
+}
+
+/// The entities a filter keeps, without their parents.
+fn kept_alone<'a>(snapshot: &'a Snapshot, filter: &Filter, names: &HashMap<EntityId, String>) -> Vec<EntityRef<'a>> {
+    snapshot
+        .entities()
+        .filter(|entity| {
+            let in_scope = filter.scope.is_none_or(|(shown, tile, tiles)| {
+                let [x, y, _] = entity.origin();
+                entity.placed.key.map == shown
+                    && chunk_at(x, y).is_some_and(|(at, _)| at.x.abs_diff(tile.x).max(at.y.abs_diff(tile.y)) <= tiles)
+            });
+            let matches = (filter.kinds.is_empty() || filter.kinds.contains(&entity.id().kind))
+                && (filter.text.is_empty()
+                    || name_of(entity, names).to_lowercase().contains(&filter.text)
+                    || entity.label().to_lowercase().contains(&filter.text));
+            (in_scope && matches) || filter.kept.contains(&entity.id())
+        })
+        .collect()
+}
+
+/// The view *Files*: the tiles in scope, each with the chunks, the water, the buildings and the
+/// doodads its file stores, an entity listed by several tiles under each, marked.
+fn build_files(snapshot: &Snapshot, filter: &Filter, names: &HashMap<EntityId, String>) -> Tree {
+    let mut tree = Tree::default();
+    let mut folders = HashMap::new();
+    let mut kept = kept_alone(snapshot, filter, names);
+    kept.retain(|entity| {
+        matches!(
+            entity.id().kind,
+            Kind::Chunk | Kind::Water | Kind::Doodad | Kind::Building
+        )
+    });
+    let mut tiles: Vec<(EntityRef, Vec<uniwow_api::formats::TileId>)> = kept
+        .into_iter()
+        .map(|entity| {
+            let tiles = entity.tiles();
+            (entity, tiles)
+        })
+        .collect();
+    tiles.retain(|(_, tiles)| !tiles.is_empty());
+    tiles.sort_by_key(|(entity, _)| (entity.id().kind, name_of(entity, names).to_lowercase()));
+    for (entity, stored) in &tiles {
+        let id = entity.id();
+        for tile in stored {
+            let at = format!("{}_{}", tile.x, tile.y);
+            let root = tree.folder(&mut folders, format!("file:{at}"), &format!("Tile {at}"), None, None);
+            let folder = tree.folder(
+                &mut folders,
+                format!("file:{at}:{}", id.kind.name()),
+                kind_label(id.kind),
+                Some(root),
+                None,
+            );
+            let others: Vec<String> = stored
+                .iter()
+                .filter(|other| *other != tile)
+                .map(|other| format!("{}_{}", other.x, other.y))
+                .collect();
+            let label = match others.is_empty() {
+                true => name_of(entity, names),
+                false => format!("{} (also in {})", name_of(entity, names), others.join(", ")),
+            };
+            tree.add(Node {
+                key: format!("file:{at}:{id}"),
+                label,
+                entity: Some(id),
+                area: None,
+                parent: Some(folder),
+                children: Vec::new(),
+            });
+        }
+        tree.entities += 1;
+    }
+    tree.roots
+        .sort_by(|a, b| tree.nodes[*a as usize].label.cmp(&tree.nodes[*b as usize].label));
+    tree
+}
+
+/// The view *By type*: a flat list a kind, each sorted by name.
+fn build_by_type(snapshot: &Snapshot, filter: &Filter, names: &HashMap<EntityId, String>) -> Tree {
+    let mut tree = Tree::default();
+    let mut folders = HashMap::new();
+    let mut kept = kept_alone(snapshot, filter, names);
+    kept.sort_by_key(|entity| (entity.id().kind, name_of(entity, names).to_lowercase()));
+    let mut counts: HashMap<Kind, usize> = HashMap::new();
+    for entity in &kept {
+        *counts.entry(entity.id().kind).or_default() += 1;
+    }
+    for entity in &kept {
+        let id = entity.id();
+        let label = format!("{} ({})", kind_label(id.kind), counts[&id.kind]);
+        let folder = tree.folder(&mut folders, format!("type:{}", id.kind.name()), &label, None, None);
+        tree.add(Node {
+            key: id.to_string(),
+            label: name_of(entity, names),
+            entity: Some(id),
+            area: None,
+            parent: Some(folder),
+            children: Vec::new(),
+        });
+        tree.entities += 1;
+    }
+    tree
+}
+
+/// The tree of the entities of `snapshot` that `filter` keeps, in its view: the main one, the map
+/// named `map`, those of the groups of `groups` under their group.
 pub fn build(
     snapshot: &Snapshot,
     filter: &Filter,
@@ -139,6 +281,11 @@ pub fn build(
     map: &str,
     groups: &uniwow_api::scene::Groups,
 ) -> Tree {
+    match filter.view {
+        View::Files => return build_files(snapshot, filter, names),
+        View::ByType => return build_by_type(snapshot, filter, names),
+        View::Main => {}
+    }
     let in_scope = |entity: &EntityRef| {
         let Some((shown, tile, tiles)) = filter.scope else {
             return true;

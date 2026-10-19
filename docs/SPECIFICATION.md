@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.9 done; milestones 10 to 14 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.10 done; milestones 10 to 14 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -8288,7 +8288,7 @@ On the user's machine, with the client and the server on it:
 the sources of AzerothCore at the commit of the user's server (bc9198ce7) and against WoWDBDefs;
 validated by the user (decision 31), with his answers to the points the proposal left to decide
 (*Decided by the user after the proposal*); its technical specification written once validated, at
-his request. Being built: steps 15.1 to 15.9 as built, at the end of this milestone.*
+his request. Being built: steps 15.1 to 15.10 as built, at the end of this milestone.*
 
 The world of milestone 9, shown, becomes a world the user edits as a scene of Unity: a window
 *Hierarchy* left of the 3D view lists what is loaded around the camera, by the places of the game;
@@ -10205,6 +10205,26 @@ listing a group's children under it, not in their place.
 Goldshire with the four under it; a click on a tent selects the group; W, the group moved as one,
 Ctrl+Z; *Make a prefab*, *Place* three times; a tent of one instance moved, *Apply*: the others follow;
 another moved, *Revert*: back; the project saved and opened again: the groups and the prefab back.
+
+#### Step 15.10, as built: the views Files and By type
+
+Built after a4257ea, on `main`. The Hierarchy chooses its view at its top: *Main*, *Files*, *By type*,
+the search, the filter of kinds, the scope and the selection shared by all three.
+
+- *Files*: the tiles of the scope, each with the chunks, the water, the buildings and the doodads
+  its file stores, by kind; an entity listed by several tiles under each, marked *(also in 33_48)*;
+  the selection unfolds to its first listing.
+- *By type*: a flat list a kind, each with its count, sorted by name.
+
+**Not in 15.10**: the rooms and the doodads of the buildings in *Files* (they are their building's
+file's: under *By type* and *Main*); the views *Server* (15.11) and *Groups & prefabs* (the prefabs at
+the bottom of the Hierarchy).
+
+**Tests**: a tile and what it stores, a doodad listed by two tiles under each, marked; the list a
+kind with its counts.
+
+**The user checks**: *Files*: a tile of Elwynn and what it stores, a doodad by the border under both
+tiles; *By type*: the doodads, the buildings, the chunks.
 
 ### Milestone 10: Lua modules (outline)
 

@@ -221,6 +221,73 @@ fn the_entities_of_a_group_are_listed_under_it_not_in_their_place() {
 }
 
 #[test]
+fn the_files_list_each_tile_with_what_it_stores_and_by_type_a_list_a_kind() {
+    use crate::tree::View;
+    let at = middle(ELWYNN);
+    // A doodad listed by two tiles: one piece of each.
+    let mut snapshot = snapshot(&[
+        (entity(EntityId::doodad(0, 7), None, "Fence", at), 87),
+        (entity(EntityId::building(0, 9), None, "Goldshire_Inn", at), 87),
+        (entity(EntityId::chunk(0, ELWYNN, [1, 1]), None, "", at), 87),
+    ]);
+    let other = TileId { x: 33, y: 48 };
+    let mut builder = PieceBuilder::new(vec![other]);
+    builder.push(entity(EntityId::doodad(0, 7), None, "Fence", at));
+    let piece = Arc::new(builder.build());
+    let key = PieceKey::tile("test", 0, other);
+    let mut slots = (*snapshot.slots).clone();
+    slots.push(Some(Arc::new(Placed {
+        key: key.clone(),
+        generation: 1,
+        bounds: piece_bounds(&piece),
+        areas: Box::new([87]),
+        piece,
+    })));
+    let mut keys = (*snapshot.keys).clone();
+    keys.insert(key, 1);
+    let mut index = (*snapshot.index).clone();
+    index
+        .get_mut(&EntityId::doodad(0, 7))
+        .unwrap()
+        .push(Listing { slot: 1, row: 0 });
+    snapshot.slots = Arc::new(slots);
+    snapshot.keys = Arc::new(keys);
+    snapshot.index = Arc::new(index);
+    let files = Filter {
+        view: View::Files,
+        ..Filter::default()
+    };
+    let tree = build(&snapshot, &files, &HashMap::new(), "", &Default::default());
+    let labels = shown(&tree);
+    assert!(labels.contains(&"Tile 32_48".to_owned()));
+    assert!(
+        labels.contains(&"    Fence #7 (also in 33_48)".to_owned()),
+        "{labels:?}"
+    );
+    assert!(
+        labels.contains(&"    Fence #7 (also in 32_48)".to_owned()),
+        "{labels:?}"
+    );
+    assert!(labels.contains(&"    Chunk 1, 1".to_owned()));
+    let by_type = Filter {
+        view: View::ByType,
+        ..Filter::default()
+    };
+    let tree = build(&snapshot, &by_type, &HashMap::new(), "", &Default::default());
+    assert_eq!(
+        shown(&tree),
+        [
+            "Chunks (1)",
+            "  Chunk 1, 1",
+            "Doodads (1)",
+            "  Fence #7",
+            "Buildings (1)",
+            "  Goldshire_Inn #9"
+        ]
+    );
+}
+
+#[test]
 fn the_rows_follow_the_folds_and_the_path_of_a_node_unfolds_to_it() {
     let snapshot = goldshire();
     let tree = build(
