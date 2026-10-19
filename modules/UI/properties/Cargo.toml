@@ -19,4 +19,4 @@ name = "Property grid"
 category = "Interface"
 # Services the module cannot work without, and services it uses when present.
 requires = []
-uses = []
+uses = ["scene"]

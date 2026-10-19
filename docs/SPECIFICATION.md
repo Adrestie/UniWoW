@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.4 done; milestones 10 to 14 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.5 done; milestones 10 to 14 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -8288,7 +8288,7 @@ On the user's machine, with the client and the server on it:
 the sources of AzerothCore at the commit of the user's server (bc9198ce7) and against WoWDBDefs;
 validated by the user (decision 31), with his answers to the points the proposal left to decide
 (*Decided by the user after the proposal*); its technical specification written once validated, at
-his request. Being built: steps 15.1 to 15.4 as built, at the end of this milestone.*
+his request. Being built: steps 15.1 to 15.5 as built, at the end of this milestone.*
 
 The world of milestone 9, shown, becomes a world the user edits as a scene of Unity: a window
 *Hierarchy* left of the 3D view lists what is loaded around the camera, by the places of the game;
@@ -10000,6 +10000,69 @@ buildings with their rooms; a search for `ElwynnTree`; a click on a row selectin
 a click in the 3D view unfolding the Hierarchy to it; the lock of Goldshire, then a click on its inn
 in the view selecting nothing; a tree renamed; the interface fluid while flying over Northrend with
 the Hierarchy open.
+
+#### Step 15.5, as built: the Inspector, its Transform, and the gestures of the kernel
+
+Built after bc10536, on `main` (the gestures first, in f7622aa).
+
+**The gestures of the kernel** (rule E2): `Context::begin_gesture(label)` and `end_gesture` on the
+interface thread. Every undoable command queued while it is open (`Context::execute`) by its module,
+or by the module a call of it serves (`Context::call` within the gesture), the calls those make in
+turn included, joins one entry of the history, its parts owned each by its module. The kernel tags
+each command and each call with its gesture as it is queued; a call of a gesture served marks the
+gesture as the one its module's commands and calls join. The entry is made once the gesture is ended
+and its calls are all answered; a gesture left open with no call waiting is closed two frames later,
+said in the log; its module failing closes it, its own changes taken out, the others' kept. Undo is
+refused while a gesture holds a change. A call of a compiled module answered on its thread is
+counted answered at once: its changes, recorded there, stay its own entries. **Tests** against the
+shell: a gesture of a change of its own and three calls, one relayed through another module, one
+entry undone and redone whole; a lone change after it its own entry; a gesture left open closed; its
+module failing in the middle, its refused calls changing nothing; twenty rounds of twelve gestures
+and lone changes at random, seeded, each one entry, all undone to nothing and redone.
+
+**The changes kept in memory**:
+
+- `doodads`: the places changed (`editing::Spot`, the position and rotation in the axes of the file,
+  the scale), by entity, laid over the placements of each tile when it is read again, its instances
+  moved through `models` by the tile placing them, the pieces of every tile listing them given to the
+  scene again, the picking following. `doodads.read` (on the calling thread) and `doodads.write` (on
+  the interface thread: position in the world, rotation, scale from 1/1024 to 63.99, a value or
+  `+n`, `-=n`, `*n`, `/n` from each one's own; one undoable command a call).
+- `buildings`: the placements changed, by unique id; a building moved or turned drawn there from the
+  next frame, its doodads placed again (their job gives the scene the building whole again), its
+  liquids poured again, its picking following. `buildings.read` and `buildings.write` (position,
+  rotation; a scale refused: the client of 3.3.5a reads none). Its bounds follow its position, not
+  yet its rotation.
+- `scene::changed_value` (the relative values), `scene::world_of_file`, `file_of_world`.
+
+**The window *Inspector*** (the module `properties`, its panel in the right area): its header (the
+name, the kind and the id, the place, the other zones its bounds reach, the tiles storing it, *Read
+only*; for several, how many of each kind); *Transform*, a field each axis, the common value or `—`, a
+value typed and confirmed by Enter given to every entity selected as one gesture over their
+providers, *Copy* and *Paste* (the Transform of the active one onto the selection, one gesture);
+*Model* (its file, a building's doodad set and name set); the raw mode (the fields as the files
+store them, one entity at a time); the lock (it keeps what it shows while the selection changes). The
+values are read by a job through `<provider>.read`, again when the selection, the registry or a write
+answered changes them; the refusals of a write are shown.
+
+**Not in 15.5, set aside**: the Transform of the doodads of a building (they belong to its file:
+changed for every placement of it, shown read only meanwhile); the raw fields editable (read only);
+the drag of a field, the change under way shown before it is confirmed (fields typed only; the
+gizmos of 15.6 bring the drag); the components declared by the modules (`scene.declare`, 15.12: the
+Inspector knows Transform, Model and the raw data); the limit of the history (`Command::bytes`, 256 MB);
+`PanelSpec::first` (the Inspector is a tab of the right area among the others); renaming as an undo
+entry.
+
+**Tests**: the gestures above; a doodad changed read back, its position moved along each axis of the
+world into the axes of its file, its rotation and scale, a scale out of range and a field it has not
+refused, laid over its tile read again; a building moved with its bounds, turned, never scaled; the
+fields of several entities showing their common value or a dash; the relative values.
+
+**The user checks**, the client and the server running: a tree of Goldshire selected, its position Z
+typed `+5` in the Inspector, then Ctrl+Z, then Ctrl+Y; twenty fence posts selected by a rectangle,
+`+2` in Z, one undo entry; the inn turned by `+45` in Y, its doodads following; the raw data of a
+doodad against what Noggit shows of it; a tree moved, the camera flown away and back, the tree still
+moved.
 
 ### Milestone 10: Lua modules (outline)
 

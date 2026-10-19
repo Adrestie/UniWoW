@@ -11,6 +11,7 @@ mod cells;
 mod cells_tests;
 mod colours;
 mod doodads;
+mod editing;
 mod entities;
 mod eye;
 #[cfg(test)]
@@ -32,7 +33,7 @@ use uniwow_api::buildings::{self as service, Eye};
 use uniwow_api::formats::{self, Building, DoodadSet, FileRef, TileId, Wdt, WmoDoodad};
 use uniwow_api::glam::Vec3;
 use uniwow_api::scene::{self, PieceKey};
-use uniwow_api::serde_json::json;
+use uniwow_api::serde_json::{Value, json};
 use uniwow_api::viewport::Demand;
 use uniwow_api::{
     Context, DockArea, JobId, JobOutcome, Module, Priority, PropertyValue, Registrar, SettingSpec, egui, liquids, log,
@@ -148,6 +149,28 @@ fn owner(directory: &str, id: u32) -> String {
 
 type Picks = Arc<Mutex<HashMap<u32, Arc<entities::Picked>>>>;
 
+/// The placements of buildings changed, each from and to: one undo entry.
+struct MoveBuildings {
+    label: String,
+    changes: Vec<(u32, Building, Building)>,
+}
+
+impl uniwow_api::Command for MoveBuildings {
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn apply(&mut self, module: &mut dyn std::any::Any) {
+        let module: &mut BuildingsModule = module.downcast_mut().expect("the buildings");
+        module.set_buildings(self.changes.iter().map(|(id, _, to)| (*id, to.clone())).collect());
+    }
+
+    fn revert(&mut self, module: &mut dyn std::any::Any) {
+        let module: &mut BuildingsModule = module.downcast_mut().expect("the buildings");
+        module.set_buildings(self.changes.iter().map(|(id, from, _)| (*id, from.clone())).collect());
+    }
+}
+
 /// The bytes of the triangles of the buildings and their doodads the picking keeps.
 const MESHES: usize = 96 << 20;
 
@@ -230,8 +253,12 @@ struct BuildingsModule {
     map_id: u32,
     /// The names of the rooms of `WMOAreaTable.dbc`, read by the first job that needs them.
     room_names: Arc<OnceLock<entities::RoomNames>>,
+    /// The buildings the user moved or turned, kept in memory, by their unique id.
+    moved: HashMap<u32, Building>,
     /// What the picking needs of each building kept, by its unique id.
     picked: Picks,
+    /// The buildings moved whose liquids are to be poured again.
+    repour: HashSet<u32>,
     wdt: Option<Result<Arc<Wdt>, String>>,
     reading_wdt: Option<JobId>,
     /// The buildings of the tiles held, the reads of tiles running, by tile and by job, the tiles
@@ -311,11 +338,31 @@ impl BuildingsModule {
         self.map = map;
     }
 
+    /// The building `id` kept, as the user changed it.
+    fn building(&self, id: u32) -> Option<Building> {
+        self.moved.get(&id).cloned().or_else(|| self.kept.get(id).cloned())
+    }
+
+    /// Places the buildings `changed` as given: kept in memory; drawn there from the next frame, their
+    /// doodads and their liquids placed again, their entities given to the scene again.
+    fn set_buildings(&mut self, changed: Vec<(u32, Building)>) {
+        for (id, building) in changed {
+            self.grounds.insert(id, budget::ground(&building));
+            lock(&self.picked).insert(id, Arc::new(entities::picked(&building, None)));
+            self.moved.insert(id, building);
+            // Their doodads placed again by their jobs, which give the scene their entities whole.
+            self.told.remove(&id);
+            self.repour.insert(id);
+        }
+        self.changed = true;
+    }
+
     /// Keeps the building `id` the tiles brought: its file wanted, read when the budget allows it.
     fn bring(&mut self, id: u32, ctx: &mut Context) {
-        let Some(building) = self.kept.get(id) else {
+        let Some(building) = self.building(id) else {
             return;
         };
+        let building = &building;
         if let Some(scene) = ctx.service(scene::SERVICE) {
             let vfs = ctx.service(vfs::SERVICE);
             let path_of = |file| vfs.as_ref().and_then(|vfs| vfs.path_of(file));
@@ -424,7 +471,7 @@ impl BuildingsModule {
         self.building_files
             .iter()
             .filter_map(|(id, file)| match &self.files.get(file)?.state {
-                FileState::Ready(read) => Some((*id, self.kept.get(*id)?.clone(), read.clone())),
+                FileState::Ready(read) => Some((*id, self.building(*id)?, read.clone())),
                 _ => None,
             })
             .collect()
@@ -639,6 +686,11 @@ impl BuildingsModule {
     /// Places the liquids of the buildings drawn of the map `directory` in the world through
     /// `service`, those of the buildings let go taken away.
     fn pour(&mut self, directory: &str, service: &dyn liquids::Liquids) {
+        for id in std::mem::take(&mut self.repour) {
+            if self.poured.remove(&id).is_some() {
+                service.clear(&owner(directory, id));
+            }
+        }
         let ready = self.ready();
         let drawn: HashSet<u32> = ready.iter().map(|(id, _, _)| *id).collect();
         self.poured.retain(|id, _| {
@@ -760,7 +812,87 @@ impl Module for BuildingsModule {
                 "Buildings",
                 vec![formats::distance_setting(DISTANCE), highlights_setting()],
             )
-            .provide(service::SERVICE, seen);
+            .provide(service::SERVICE, seen)
+            .command(
+                "buildings.read",
+                "The components of the buildings 'ids' held: Transform (position in the world, rotation in degrees \
+                 about the axes of their file; no scale, which the client of 3.3.5a does not read), Model (its file, \
+                 its doodad set and name set), and their raw data as their tile stores it.",
+                json!({ "type": "object", "properties": { "ids": { "type": "array" } }, "required": ["ids"] }),
+                json!({ "type": "object", "properties": { "entities": { "type": "array" } } }),
+            )
+            .command(
+                "buildings.write",
+                "Changes the 'field' (position or rotation) of the buildings 'ids', on the 'axis' 0, 1 or 2 or all of \
+                 them: 'change' a value, or +n, -=n, *n, /n from each one's own; kept in memory, one undo entry. The \
+                 position in the world.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "ids": { "type": "array" },
+                        "field": { "type": "string", "enum": ["position", "rotation"] },
+                        "axis": { "type": "integer" },
+                        "change": { "type": "string" }
+                    },
+                    "required": ["ids", "field", "change"]
+                }),
+                json!({ "type": "object", "properties": { "changed": { "type": "integer" }, "refused": { "type": "array" } } }),
+            );
+    }
+
+    fn on_command(&mut self, name: &str, arguments: Value, ctx: &mut Context) -> Result<Value, String> {
+        let ids: Vec<scene::EntityId> = arguments
+            .get("ids")
+            .and_then(Value::as_array)
+            .ok_or("'ids' is a list of ids")?
+            .iter()
+            .filter_map(|id| id.as_str()?.parse().ok())
+            .filter(|id: &scene::EntityId| id.kind == scene::Kind::Building)
+            .collect();
+        match name {
+            "buildings.read" => {
+                let entities: Vec<Value> = ids
+                    .iter()
+                    .filter_map(|id| Some((id, self.building(id.key as u32)?)))
+                    .map(|(id, building)| editing::read(id, &building, self.moved.contains_key(&(id.key as u32))))
+                    .collect();
+                Ok(json!({ "entities": entities }))
+            }
+            "buildings.write" => {
+                let field = arguments
+                    .get("field")
+                    .and_then(Value::as_str)
+                    .ok_or("'field' names a field")?;
+                let axis = arguments.get("axis").and_then(Value::as_u64).map(|axis| axis as usize);
+                let change = arguments
+                    .get("change")
+                    .and_then(Value::as_str)
+                    .ok_or("'change' is a value")?;
+                let mut changes = Vec::new();
+                let mut refused = Vec::new();
+                for id in &ids {
+                    let Some(building) = self.building(id.key as u32) else {
+                        refused.push(format!("{id}: not held"));
+                        continue;
+                    };
+                    match editing::written(&building, field, axis, change) {
+                        Ok(to) if to != building => changes.push((id.key as u32, building, to)),
+                        Ok(_) => {}
+                        Err(reason) => refused.push(format!("{id}: {reason}")),
+                    }
+                }
+                let changed = changes.len();
+                if changed > 0 {
+                    let label = match changed {
+                        1 => format!("Set the {field} of a building"),
+                        n => format!("Set the {field} of {n} buildings"),
+                    };
+                    ctx.execute(MoveBuildings { label, changes });
+                }
+                Ok(json!({ "changed": changed, "refused": refused }))
+            }
+            _ => Err(format!("'{name}' is not handled")),
+        }
     }
 
     fn init(&mut self, ctx: &mut Context) {

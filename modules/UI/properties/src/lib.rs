@@ -3,6 +3,8 @@
 //! rows in sight are drawn. Offered as a service; the core has it draw the `PropertyGrid` objects
 //! of every language, and writes and records the values it changes.
 
+mod inspector;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -226,16 +228,40 @@ fn number_field(ui: &mut egui::Ui, value: &mut f64, range: [f64; 2], speed: f64)
 }
 
 #[derive(Default)]
-struct PropertiesModule;
+struct PropertiesModule {
+    inspector: inspector::Inspector,
+}
 
 impl Module for PropertiesModule {
     fn register(&mut self, reg: &mut Registrar) {
         let grid: Arc<dyn PropertyGrid> = Arc::new(Grid::default());
-        reg.provide(property_grid::SERVICE, grid);
+        reg.provide(property_grid::SERVICE, grid)
+            .panel("inspector", "Inspector", uniwow_api::DockArea::Right);
+    }
+
+    fn init(&mut self, ctx: &mut uniwow_api::Context) {
+        self.inspector.init(ctx);
+    }
+
+    fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut uniwow_api::Context) {
+        self.inspector.ui(ui, ctx);
+    }
+
+    fn on_reply(
+        &mut self,
+        call: uniwow_api::CallId,
+        result: Result<uniwow_api::serde_json::Value, String>,
+        _ctx: &mut uniwow_api::Context,
+    ) {
+        self.inspector.on_reply(call, result);
+    }
+
+    fn on_job(&mut self, job: uniwow_api::JobId, outcome: uniwow_api::JobOutcome, _ctx: &mut uniwow_api::Context) {
+        self.inspector.on_job(job, outcome);
     }
 }
 
-uniwow_api::export_module!(PropertiesModule);
+uniwow_api::export_module!(PropertiesModule::default());
 
 #[cfg(test)]
 mod tests {

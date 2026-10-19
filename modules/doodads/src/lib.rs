@@ -1,8 +1,9 @@
 //! The doodads of the tiles of the map the terrain shows, around the camera of the 3D view, within
 //! a distance of their own: the placements of each tile read by a job, the nearest first, and its
-//! doodads placed through the service `models`, an owner a tile. Nothing is changed: no undo
-//! entry, no file written.
+//! doodads placed through the service `models`, an owner a tile. Their places changed by the
+//! Inspector are kept in memory and undoable (`editing`); no file is written.
 
+mod editing;
 mod placing;
 #[cfg(test)]
 mod tests;
@@ -12,13 +13,20 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use uniwow_api::formats::{self, TileId, Wdt};
+use uniwow_api::scene::EntityId;
 use uniwow_api::scene::{self, PieceKey};
+use uniwow_api::serde_json::Value;
 use uniwow_api::serde_json::json;
 use uniwow_api::{
-    Context, DockArea, JobId, JobOutcome, Module, Priority, PropertyValue, Registrar, egui, log, models, vfs, viewport,
+    Command, Context, DockArea, JobId, JobOutcome, Module, Priority, PropertyValue, Registrar, egui, log, models, vfs,
+    viewport,
 };
 
+use editing::{Listed, Spot};
 use placing::Placing;
+
+/// The id of the module, the provider of its pieces of the scene.
+const MODULE: &str = "doodads";
 
 /// The setting of how far around the camera tiles are placed, in tiles (`formats::distance_setting`).
 const DISTANCE: &str = "distance";
@@ -63,6 +71,34 @@ struct DoodadsModule {
     counts: [usize; 3],
     /// The model and the transform of each doodad of the tiles placed, for the picking.
     picked: Picked,
+    /// What the tiles placed list and the doodads changed, shared with the jobs and the reads.
+    listed: Arc<Mutex<Listed>>,
+    /// The services the changes are shown through, once there.
+    models: Option<models::Handle>,
+    scene: Option<scene::Handle>,
+    vfs: Option<Arc<dyn vfs::Vfs>>,
+}
+
+/// The places of doodads changed, each from and to: one undo entry.
+struct MoveDoodads {
+    label: String,
+    changes: Vec<(EntityId, Spot, Spot)>,
+}
+
+impl Command for MoveDoodads {
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn apply(&mut self, module: &mut dyn std::any::Any) {
+        let module: &mut DoodadsModule = module.downcast_mut().expect("the doodads");
+        module.set_spots(self.changes.iter().map(|(id, _, to)| (*id, *to)).collect());
+    }
+
+    fn revert(&mut self, module: &mut dyn std::any::Any) {
+        let module: &mut DoodadsModule = module.downcast_mut().expect("the doodads");
+        module.set_spots(self.changes.iter().map(|(id, from, _)| (*id, *from)).collect());
+    }
 }
 
 type Picked = Arc<Mutex<HashMap<TileId, Arc<placing::Placed>>>>;
@@ -103,6 +139,88 @@ impl scene::Picker for Models {
 }
 
 impl DoodadsModule {
+    /// Puts the doodads `spots` at their places: kept in memory, their instances moved, the pieces
+    /// of the tiles listing them given to the scene again.
+    fn set_spots(&mut self, spots: Vec<(EntityId, Spot)>) {
+        let mut listed = lock(&self.listed);
+        for (id, spot) in &spots {
+            listed.moved.insert(*id, *spot);
+        }
+        let unique: HashSet<u32> = spots.iter().map(|(id, _)| id.key as u32).collect();
+        let tiles: Vec<(TileId, Arc<formats::Placements>)> = listed
+            .tiles_listing(&unique)
+            .into_iter()
+            .filter_map(|tile| Some((tile, listed.tiles.get(&tile)?.clone())))
+            .collect();
+        let moved = listed.moved.clone();
+        drop(listed);
+        let Some(directory) = self.map.clone() else {
+            return;
+        };
+        let mut placing = lock(&self.placing);
+        if let Some(models) = &self.models {
+            for (id, spot) in spots.iter().filter(|(id, _)| id.again().is_none()) {
+                placing.moved(&**models, &directory, id.key, spot.transform());
+            }
+        }
+        for (tile, placements) in tiles {
+            let again = placing.differing(tile);
+            let effective = editing::moved(&placements, self.map_id, tile, &again, &moved);
+            lock(&self.picked).insert(tile, Arc::new(placing::placed(&effective)));
+            if let Some(scene) = &self.scene {
+                let vfs = self.vfs.clone();
+                let path_of = |file| vfs.as_ref().and_then(|vfs| vfs.path_of(file));
+                let piece = placing::piece(&effective, self.map_id, tile, &again, &path_of);
+                scene.publish(PieceKey::tile(MODULE, self.map_id, tile), Arc::new(piece));
+            }
+        }
+    }
+
+    /// `doodads.write`: the field of the doodads named changed as asked, one undoable command.
+    fn write(&mut self, arguments: &Value, ctx: &mut Context) -> Result<Value, String> {
+        let ids: Vec<EntityId> = arguments
+            .get("ids")
+            .and_then(Value::as_array)
+            .ok_or("'ids' is a list of ids")?
+            .iter()
+            .map(|id| id.as_str().ok_or("'ids' is a list of ids as text")?.parse())
+            .collect::<Result<_, String>>()?;
+        let field = arguments
+            .get("field")
+            .and_then(Value::as_str)
+            .ok_or("'field' names a field")?;
+        let axis = arguments.get("axis").and_then(Value::as_u64).map(|axis| axis as usize);
+        let change = arguments
+            .get("change")
+            .and_then(Value::as_str)
+            .ok_or("'change' is a value")?;
+        let mut changes = Vec::new();
+        let mut refused = Vec::new();
+        {
+            let listed = lock(&self.listed);
+            for id in &ids {
+                let Some((_, _, spot)) = listed.find(id) else {
+                    refused.push(format!("{id}: not held"));
+                    continue;
+                };
+                match editing::written(spot, field, axis, change) {
+                    Ok(to) if to != spot => changes.push((*id, spot, to)),
+                    Ok(_) => {}
+                    Err(reason) => refused.push(format!("{id}: {reason}")),
+                }
+            }
+        }
+        let changed = changes.len();
+        if changed > 0 {
+            let label = match changed {
+                1 => format!("Set the {field} of a doodad"),
+                n => format!("Set the {field} of {n} doodads"),
+            };
+            ctx.execute(MoveDoodads { label, changes });
+        }
+        Ok(json!({ "changed": changed, "refused": refused }))
+    }
+
     /// Shows the doodads of the map `map`, by its folder, or of none: what the map before held
     /// taken away.
     fn show(&mut self, map: Option<String>, models: &dyn models::Models, ctx: &mut Context) {
@@ -124,6 +242,7 @@ impl DoodadsModule {
             scene.withdraw_provider(ctx.module_id(), None);
         }
         lock(&self.picked).clear();
+        lock(&self.listed).tiles.clear();
         self.map = map;
     }
 
@@ -155,6 +274,11 @@ impl DoodadsModule {
         ) else {
             return;
         };
+        if self.models.is_none() {
+            self.models = Some(models.clone());
+            self.scene = ctx.service(scene::SERVICE);
+            self.vfs = ctx.service(vfs::SERVICE);
+        }
         let shown = ctx.editor().call("terrain.map", json!({})).ok();
         let map = shown
             .as_ref()
@@ -211,6 +335,7 @@ impl DoodadsModule {
                     scene.withdraw(PieceKey::tile(ctx.module_id(), self.map_id, *tile));
                 }
                 lock(&self.picked).remove(tile);
+                lock(&self.listed).tiles.remove(tile);
             }
             if leaving {
                 let (placing, models) = (self.placing.clone(), models.clone());
@@ -234,12 +359,13 @@ impl DoodadsModule {
             }
             let (formats, models, placing, directory) =
                 (formats.clone(), models.clone(), self.placing.clone(), directory.clone());
-            let (scene, vfs, provider, map_id, picked) = (
+            let (scene, vfs, provider, map_id, picked, listed) = (
                 ctx.service(scene::SERVICE),
                 ctx.service(vfs::SERVICE),
                 ctx.module_id().to_owned(),
                 self.map_id,
                 self.picked.clone(),
+                self.listed.clone(),
             );
             let tile = *tile;
             let label = format!("Place the doodads of the tile {} {} of {directory}", tile.x, tile.y);
@@ -251,7 +377,10 @@ impl DoodadsModule {
                 if job.is_cancelled() {
                     return Ok(false);
                 }
-                let instances = placing::instances(&read, &*models);
+                // The doodads the user changed at their places as changed.
+                let moved = lock(&listed).moved.clone();
+                let effective = editing::moved(&read, map_id, tile, &HashSet::new(), &moved);
+                let instances = placing::instances(&effective, &*models);
                 if job.is_cancelled() {
                     return Ok(false);
                 }
@@ -265,10 +394,14 @@ impl DoodadsModule {
                     };
                     (placed, again)
                 };
+                if placed {
+                    lock(&listed).tiles.insert(tile, Arc::new(read.clone()));
+                }
                 if placed && let Some(scene) = scene {
                     let path_of = |file| vfs.as_ref().and_then(|vfs| vfs.path_of(file));
-                    let piece = placing::piece(&read, map_id, tile, &again, &path_of);
-                    lock(&picked).insert(tile, Arc::new(placing::placed(&read)));
+                    let effective = editing::moved(&read, map_id, tile, &again, &moved);
+                    let piece = placing::piece(&effective, map_id, tile, &again, &path_of);
+                    lock(&picked).insert(tile, Arc::new(placing::placed(&effective)));
                     scene.publish(PieceKey::tile(&provider, map_id, tile), Arc::new(piece));
                 }
                 Ok(placed)
@@ -298,8 +431,50 @@ impl DoodadsModule {
 
 impl Module for DoodadsModule {
     fn register(&mut self, reg: &mut Registrar) {
+        let listed = self.listed.clone();
         reg.panel("doodads", "Doodads", DockArea::Right)
-            .settings("Doodads", vec![formats::distance_setting(DISTANCE)]);
+            .settings("Doodads", vec![formats::distance_setting(DISTANCE)])
+            .command_on_caller(
+                "doodads.read",
+                "The components of the doodads 'ids' held: Transform (position in the world, rotation in degrees \
+                 about the axes of their file, scale), Model, and their raw data as their tile stores it.",
+                json!({ "type": "object", "properties": { "ids": { "type": "array" } }, "required": ["ids"] }),
+                json!({ "type": "object", "properties": { "entities": { "type": "array" } } }),
+                Arc::new(move |arguments| {
+                    let ids = arguments.get("ids").and_then(Value::as_array).cloned().unwrap_or_default();
+                    let listed = lock(&listed);
+                    let entities: Vec<Value> = ids
+                        .iter()
+                        .filter_map(|id| id.as_str()?.parse::<EntityId>().ok())
+                        .filter_map(|id| editing::read(&listed, &id))
+                        .collect();
+                    Ok(json!({ "entities": entities }))
+                }),
+            )
+            .command(
+                "doodads.write",
+                "Changes the 'field' (position, rotation or scale) of the doodads 'ids', on the 'axis' 0, 1 or 2 of a \
+                 vector or all of them: 'change' a value, or +n, -=n, *n, /n from each one's own; kept in memory, \
+                 one undo entry. The position in the world.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "ids": { "type": "array" },
+                        "field": { "type": "string", "enum": ["position", "rotation", "scale"] },
+                        "axis": { "type": "integer" },
+                        "change": { "type": "string" }
+                    },
+                    "required": ["ids", "field", "change"]
+                }),
+                json!({ "type": "object", "properties": { "changed": { "type": "integer" }, "refused": { "type": "array" } } }),
+            );
+    }
+
+    fn on_command(&mut self, name: &str, arguments: Value, ctx: &mut Context) -> Result<Value, String> {
+        match name {
+            "doodads.write" => self.write(&arguments, ctx),
+            _ => Err(format!("'{name}' is not handled")),
+        }
     }
 
     fn init(&mut self, ctx: &mut Context) {

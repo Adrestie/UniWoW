@@ -782,6 +782,51 @@ impl PieceBuilder {
     }
 }
 
+/// The value `value` changed as the Inspector's `change` says: `+n`, `-=n`, `*n` and `/n` change
+/// it from its own value, any other number is the value (`-n` the value −n, not a change).
+pub fn changed_value(value: f32, change: &str) -> Result<f32, String> {
+    let change = change.trim();
+    let number = |text: &str| -> Result<f32, String> {
+        let parsed: f32 = text.trim().parse().map_err(|_| format!("'{change}' is no number"))?;
+        if parsed.is_finite() {
+            Ok(parsed)
+        } else {
+            Err(format!("'{change}' is no number"))
+        }
+    };
+    let result = if let Some(rest) = change.strip_prefix("-=") {
+        value - number(rest)?
+    } else if let Some(rest) = change.strip_prefix('+') {
+        value + number(rest)?
+    } else if let Some(rest) = change.strip_prefix('*') {
+        value * number(rest)?
+    } else if let Some(rest) = change.strip_prefix('/') {
+        let by = number(rest)?;
+        if by == 0.0 {
+            return Err("divided by 0".to_owned());
+        }
+        value / by
+    } else {
+        number(change)?
+    };
+    Ok(result)
+}
+
+/// The middle of the world in the axes of the files of the tiles.
+const FILE_ORIGIN: f32 = 32.0 * 1600.0 / 3.0;
+
+/// The point of the world of the position `position` in the axes of the files of the tiles.
+pub fn world_of_file(position: [f32; 3]) -> [f32; 3] {
+    let [x, y, z] = position;
+    [FILE_ORIGIN - z, FILE_ORIGIN - x, y]
+}
+
+/// The position in the axes of the files of the tiles of the point `point` of the world.
+pub fn file_of_world(point: [f32; 3]) -> [f32; 3] {
+    let [x, y, z] = point;
+    [FILE_ORIGIN - y, z, FILE_ORIGIN - x]
+}
+
 /// A box of `half` yards around `origin`, for an entity whose bounds are not known yet.
 pub fn box_around(origin: [f32; 3], half: f32) -> [[f32; 3]; 2] {
     [origin.map(|v| v - half), origin.map(|v| v + half)]
@@ -1125,6 +1170,22 @@ mod tests {
         let corner = [32.0 * TILE - TILE * 21.0 - 0.01, 32.0 * TILE - TILE * 30.0 - 0.01];
         assert_eq!(chunk_at(corner[0], corner[1]), Some((tile, [0, 0])));
         assert_eq!(chunk_at(40000.0, 0.0), None);
+    }
+
+    #[test]
+    fn a_value_is_changed_by_a_value_or_relative_to_its_own() {
+        assert_eq!(changed_value(10.0, "5"), Ok(5.0));
+        assert_eq!(changed_value(10.0, "-5"), Ok(-5.0), "-n is a value");
+        assert_eq!(changed_value(10.0, "+2"), Ok(12.0));
+        assert_eq!(changed_value(10.0, "-=3"), Ok(7.0));
+        assert_eq!(changed_value(10.0, "*2"), Ok(20.0));
+        assert_eq!(changed_value(10.0, "/4"), Ok(2.5));
+        assert!(changed_value(10.0, "/0").is_err());
+        assert!(changed_value(10.0, "abc").is_err());
+        assert!(changed_value(10.0, "inf").is_err());
+        let point = [100.0, 200.0, 30.0];
+        let back = world_of_file(file_of_world(point));
+        assert!((0..3).all(|axis| (back[axis] - point[axis]).abs() < 1e-3));
     }
 
     #[test]

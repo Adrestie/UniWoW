@@ -145,6 +145,22 @@ impl Placing {
             .collect()
     }
 
+    /// Moves the doodad `id` of the map `map` to `transform` in every tile listing it, its instance
+    /// placed again by the tile placing it.
+    pub fn moved(&mut self, models: &dyn Models, map: &str, id: u64, transform: uniwow_api::glam::Mat4) {
+        if map != self.map {
+            return;
+        }
+        for (tile, listed) in &mut self.tiles {
+            if let Some(instance) = listed.get_mut(&id) {
+                instance.transform = transform;
+                if self.placer.get(&id) == Some(tile) {
+                    models.change(&owner(map, *tile), &[*instance], &[]);
+                }
+            }
+        }
+    }
+
     /// The tiles placed, the doodads placed, and those the tiles list.
     pub fn counts(&self) -> [usize; 3] {
         [
