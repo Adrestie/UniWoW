@@ -101,6 +101,10 @@ pub use service::ServiceKey;
 /// Topic published by the kernel when a module fails while running. Payload: `{ "id": <module id> }`.
 pub const MODULE_FAILED_TOPIC: &str = "kernel.module_failed";
 
+/// Topic published by the kernel when a module stops, having failed or not, so that what other
+/// modules hold for it goes. Payload: `{ "id": <module id> }`.
+pub const MODULE_STOPPED_TOPIC: &str = "kernel.module_stopped";
+
 /// Topic published by the kernel when the editor goes out of sight, its main window minimised with
 /// no panel torn off from it showing, and when it comes back. Payload: `{ "minimised": <bool> }`.
 /// Delivered while it is minimised too, when neither `Module::windows_ui` nor the panels are

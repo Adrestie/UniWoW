@@ -4,6 +4,7 @@
 //! and the module `scene` keeps them in its registry, indexed by jobs, read by anyone from a
 //! snapshot shared between threads (rule T3). Nothing is changed through it: it lists.
 
+pub mod components;
 pub mod meshes;
 
 use std::collections::{BTreeMap, HashMap};
@@ -97,6 +98,11 @@ pub trait Scene: Send + Sync {
 
     /// The groups and the prefabs of the editor (step 15.9); none by default.
     fn groups(&self) -> Arc<Groups> {
+        Arc::default()
+    }
+
+    /// The components the modules declared (step 15.12), in the order they were; none by default.
+    fn components(&self) -> Arc<Vec<components::Component>> {
         Arc::default()
     }
 }

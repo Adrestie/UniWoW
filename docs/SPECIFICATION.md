@@ -1,7 +1,7 @@
 # UniWoW — Architecture and module catalogue
 
 Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.10 done, 15.11 built
-before its first connection (15.11a to 15.11c); milestones 10 to 14 outlined. Open questions in section 10.
+before its first connection (15.11a to 15.11c), 15.12a done; milestones 10 to 14 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -10314,6 +10314,44 @@ measure on the user's database.
 player by their guids; a spawn and its live listing one entity, edited where it was put and live
 where it runs, the spawn alone again once the world leaves; the quests of rows read, searched by
 title and id, given, taken, given back and kept in the project, read in the component.
+
+#### Step 15.12a, as built: the components declared by the modules of every language
+
+Built after 1b2942e, on `main`; the second half of 15.12 (the objects `HierarchyView` and
+`InspectorView`, the drawings of a module's own) is 15.12b.
+
+- **`uniwow_api::scene::components`**: a `Component` declared by a module (its name and label, the
+  kinds it fits, every one when none; its fields, each a number, a vector, a text, a boolean or a
+  colour, read only or not; the commands that read and write it), `Scene::components`, the topic
+  `scene.declared`. The kernel publishes `kernel.module_stopped` when a module stops, having failed
+  or not (`MODULE_STOPPED_TOPIC`).
+- **The commands of `scene`** for every language, on the interface thread, the caller known:
+  `scene.declare` (the caller's components, in place of those it declared before; a name taken by
+  another module refused), `scene.publish` and `scene.withdraw` (the caller's entities as a piece
+  of its own, by map and part, of the kinds of the scene). A module's declarations and pieces go
+  when it stops.
+- **The Inspector** reads each component declared that fits every entity shown through its read
+  command (`{ids}` answered by `{entities: [{id, fields}]}`), in the job of the others, and draws its
+  fields: a text field per value or axis (a value typed, or `+n`, `-=n`, `*n`, `/n`), a check box,
+  a colour as a swatch and `#rrggbb`; a value typed written through its write command in a gesture.
+- **The module `notes`** (*Notes of the editor*, in Rust, never exported): a text and a colour on
+  any entity, declared through `scene.declare` as a module of another language would, each change
+  one undo entry, kept in the project; `notes.colours` gives the Hierarchy the colour of each row
+  noted, again only when they changed.
+- **The sample C# module** declares *Tag (C#)* on the doodads (a tag and a weight) from a thread of
+  its own once the scene answers; `cs.tag_read`, `cs.tag_write` on the callers' threads, each change
+  recorded by `record_change`, undone by its `apply_change`.
+
+**Not in 15.12a**: *Add Component* and the menu of a component (*Reset*, *Remove*…); the kinds of
+entity a module declares of its own (`scene.declare` takes components only, its entities of the
+kinds of the scene); the colour edited by a picker (typed); the C# component through the C table in
+the SDK tests (the SDK's tests run on a fake table, the module itself built by CI).
+
+**Tests**: a component declared by its fields and commands, refused when wrong, fitting its kinds;
+declared again in place of its own, a name of another module refused, gone with its module; the
+entities of a module a piece of its own; the values of several entities shown together, a colour
+`#rrggbb`; a note written, coloured, taken away, kept in the project; the kernel telling the
+modules that another stopped.
 
 ### Milestone 10: Lua modules (outline)
 

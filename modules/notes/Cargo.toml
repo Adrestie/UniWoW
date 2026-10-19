@@ -1,0 +1,22 @@
+[package]
+name = "uniwow-module-notes"
+description = "Notes of the editor: a text and a colour on any entity of the scene, kept in the project, never exported"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Only uniwow-api and the crates of libs/ are allowed, here and in dev or build dependencies
+# (cargo xtask check). Any other crate, even one the runtime already contains, can make Cargo
+# rebuild the runtime and so make every module incompatible. Ask for it to be added to the runtime.
+uniwow-api.workspace = true
+
+[package.metadata.uniwow]
+id = "notes"
+name = "Notes of the editor"
+category = "World"
+# Services the module cannot work without, and services it uses when present.
+requires = []
+uses = ["scene"]

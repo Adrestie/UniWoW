@@ -5,6 +5,7 @@
 //! `scene` from any thread; one job at a time indexes them, and `scene.changed` says so once a
 //! frame at most. Nothing is changed: it lists.
 
+mod declared;
 mod groups;
 mod picking;
 mod registry;
@@ -25,7 +26,8 @@ use uniwow_api::scene::{
 use uniwow_api::serde_json::{self, Value, json};
 use uniwow_api::viewport::{Ray, Seen};
 use uniwow_api::{
-    Context, Event, JobId, JobOutcome, MODULE_FAILED_TOPIC, Module, PropertyValue, Registrar, SettingSpec, journal, log,
+    Context, Event, JobId, JobOutcome, MODULE_FAILED_TOPIC, MODULE_STOPPED_TOPIC, Module, PropertyValue, Registrar,
+    SettingSpec, journal, log,
 };
 
 use registry::{AreaSource, Change, Registry, Summary};
@@ -60,6 +62,8 @@ struct Shared {
     pickers: Mutex<HashMap<String, Arc<dyn Picker>>>,
     /// The groups and the prefabs of the editor.
     groups: Mutex<Arc<Groups>>,
+    /// The components the modules declared.
+    components: Mutex<Arc<Vec<scene::components::Component>>>,
     /// The questions to the thread of `scene`, each with where its answer goes; none until it runs.
     questions: Mutex<Option<Sender<Asked>>>,
 }
@@ -191,6 +195,10 @@ impl scene::Scene for Service {
             None => changed.remove(&id),
         };
         *names = Arc::new(changed);
+    }
+
+    fn components(&self) -> Arc<Vec<scene::components::Component>> {
+        lock(&self.0.components).clone()
     }
 
     fn groups(&self) -> Arc<Groups> {
@@ -1023,7 +1031,25 @@ impl Module for SceneModule {
             group_object(),
             json!({}),
         )
-        .command("scene.revert", "Gives the instance 'group' back the values of its prefab.", group_object(), json!({}));
+        .command("scene.revert", "Gives the instance 'group' back the values of its prefab.", group_object(), json!({}))
+        .command(
+            "scene.declare",
+            "Declares the components of the calling module, in place of those it declared before: each {name, label,              kinds (those it fits, every one when none), fields: [{name, label, kind (number, vector, text, boolean,              colour), read_only}], read, write}, the commands reading ({ids} answered by {entities: [{id, fields}]})              and writing ({ids, field, axis, change}) them. They go when the module stops.",
+            json!({ "type": "object", "properties": { "components": { "type": "array" } }, "required": ["components"] }),
+            json!({ "type": "object", "properties": { "declared": { "type": "integer" } } }),
+        )
+        .command(
+            "scene.publish",
+            "Publishes the entities of the calling module as its piece 'part' (0 by default) of the map 'map', in              place of the one before: [{id, label, origin, extra, size}]. They go when the module stops.",
+            json!({ "type": "object", "properties": { "map": { "type": "integer" }, "part": { "type": "integer" }, "entities": { "type": "array" } }, "required": ["map", "entities"] }),
+            json!({ "type": "object", "properties": { "published": { "type": "integer" } } }),
+        )
+        .command(
+            "scene.withdraw",
+            "Takes away the piece 'part' (0 by default) of the map 'map' of the calling module.",
+            json!({ "type": "object", "properties": { "map": { "type": "integer" }, "part": { "type": "integer" } }, "required": ["map"] }),
+            json!({}),
+        );
         let for_rename = self.shared.clone();
         reg.command_on_caller(
             "scene.rename",
@@ -1096,6 +1122,7 @@ impl Module for SceneModule {
         reg.settings("Scene", vec![scope_setting()])
             .provide(scene::SERVICE, service)
             .subscribe(MODULE_FAILED_TOPIC)
+            .subscribe(MODULE_STOPPED_TOPIC)
             .command_on_caller(
                 "scene.entities",
                 "The entities of the scene a filter keeps, each once, a page of them: by default those within the \
@@ -1186,7 +1213,28 @@ impl Module for SceneModule {
     }
 
     fn on_command(&mut self, name: &str, arguments: Value, ctx: &mut Context) -> Result<Value, String> {
-        self.group_command(name, &arguments, ctx)
+        let caller = ctx.command_caller().unwrap_or_else(|| ctx.module_id()).to_owned();
+        match name {
+            "scene.declare" => {
+                let after = declared::declared(&lock(&self.shared.components), &caller, &arguments)?;
+                let count = after.iter().filter(|component| component.module == caller).count();
+                *lock(&self.shared.components) = Arc::new(after);
+                ctx.publish(scene::components::DECLARED_TOPIC, json!({ "module": caller }));
+                Ok(json!({ "declared": count }))
+            }
+            "scene.publish" => {
+                let (key, piece) = (declared::key(&caller, &arguments)?, declared::piece(&arguments)?);
+                let published = piece.ids.len();
+                journal::lock(&self.shared.pending, "scene pending").push(Change::Publish(key, Arc::new(piece)));
+                Ok(json!({ "published": published }))
+            }
+            "scene.withdraw" => {
+                let key = declared::key(&caller, &arguments)?;
+                journal::lock(&self.shared.pending, "scene pending").push(Change::Withdraw(key));
+                Ok(json!({}))
+            }
+            _ => self.group_command(name, &arguments, ctx),
+        }
     }
 
     fn on_reply(&mut self, call: uniwow_api::CallId, result: Result<Value, String>, ctx: &mut Context) {
@@ -1232,11 +1280,16 @@ impl Module for SceneModule {
         Service(self.shared.clone()).select(Select::Set(vec![EntityId::group(id)]));
     }
 
-    fn on_event(&mut self, event: &Event, _ctx: &mut Context) {
-        if event.topic == MODULE_FAILED_TOPIC
+    fn on_event(&mut self, event: &Event, ctx: &mut Context) {
+        if (event.topic == MODULE_FAILED_TOPIC || event.topic == MODULE_STOPPED_TOPIC)
             && let Some(id) = event.payload.get("id").and_then(Value::as_str)
         {
             journal::lock(&self.shared.pending, "scene pending").push(Change::WithdrawProvider(id.to_owned(), None));
+            let left = declared::dropped(&lock(&self.shared.components), id);
+            if let Some(left) = left {
+                *lock(&self.shared.components) = Arc::new(left);
+                ctx.publish(scene::components::DECLARED_TOPIC, json!({ "module": id }));
+            }
         }
     }
 

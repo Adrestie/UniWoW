@@ -25,8 +25,8 @@ use uniwow_api::egui_dock::{self, DockArea, DockState, TabViewer};
 use uniwow_api::theme::{self, Level, Theme};
 use uniwow_api::{
     CallId, CommandHandler, CommandInfo, CommandSpec, Context, DIALOG_ANSWERED_TOPIC, DIALOG_COMMAND, DockArea as Area,
-    Event, Host, MINIMISED_TOPIC, MODULE_FAILED_TOPIC, Module, PropertyInfo, Registrar, RunsOn, eframe, egui, log,
-    name_error, range_error, serde_json,
+    Event, Host, MINIMISED_TOPIC, MODULE_FAILED_TOPIC, MODULE_STOPPED_TOPIC, Module, PropertyInfo, Registrar, RunsOn,
+    eframe, egui, log, name_error, range_error, serde_json,
 };
 
 use crate::capi;
@@ -435,6 +435,8 @@ impl Shell {
         self.host.views.retain(|(owner, _), _| *owner != id);
         self.sync_running();
         self.make_catalogue();
+        self.host
+            .publish(KERNEL, MODULE_STOPPED_TOPIC, serde_json::json!({ "id": id }));
     }
 
     /// Tells the bridge which modules are running: only their commands can be called.

@@ -10,7 +10,7 @@
 mod tests;
 mod tree;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use uniwow_api::scene::{self, EntityId, Kind, Select};
@@ -49,6 +49,9 @@ struct Made {
 #[derive(Default)]
 struct HierarchyModule {
     scene: Option<scene::Handle>,
+    /// The colours of the notes of the editor by entity, and their number as `notes` last gave them.
+    noted: HashMap<EntityId, egui::Color32>,
+    notes_generation: Option<u64>,
     tree: Arc<Tree>,
     made: Option<Made>,
     job: Option<(JobId, Made)>,
@@ -245,11 +248,54 @@ impl Module for HierarchyModule {
     }
 
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
+        // The panel is drawn by `HierarchyModule::ui` below.
+        self.ui(ui, ctx);
+    }
+
+    fn on_job(&mut self, job: JobId, outcome: JobOutcome, _ctx: &mut Context) {
+        if self.job.as_ref().is_none_or(|(running, _)| *running != job) {
+            return;
+        }
+        let Some((_, made)) = self.job.take() else {
+            return;
+        };
+        match outcome {
+            JobOutcome::Panicked(message) => log::error!("the tree of the Hierarchy failed: {message}"),
+            outcome => {
+                if let Some(Some(tree)) = outcome.take::<Option<Tree>>() {
+                    self.tree = Arc::new(tree);
+                    self.made = Some(made);
+                    self.folded = true;
+                }
+            }
+        }
+    }
+}
+
+impl HierarchyModule {
+    /// The colours of the notes of the editor, when `notes` runs and they changed.
+    fn read_notes(&mut self, ctx: &mut Context) {
+        let Ok(answer) = ctx
+            .editor()
+            .call("notes.colours", json!({ "generation": self.notes_generation }))
+        else {
+            self.noted.clear();
+            self.notes_generation = None;
+            return;
+        };
+        if let Some(colours) = answer["colours"].as_object() {
+            self.noted = noted_colours(colours);
+        }
+        self.notes_generation = answer["generation"].as_u64();
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, ctx: &mut Context) {
         let Some(scene) = self.scene.clone() else {
             ui.label("No scene: the module scene is not running.");
             return;
         };
         self.steer(ctx);
+        self.read_notes(ctx);
         let selection = scene.selection();
         self.follow(selection.active());
         if self.folded {
@@ -324,6 +370,9 @@ impl Module for HierarchyModule {
                         .is_some_and(|id| id.kind != Kind::Live && snapshot.live(&id).is_some());
                     let label = if live { format!("{label} ●") } else { label };
                     let mut text = egui::RichText::new(label);
+                    if let Some(colour) = node.entity.and_then(|id| self.noted.get(&id)) {
+                        text = text.color(*colour);
+                    }
                     if node.entity.is_none() {
                         text = text.strong();
                     }
@@ -440,25 +489,20 @@ impl Module for HierarchyModule {
             ctx.call(command, arguments);
         }
     }
-
-    fn on_job(&mut self, job: JobId, outcome: JobOutcome, _ctx: &mut Context) {
-        if self.job.as_ref().is_none_or(|(running, _)| *running != job) {
-            return;
-        }
-        let Some((_, made)) = self.job.take() else {
-            return;
-        };
-        match outcome {
-            JobOutcome::Panicked(message) => log::error!("the tree of the Hierarchy failed: {message}"),
-            outcome => {
-                if let Some(Some(tree)) = outcome.take::<Option<Tree>>() {
-                    self.tree = Arc::new(tree);
-                    self.made = Some(made);
-                    self.folded = true;
-                }
-            }
-        }
-    }
 }
 
 uniwow_api::export_module!(HierarchyModule::default());
+
+/// The colours of `notes.colours`, `#rrggbb` by id.
+fn noted_colours(
+    colours: &uniwow_api::serde_json::Map<String, uniwow_api::serde_json::Value>,
+) -> HashMap<EntityId, egui::Color32> {
+    colours
+        .iter()
+        .filter_map(|(id, colour)| {
+            let hex = colour.as_str()?.strip_prefix('#')?;
+            let at = |from: usize| u8::from_str_radix(hex.get(from..from + 2)?, 16).ok();
+            Some((id.parse().ok()?, egui::Color32::from_rgb(at(0)?, at(2)?, at(4)?)))
+        })
+        .collect()
+}

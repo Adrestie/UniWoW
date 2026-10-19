@@ -2226,6 +2226,7 @@ fn watcher(panics_in_shutdown: bool) -> (Box<dyn Module>, Watched) {
 impl Module for Watcher {
     fn register(&mut self, reg: &mut Registrar) {
         reg.subscribe(MINIMISED_TOPIC);
+        reg.subscribe(uniwow_api::MODULE_STOPPED_TOPIC);
         reg.command("watcher.panic", "Panics", json!({}), json!({}));
     }
 
@@ -2525,4 +2526,15 @@ fn gestures_and_lone_changes_at_random_are_each_one_entry() {
         }
         assert_eq!(values(&counted), expected, "every entry redone");
     }
+}
+
+#[test]
+fn the_modules_are_told_when_another_stops_so_that_what_they_hold_for_it_goes() {
+    let (watching, (seen, _)) = watcher(false);
+    let (stopping, _) = counter("a");
+    let mut harness = Harness::new(vec![("watching", watching), ("a", stopping)]);
+    let index = harness.index("a");
+    harness.shell.fail(index, "disabled from the Modules panel".to_owned());
+    harness.frame(RawInput::default());
+    assert_eq!(*lock(&seen), [json!({ "id": "a" })]);
 }

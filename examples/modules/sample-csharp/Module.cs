@@ -2,7 +2,9 @@
 // and a spin box, each change one undo entry, with its history painted as bars; a curve edited in
 // the curve editor of the module curves, each change one undo entry; the counter's value as an
 // animatable property, with a sequence of its own shown in a dopesheet, whose changes the editor
-// records; a table of 100,000 rows, a tree and a property grid of the cube; and two commands.
+// records; a table of 100,000 rows, a tree and a property grid of the cube; two commands; and a
+// component of the scene on the doodads, a tag and a weight, declared through scene.declare, read and
+// written through its commands, each change one undo entry.
 
 using System.Runtime.InteropServices;
 using System.Text;
@@ -65,7 +67,21 @@ static unsafe class Module
             "Four threads paint the cube twice each; the two paints of each thread are one undo entry.",
             """{"type":"object"}""", """{"type":"object","properties":{"threads":{"type":"integer"}}}""",
             PaintFromThreads),
+        new("cs.tag_read", "The tags and weights of the doodads 'ids', the component Tag (C#).",
+            """{"type":"object","properties":{"ids":{"type":"array"}},"required":["ids"]}""",
+            """{"type":"object","properties":{"entities":{"type":"array"}}}""", ReadTags),
+        new("cs.tag_write", "Changes the 'field' (tag, weight) of the doodads 'ids' to 'change'; one undo entry.",
+            """{"type":"object","properties":{"ids":{"type":"array"},"field":{"type":"string"},"change":{"type":"string"}},"required":["ids","field","change"]}""",
+            """{"type":"object","properties":{"changed":{"type":"integer"},"refused":{"type":"array"}}}""", WriteTags),
     ];
+
+    // The component Tag (C#): a tag and a weight by doodad, read and written on the callers'
+    // threads, applied again by ApplyChange on the module's.
+    static readonly Dictionary<string, (string Tag, double Weight)> tags = [];
+    static readonly object tagsLock = new();
+
+    const string TagDeclaration =
+        """{"components":[{"name":"cs.tag","label":"Tag (C#)","kinds":["doodad"],"fields":[{"name":"tag","label":"Tag","kind":"text"},{"name":"weight","label":"Weight","kind":"number"}],"read":"cs.tag_read","write":"cs.tag_write"}]}""";
 
     static readonly PanelDeclaration[] Panels =
         [new("counter", "Counter", Area.Right), new("data", "Data", Area.Right)];
@@ -85,6 +101,7 @@ static unsafe class Module
             Editor.DeclareProperty("value", "Value", ValueKind.Number, Minimum, Maximum, [counter], WriteValue);
             Editor.Describe(info, "sample-csharp", "0.1.0", Commands, Panels, ApplyChange);
             described = true;
+            new Thread(DeclareTag) { IsBackground = true }.Start();
             return 0;
         }
         catch (Exception failure)
@@ -293,6 +310,19 @@ static unsafe class Module
             throw new InvalidOperationException("asked to fail by its check box");
         }
         using var document = JsonDocument.Parse(value);
+        if (document.RootElement.TryGetProperty("tags", out var recordedTags))
+        {
+            lock (tagsLock)
+            {
+                tags.Clear();
+                foreach (var entry in recordedTags.EnumerateObject())
+                {
+                    tags[entry.Name] = (entry.Value.GetProperty("tag").GetString() ?? "",
+                                        entry.Value.GetProperty("weight").GetDouble());
+                }
+            }
+            return;
+        }
         if (document.RootElement.TryGetProperty("curve", out var recorded))
         {
             committedCurve = recorded.GetRawText();
@@ -418,5 +448,116 @@ static unsafe class Module
         {
             Editor.Log(LogLevel.Error, Invariant($"C# thread {index + 1}: {failure.Message}"));
         }
+    }
+
+    // Declares the component Tag (C#) once the scene answers: it may start after this module.
+    static void DeclareTag()
+    {
+        for (int attempt = 0; attempt < 40; attempt++)
+        {
+            var (ok, answer) = Editor.Call("scene.declare", TagDeclaration);
+            if (ok)
+            {
+                return;
+            }
+            if (attempt == 39)
+            {
+                Editor.Log(LogLevel.Warning, "the component Tag (C#) is not declared: " + answer);
+            }
+            Thread.Sleep(500);
+        }
+    }
+
+    static List<string> Ids(JsonElement root)
+    {
+        if (!root.TryGetProperty("ids", out var ids) || ids.ValueKind != JsonValueKind.Array)
+        {
+            throw new ArgumentException("'ids' is a list of ids");
+        }
+        return [.. ids.EnumerateArray().Select(id => id.GetString() ?? throw new ArgumentException("an id is text"))];
+    }
+
+    static string Text(string text) => JsonEncodedText.Encode(text).ToString();
+
+    static string Fields(string tag, double weight) =>
+        "{\"tag\":\"" + Text(tag) + "\",\"weight\":" + Invariant($"{weight}") + "}";
+
+    // The tags as JSON, for an undo entry; the lock is held.
+    static string TagsJson()
+    {
+        var entries = tags.OrderBy(entry => entry.Key, StringComparer.Ordinal)
+            .Select(entry => "\"" + Text(entry.Key) + "\":" + Fields(entry.Value.Tag, entry.Value.Weight));
+        return "{\"tags\":{" + string.Join(",", entries) + "}}";
+    }
+
+    static string ReadTags(string arguments)
+    {
+        using var document = JsonDocument.Parse(arguments);
+        var ids = Ids(document.RootElement);
+        lock (tagsLock)
+        {
+            var entities = ids.Select(id =>
+            {
+                var (tag, weight) = tags.TryGetValue(id, out var held) ? held : ("", 0.0);
+                return "{\"id\":\"" + Text(id) + "\",\"fields\":" + Fields(tag, weight) + "}";
+            });
+            return "{\"entities\":[" + string.Join(",", entities) + "]}";
+        }
+    }
+
+    // A number changed as the Inspector types it: a value, or +n, -=n, *n, /n.
+    static double Changed(double value, string change)
+    {
+        static double Number(string text) =>
+            double.TryParse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var number) && double.IsFinite(number)
+                ? number
+                : throw new ArgumentException($"'{text}' is not a number");
+        change = change.Trim();
+        double result = change switch
+        {
+            _ when change.StartsWith("-=") => value - Number(change[2..]),
+            _ when change.StartsWith('+') => value + Number(change[1..]),
+            _ when change.StartsWith('*') => value * Number(change[1..]),
+            _ when change.StartsWith('/') => value / Number(change[1..]),
+            _ => Number(change),
+        };
+        return double.IsFinite(result) ? result : throw new ArgumentException("the weight is not finite");
+    }
+
+    static string WriteTags(string arguments)
+    {
+        using var document = JsonDocument.Parse(arguments);
+        var root = document.RootElement;
+        var ids = Ids(root);
+        string field = root.GetProperty("field").GetString() ?? "";
+        string change = root.GetProperty("change").GetString() ?? "";
+        lock (tagsLock)
+        {
+            string before = TagsJson();
+            foreach (var id in ids)
+            {
+                var (tag, weight) = tags.TryGetValue(id, out var held) ? held : ("", 0.0);
+                switch (field)
+                {
+                    case "tag": tag = change; break;
+                    case "weight": weight = Changed(weight, change); break;
+                    default: throw new ArgumentException($"the tag has no field '{field}'");
+                }
+                if (tag.Length == 0 && weight == 0)
+                {
+                    tags.Remove(id);
+                }
+                else
+                {
+                    tags[id] = (tag, weight);
+                }
+            }
+            string after = TagsJson();
+            if (before != after)
+            {
+                Editor.RecordChange("set the " + field + " (C#)", before, after);
+            }
+        }
+        return Invariant($$"""{"changed":{{ids.Count}},"refused":[]}""");
     }
 }

@@ -6,11 +6,14 @@
 //! value that differs shows `—`. *Model* and the raw data as the files store them, read only. The
 //! values are read by a job through the commands `<provider>.read`, again when the selection or the
 //! registry changes; written through `<provider>.write`. The Inspector can be locked on what it shows.
+//! The components the modules declare (step 15.12) are read and written through the commands they
+//! name, drawn from their fields.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use uniwow_api::egui;
+use uniwow_api::scene::components::{Component, FieldKind};
 use uniwow_api::scene::{self, EntityId, Kind, Snapshot};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::{CallId, Context, JobId, JobOutcome, log};
@@ -85,11 +88,13 @@ pub fn text(shown: &Shown) -> String {
 pub struct Read {
     pub values: Vec<(EntityId, Value)>,
     pub refused: Vec<String>,
+    /// The components declared that fit the entities, each with their fields by entity.
+    pub declared: Vec<(Component, Vec<(EntityId, Value)>)>,
 }
 
 /// Reads the components of `ids` through the read commands of their providers, `snapshot` naming
 /// them.
-fn read(editor: &uniwow_api::Editor, snapshot: &Snapshot, ids: &[EntityId]) -> Read {
+fn read(editor: &uniwow_api::Editor, snapshot: &Snapshot, ids: &[EntityId], components: &[Component]) -> Read {
     let mut by_provider: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for id in ids {
         if let Some(entity) = snapshot.editable(id) {
@@ -115,7 +120,51 @@ fn read(editor: &uniwow_api::Editor, snapshot: &Snapshot, ids: &[EntityId]) -> R
             Err(reason) => out.refused.push(format!("{provider}: {reason}")),
         }
     }
+    let texts: Vec<String> = ids.iter().map(ToString::to_string).collect();
+    for component in components
+        .iter()
+        .filter(|component| component.fits(ids.iter().map(|id| id.kind)))
+    {
+        match editor.call(&component.read, json!({ "ids": texts })) {
+            Ok(answer) => out.declared.push((component.clone(), fields_of(&answer))),
+            Err(reason) => out.refused.push(format!("{}: {reason}", component.label)),
+        }
+    }
     out
+}
+
+/// The fields of each entity of an answer of a component's read command.
+fn fields_of(answer: &Value) -> Vec<(EntityId, Value)> {
+    answer["entities"]
+        .as_array()
+        .map(|entities| {
+            entities
+                .iter()
+                .filter_map(|entity| Some((entity["id"].as_str()?.parse().ok()?, entity["fields"].clone())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The value of `field` (on `axis` of a vector) common to `values` as text, `—` when they differ,
+/// nothing when none has it.
+pub fn common(values: &[(EntityId, Value)], field: &str, axis: Option<usize>) -> Option<String> {
+    let mut shown = values.iter().map(|(_, fields)| {
+        let value = &fields[field];
+        match axis {
+            Some(axis) => value.get(axis).cloned().unwrap_or(Value::Null),
+            None => value.clone(),
+        }
+    });
+    let first = shown.next().filter(|value| !value.is_null())?;
+    Some(if shown.all(|value| value == first) {
+        match &first {
+            Value::Number(number) => text(&Shown::Same(number.as_f64().unwrap_or(0.0))),
+            other => plain(other),
+        }
+    } else {
+        "—".to_owned()
+    })
 }
 
 /// What the Inspector read for, so that it reads again only when it changes.
@@ -124,6 +173,8 @@ struct ReadFor {
     ids: Vec<EntityId>,
     registry: u64,
     written: u64,
+    /// The declarations read with, by their address.
+    declared: usize,
 }
 
 #[derive(Default)]
@@ -169,10 +220,12 @@ impl Inspector {
     /// The values read again by a job when what they are read for changed.
     fn steer(&mut self, scene: &scene::Handle, ids: &[EntityId], ctx: &mut Context) {
         let snapshot = scene.snapshot();
+        let components = scene.components();
         let wanted = ReadFor {
             ids: ids.to_vec(),
             registry: snapshot.generation,
             written: self.written,
+            declared: Arc::as_ptr(&components) as usize,
         };
         if self.read_for.as_ref() == Some(&wanted)
             || self.reading.as_ref().is_some_and(|(_, running)| *running == wanted)
@@ -185,7 +238,7 @@ impl Inspector {
         let editor = ctx.editor();
         let ids = ids.to_vec();
         let job = ctx.spawn("Read the components of the selection", move |_| {
-            read(&editor, &snapshot, &ids)
+            read(&editor, &snapshot, &ids, &components)
         });
         self.reading = Some((job, wanted));
     }
@@ -323,6 +376,7 @@ impl Inspector {
                 self.transform_ui(ui, &values, unread, &ids, &snapshot, ctx);
                 self.model_ui(ui, &values);
                 self.quests_ui(ui, &values, ctx);
+                self.declared_ui(ui, &read, &ids, ctx);
             }
             for refused in read.refused.iter().chain(&self.said) {
                 ui.colored_label(ui.visuals().warn_fg_color, refused);
@@ -563,6 +617,99 @@ impl Inspector {
         });
     }
 
+    /// The components the modules declared that fit the entities shown, each field drawn by its
+    /// kind; a value typed written through the component's command, in a gesture.
+    fn declared_ui(&mut self, ui: &mut egui::Ui, read: &Read, ids: &[EntityId], ctx: &mut Context) {
+        for (component, values) in &read.declared {
+            let values: Vec<(EntityId, Value)> = values.iter().filter(|(id, _)| ids.contains(id)).cloned().collect();
+            let mut writes: Vec<(String, Option<usize>, String)> = Vec::new();
+            egui::CollapsingHeader::new(&component.label)
+                .id_salt(("declared", &component.module, &component.name))
+                .default_open(true)
+                .show(ui, |ui| {
+                    if values.is_empty() {
+                        ui.label(egui::RichText::new("Nothing read.").weak());
+                        return;
+                    }
+                    egui::Grid::new(("inspector declared", &component.name))
+                        .num_columns(4)
+                        .show(ui, |ui| {
+                            for field in &component.fields {
+                                ui.label(&field.label);
+                                let writable = !field.read_only && component.write.is_some();
+                                let axes: Vec<Option<usize>> = if field.kind == FieldKind::Vector {
+                                    vec![Some(0), Some(1), Some(2)]
+                                } else {
+                                    vec![None]
+                                };
+                                for axis in axes {
+                                    let value = common(&values, &field.name, axis).unwrap_or_default();
+                                    if field.kind == FieldKind::Boolean {
+                                        let mut checked = value == "true";
+                                        let response =
+                                            ui.add_enabled(writable, egui::Checkbox::without_text(&mut checked));
+                                        if response.changed() {
+                                            writes.push((field.name.clone(), None, checked.to_string()));
+                                        }
+                                        continue;
+                                    }
+                                    if field.kind == FieldKind::Colour {
+                                        let colour = values[0].1[&field.name].as_array().map(|rgb| {
+                                            let at = |i: usize| {
+                                                (rgb.get(i).and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 1.0)
+                                                    * 255.0) as u8
+                                            };
+                                            egui::Color32::from_rgb(at(0), at(1), at(2))
+                                        });
+                                        let (rect, _) =
+                                            ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                                        ui.painter().rect_filled(
+                                            rect,
+                                            2.0,
+                                            colour.unwrap_or(egui::Color32::TRANSPARENT),
+                                        );
+                                    }
+                                    if !writable {
+                                        ui.label(value);
+                                        continue;
+                                    }
+                                    let key =
+                                        format!("{}/{}/{}:{axis:?}", component.module, component.name, field.name);
+                                    let shown = if field.kind == FieldKind::Colour {
+                                        colour_text(&values, &field.name)
+                                    } else {
+                                        value
+                                    };
+                                    let typed = self.typed.entry(key).or_insert_with(|| shown.clone());
+                                    let response = ui.add(egui::TextEdit::singleline(typed).desired_width(70.0));
+                                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                        if *typed != shown && typed.trim() != "—" {
+                                            writes.push((field.name.clone(), axis, typed.trim().to_owned()));
+                                        }
+                                    } else if !response.has_focus() && *typed != shown {
+                                        *typed = shown;
+                                    }
+                                }
+                                ui.end_row();
+                            }
+                        });
+                });
+            if let (Some(command), false) = (&component.write, writes.is_empty()) {
+                let written: Vec<String> = values.iter().map(|(id, _)| id.to_string()).collect();
+                let gesture = ctx.begin_gesture(&format!("Set the {}", writes[0].0));
+                for (field, axis, change) in writes {
+                    let call = ctx.call(
+                        command,
+                        json!({ "ids": written, "field": field, "axis": axis, "change": change }),
+                    );
+                    self.waiting.push(call);
+                }
+                ctx.end_gesture(gesture);
+                self.said.clear();
+            }
+        }
+    }
+
     fn raw_ui(&self, ui: &mut egui::Ui, values: &[(EntityId, Value)]) {
         let [(id, value)] = values else {
             ui.label(egui::RichText::new("The raw data of one entity read at a time.").weak());
@@ -596,6 +743,21 @@ fn quests_found(answer: &Value) -> Vec<(u64, String)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The colour `field` common to `values` as `#rrggbb`, `—` when they differ.
+fn colour_text(values: &[(EntityId, Value)], field: &str) -> String {
+    let hex = |value: &Value| {
+        let rgb = value.as_array()?;
+        let at = |i: usize| Some((rgb.get(i)?.as_f64()?.clamp(0.0, 1.0) * 255.0).round() as u8);
+        Some(format!("#{:02x}{:02x}{:02x}", at(0)?, at(1)?, at(2)?))
+    };
+    let mut colours = values.iter().map(|(_, fields)| hex(&fields[field]));
+    match colours.next().flatten() {
+        Some(first) if colours.all(|colour| colour.as_deref() == Some(&first)) => first,
+        Some(_) => "—".to_owned(),
+        None => String::new(),
+    }
 }
 
 /// A value of JSON as text, a string without its quotes.
@@ -635,6 +797,24 @@ mod tests {
             "the building has none"
         );
         assert_eq!(shown(&read, "transform", "colour", None), Shown::Missing);
+        let fields = [
+            (
+                EntityId::doodad(0, 1),
+                json!({ "tag": "lamp", "weight": 2.0, "at": [1.0, 2.0, 3.0], "colour": [1.0, 0.5, 0.0] }),
+            ),
+            (
+                EntityId::doodad(0, 2),
+                json!({ "tag": "lamp", "weight": 3.0, "at": [1.0, 5.0, 3.0], "colour": [1.0, 0.5, 0.0] }),
+            ),
+        ];
+        assert_eq!(common(&fields, "tag", None).as_deref(), Some("lamp"));
+        assert_eq!(common(&fields, "weight", None).as_deref(), Some("—"));
+        assert_eq!(common(&fields, "at", Some(0)).as_deref(), Some("1"));
+        assert_eq!(common(&fields, "at", Some(1)).as_deref(), Some("—"));
+        assert_eq!(common(&fields, "missing", None), None);
+        assert_eq!(colour_text(&fields, "colour"), "#ff8000");
+        let answer = json!({ "entities": [{ "id": "doodad:0:1", "fields": { "tag": "lamp" } }, { "id": "x" }] });
+        assert_eq!(fields_of(&answer), [(EntityId::doodad(0, 1), json!({ "tag": "lamp" }))]);
         assert_eq!(text(&Shown::Same(2.5)), "2.5");
         assert_eq!(text(&Shown::Same(90.0)), "90");
         assert_eq!(text(&Shown::Mixed), "—");
