@@ -87,6 +87,13 @@ pub trait Scene: Send + Sync {
     /// The map the terrain shows, the tile of the camera and the scope in tiles around it, within
     /// which the views list the entities; none without a map or a camera.
     fn scope(&self) -> Option<(u32, TileId, u32)>;
+
+    /// How far along `ray` it meets the ground, the terrain of the full tiles, whatever its locks;
+    /// none where it does not, or by default.
+    fn ground(&self, ray: &Ray) -> Option<f32> {
+        let _ = ray;
+        None
+    }
 }
 
 /// The locks of the scene.

@@ -37,20 +37,181 @@ impl Spot {
     }
 }
 
-/// What the tiles placed list as read, and the doodads the user changed, shared by the jobs, the
-/// commands and the reads.
+/// A doodad the user created, kept in memory: its model and its place.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Added {
+    pub file: FileRef,
+    pub spot: Spot,
+}
+
+impl Added {
+    /// Its tile, the one under its origin.
+    pub fn tile(&self) -> Option<TileId> {
+        let [x, y, _] = scene::world_of_file(self.spot.position);
+        scene::chunk_at(x, y).map(|(tile, _)| tile)
+    }
+
+    pub fn doodad(&self, unique_id: u32) -> Doodad {
+        Doodad {
+            file: self.file.clone(),
+            unique_id,
+            position: self.spot.position,
+            rotation: self.spot.rotation,
+            scale: self.spot.scale,
+            flags: 0,
+        }
+    }
+}
+
+/// The changes the user made to the doodads, kept in memory: those moved, created and deleted, and
+/// the unique ids given, by map.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Changes {
+    pub moved: HashMap<EntityId, Spot>,
+    pub added: HashMap<EntityId, Added>,
+    pub deleted: HashSet<EntityId>,
+    /// The highest unique id given by map, so that none is given twice.
+    pub given: HashMap<u32, u32>,
+}
+
+impl Changes {
+    /// The changes as the project keeps them, in order.
+    pub fn section(&self) -> Value {
+        let file = |file: &FileRef| match file {
+            FileRef::Path(path) => json!(path),
+            FileRef::Id(id) => json!(id),
+        };
+        let mut moved: Vec<(&EntityId, &Spot)> = self.moved.iter().collect();
+        moved.sort_by_key(|(id, _)| **id);
+        let mut added: Vec<(&EntityId, &Added)> = self.added.iter().collect();
+        added.sort_by_key(|(id, _)| **id);
+        let mut deleted: Vec<&EntityId> = self.deleted.iter().collect();
+        deleted.sort();
+        let given: std::collections::BTreeMap<String, u32> =
+            self.given.iter().map(|(map, id)| (map.to_string(), *id)).collect();
+        json!({
+            "moved": moved.into_iter().map(|(id, spot)| json!({
+                "id": id.to_string(), "position": spot.position, "rotation": spot.rotation, "scale": spot.scale,
+            })).collect::<Vec<_>>(),
+            "created": added.into_iter().map(|(id, added)| json!({
+                "id": id.to_string(), "file": file(&added.file), "position": added.spot.position,
+                "rotation": added.spot.rotation, "scale": added.spot.scale,
+            })).collect::<Vec<_>>(),
+            "deleted": deleted.into_iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "unique ids given": given,
+        })
+    }
+
+    /// The changes the project kept in `section`; none for none.
+    pub fn of_section(section: &Value) -> Self {
+        let vector = |value: &Value| -> Option<[f32; 3]> {
+            let values = value.as_array()?;
+            Some([0, 1, 2].map(|at| values.get(at).and_then(Value::as_f64).unwrap_or(0.0) as f32))
+        };
+        let spot = |entry: &Value| -> Option<Spot> {
+            Some(Spot {
+                position: vector(&entry["position"])?,
+                rotation: vector(&entry["rotation"])?,
+                scale: entry["scale"].as_f64()? as f32,
+            })
+        };
+        let list = |key: &str| section[key].as_array().cloned().unwrap_or_default();
+        let id = |entry: &Value| entry["id"].as_str()?.parse::<EntityId>().ok();
+        Self {
+            moved: list("moved")
+                .iter()
+                .filter_map(|entry| Some((id(entry)?, spot(entry)?)))
+                .collect(),
+            added: list("created")
+                .iter()
+                .filter_map(|entry| {
+                    let file = match &entry["file"] {
+                        Value::String(path) => FileRef::Path(path.clone()),
+                        Value::Number(number) => FileRef::Id(number.as_u64()? as u32),
+                        _ => return None,
+                    };
+                    Some((
+                        id(entry)?,
+                        Added {
+                            file,
+                            spot: spot(entry)?,
+                        },
+                    ))
+                })
+                .collect(),
+            deleted: list("deleted")
+                .iter()
+                .filter_map(|id| id.as_str()?.parse().ok())
+                .collect(),
+            given: section["unique ids given"]
+                .as_object()
+                .map(|given| {
+                    given
+                        .iter()
+                        .filter_map(|(map, id)| Some((map.parse().ok()?, id.as_u64()? as u32)))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Every entity these changes name.
+    pub fn ids(&self) -> Vec<EntityId> {
+        let mut ids: Vec<EntityId> = self
+            .moved
+            .keys()
+            .chain(self.added.keys())
+            .chain(self.deleted.iter())
+            .copied()
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+}
+
+/// What the tiles placed list as read, the doodads the user changed, and the highest unique id the
+/// tiles of each map hold, shared by the jobs, the commands and the reads.
 #[derive(Default)]
 pub struct Listed {
     pub tiles: HashMap<TileId, Arc<Placements>>,
     pub moved: HashMap<EntityId, Spot>,
+    pub added: HashMap<EntityId, Added>,
+    pub deleted: HashSet<EntityId>,
+    pub given: HashMap<u32, u32>,
+    pub highest: HashMap<u32, u32>,
 }
 
 impl Listed {
+    /// The changes, to lay over a tile read.
+    pub fn changes(&self) -> Changes {
+        Changes {
+            moved: self.moved.clone(),
+            added: self.added.clone(),
+            deleted: self.deleted.clone(),
+            given: self.given.clone(),
+        }
+    }
+
+    /// A unique id of the map `map` none of its tiles holds and none given before; none while the
+    /// highest of its tiles is not read.
+    pub fn give(&mut self, map: u32) -> Option<u32> {
+        let highest = *self.highest.get(&map)?;
+        let given = self.given.entry(map).or_insert(0);
+        *given = (*given).max(highest) + 1;
+        Some(*given)
+    }
+
     /// The doodad `id` as a tile lists it: the tile it is listed again by, else the first listing
-    /// it; and its place, as changed.
+    /// it; and its place, as changed. A doodad created is listed by the tile under it; one deleted
+    /// is none.
     pub fn find(&self, id: &EntityId) -> Option<(TileId, Doodad, Spot)> {
-        if id.kind != Kind::Doodad {
+        if id.kind != Kind::Doodad || self.deleted.contains(id) {
             return None;
+        }
+        if let Some(added) = self.added.get(id) {
+            let spot = self.moved.get(id).copied().unwrap_or(added.spot);
+            return Some((added.tile()?, added.doodad(id.key as u32), spot));
         }
         let unique = id.key as u32;
         let found = |tile: TileId| {
@@ -70,7 +231,8 @@ impl Listed {
         Some((tile, doodad, spot))
     }
 
-    /// The tiles listing the unique ids `unique`, in their order.
+    /// The tiles held listing the unique ids `unique`, or under a doodad created among them, in
+    /// their order.
     pub fn tiles_listing(&self, unique: &HashSet<u32>) -> Vec<TileId> {
         let mut tiles: Vec<TileId> = self
             .tiles
@@ -82,10 +244,44 @@ impl Listed {
                     .any(|doodad| unique.contains(&doodad.unique_id))
             })
             .map(|(tile, _)| *tile)
+            .chain(
+                self.added
+                    .iter()
+                    .filter(|(id, _)| unique.contains(&(id.key as u32)))
+                    .filter_map(|(_, added)| added.tile())
+                    .filter(|tile| self.tiles.contains_key(tile)),
+            )
             .collect();
         tiles.sort();
+        tiles.dedup();
         tiles
     }
+}
+
+/// `placements` of the tile `tile` of the map `map` as the user changed them: the doodads deleted
+/// left out, those created under it added, those moved at their places; those of `again` by their
+/// ids listed again.
+pub fn edited(placements: &Placements, map: u32, tile: TileId, again: &HashSet<u64>, changes: &Changes) -> Placements {
+    let id_of = |unique: u32| match again.contains(&u64::from(unique)) {
+        true => EntityId::doodad_again(map, unique, tile),
+        false => EntityId::doodad(map, unique),
+    };
+    let mut placements = placements.clone();
+    if !changes.deleted.is_empty() {
+        placements
+            .doodads
+            .retain(|doodad| !changes.deleted.contains(&id_of(doodad.unique_id)));
+    }
+    let mut created: Vec<(&EntityId, &Added)> = changes
+        .added
+        .iter()
+        .filter(|(id, added)| id.map == map && added.tile() == Some(tile) && !changes.deleted.contains(id))
+        .collect();
+    created.sort_by_key(|(id, _)| **id);
+    for (id, added) in created {
+        placements.doodads.push(added.doodad(id.key as u32));
+    }
+    moved(&placements, map, tile, again, &changes.moved)
 }
 
 /// `placements` of the tile `tile` of the map `map`, the doodads the user changed at their places
@@ -201,6 +397,70 @@ mod tests {
             scale: 1.0,
             flags: 0,
         }
+    }
+
+    #[test]
+    fn a_doodad_created_and_one_deleted_are_laid_over_their_tile_and_ids_are_never_given_twice() {
+        let tile = TileId { x: 32, y: 48 };
+        let placements = Placements {
+            doodads: vec![doodad(7, [100.0, 20.0, 200.0]), doodad(8, [1.0, 2.0, 3.0])],
+            buildings: Vec::new(),
+        };
+        let mut listed = Listed::default();
+        listed.tiles.insert(tile, Arc::new(placements.clone()));
+        assert_eq!(listed.give(0), None, "the highest of the map not read yet");
+        listed.highest.insert(0, 500);
+        let given = listed.give(0).unwrap();
+        assert_eq!((given, listed.give(0).unwrap()), (501, 502));
+        // Created within the tile: its file's X in its column, its Z in its row.
+        let id = EntityId::doodad(0, given);
+        let mut spot = Spot::of(&placements.doodads[0]);
+        spot.position = [17_166.0, 20.0, 25_700.0];
+        listed.added.insert(
+            id,
+            Added {
+                file: FileRef::Path("World\\Oak.m2".to_owned()),
+                spot,
+            },
+        );
+        listed.deleted.insert(EntityId::doodad(0, 8));
+        let edited = edited(&placements, 0, tile, &HashSet::new(), &listed.changes());
+        let ids: Vec<u32> = edited.doodads.iter().map(|doodad| doodad.unique_id).collect();
+        assert_eq!(ids, [7, 501]);
+        assert_eq!(listed.find(&id).unwrap().0, tile);
+        assert!(listed.find(&EntityId::doodad(0, 8)).is_none(), "deleted");
+        assert_eq!(listed.tiles_listing(&HashSet::from([501])), [tile]);
+    }
+
+    #[test]
+    fn the_changes_are_kept_in_the_project_and_read_back() {
+        let mut changes = Changes::default();
+        let spot = Spot {
+            position: [1.0, 2.0, 3.0],
+            rotation: [0.0, 45.0, 0.0],
+            scale: 1.5,
+        };
+        changes.moved.insert(EntityId::doodad(0, 7), spot);
+        changes.added.insert(
+            EntityId::doodad(0, 501),
+            Added {
+                file: FileRef::Path("World\\Oak.m2".to_owned()),
+                spot,
+            },
+        );
+        changes.added.insert(
+            EntityId::doodad(0, 502),
+            Added {
+                file: FileRef::Id(12345),
+                spot,
+            },
+        );
+        changes.deleted.insert(EntityId::doodad(0, 8));
+        changes.given.insert(0, 502);
+        let section = changes.section();
+        assert_eq!(Changes::of_section(&section), changes);
+        assert_eq!(Changes::of_section(&Value::Null), Changes::default());
+        assert_eq!(changes.ids().len(), 4);
     }
 
     #[test]

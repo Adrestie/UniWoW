@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.7 done; milestones 10 to 14 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.8 done; milestones 10 to 14 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -8288,7 +8288,7 @@ On the user's machine, with the client and the server on it:
 the sources of AzerothCore at the commit of the user's server (bc9198ce7) and against WoWDBDefs;
 validated by the user (decision 31), with his answers to the points the proposal left to decide
 (*Decided by the user after the proposal*); its technical specification written once validated, at
-his request. Being built: steps 15.1 to 15.7 as built, at the end of this milestone.*
+his request. Being built: steps 15.1 to 15.8 as built, at the end of this milestone.*
 
 The world of milestone 9, shown, becomes a world the user edits as a scene of Unity: a window
 *Hierarchy* left of the 3D view lists what is loaded around the camera, by the places of the game;
@@ -10133,6 +10133,40 @@ kinds locked at first; the kernel's tests of the closing with the project in it.
 another moved, Goldshire locked; the editor closed (the project listed unsaved if changed since, *Save*)
 and opened again, *File > Open recent*: the tree's name, its place and the lock back; the file
 `uniwow-project.json` read in a text editor; *File > New project*: the tree back where its tile has it.
+
+#### Step 15.8, as built: create, duplicate, delete (the doodads)
+
+Built after 7fd3e6e, on `main`.
+
+- **The unique ids given**: when a map is shown, a job reads the placements of all its tiles (over
+  `parallel_for`) and keeps the highest unique id of its doodads and buildings; a doodad created takes
+  the next one above it and above every one given before on that map, never twice: those given are
+  kept in the project. While the job runs, creating is refused with *a moment*.
+- **The doodads** keep, besides those moved, those created (their model and place) and those deleted,
+  in memory, laid over their tiles as they are read (`editing::edited`), their instances placed or
+  taken away through `models`, their pieces given to the scene again. `doodads.create` (a model by its
+  path or FileDataID, a position in the world, a rotation and a scale), `doodads.duplicate` (the same
+  model at the same place, new ids, in the order given), `doodads.delete`: each one undoable command;
+  in the project's section with the ids given.
+- **In the 3D view** (`scene-tools`): *Create…* in the toolbar opens a window listing the models of the
+  archives (`.m2`, `.mdx`, listed once by a job), searched as typed, the first 500 shown; a click
+  creates one on the ground in the middle of the view (`Scene::ground`, the terrain of the full tiles
+  whatever its locks; 30 yards ahead without ground), selected. **Ctrl+D** duplicates the doodads
+  selected, the new ones selected in their place; **Delete** deletes them; each one gesture, one undo
+  entry, while the pointer is over the view.
+
+**Not in 15.8, set aside**: creating, duplicating and deleting buildings (their files read, their
+doodads and liquids, the building doodads changing their file: a later step); the menu *Create* of the
+Hierarchy and NPCs and game objects (15.11); the ids given checked again against the files before
+anything is written (the export, a later work).
+
+**Tests**: an id never given while the highest of the map is not read, then above it and above those
+given; a doodad created laid over its tile, one deleted left out, the tile of a created one found; the
+changes (moved, created, deleted, ids given) kept in the project and read back.
+
+**The user checks**: *Create…*, `oak`, a model clicked: an oak on the ground in the middle of the
+view, selected; Ctrl+D five times (in place: moved with W after each); one deleted with Delete; Ctrl+Z
+back through all of them; the project saved, the editor closed and opened again on it: the oaks back.
 
 ### Milestone 10: Lua modules (outline)
 

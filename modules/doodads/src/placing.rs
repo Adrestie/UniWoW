@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use uniwow_api::formats::{FileRef, Placements, TileId, placement};
+use uniwow_api::formats::{Doodad, FileRef, Placements, TileId, placement};
 use uniwow_api::models::{Geosets, Instance, Look, Models, Motion};
 use uniwow_api::scene::{self, Entity, EntityId, Piece, PieceBuilder, flags};
 
@@ -13,26 +13,31 @@ pub fn owner(directory: &str, tile: TileId) -> String {
     format!("doodads/{directory}/{}_{}", tile.x, tile.y)
 }
 
+/// The instance of `doodad`: the model of its file with its own textures and all its submeshes.
+pub fn instance(doodad: &Doodad, models: &dyn Models) -> Instance {
+    Instance {
+        id: u64::from(doodad.unique_id),
+        look: models.look(&Look {
+            model: doodad.file.clone(),
+            textures: Vec::new(),
+            geosets: Geosets::All,
+        }),
+        transform: placement(doodad.position, doodad.rotation, doodad.scale),
+        alpha: 1.0,
+        motion: Motion::Standing,
+        interior: None,
+    }
+}
+
 /// The instances of the doodads of a tile, by their unique id: of a doodad the tile lists twice,
-/// the first. Each the model of its file with its own textures and all its submeshes.
+/// the first.
 pub fn instances(placements: &Placements, models: &dyn Models) -> Vec<Instance> {
     let mut seen = HashSet::new();
     placements
         .doodads
         .iter()
         .filter(|doodad| seen.insert(doodad.unique_id))
-        .map(|doodad| Instance {
-            id: u64::from(doodad.unique_id),
-            look: models.look(&Look {
-                model: doodad.file.clone(),
-                textures: Vec::new(),
-                geosets: Geosets::All,
-            }),
-            transform: placement(doodad.position, doodad.rotation, doodad.scale),
-            alpha: 1.0,
-            motion: Motion::Standing,
-            interior: None,
-        })
+        .map(|doodad| instance(doodad, models))
         .collect()
 }
 
@@ -159,6 +164,34 @@ impl Placing {
                 }
             }
         }
+    }
+
+    /// Puts `instance`, a doodad the user created, in the tile `tile` placed, its instance placed
+    /// there unless another tile placed it first.
+    pub fn put(&mut self, models: &dyn Models, map: &str, tile: TileId, instance: Instance) {
+        if map != self.map {
+            return;
+        }
+        let Some(listed) = self.tiles.get_mut(&tile) else {
+            return;
+        };
+        listed.insert(instance.id, instance);
+        if *self.placer.entry(instance.id).or_insert(tile) == tile {
+            models.change(&owner(map, tile), &[instance], &[]);
+        }
+    }
+
+    /// Takes the doodad `id` away from every tile placed.
+    pub fn remove(&mut self, models: &dyn Models, map: &str, id: u64) {
+        if map != self.map {
+            return;
+        }
+        for (tile, listed) in &mut self.tiles {
+            if listed.remove(&id).is_some() && self.placer.get(&id) == Some(tile) {
+                models.change(&owner(map, *tile), &[], &[id]);
+            }
+        }
+        self.placer.remove(&id);
     }
 
     /// The tiles placed, the doodads placed, and those the tiles list.

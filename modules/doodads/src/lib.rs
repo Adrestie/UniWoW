@@ -73,10 +73,106 @@ struct DoodadsModule {
     picked: Picked,
     /// What the tiles placed list and the doodads changed, shared with the jobs and the reads.
     listed: Arc<Mutex<Listed>>,
+    /// The job reading the highest unique id of the map shown.
+    highest_job: Option<JobId>,
     /// The services the changes are shown through, once there.
     models: Option<models::Handle>,
     scene: Option<scene::Handle>,
     vfs: Option<Arc<dyn vfs::Vfs>>,
+}
+
+/// The ids of `arguments`, as text.
+fn read_ids(arguments: &Value) -> Result<Vec<EntityId>, String> {
+    arguments
+        .get("ids")
+        .and_then(Value::as_array)
+        .ok_or("'ids' is a list of ids")?
+        .iter()
+        .map(|id| id.as_str().ok_or("'ids' is a list of ids as text")?.parse())
+        .collect()
+}
+
+/// Doodads created: one undo entry.
+struct Create {
+    label: String,
+    items: Vec<(EntityId, editing::Added)>,
+}
+
+impl Command for Create {
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn apply(&mut self, module: &mut dyn std::any::Any) {
+        let module: &mut DoodadsModule = module.downcast_mut().expect("the doodads");
+        let mut listed = lock(&module.listed);
+        for (id, added) in &self.items {
+            listed.added.insert(*id, added.clone());
+            listed.deleted.remove(id);
+        }
+        drop(listed);
+        module.refresh(self.items.iter().map(|(id, _)| *id).collect(), Vec::new());
+    }
+
+    fn revert(&mut self, module: &mut dyn std::any::Any) {
+        let module: &mut DoodadsModule = module.downcast_mut().expect("the doodads");
+        let mut listed = lock(&module.listed);
+        for (id, _) in &self.items {
+            listed.added.remove(id);
+            listed.moved.remove(id);
+        }
+        drop(listed);
+        let tiles = self.items.iter().filter_map(|(_, added)| added.tile()).collect();
+        module.refresh(self.items.iter().map(|(id, _)| *id).collect(), tiles);
+    }
+}
+
+/// Doodads deleted, those the user had created with what they were: one undo entry.
+struct Delete {
+    label: String,
+    items: Vec<(EntityId, Option<editing::Added>)>,
+}
+
+impl Command for Delete {
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn apply(&mut self, module: &mut dyn std::any::Any) {
+        let module: &mut DoodadsModule = module.downcast_mut().expect("the doodads");
+        let mut listed = lock(&module.listed);
+        let mut tiles = Vec::new();
+        for (id, added) in &self.items {
+            match added {
+                Some(added) => {
+                    tiles.extend(added.tile());
+                    listed.added.remove(id);
+                }
+                None => {
+                    listed.deleted.insert(*id);
+                }
+            }
+        }
+        drop(listed);
+        module.refresh(self.items.iter().map(|(id, _)| *id).collect(), tiles);
+    }
+
+    fn revert(&mut self, module: &mut dyn std::any::Any) {
+        let module: &mut DoodadsModule = module.downcast_mut().expect("the doodads");
+        let mut listed = lock(&module.listed);
+        for (id, added) in &self.items {
+            match added {
+                Some(added) => {
+                    listed.added.insert(*id, added.clone());
+                }
+                None => {
+                    listed.deleted.remove(id);
+                }
+            }
+        }
+        drop(listed);
+        module.refresh(self.items.iter().map(|(id, _)| *id).collect(), Vec::new());
+    }
 }
 
 /// The places of doodads changed, each from and to: one undo entry.
@@ -142,30 +238,59 @@ impl DoodadsModule {
     /// Puts the doodads `spots` at their places: kept in memory, their instances moved, the pieces
     /// of the tiles listing them given to the scene again.
     fn set_spots(&mut self, spots: Vec<(EntityId, Spot)>) {
-        let mut listed = lock(&self.listed);
-        for (id, spot) in &spots {
-            listed.moved.insert(*id, *spot);
+        {
+            let mut listed = lock(&self.listed);
+            for (id, spot) in &spots {
+                listed.moved.insert(*id, *spot);
+            }
         }
-        let unique: HashSet<u32> = spots.iter().map(|(id, _)| id.key as u32).collect();
-        let tiles: Vec<(TileId, Arc<formats::Placements>)> = listed
-            .tiles_listing(&unique)
+        self.refresh(spots.iter().map(|(id, _)| *id).collect(), Vec::new());
+    }
+
+    /// Shows the doodads `ids` as the changes have them: placed, moved, or taken away; the pieces of
+    /// the tiles listing them, and of `tiles` besides, given to the scene again.
+    fn refresh(&mut self, ids: Vec<EntityId>, tiles: Vec<TileId>) {
+        let listed = lock(&self.listed);
+        let unique: HashSet<u32> = ids.iter().map(|id| id.key as u32).collect();
+        let mut touched = listed.tiles_listing(&unique);
+        touched.extend(tiles.into_iter().filter(|tile| listed.tiles.contains_key(tile)));
+        touched.sort();
+        touched.dedup();
+        let tiles: Vec<(TileId, Arc<formats::Placements>)> = touched
             .into_iter()
             .filter_map(|tile| Some((tile, listed.tiles.get(&tile)?.clone())))
             .collect();
-        let moved = listed.moved.clone();
+        let found: Vec<_> = ids
+            .iter()
+            .map(|id| (*id, listed.find(id), listed.added.contains_key(id)))
+            .collect();
+        let changes = listed.changes();
         drop(listed);
         let Some(directory) = self.map.clone() else {
             return;
         };
         let mut placing = lock(&self.placing);
         if let Some(models) = &self.models {
-            for (id, spot) in spots.iter().filter(|(id, _)| id.again().is_none()) {
-                placing.moved(&**models, &directory, id.key, spot.transform());
+            for (id, found, added) in found
+                .iter()
+                .filter(|(id, _, _)| id.again().is_none() && id.map == self.map_id)
+            {
+                match found {
+                    Some((tile, doodad, spot)) if *added => {
+                        let mut placed = doodad.clone();
+                        placed.position = spot.position;
+                        placed.rotation = spot.rotation;
+                        placed.scale = spot.scale;
+                        placing.put(&**models, &directory, *tile, placing::instance(&placed, &**models));
+                    }
+                    Some((_, _, spot)) => placing.moved(&**models, &directory, id.key, spot.transform()),
+                    None => placing.remove(&**models, &directory, id.key),
+                }
             }
         }
         for (tile, placements) in tiles {
             let again = placing.differing(tile);
-            let effective = editing::moved(&placements, self.map_id, tile, &again, &moved);
+            let effective = editing::edited(&placements, self.map_id, tile, &again, &changes);
             lock(&self.picked).insert(tile, Arc::new(placing::placed(&effective)));
             if let Some(scene) = &self.scene {
                 let vfs = self.vfs.clone();
@@ -174,6 +299,102 @@ impl DoodadsModule {
                 scene.publish(PieceKey::tile(MODULE, self.map_id, tile), Arc::new(piece));
             }
         }
+    }
+
+    /// A unique id for a doodad created on the map shown.
+    fn give(&self) -> Result<EntityId, String> {
+        lock(&self.listed)
+            .give(self.map_id)
+            .map(|unique| EntityId::doodad(self.map_id, unique))
+            .ok_or_else(|| "the unique ids of the map are still being read: a moment".to_owned())
+    }
+
+    /// `doodads.create`: a doodad of the model `file` at `position` in the world, one undoable
+    /// command; its id.
+    fn create(&mut self, arguments: &Value, ctx: &mut Context) -> Result<Value, String> {
+        let file = match &arguments["file"] {
+            Value::String(path) if !path.is_empty() => formats::FileRef::Path(path.clone()),
+            Value::Number(id) => formats::FileRef::Id(id.as_u64().ok_or("'file' is a path or a FileDataID")? as u32),
+            _ => return Err("'file' is a path or a FileDataID".to_owned()),
+        };
+        let vector = |key: &str, default: [f32; 3]| -> Result<[f32; 3], String> {
+            match arguments.get(key) {
+                None | Some(Value::Null) => Ok(default),
+                Some(value) => {
+                    let values = value.as_array().ok_or(format!("'{key}' is [x, y, z]"))?;
+                    let number = |at: usize| values.get(at).and_then(Value::as_f64).map(|v| v as f32);
+                    match (number(0), number(1), number(2)) {
+                        (Some(x), Some(y), Some(z)) => Ok([x, y, z]),
+                        _ => Err(format!("'{key}' is [x, y, z]")),
+                    }
+                }
+            }
+        };
+        let world = vector("position", [f32::NAN; 3])?;
+        if world.iter().any(|value| !value.is_finite()) {
+            return Err("'position' is [x, y, z] in the world".to_owned());
+        }
+        let spot = Spot {
+            position: scene::file_of_world(world),
+            rotation: vector("rotation", [0.0; 3])?,
+            scale: arguments["scale"].as_f64().unwrap_or(1.0) as f32,
+        };
+        let id = self.give()?;
+        ctx.execute(Create {
+            label: "Create a doodad".to_owned(),
+            items: vec![(id, editing::Added { file, spot })],
+        });
+        Ok(json!({ "ids": [id.to_string()] }))
+    }
+
+    /// `doodads.duplicate`: the doodads `ids` again, the same at the same place, one undoable
+    /// command; the new ids, in the order of `ids`.
+    fn duplicate(&mut self, arguments: &Value, ctx: &mut Context) -> Result<Value, String> {
+        let ids = read_ids(arguments)?;
+        let mut items = Vec::new();
+        for id in &ids {
+            let Some((_, doodad, spot)) = lock(&self.listed).find(id) else {
+                continue;
+            };
+            let new = self.give()?;
+            items.push((
+                new,
+                editing::Added {
+                    file: doodad.file,
+                    spot,
+                },
+            ));
+        }
+        let new: Vec<String> = items.iter().map(|(id, _)| id.to_string()).collect();
+        if !items.is_empty() {
+            let label = match items.len() {
+                1 => "Duplicate a doodad".to_owned(),
+                n => format!("Duplicate {n} doodads"),
+            };
+            ctx.execute(Create { label, items });
+        }
+        Ok(json!({ "ids": new }))
+    }
+
+    /// `doodads.delete`: the doodads `ids` taken away, one undoable command.
+    fn delete(&mut self, arguments: &Value, ctx: &mut Context) -> Result<Value, String> {
+        let ids = read_ids(arguments)?;
+        let listed = lock(&self.listed);
+        let items: Vec<(EntityId, Option<editing::Added>)> = ids
+            .iter()
+            .filter(|id| listed.find(id).is_some())
+            .map(|id| (*id, listed.added.get(id).cloned()))
+            .collect();
+        drop(listed);
+        let deleted = items.len();
+        if deleted > 0 {
+            let label = match deleted {
+                1 => "Delete a doodad".to_owned(),
+                n => format!("Delete {n} doodads"),
+            };
+            ctx.execute(Delete { label, items });
+        }
+        Ok(json!({ "deleted": deleted }))
     }
 
     /// `doodads.write`: the field of the doodads named changed as asked, one undoable command.
@@ -308,6 +529,45 @@ impl DoodadsModule {
                 return;
             }
         };
+        // The highest unique id of the map, read once over all its tiles, before any is given.
+        if self.highest_job.is_none() && !lock(&self.listed).highest.contains_key(&self.map_id) {
+            let (formats, read, listed, map_id, tiles) = (
+                formats.clone(),
+                directory.clone(),
+                self.listed.clone(),
+                self.map_id,
+                (0..4096u32)
+                    .filter(|index| wdt.tiles[*index as usize])
+                    .map(|index| TileId {
+                        x: index % 64,
+                        y: index / 64,
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            self.highest_job = Some(
+                ctx.spawn(&format!("Read the highest unique id of {directory}"), move |_| {
+                    let highest = std::sync::atomic::AtomicU32::new(0);
+                    uniwow_api::parallel_for(tiles.len(), 8, |range| {
+                        for tile in &tiles[range] {
+                            let Ok(Some(placements)) = formats.placements(&read, tile.x, tile.y) else {
+                                continue;
+                            };
+                            let most = placements
+                                .doodads
+                                .iter()
+                                .map(|doodad| doodad.unique_id)
+                                .chain(placements.buildings.iter().map(|building| building.unique_id))
+                                .max()
+                                .unwrap_or(0);
+                            highest.fetch_max(most, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    });
+                    lock(&listed)
+                        .highest
+                        .insert(map_id, highest.load(std::sync::atomic::Ordering::Relaxed));
+                }),
+            );
+        }
         let Some(frame) = view.wait_frame(self.frame, Duration::ZERO) else {
             return;
         };
@@ -377,9 +637,9 @@ impl DoodadsModule {
                 if job.is_cancelled() {
                     return Ok(false);
                 }
-                // The doodads the user changed at their places as changed.
-                let moved = lock(&listed).moved.clone();
-                let effective = editing::moved(&read, map_id, tile, &HashSet::new(), &moved);
+                // The doodads as the user changed them.
+                let changes = lock(&listed).changes();
+                let effective = editing::edited(&read, map_id, tile, &HashSet::new(), &changes);
                 let instances = placing::instances(&effective, &*models);
                 if job.is_cancelled() {
                     return Ok(false);
@@ -399,7 +659,7 @@ impl DoodadsModule {
                 }
                 if placed && let Some(scene) = scene {
                     let path_of = |file| vfs.as_ref().and_then(|vfs| vfs.path_of(file));
-                    let effective = editing::moved(&read, map_id, tile, &again, &moved);
+                    let effective = editing::edited(&read, map_id, tile, &again, &changes);
                     let piece = placing::piece(&effective, map_id, tile, &again, &path_of);
                     lock(&picked).insert(tile, Arc::new(placing::placed(&effective)));
                     scene.publish(PieceKey::tile(&provider, map_id, tile), Arc::new(piece));
@@ -452,6 +712,31 @@ impl Module for DoodadsModule {
                 }),
             )
             .command(
+                "doodads.create",
+                "Creates a doodad of the model 'file' (a path in the archives, or a FileDataID) at 'position' in the \
+                 world, turned by 'rotation' (degrees about the axes of the files), scaled by 'scale'; a unique id of \
+                 the map above those its tiles hold; kept in memory, one undo entry. Its id.",
+                json!({
+                    "type": "object",
+                    "properties": { "file": {}, "position": { "type": "array" }, "rotation": { "type": "array" }, "scale": { "type": "number" } },
+                    "required": ["file", "position"]
+                }),
+                json!({ "type": "object", "properties": { "ids": { "type": "array" } } }),
+            )
+            .command(
+                "doodads.duplicate",
+                "Duplicates the doodads 'ids': new doodads of the same model at the same places, new unique ids; one \
+                 undo entry. The new ids, in the order of 'ids'.",
+                json!({ "type": "object", "properties": { "ids": { "type": "array" } }, "required": ["ids"] }),
+                json!({ "type": "object", "properties": { "ids": { "type": "array" } } }),
+            )
+            .command(
+                "doodads.delete",
+                "Deletes the doodads 'ids', in memory; one undo entry.",
+                json!({ "type": "object", "properties": { "ids": { "type": "array" } }, "required": ["ids"] }),
+                json!({ "type": "object", "properties": { "deleted": { "type": "integer" } } }),
+            )
+            .command(
                 "doodads.write",
                 "Changes the 'field' (position, rotation or scale) of the doodads 'ids', on the 'axis' 0, 1 or 2 of a \
                  vector or all of them: 'change' a value, or +n, -=n, *n, /n from each one's own; kept in memory, \
@@ -471,58 +756,34 @@ impl Module for DoodadsModule {
     }
 
     fn project_section(&self) -> Option<Value> {
-        let listed = lock(&self.listed);
-        let mut moved: Vec<(&EntityId, &Spot)> = listed.moved.iter().collect();
-        moved.sort_by_key(|(id, _)| **id);
-        let moved: Vec<Value> = moved
-            .into_iter()
-            .map(|(id, spot)| {
-                json!({ "id": id.to_string(), "position": spot.position, "rotation": spot.rotation, "scale": spot.scale })
-            })
-            .collect();
-        Some(json!({ "moved": moved }))
+        Some(lock(&self.listed).changes().section())
     }
 
     fn open_project(&mut self, section: Option<Value>, _ctx: &mut Context) {
-        let vector = |value: &Value| -> Option<[f32; 3]> {
-            let values = value.as_array()?;
-            Some([0, 1, 2].map(|at| values.get(at).and_then(Value::as_f64).unwrap_or(0.0) as f32))
-        };
-        let opened: HashMap<EntityId, Spot> = section
-            .as_ref()
-            .and_then(|section| section["moved"].as_array())
-            .cloned()
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|entry| {
-                let id: EntityId = entry["id"].as_str()?.parse().ok()?;
-                let spot = Spot {
-                    position: vector(&entry["position"])?,
-                    rotation: vector(&entry["rotation"])?,
-                    scale: entry["scale"].as_f64()? as f32,
-                };
-                Some((id, spot))
-            })
-            .collect();
-        // Those moved before and not in the project put back where their tiles have them.
-        let mut spots: Vec<(EntityId, Spot)> = {
+        let opened = editing::Changes::of_section(&section.unwrap_or_default());
+        // The changes before and those of the project shown as the project has them.
+        let (mut ids, tiles) = {
             let mut listed = lock(&self.listed);
-            let before: Vec<EntityId> = listed.moved.keys().copied().collect();
-            listed.moved.clear();
-            before
-                .into_iter()
-                .filter(|id| !opened.contains_key(id))
-                .filter_map(|id| Some((id, listed.find(&id)?.2)))
-                .collect()
+            let before = listed.changes();
+            let tiles: Vec<TileId> = before.added.values().filter_map(editing::Added::tile).collect();
+            listed.moved = opened.moved.clone();
+            listed.added = opened.added.clone();
+            listed.deleted = opened.deleted.clone();
+            listed.given = opened.given.clone();
+            (before.ids(), tiles)
         };
-        spots.extend(opened.iter().map(|(id, spot)| (*id, *spot)));
-        self.set_spots(spots);
-        lock(&self.listed).moved = opened;
+        ids.extend(opened.ids());
+        ids.sort();
+        ids.dedup();
+        self.refresh(ids, tiles);
     }
 
     fn on_command(&mut self, name: &str, arguments: Value, ctx: &mut Context) -> Result<Value, String> {
         match name {
             "doodads.write" => self.write(&arguments, ctx),
+            "doodads.create" => self.create(&arguments, ctx),
+            "doodads.duplicate" => self.duplicate(&arguments, ctx),
+            "doodads.delete" => self.delete(&arguments, ctx),
             _ => Err(format!("'{name}' is not handled")),
         }
     }
@@ -576,6 +837,13 @@ impl Module for DoodadsModule {
     }
 
     fn on_job(&mut self, job: JobId, outcome: JobOutcome, _ctx: &mut Context) {
+        if self.highest_job == Some(job) {
+            self.highest_job = None;
+            if let JobOutcome::Panicked(message) = outcome {
+                log::error!("the highest unique id of the map was not read: {message}");
+            }
+            return;
+        }
         if self.settling.remove(&job) {
             if let JobOutcome::Panicked(message) = outcome {
                 log::error!("the doodads of the tiles left could not be taken away: {message}");

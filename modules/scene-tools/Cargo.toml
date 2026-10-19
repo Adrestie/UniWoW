@@ -19,4 +19,4 @@ name = "Scene tools"
 category = "World"
 # Services the module cannot work without, and services it uses when present.
 requires = []
-uses = ["scene", "viewport"]
+uses = ["scene", "viewport", "vfs"]

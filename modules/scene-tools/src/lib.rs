@@ -103,6 +103,19 @@ struct Shared {
     /// The gizmo shown, and the changes of the drags let go, for the module to write.
     mode: std::sync::Mutex<gizmo::Mode>,
     writes: std::sync::Mutex<Vec<(String, Writes)>>,
+    /// Whether the window creating a doodad is asked for.
+    create: AtomicBool,
+}
+
+/// The window creating a doodad: the models of the archives, found by a job, and the text searched.
+#[derive(Default)]
+struct Creating {
+    open: bool,
+    text: String,
+    models: Option<Arc<Vec<String>>>,
+    listing: Option<uniwow_api::JobId>,
+    found: Vec<String>,
+    searched: Option<String>,
 }
 
 fn held<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -299,6 +312,13 @@ impl Tool for Selecting {
             ui.selectable_value(&mut mode, shown, label).on_hover_text(hint);
         }
         *held(&self.shared.mode) = mode;
+        if ui
+            .button("Create…")
+            .on_hover_text("A doodad of a model of the archives, on the ground in the middle of the view")
+            .clicked()
+        {
+            self.shared.create.store(true, Ordering::Relaxed);
+        }
         ui.separator();
         ui.label("Rectangle:");
         egui::ComboBox::from_id_salt("scene-tools rectangle")
@@ -382,13 +402,144 @@ impl Tool for Selecting {
 struct SceneTools {
     shared: Arc<Shared>,
     frame: Option<Hotkey>,
-    /// The hotkeys of the gizmos: Move, Rotate, Scale.
+    /// The hotkeys of the gizmos: Move, Rotate, Scale; of Delete and Duplicate.
     gizmos: Vec<(Hotkey, gizmo::Mode)>,
+    delete: Option<Hotkey>,
+    duplicate: Option<Hotkey>,
+    /// The calls creating doodads, whose answers are selected.
+    creating_calls: Vec<uniwow_api::CallId>,
+    creating: Creating,
     scene: Option<scene::Handle>,
     view: Option<viewport::Handle>,
 }
 
 impl SceneTools {
+    /// Calls `command` (`doodads.delete`, `doodads.duplicate`) for the doodads selected, one gesture;
+    /// the doodads made selected once answered.
+    fn on_selection(&mut self, command: &str, label: &str, ctx: &mut Context) {
+        let Some(scene) = &self.scene else {
+            return;
+        };
+        let (selection, snapshot) = (scene.selection(), scene.snapshot());
+        let ids: Vec<String> = selection
+            .ids
+            .iter()
+            .filter(|id| snapshot.get(id).is_some_and(|entity| entity.provider() == "doodads"))
+            .map(ToString::to_string)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let gesture = ctx.begin_gesture(label);
+        let call = ctx.call(command, json!({ "ids": ids }));
+        ctx.end_gesture(gesture);
+        if command == "doodads.duplicate" {
+            self.creating_calls.push(call);
+        } else {
+            scene.select(Select::Clear);
+        }
+    }
+
+    /// Creates a doodad of the model `file` on the ground in the middle of the view, or 30 yards in
+    /// front of the eye.
+    fn create(&mut self, file: &str, ctx: &mut Context) {
+        let (Some(scene), Some(view)) = (&self.scene, &self.view) else {
+            return;
+        };
+        let Some(seen) = view.last_view() else {
+            return;
+        };
+        let Some(ray) = seen.ray([seen.size[0] / 2.0, seen.size[1] / 2.0]) else {
+            return;
+        };
+        let distance = scene.ground(&ray).unwrap_or(30.0);
+        let at = ray.at(distance).to_array();
+        let gesture = ctx.begin_gesture("Create a doodad");
+        let call = ctx.call("doodads.create", json!({ "file": file, "position": at }));
+        ctx.end_gesture(gesture);
+        self.creating_calls.push(call);
+    }
+
+    /// The window creating a doodad: a search over the models of the archives, listed by a job.
+    fn creating_ui(&mut self, egui: &egui::Context, ctx: &mut Context) {
+        if self.shared.create.swap(false, Ordering::Relaxed) {
+            self.creating.open = true;
+        }
+        if !self.creating.open {
+            return;
+        }
+        if self.creating.models.is_none()
+            && self.creating.listing.is_none()
+            && let Some(vfs) = ctx.service(uniwow_api::vfs::SERVICE)
+        {
+            self.creating.listing = Some(ctx.spawn("List the models of the archives", move |_| {
+                let mut models: Vec<String> = vfs
+                    .files_under("")
+                    .into_iter()
+                    .filter(|path| {
+                        let lower = path.to_ascii_lowercase();
+                        lower.ends_with(".m2") || lower.ends_with(".mdx")
+                    })
+                    .collect();
+                models.sort_by_key(|path| path.to_ascii_lowercase());
+                Arc::new(models)
+            }));
+        }
+        let mut open = self.creating.open;
+        let mut chosen = None;
+        egui::Window::new("Create a doodad")
+            .open(&mut open)
+            .default_size([420.0, 360.0])
+            .show(egui, |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.creating.text)
+                        .hint_text("Search a model: ElwynnTree, Barrel…"),
+                );
+                let Some(models) = self.creating.models.clone() else {
+                    ui.label("Listing the models of the archives…");
+                    return;
+                };
+                let text = self.creating.text.trim().to_lowercase();
+                if self.creating.searched.as_ref() != Some(&text) {
+                    self.creating.found = models
+                        .iter()
+                        .filter(|path| text.is_empty() || path.to_lowercase().contains(&text))
+                        .take(500)
+                        .cloned()
+                        .collect();
+                    self.creating.searched = Some(text);
+                }
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} shown, of {} models",
+                        self.creating.found.len(),
+                        models.len()
+                    ))
+                    .weak(),
+                );
+                egui::ScrollArea::vertical().auto_shrink(false).show_rows(
+                    ui,
+                    18.0,
+                    self.creating.found.len(),
+                    |ui, range| {
+                        for path in &self.creating.found[range] {
+                            if ui
+                                .selectable_label(false, path)
+                                .on_hover_text("Created on the ground in the middle of the view")
+                                .clicked()
+                            {
+                                chosen = Some(path.clone());
+                            }
+                        }
+                    },
+                );
+            });
+        self.creating.open = open;
+        if let Some(path) = chosen {
+            self.create(&path, ctx);
+        }
+    }
+
     /// Writes the changes of the drags let go into the selection, each one gesture over the
     /// providers of its entities.
     fn write(&self, ctx: &mut Context) {
@@ -468,6 +619,18 @@ impl Module for SceneTools {
             HotkeyKind::Press,
             Keys::key(egui::Key::F),
         ));
+        self.delete = Some(reg.hotkey(
+            "delete",
+            "Delete the doodads selected",
+            HotkeyKind::Press,
+            Keys::key(egui::Key::Delete),
+        ));
+        self.duplicate = Some(reg.hotkey(
+            "duplicate",
+            "Duplicate the doodads selected",
+            HotkeyKind::Press,
+            Keys::ctrl(egui::Key::D),
+        ));
         self.gizmos = vec![
             (
                 reg.hotkey("move", "Move gizmo", HotkeyKind::Press, Keys::key(egui::Key::W)),
@@ -484,12 +647,34 @@ impl Module for SceneTools {
         ];
     }
 
+    fn on_job(&mut self, job: uniwow_api::JobId, outcome: uniwow_api::JobOutcome, _ctx: &mut Context) {
+        if self.creating.listing == Some(job) {
+            self.creating.listing = None;
+            self.creating.models = Some(outcome.take::<Arc<Vec<String>>>().unwrap_or_default());
+        }
+    }
+
     fn on_reply(
         &mut self,
-        _call: uniwow_api::CallId,
+        call: uniwow_api::CallId,
         result: Result<uniwow_api::serde_json::Value, String>,
         _ctx: &mut Context,
     ) {
+        if let Some(at) = self.creating_calls.iter().position(|waiting| *waiting == call) {
+            self.creating_calls.remove(at);
+            if let (Ok(answer), Some(scene)) = (&result, &self.scene) {
+                let ids: Vec<EntityId> = answer["ids"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|id| id.as_str()?.parse().ok())
+                    .collect();
+                if !ids.is_empty() {
+                    scene.select(Select::Set(ids));
+                }
+            }
+        }
         match result {
             Ok(answer) => {
                 for refused in answer["refused"].as_array().cloned().unwrap_or_default() {
@@ -536,8 +721,15 @@ impl Module for SceneTools {
                     *shown = if *shown == *mode { gizmo::Mode::Select } else { *mode };
                 }
             }
+            if self.delete.as_ref().is_some_and(|key| key.pressed(egui)) {
+                self.on_selection("doodads.delete", "Delete", ctx);
+            }
+            if self.duplicate.as_ref().is_some_and(|key| key.pressed(egui)) {
+                self.on_selection("doodads.duplicate", "Duplicate", ctx);
+            }
         }
         self.write(ctx);
+        self.creating_ui(egui, ctx);
     }
 
     fn shutdown(&mut self) {

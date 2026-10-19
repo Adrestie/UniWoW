@@ -182,6 +182,13 @@ impl scene::Scene for Service {
         *names = Arc::new(changed);
     }
 
+    fn ground(&self, ray: &Ray) -> Option<f32> {
+        let snapshot = lock(&self.0.published).clone();
+        let pickers = lock(&self.0.pickers).clone();
+        let others: Vec<Kind> = Kind::ALL.into_iter().filter(|kind| *kind != Kind::Chunk).collect();
+        picking::pick(&snapshot, ray, &Locks::of_kinds(&others), &pickers).map(|hit| hit.distance)
+    }
+
     fn scope(&self) -> Option<(u32, TileId, u32)> {
         let (map, [x, y, _]) = (*lock(&self.0.camera))?;
         let (tile, _) = chunk_at(x, y)?;
