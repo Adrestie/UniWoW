@@ -369,15 +369,24 @@ pub struct Planned {
 /// their first, each with the shader WotLK chooses for it, drawn as the sky for a model of the sky;
 /// and the slots of the materials that move, which their batches point to (`dress`).
 pub fn plan(data: &Model, look: &Look) -> (Vec<Vec<Planned>>, Vec<Moving>) {
-    // The file of the texture `index` of the model: a file, one the display fills, or none.
-    let file_of = |index: usize| match &data.textures[index].source {
-        ModelTextureSource::File(file) => Some(file.clone()),
-        ModelTextureSource::Filled(kind) => look
-            .textures
+    // The file of the texture `index` of the model: one the user put in its place, a file, one the
+    // display fills, or none.
+    let replaced = |index: usize| {
+        look.textures
             .iter()
-            .find(|(filled, _)| filled == kind)
-            .map(|(_, file)| file.clone()),
-        ModelTextureSource::Unnamed => None,
+            .find(|(kind, _)| *kind == uniwow_api::models::REPLACED | index as u32)
+            .map(|(_, file)| file.clone())
+    };
+    let file_of = |index: usize| {
+        replaced(index).or_else(|| match &data.textures[index].source {
+            ModelTextureSource::File(file) => Some(file.clone()),
+            ModelTextureSource::Filled(kind) => look
+                .textures
+                .iter()
+                .find(|(filled, _)| filled == kind)
+                .map(|(_, file)| file.clone()),
+            ModelTextureSource::Unnamed => None,
+        })
     };
     let mut slots: Vec<Moving> = Vec::new();
     let skins = data

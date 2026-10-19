@@ -172,3 +172,25 @@ fn the_batches_point_to_their_slot_and_one_unseen_at_rest_whose_alpha_moves_is_k
     assert!(slots.is_empty());
     assert_eq!(skins.iter().map(Vec::len).collect::<Vec<_>>(), [1, 0]);
 }
+
+#[test]
+fn a_texture_the_user_replaced_is_drawn_in_place_of_the_model_s_whatever_its_source() {
+    let model = coloured();
+    let look = |textures| Look {
+        model: uniwow_api::formats::FileRef::Path("square.m2".to_owned()),
+        textures,
+        geosets: Geosets::All,
+    };
+    let red = uniwow_api::formats::FileRef::Path("world\red.blp".to_owned());
+    let first = |look: &Look| plan(&model, look).0[0][0].textures[0].clone().map(|(file, _)| file);
+    let own = first(&look(Vec::new()));
+    let replaced = first(&look(vec![(uniwow_api::models::REPLACED, red.clone())]));
+    assert_eq!(replaced, Some(red));
+    assert_ne!(own, replaced);
+    // A texture of another index replaced leaves this one as it was.
+    let other = first(&look(vec![(
+        uniwow_api::models::REPLACED | 5,
+        uniwow_api::formats::FileRef::Id(9),
+    )]));
+    assert_eq!(other, own);
+}

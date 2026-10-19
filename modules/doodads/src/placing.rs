@@ -13,13 +13,14 @@ pub fn owner(directory: &str, tile: TileId) -> String {
     format!("doodads/{directory}/{}_{}", tile.x, tile.y)
 }
 
-/// The instance of `doodad`: the model of its file with its own textures and all its submeshes.
-pub fn instance(doodad: &Doodad, models: &dyn Models) -> Instance {
+/// The instance of `doodad`: the model of its file with its own textures but those `replaced`
+/// (`models::REPLACED`), and all its submeshes.
+pub fn instance(doodad: &Doodad, models: &dyn Models, replaced: Vec<(u32, FileRef)>) -> Instance {
     Instance {
         id: u64::from(doodad.unique_id),
         look: models.look(&Look {
             model: doodad.file.clone(),
-            textures: Vec::new(),
+            textures: replaced,
             geosets: Geosets::All,
         }),
         transform: placement(doodad.position, doodad.rotation, doodad.scale),
@@ -30,14 +31,18 @@ pub fn instance(doodad: &Doodad, models: &dyn Models) -> Instance {
 }
 
 /// The instances of the doodads of a tile, by their unique id: of a doodad the tile lists twice,
-/// the first.
-pub fn instances(placements: &Placements, models: &dyn Models) -> Vec<Instance> {
+/// the first; the textures of each `replaced` gives by its unique id replaced.
+pub fn instances(
+    placements: &Placements,
+    models: &dyn Models,
+    replaced: impl Fn(u32) -> Vec<(u32, FileRef)>,
+) -> Vec<Instance> {
     let mut seen = HashSet::new();
     placements
         .doodads
         .iter()
         .filter(|doodad| seen.insert(doodad.unique_id))
-        .map(|doodad| instance(doodad, models))
+        .map(|doodad| instance(doodad, models, replaced(doodad.unique_id)))
         .collect()
 }
 

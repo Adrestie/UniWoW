@@ -29,7 +29,7 @@ const WRITTEN: [(&str, &[&str]); 3] = [
 const READ_ONLY: [&str; 1] = ["terrain"];
 
 /// The components drawn by their own part of the Inspector; the others are drawn as their values.
-const DRAWN: [&str; 4] = ["transform", "model", "raw", "quests"];
+const DRAWN: [&str; 5] = ["transform", "model", "raw", "quests", "materials"];
 
 /// The fields of the Transform, in their order: their name, their label, whether a vector.
 pub const TRANSFORM: [(&str, &str, bool); 3] = [
@@ -126,6 +126,21 @@ pub fn read(editor: &uniwow_api::Editor, snapshot: &Snapshot, ids: &[EntityId], 
             Err(reason) => out.refused.push(format!("{provider}: {reason}")),
         }
     }
+    // The materials of the models, each read once.
+    let mut materials: HashMap<String, Value> = HashMap::new();
+    for (id, value) in out.values.iter_mut().take(MATERIALS_READ) {
+        let Some(asked) = materials_asked(id, value) else {
+            continue;
+        };
+        let key = asked.to_string();
+        if !materials.contains_key(&key) {
+            let read = editor
+                .call("models.materials", asked)
+                .unwrap_or_else(|reason| json!({ "refused": reason }));
+            materials.insert(key.clone(), read);
+        }
+        value["components"]["materials"] = materials[&key].clone();
+    }
     let texts: Vec<String> = ids.iter().map(ToString::to_string).collect();
     for component in components
         .iter()
@@ -158,6 +173,22 @@ pub fn writes(provider: &str, field: &str) -> bool {
     WRITTEN
         .iter()
         .any(|(written, fields)| *written == provider && fields.contains(&field))
+}
+
+/// The most entities whose materials are read with their components.
+const MATERIALS_READ: usize = 16;
+
+/// What `models.materials` is asked for the entity `id` read as `value`: its model with the
+/// textures replaced, its building, its creature's display or its game object's; none for others.
+pub fn materials_asked(id: &EntityId, value: &Value) -> Option<Value> {
+    let model = &value["components"]["model"];
+    Some(match id.kind {
+        Kind::Doodad => json!({ "model": model["file"].as_str()?, "replaced": value["replaced"] }),
+        Kind::Building => json!({ "building": model["file"].as_str()? }),
+        Kind::Creature => json!({ "display": model["display"].as_u64().filter(|display| *display != 0)? }),
+        Kind::GameObject => json!({ "object": model["display"].as_u64().filter(|display| *display != 0)? }),
+        _ => return None,
+    })
 }
 
 /// The fields of each entity of an answer of a component's read command.
@@ -407,6 +438,7 @@ impl Inspector {
                 let unplaced = ids.len().saturating_sub(placed.len());
                 self.transform_ui(ui, &placed, unplaced, &ids, &snapshot, ctx);
                 self.model_ui(ui, &values);
+                self.materials_ui(ui, &values, ctx);
                 components_ui(ui, &values);
                 self.quests_ui(ui, &values, ctx);
                 self.declared_ui(ui, &read, &ids, ctx);
@@ -749,6 +781,109 @@ impl Inspector {
         }
     }
 
+    /// The materials of the model of the first entity shown: its textures, each of a doodad replaced
+    /// by a file typed, or given back; how its materials are drawn; a building's doodad sets, one
+    /// chosen by a click. Each change written for the entities shown of the same model.
+    fn materials_ui(&mut self, ui: &mut egui::Ui, values: &[(EntityId, Value)], ctx: &mut Context) {
+        let Some((first, value)) = values.first() else {
+            return;
+        };
+        let materials = &value["components"]["materials"];
+        if materials.is_null() {
+            return;
+        }
+        let file = &value["components"]["model"]["file"];
+        let same: Vec<String> = values
+            .iter()
+            .filter(|(id, other)| id.kind == first.kind && other["components"]["model"]["file"] == *file)
+            .map(|(id, _)| id.to_string())
+            .collect();
+        let mut calls: Vec<(&str, Value, &str)> = Vec::new();
+        egui::CollapsingHeader::new("Materials")
+            .default_open(true)
+            .show(ui, |ui| {
+                if let Some(refused) = materials["refused"].as_str() {
+                    ui.colored_label(ui.visuals().warn_fg_color, refused);
+                    return;
+                }
+                if materials["building"] == true {
+                    ui.label(egui::RichText::new("A building: its materials are those of its file.").weak());
+                }
+                if let Some(textures) = materials["textures"].as_array() {
+                    ui.strong("Textures");
+                    egui::Grid::new("inspector textures").striped(true).show(ui, |ui| {
+                        for texture in textures {
+                            let index = texture["texture"].as_u64().unwrap_or(0);
+                            ui.label(format!("{index}"));
+                            ui.label(shown_value(&texture["file"]));
+                            ui.label(egui::RichText::new(plain(&texture["source"])).weak());
+                            if first.kind == Kind::Doodad {
+                                let key = format!("materials/{index}");
+                                let typed = self.typed.entry(key).or_default();
+                                let response = ui.add(
+                                    egui::TextEdit::singleline(typed)
+                                        .hint_text("Replace with…")
+                                        .desired_width(160.0),
+                                );
+                                if response.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                    && !typed.trim().is_empty()
+                                {
+                                    calls.push((
+                                        "doodads.texture",
+                                        json!({ "ids": same, "texture": index, "file": typed.trim() }),
+                                        "Replace a texture",
+                                    ));
+                                    typed.clear();
+                                }
+                                if texture["replaced"] == true
+                                    && ui
+                                        .small_button("↺")
+                                        .on_hover_text("Give the model's texture back")
+                                        .clicked()
+                                {
+                                    calls.push((
+                                        "doodads.texture",
+                                        json!({ "ids": same, "texture": index }),
+                                        "Give the texture back",
+                                    ));
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+                }
+                if materials["materials"].is_array() {
+                    fields_ui(ui, "materials", &json!({ "drawn": materials["materials"] }));
+                }
+                if let Some(sets) = materials["doodad sets"].as_array() {
+                    ui.strong("Doodad sets");
+                    let chosen = value["components"]["model"]["doodad set"].as_u64();
+                    for set in sets {
+                        let index = set["set"].as_u64().unwrap_or(0);
+                        let label = format!(
+                            "{index}: {} ({} doodads)",
+                            plain(&set["name"]),
+                            shown_value(&set["doodads"])
+                        );
+                        if ui.selectable_label(chosen == Some(index), label).clicked() && chosen != Some(index) {
+                            calls.push((
+                                "buildings.write",
+                                json!({ "ids": same, "field": "doodad set", "change": index.to_string() }),
+                                "Set the doodad set",
+                            ));
+                        }
+                    }
+                }
+            });
+        for (command, arguments, label) in calls {
+            let gesture = ctx.begin_gesture(label);
+            let call = ctx.call(command, arguments);
+            ctx.end_gesture(gesture);
+            self.waiting.push(call);
+        }
+    }
+
     fn raw_ui(&self, ui: &mut egui::Ui, values: &[(EntityId, Value)]) {
         let [(id, value)] = values else {
             ui.label(egui::RichText::new("The raw data of one entity read at a time.").weak());
@@ -934,6 +1069,23 @@ mod tests {
         assert_eq!(shown_value(&json!([1.0, 2.5, 3.0])), "1, 2.5, 3");
         assert_eq!(shown_value(&json!(null)), "—");
         assert_eq!(shown_value(&json!([])), "none");
+        let doodad =
+            json!({ "replaced": [[0, "world\\red.blp"]], "components": { "model": { "file": "world\\lamp.m2" } } });
+        assert_eq!(
+            materials_asked(&EntityId::doodad(0, 1), &doodad),
+            Some(json!({ "model": "world\\lamp.m2", "replaced": [[0, "world\\red.blp"]] }))
+        );
+        let creature = json!({ "components": { "model": { "display": 3167 } } });
+        assert_eq!(
+            materials_asked(&EntityId::creature(1), &creature),
+            Some(json!({ "display": 3167 }))
+        );
+        let none = json!({ "components": { "model": { "display": 0 } } });
+        assert_eq!(materials_asked(&EntityId::game_object(1), &none), None, "no display");
+        assert_eq!(
+            materials_asked(&EntityId::chunk(0, Default::default(), [0, 0]), &doodad),
+            None
+        );
         let answer = json!({ "entities": [{ "id": "doodad:0:1", "fields": { "tag": "lamp" } }, { "id": "x" }] });
         assert_eq!(fields_of(&answer), [(EntityId::doodad(0, 1), json!({ "tag": "lamp" }))]);
         assert_eq!(text(&Shown::Same(2.5)), "2.5");

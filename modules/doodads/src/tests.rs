@@ -119,7 +119,7 @@ fn the_instances_of_a_tile_are_its_doodads_once_each() {
         ],
         buildings: Vec::new(),
     };
-    let instances = placing::instances(&placements, &models);
+    let instances = placing::instances(&placements, &models, |_| Vec::new());
     assert_eq!(
         instances.iter().map(|i| i.id).collect::<Vec<_>>(),
         [7, 8],

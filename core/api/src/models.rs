@@ -25,6 +25,10 @@ pub struct Look {
     pub geosets: Geosets,
 }
 
+/// The kind of a texture of a look that replaces the texture `index` of its model, whatever its
+/// source: `REPLACED | index` (step 15.13b, a texture the user dropped on another).
+pub const REPLACED: u32 = 0x8000_0000;
+
 /// The submeshes a look shows, by the rules of `formats`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Geosets {

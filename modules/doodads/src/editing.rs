@@ -3,7 +3,7 @@
 //! Inspector through the commands `doodads.read` and `doodads.write`. Nothing is written to the
 //! files.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use uniwow_api::formats::{Doodad, FileRef, Placements, TileId, placement};
@@ -72,6 +72,8 @@ pub struct Changes {
     pub deleted: HashSet<EntityId>,
     /// The highest unique id given by map, so that none is given twice.
     pub given: HashMap<u32, u32>,
+    /// The textures of their models the user replaced, by doodad: by the index of the texture.
+    pub textures: HashMap<EntityId, BTreeMap<u32, FileRef>>,
 }
 
 impl Changes {
@@ -89,6 +91,16 @@ impl Changes {
         deleted.sort();
         let given: std::collections::BTreeMap<String, u32> =
             self.given.iter().map(|(map, id)| (map.to_string(), *id)).collect();
+        let mut textures: Vec<(&EntityId, &BTreeMap<u32, FileRef>)> = self.textures.iter().collect();
+        textures.sort_by_key(|(id, _)| **id);
+        let textures: Vec<Value> = textures
+            .into_iter()
+            .flat_map(|(id, replaced)| {
+                replaced
+                    .iter()
+                    .map(move |(index, to)| json!({ "id": id.to_string(), "texture": index, "file": file(to) }))
+            })
+            .collect();
         json!({
             "moved": moved.into_iter().map(|(id, spot)| json!({
                 "id": id.to_string(), "position": spot.position, "rotation": spot.rotation, "scale": spot.scale,
@@ -99,6 +111,7 @@ impl Changes {
             })).collect::<Vec<_>>(),
             "deleted": deleted.into_iter().map(ToString::to_string).collect::<Vec<_>>(),
             "unique ids given": given,
+            "textures": textures,
         })
     }
 
@@ -152,7 +165,34 @@ impl Changes {
                         .collect()
                 })
                 .unwrap_or_default(),
+            textures: {
+                let mut textures: HashMap<EntityId, BTreeMap<u32, FileRef>> = HashMap::new();
+                for entry in list("textures") {
+                    let file = match &entry["file"] {
+                        Value::String(path) => FileRef::Path(path.clone()),
+                        Value::Number(number) => number.as_u64().map_or(FileRef::Id(0), |id| FileRef::Id(id as u32)),
+                        _ => continue,
+                    };
+                    if let (Some(id), Some(index)) = (id(&entry), entry["texture"].as_u64()) {
+                        textures.entry(id).or_default().insert(index as u32, file);
+                    }
+                }
+                textures
+            },
         }
+    }
+
+    /// The textures replaced of the doodad `id`, as a look names them.
+    pub fn replaced(&self, id: &EntityId) -> Vec<(u32, FileRef)> {
+        self.textures
+            .get(id)
+            .map(|replaced| {
+                replaced
+                    .iter()
+                    .map(|(index, file)| (uniwow_api::models::REPLACED | index, file.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Every entity these changes name.
@@ -162,6 +202,7 @@ impl Changes {
             .keys()
             .chain(self.added.keys())
             .chain(self.deleted.iter())
+            .chain(self.textures.keys())
             .copied()
             .collect();
         ids.sort();
@@ -180,6 +221,7 @@ pub struct Listed {
     pub deleted: HashSet<EntityId>,
     pub given: HashMap<u32, u32>,
     pub highest: HashMap<u32, u32>,
+    pub textures: HashMap<EntityId, BTreeMap<u32, FileRef>>,
 }
 
 impl Listed {
@@ -190,6 +232,7 @@ impl Listed {
             added: self.added.clone(),
             deleted: self.deleted.clone(),
             given: self.given.clone(),
+            textures: self.textures.clone(),
         }
     }
 
@@ -324,9 +367,21 @@ fn file_text(file: &FileRef) -> String {
 pub fn read(listed: &Listed, id: &EntityId) -> Option<Value> {
     let (tile, doodad, spot) = listed.find(id)?;
     let world = scene::world_of_file(spot.position);
+    // The textures replaced, for the materials of its model to be read with them.
+    let replaced: Vec<Value> = listed
+        .textures
+        .get(id)
+        .map(|textures| {
+            textures
+                .iter()
+                .map(|(index, file)| json!([index, file_text(file)]))
+                .collect()
+        })
+        .unwrap_or_default();
     Some(json!({
         "id": id.to_string(),
-        "changed": listed.moved.contains_key(id),
+        "changed": listed.moved.contains_key(id) || listed.textures.contains_key(id),
+        "replaced": replaced,
         "components": {
             "transform": {
                 "position": world,
@@ -457,6 +512,18 @@ mod tests {
         );
         changes.deleted.insert(EntityId::doodad(0, 8));
         changes.given.insert(0, 502);
+        changes.textures.insert(
+            EntityId::doodad(0, 7),
+            BTreeMap::from([(1, FileRef::Path("world\red.blp".to_owned()))]),
+        );
+        assert_eq!(
+            changes.replaced(&EntityId::doodad(0, 7)),
+            [(
+                uniwow_api::models::REPLACED | 1,
+                FileRef::Path("world\red.blp".to_owned())
+            )]
+        );
+        assert!(changes.replaced(&EntityId::doodad(0, 8)).is_empty());
         let section = changes.section();
         assert_eq!(Changes::of_section(&section), changes);
         assert_eq!(Changes::of_section(&Value::Null), Changes::default());

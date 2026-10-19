@@ -42,7 +42,7 @@ pub fn read(id: &EntityId, building: &Building, changed: bool) -> Value {
     })
 }
 
-/// `building` with its `field` (position or rotation) changed as `change` says (`scene::
+/// `building` with its `field` (position, rotation or doodad set) changed as `change` says (`scene::
 /// changed_value`), on the axis `axis` or every axis; the position in the axes of the world, the
 /// bounds following it. A building is not scaled: the client of 3.3.5a reads no scale.
 pub fn written(building: &Building, field: &str, axis: Option<usize>, change: &str) -> Result<Building, String> {
@@ -70,6 +70,13 @@ pub fn written(building: &Building, field: &str, axis: Option<usize>, change: &s
             for axis in axes {
                 changed.rotation[axis] = scene::changed_value(building.rotation[axis], change)?;
             }
+        }
+        "doodad set" => {
+            let set = scene::changed_value(f32::from(building.doodad_set), change)?.round();
+            if !(0.0..=f32::from(u16::MAX)).contains(&set) {
+                return Err(format!("no doodad set {set}"));
+            }
+            changed.doodad_set = set as u16;
         }
         "scale" => return Err("a building is not scaled: the client of 3.3.5a reads no scale".to_owned()),
         other => return Err(format!("a building has no field '{other}'")),
@@ -102,6 +109,9 @@ mod tests {
             [0.0, 0.0, 0.0]
         );
         assert!(written(&building, "scale", None, "2").is_err());
+        assert_eq!(written(&building, "doodad set", None, "3").unwrap().doodad_set, 3);
+        assert_eq!(written(&building, "doodad set", None, "+1").unwrap().doodad_set, 2);
+        assert!(written(&building, "doodad set", None, "-5").is_err(), "no set below 0");
         let read = read(&EntityId::building(0, 9), &up, true);
         assert_eq!(read["components"]["model"]["doodad set"], json!(1));
         assert_eq!(read["changed"], json!(true));

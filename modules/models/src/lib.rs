@@ -22,6 +22,7 @@ mod gpu;
 mod groups;
 mod layer;
 mod loading;
+mod materials;
 mod pool;
 #[cfg(test)]
 mod pool_tests;
@@ -1035,6 +1036,23 @@ impl Module for ModelsModule {
                 }),
                 serde_json::json!({ "type": "object" }),
             );
+        let service = self.service.clone();
+        reg.command_on_caller(
+            "models.materials",
+            "The materials of a model, a building, a creature's display or a game object's: the 'model' or 'building'              at a path, or the 'display' or 'object' by its id; its textures with their files, sources and the              'replaced' ([[index, file], ...]) put in their places, how each material is drawn, a building's doodad              sets. Read from the files, from the calling thread.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "model": { "type": "string" },
+                    "building": { "type": "string" },
+                    "display": { "type": "integer" },
+                    "object": { "type": "integer" },
+                    "replaced": { "type": "array" },
+                },
+            }),
+            serde_json::json!({ "type": "object" }),
+            Arc::new(move |arguments| read_materials(&arguments, &lock(&service.formats).clone())),
+        );
     }
 
     fn init(&mut self, ctx: &mut Context) {
@@ -1196,3 +1214,41 @@ impl Module for ModelsModule {
 }
 
 uniwow_api::export_module!(ModelsModule::default());
+
+/// The materials `models.materials` gives for `arguments`.
+fn read_materials(
+    arguments: &serde_json::Value,
+    formats: &Option<Arc<dyn Formats>>,
+) -> Result<serde_json::Value, String> {
+    let formats = formats.as_ref().ok_or("the client's files are not open")?;
+    let file = |key: &str| arguments[key].as_str().map(|path| FileRef::Path(path.to_owned()));
+    if let Some(building) = file("building") {
+        return Ok(materials::of_wmo(&formats.wmo(&building)?));
+    }
+    let mut look = if let Some(model) = file("model") {
+        models::Look {
+            model,
+            textures: Vec::new(),
+            geosets: models::Geosets::All,
+        }
+    } else if let Some(display) = arguments["display"].as_u64() {
+        display::display(&**formats, display as u32)?.0
+    } else if let Some(object) = arguments["object"].as_u64() {
+        let Some(look) = display::object(&**formats, object as u32)? else {
+            return Ok(serde_json::json!({ "building": true }));
+        };
+        look
+    } else {
+        return Err("a 'model', 'building', 'display' or 'object' to read".to_owned());
+    };
+    for replaced in arguments["replaced"].as_array().cloned().unwrap_or_default() {
+        if let (Some(index), Some(path)) = (replaced[0].as_u64(), replaced[1].as_str()) {
+            look.textures
+                .push((models::REPLACED | index as u32, FileRef::Path(path.to_owned())));
+        }
+    }
+    let model = formats.model(&look.model)?;
+    let mut read = materials::of_model(&model, Some(&look));
+    read["file"] = materials::file_text(&look.model).into();
+    Ok(read)
+}

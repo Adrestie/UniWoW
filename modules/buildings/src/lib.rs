@@ -256,6 +256,8 @@ struct BuildingsModule {
     /// The buildings the user moved or turned, kept in memory, by their unique id: their position
     /// and rotation in the axes of the files.
     moved: HashMap<u32, ([f32; 3], [f32; 3])>,
+    /// The buildings the user gave another doodad set, by their unique id.
+    sets: HashMap<u32, u16>,
     /// What the picking needs of each building kept, by its unique id.
     picked: Picks,
     /// The buildings moved whose liquids are to be poured again.
@@ -351,6 +353,9 @@ impl BuildingsModule {
             building.position = *position;
             building.rotation = *rotation;
         }
+        if let Some(set) = self.sets.get(&id) {
+            building.doodad_set = *set;
+        }
         Some(building)
     }
 
@@ -358,6 +363,12 @@ impl BuildingsModule {
     /// doodads and their liquids placed again, their entities given to the scene again.
     fn set_buildings(&mut self, changed: Vec<(u32, Building)>) {
         for (id, building) in changed {
+            let original = self.kept.get(id).map(|kept| kept.doodad_set);
+            if original == Some(building.doodad_set) {
+                self.sets.remove(&id);
+            } else {
+                self.sets.insert(id, building.doodad_set);
+            }
             self.place_as(id, building.position, building.rotation);
         }
         self.changed = true;
@@ -875,12 +886,29 @@ impl Module for BuildingsModule {
             .into_iter()
             .map(|(id, (position, rotation))| json!({ "unique id": id, "position": position, "rotation": rotation }))
             .collect();
-        Some(json!({ "moved": moved }))
+        let mut sets: Vec<_> = self.sets.iter().collect();
+        sets.sort();
+        let sets: Vec<Value> = sets
+            .into_iter()
+            .map(|(id, set)| json!({ "unique id": id, "doodad set": set }))
+            .collect();
+        Some(json!({ "moved": moved, "doodad sets": sets }))
     }
 
     fn open_project(&mut self, section: Option<Value>, _ctx: &mut Context) {
-        let before: Vec<u32> = self.moved.keys().copied().collect();
+        let before: Vec<u32> = self.moved.keys().chain(self.sets.keys()).copied().collect();
         self.moved.clear();
+        self.sets.clear();
+        for entry in section
+            .as_ref()
+            .and_then(|section| section["doodad sets"].as_array())
+            .cloned()
+            .unwrap_or_default()
+        {
+            if let (Some(id), Some(set)) = (entry["unique id"].as_u64(), entry["doodad set"].as_u64()) {
+                self.sets.insert(id as u32, set as u16);
+            }
+        }
         let mut placed: Vec<u32> = before;
         for entry in section
             .as_ref()
@@ -900,6 +928,7 @@ impl Module for BuildingsModule {
             self.moved.insert(id as u32, (position, rotation));
             placed.push(id as u32);
         }
+        placed.extend(self.sets.keys().copied());
         // Those held, placed again where they are now.
         for id in placed {
             if let Some(building) = self.building(id) {
@@ -923,7 +952,14 @@ impl Module for BuildingsModule {
                 let entities: Vec<Value> = ids
                     .iter()
                     .filter_map(|id| Some((id, self.building(id.key as u32)?)))
-                    .map(|(id, building)| editing::read(id, &building, self.moved.contains_key(&(id.key as u32))))
+                    .map(|(id, building)| {
+                        let key = id.key as u32;
+                        editing::read(
+                            id,
+                            &building,
+                            self.moved.contains_key(&key) || self.sets.contains_key(&key),
+                        )
+                    })
                     .collect();
                 Ok(json!({ "entities": entities }))
             }

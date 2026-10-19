@@ -1,7 +1,7 @@
 # UniWoW — Architecture and module catalogue
 
 Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.10 done, 15.11 built
-before its first connection (15.11a to 15.11c), 15.12 done, 15.13a done; milestones 10 to 14 outlined. Open questions in section 10.
+before its first connection (15.11a to 15.11c), steps 15.12 and 15.13 done; milestones 10 to 14 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -10413,6 +10413,37 @@ doodads not to draw); a chunk changed (the terrain is edited in a later mileston
 component of a chunk of a tile the tests make: its layers and their shares, a texture missing,
 its area, flags, holes, the water of its corner alone, its colours, its shadow, its sounds; a
 chunk the tile does not have; the values shown in the Inspector.
+
+#### Step 15.13b, as built: the materials, a texture replaced, a doodad set chosen
+
+Built after 9cd993b, on `main`.
+
+- **`models.materials`**, on the calling thread: the materials of a model (at a path, or of a
+  creature's display or a game object's by its id): its textures, each by its index, its file (that
+  the display fills, or one the user put in its place), its source and how it wraps; how each
+  material is drawn (unlit, unfogged, two-sided, the depth, the blending); of a building: its
+  materials (their textures, flags named, among them glowing at night and two-sided, shader and
+  blending) and its doodad sets.
+- **A texture replaced in memory and drawn**: a look's texture of the kind `models::REPLACED |
+  index` takes the place of the texture `index` of its model, whatever its source. `doodads.texture`
+  replaces a texture of the doodads given (or gives it back), one undo entry, kept in the project;
+  their instances are made again with it. `doodads.read` gives the textures replaced.
+- **A doodad set chosen**: `buildings.write` changes the field `doodad set` (a value, or `+n`…),
+  one undo entry, kept in the project; the building's doodads placed again from that set.
+- **The Inspector** reads the materials of the entities shown with their components (16 at most,
+  each model once) and draws *Materials*: the textures (a doodad's replaced by a path typed, given
+  back by ↺, for the doodads shown of the same model), how the materials are drawn, a building's
+  doodad sets (one chosen by a click).
+
+**Not in 15.13b**: the previews of the textures; a texture dropped from a browser of the archives
+(typed meanwhile); the textures of a building replaced (its materials go to the GPU whole, as its
+file has them); the name sets of a building chosen (its rooms' names follow `WMOAreaTable`); the
+equipment of a character's display.
+
+**Tests**: the materials of a model naming their files, sources and drawing, a texture replaced,
+one the display fills; those of a building and its doodad sets; a texture replaced drawn in place of
+the model's whatever its source, another index left alone; the textures replaced kept in the
+project; a doodad set written, below 0 refused; what the Inspector asks for each kind.
 
 ### Milestone 10: Lua modules (outline)
 

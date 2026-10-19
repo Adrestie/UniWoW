@@ -43,6 +43,8 @@ type Read = Result<bool, String>;
 #[derive(Default)]
 struct DoodadsModule {
     distance: u32,
+    /// The doodads whose textures changed, for `refresh` to make their instances again.
+    retextured: HashSet<EntityId>,
     placing: Arc<Mutex<Placing>>,
     /// The map the terrain shows, by its folder; its WDT once read, or why it could not be, and
     /// the job reading it.
@@ -175,6 +177,45 @@ impl Command for Delete {
     }
 }
 
+/// The textures replaced of doodads, each from and to: one undo entry.
+/// The textures replaced of a doodad, by their index; none for none.
+type Textures = Option<std::collections::BTreeMap<u32, formats::FileRef>>;
+
+struct Retexture {
+    label: String,
+    changes: Vec<(EntityId, Textures, Textures)>,
+}
+
+impl Retexture {
+    fn set(&self, module: &mut DoodadsModule, after: bool) {
+        let mut listed = lock(&module.listed);
+        for (id, before, done) in &self.changes {
+            match if after { done } else { before } {
+                Some(textures) => listed.textures.insert(*id, textures.clone()),
+                None => listed.textures.remove(id),
+            };
+        }
+        drop(listed);
+        let ids: Vec<EntityId> = self.changes.iter().map(|(id, _, _)| *id).collect();
+        module.retextured.extend(ids.iter().copied());
+        module.refresh(ids, Vec::new());
+    }
+}
+
+impl Command for Retexture {
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn apply(&mut self, module: &mut dyn std::any::Any) {
+        self.set(module.downcast_mut().expect("the doodads"), true);
+    }
+
+    fn revert(&mut self, module: &mut dyn std::any::Any) {
+        self.set(module.downcast_mut().expect("the doodads"), false);
+    }
+}
+
 /// The places of doodads changed, each from and to: one undo entry.
 struct MoveDoodads {
     label: String,
@@ -250,6 +291,7 @@ impl DoodadsModule {
     /// Shows the doodads `ids` as the changes have them: placed, moved, or taken away; the pieces of
     /// the tiles listing them, and of `tiles` besides, given to the scene again.
     fn refresh(&mut self, ids: Vec<EntityId>, tiles: Vec<TileId>) {
+        let retextured = std::mem::take(&mut self.retextured);
         let listed = lock(&self.listed);
         let unique: HashSet<u32> = ids.iter().map(|id| id.key as u32).collect();
         let mut touched = listed.tiles_listing(&unique);
@@ -276,12 +318,16 @@ impl DoodadsModule {
                 .filter(|(id, _, _)| id.again().is_none() && id.map == self.map_id)
             {
                 match found {
-                    Some((tile, doodad, spot)) if *added => {
+                    // Created, or its textures replaced: its instance made again.
+                    Some((tile, doodad, spot))
+                        if *added || changes.textures.contains_key(id) || retextured.contains(id) =>
+                    {
                         let mut placed = doodad.clone();
                         placed.position = spot.position;
                         placed.rotation = spot.rotation;
                         placed.scale = spot.scale;
-                        placing.put(&**models, &directory, *tile, placing::instance(&placed, &**models));
+                        let instance = placing::instance(&placed, &**models, changes.replaced(id));
+                        placing.put(&**models, &directory, *tile, instance);
                     }
                     Some((_, _, spot)) => placing.moved(&**models, &directory, id.key, spot.transform()),
                     None => placing.remove(&**models, &directory, id.key),
@@ -398,6 +444,51 @@ impl DoodadsModule {
     }
 
     /// `doodads.write`: the field of the doodads named changed as asked, one undoable command.
+    /// Replaces the texture 'texture' of the models of the doodads 'ids' by the file 'file', or gives
+    /// it back without one: one undo entry.
+    fn retexture(&mut self, arguments: &Value, ctx: &mut Context) -> Result<Value, String> {
+        let ids: Vec<EntityId> = arguments["ids"]
+            .as_array()
+            .ok_or("'ids' is a list of ids")?
+            .iter()
+            .map(|id| id.as_str().ok_or("'ids' is a list of ids as text")?.parse())
+            .collect::<Result<_, String>>()?;
+        let index = arguments["texture"]
+            .as_u64()
+            .ok_or("'texture' is the index of a texture of the model")? as u32;
+        let file = arguments["file"].as_str().map(str::trim).unwrap_or_default();
+        let listed = lock(&self.listed);
+        let changes: Vec<_> = ids
+            .iter()
+            .filter(|id| listed.find(id).is_some())
+            .filter_map(|id| {
+                let before = listed.textures.get(id).cloned();
+                let mut after = before.clone().unwrap_or_default();
+                if file.is_empty() {
+                    after.remove(&index);
+                } else {
+                    after.insert(index, formats::FileRef::Path(file.to_owned()));
+                }
+                let after = (!after.is_empty()).then_some(after);
+                (after != before).then_some((*id, before, after))
+            })
+            .collect();
+        drop(listed);
+        let changed = changes.len();
+        if changed > 0 {
+            let label = if file.is_empty() {
+                "Give the texture back"
+            } else {
+                "Replace a texture"
+            };
+            ctx.execute(Retexture {
+                label: label.to_owned(),
+                changes,
+            });
+        }
+        Ok(json!({ "changed": changed }))
+    }
+
     fn write(&mut self, arguments: &Value, ctx: &mut Context) -> Result<Value, String> {
         let ids: Vec<EntityId> = arguments
             .get("ids")
@@ -640,7 +731,9 @@ impl DoodadsModule {
                 // The doodads as the user changed them.
                 let changes = lock(&listed).changes();
                 let effective = editing::edited(&read, map_id, tile, &HashSet::new(), &changes);
-                let instances = placing::instances(&effective, &*models);
+                let instances = placing::instances(&effective, &*models, |unique| {
+                    changes.replaced(&EntityId::doodad(map_id, unique))
+                });
                 if job.is_cancelled() {
                     return Ok(false);
                 }
@@ -737,6 +830,12 @@ impl Module for DoodadsModule {
                 json!({ "type": "object", "properties": { "deleted": { "type": "integer" } } }),
             )
             .command(
+                "doodads.texture",
+                "Replaces the texture 'texture' (its index in the model) of the doodads 'ids' by the file 'file' of the                  game, drawn so; without a file, gives the model's back. In memory, kept in the project; one undo entry.",
+                json!({ "type": "object", "properties": { "ids": { "type": "array" }, "texture": { "type": "integer" }, "file": { "type": "string" } }, "required": ["ids", "texture"] }),
+                json!({ "type": "object", "properties": { "changed": { "type": "integer" } } }),
+            )
+            .command(
                 "doodads.write",
                 "Changes the 'field' (position, rotation or scale) of the doodads 'ids', on the 'axis' 0, 1 or 2 of a \
                  vector or all of them: 'change' a value, or +n, -=n, *n, /n from each one's own; kept in memory, \
@@ -770,6 +869,9 @@ impl Module for DoodadsModule {
             listed.added = opened.added.clone();
             listed.deleted = opened.deleted.clone();
             listed.given = opened.given.clone();
+            listed.textures = opened.textures.clone();
+            self.retextured
+                .extend(before.textures.keys().chain(opened.textures.keys()).copied());
             (before.ids(), tiles)
         };
         ids.extend(opened.ids());
@@ -784,6 +886,7 @@ impl Module for DoodadsModule {
             "doodads.create" => self.create(&arguments, ctx),
             "doodads.duplicate" => self.duplicate(&arguments, ctx),
             "doodads.delete" => self.delete(&arguments, ctx),
+            "doodads.texture" => self.retexture(&arguments, ctx),
             _ => Err(format!("'{name}' is not handled")),
         }
     }
