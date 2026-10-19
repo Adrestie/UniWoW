@@ -288,6 +288,45 @@ fn the_files_list_each_tile_with_what_it_stores_and_by_type_a_list_a_kind() {
 }
 
 #[test]
+fn the_server_lists_each_template_with_its_spawns() {
+    use crate::tree::View;
+    let at = middle(ELWYNN);
+    let guard = |guid: u64| Entity {
+        extra: 68,
+        ..entity(EntityId::creature(guid), None, "Stormwind City Guard", at)
+    };
+    let snapshot = snapshot(&[
+        (guard(79753), 87),
+        (guard(79754), 87),
+        (
+            Entity {
+                extra: 1731,
+                ..entity(EntityId::game_object(5714), None, "Copper Vein", at)
+            },
+            87,
+        ),
+        (entity(EntityId::doodad(0, 1), None, "Tree", at), 87),
+    ]);
+    let server = Filter {
+        view: View::Server,
+        ..Filter::default()
+    };
+    let tree = build(&snapshot, &server, &HashMap::new(), "", &Default::default());
+    assert_eq!(
+        shown(&tree),
+        [
+            "Creatures",
+            "  Stormwind City Guard (creature_template 68)",
+            "    Stormwind City Guard #79753",
+            "    Stormwind City Guard #79754",
+            "Game objects",
+            "  Copper Vein (gameobject_template 1731)",
+            "    Copper Vein #5714",
+        ]
+    );
+}
+
+#[test]
 fn the_rows_follow_the_folds_and_the_path_of_a_node_unfolds_to_it() {
     let snapshot = goldshire();
     let tree = build(

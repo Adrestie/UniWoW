@@ -4245,6 +4245,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "uniwow-module-spawns"
+version = "0.1.0"
+dependencies = [
+ "uniwow-api",
+]
+
+[[package]]
 name = "uniwow-module-terrain"
 version = "0.1.0"
 dependencies = [

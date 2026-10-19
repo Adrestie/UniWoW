@@ -1,0 +1,22 @@
+[package]
+name = "uniwow-module-spawns"
+description = "The creatures and game objects of the world database on the map shown: drawn, given to the scene, changed in memory"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Only uniwow-api and the crates of libs/ are allowed, here and in dev or build dependencies
+# (cargo xtask check). Any other crate, even one the runtime already contains, can make Cargo
+# rebuild the runtime and so make every module incompatible. Ask for it to be added to the runtime.
+uniwow-api.workspace = true
+
+[package.metadata.uniwow]
+id = "spawns"
+name = "Spawns"
+category = "World"
+# Services the module cannot work without, and services it uses when present.
+requires = []
+uses = ["world-db", "models", "scene"]

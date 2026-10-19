@@ -1,6 +1,7 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.10 done; milestones 10 to 14 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.10 done, 15.11 built
+before its first connection; milestones 10 to 14 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -10255,6 +10256,34 @@ otherwise.
 
 **Waiting for the user**: the account and the real test (the version, the creatures of Northrend read
 and the time, a write refused by the session read only).
+
+#### Step 15.11b, as built: the spawns, before their first connection
+
+Built after eb8fa18, on `main`; tested on rows the tests make, waiting for the user's database.
+
+- **The module `spawns`** (category *World*): once the world database is connected, a thread reads
+  the creatures (`creature` joined to `creature_template` and the first model of
+  `creature_template_model`) and the game objects (`gameobject` joined to `gameobject_template`, its
+  display and size) of the map the terrain shows, and the highest guid of each table, again for another
+  map or server. Its spawns given to the scene by tile (`creature:<guid>`, `gameobject:<guid>`, named
+  by their template and guid, their extra number the template's entry), drawn through `models` by
+  their looks (`Models::display`, `Models::object`, resolved by a job), an owner a tile.
+- **Changed in memory**, each one undo entry, in the project: `spawns.read` (Transform: the position
+  and the orientation as the rotation about the vertical; the template; the columns), `spawns.write`
+  (position, orientation; no scale: a spawn takes its template's size), `spawns.duplicate` (a guid
+  above the highest of its table and those given), `spawns.delete`. The Inspector, the gizmos (*Move*,
+  *Rotate*), Ctrl+D and Delete reach them as the doodads.
+- **The view *Server*** of the Hierarchy: the creatures, then the game objects, each template
+  (`Stormwind City Guard (creature_template 68)`) with its spawns.
+
+**Not in 15.11b**: a spawn of several templates (`id2`, `id3`) under its first only; the pools and
+game events; spawns created from a template searched (the menu *Create* of 15.8 for doodads); the
+spawns of the whole map placed at once on the interface thread, to measure on the user's database.
+
+**Tests**: the rows of a guard of Stormwind and of a copper vein made spawns by tile with their
+template, a number written as text read, no model its scale by default; a spawn moved, turned,
+duplicated with guids above the highest, deleted, laid over the rows and kept in the project; the view
+*Server* of a template with its spawns.
 
 ### Milestone 10: Lua modules (outline)
 

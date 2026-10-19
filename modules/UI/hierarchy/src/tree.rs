@@ -57,6 +57,8 @@ pub enum View {
     Files,
     /// A flat list a kind.
     ByType,
+    /// The spawns of the server by their template.
+    Server,
 }
 
 /// The order of the entities of a place by their kind: the terrain and the water in their folders
@@ -272,6 +274,47 @@ fn build_by_type(snapshot: &Snapshot, filter: &Filter, names: &HashMap<EntityId,
     tree
 }
 
+/// The view *Server*: the creatures, then the game objects, each template with its spawns.
+fn build_server(snapshot: &Snapshot, filter: &Filter, names: &HashMap<EntityId, String>) -> Tree {
+    let mut tree = Tree::default();
+    let mut folders = HashMap::new();
+    let mut kept = kept_alone(snapshot, filter, names);
+    kept.retain(|entity| matches!(entity.id().kind, Kind::Creature | Kind::GameObject));
+    kept.sort_by_key(|entity| {
+        (
+            entity.id().kind,
+            entity.label().to_lowercase(),
+            entity.extra(),
+            entity.id(),
+        )
+    });
+    for entity in &kept {
+        let id = entity.id();
+        let (root_key, root_label, table) = match id.kind {
+            Kind::GameObject => ("server:gameobjects", "Game objects", "gameobject"),
+            _ => ("server:creatures", "Creatures", "creature"),
+        };
+        let root = tree.folder(&mut folders, root_key.to_owned(), root_label, None, None);
+        let template = tree.folder(
+            &mut folders,
+            format!("server:{table}:{}", entity.extra()),
+            &format!("{} ({table}_template {})", entity.label(), entity.extra()),
+            Some(root),
+            None,
+        );
+        tree.add(Node {
+            key: id.to_string(),
+            label: name_of(entity, names),
+            entity: Some(id),
+            area: None,
+            parent: Some(template),
+            children: Vec::new(),
+        });
+        tree.entities += 1;
+    }
+    tree
+}
+
 /// The tree of the entities of `snapshot` that `filter` keeps, in its view: the main one, the map
 /// named `map`, those of the groups of `groups` under their group.
 pub fn build(
@@ -284,6 +327,7 @@ pub fn build(
     match filter.view {
         View::Files => return build_files(snapshot, filter, names),
         View::ByType => return build_by_type(snapshot, filter, names),
+        View::Server => return build_server(snapshot, filter, names),
         View::Main => {}
     }
     let in_scope = |entity: &EntityRef| {

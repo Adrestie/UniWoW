@@ -16,9 +16,10 @@ use uniwow_api::serde_json::{Value, json};
 use uniwow_api::{CallId, Context, JobId, JobOutcome, log};
 
 /// The providers whose entities are written through `<provider>.write`, and the fields of each.
-const WRITTEN: [(&str, &[&str]); 2] = [
+const WRITTEN: [(&str, &[&str]); 3] = [
     ("doodads", &["position", "rotation", "scale"]),
     ("buildings", &["position", "rotation"]),
+    ("spawns", &["position", "rotation"]),
 ];
 
 /// The fields of the Transform, in their order: their name, their label, whether a vector.

@@ -123,10 +123,14 @@ fn held<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// The providers whose entities the gizmos write, and the fields of each.
-const WRITTEN: [(&str, &[&str]); 2] = [
+const WRITTEN: [(&str, &[&str]); 3] = [
     ("doodads", &["position", "rotation", "scale"]),
     ("buildings", &["position", "rotation"]),
+    ("spawns", &["position", "rotation"]),
 ];
+
+/// The providers whose entities are duplicated and deleted from the view.
+const MADE: [&str; 2] = ["doodads", "spawns"];
 
 /// The tool of the selection.
 struct Selecting {
@@ -416,26 +420,33 @@ struct SceneTools {
 impl SceneTools {
     /// Calls `command` (`doodads.delete`, `doodads.duplicate`) for the doodads selected, one gesture;
     /// the doodads made selected once answered.
-    fn on_selection(&mut self, command: &str, label: &str, ctx: &mut Context) {
+    fn on_selection(&mut self, verb: &str, label: &str, ctx: &mut Context) {
         let Some(scene) = &self.scene else {
             return;
         };
         let (selection, snapshot) = (scene.selection(), scene.snapshot());
-        let ids: Vec<String> = selection
-            .ids
-            .iter()
-            .filter(|id| snapshot.get(id).is_some_and(|entity| entity.provider() == "doodads"))
-            .map(ToString::to_string)
-            .collect();
-        if ids.is_empty() {
+        let ids = scene.groups().expanded(&selection.ids);
+        let mut by_provider: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+        for id in &ids {
+            if let Some(entity) = snapshot.get(id).filter(|entity| MADE.contains(&entity.provider())) {
+                by_provider
+                    .entry(entity.provider().to_owned())
+                    .or_default()
+                    .push(id.to_string());
+            }
+        }
+        if by_provider.is_empty() {
             return;
         }
         let gesture = ctx.begin_gesture(label);
-        let call = ctx.call(command, json!({ "ids": ids }));
+        for (provider, ids) in by_provider {
+            let call = ctx.call(&format!("{provider}.{verb}"), json!({ "ids": ids }));
+            if verb == "duplicate" {
+                self.creating_calls.push(call);
+            }
+        }
         ctx.end_gesture(gesture);
-        if command == "doodads.duplicate" {
-            self.creating_calls.push(call);
-        } else {
+        if verb == "delete" {
             scene.select(Select::Clear);
         }
     }
@@ -723,10 +734,10 @@ impl Module for SceneTools {
                 }
             }
             if self.delete.as_ref().is_some_and(|key| key.pressed(egui)) {
-                self.on_selection("doodads.delete", "Delete", ctx);
+                self.on_selection("delete", "Delete", ctx);
             }
             if self.duplicate.as_ref().is_some_and(|key| key.pressed(egui)) {
-                self.on_selection("doodads.duplicate", "Duplicate", ctx);
+                self.on_selection("duplicate", "Duplicate", ctx);
             }
         }
         self.write(ctx);

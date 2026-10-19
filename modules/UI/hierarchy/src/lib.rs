@@ -196,6 +196,11 @@ impl HierarchyModule {
                 (tree::View::Main, "Main", "By the places of the game"),
                 (tree::View::Files, "Files", "By the tiles whose files store them"),
                 (tree::View::ByType, "By type", "A list a kind"),
+                (
+                    tree::View::Server,
+                    "Server",
+                    "The spawns of the world database by their template",
+                ),
             ] {
                 ui.selectable_value(&mut self.view, view, label).on_hover_text(hint);
             }
