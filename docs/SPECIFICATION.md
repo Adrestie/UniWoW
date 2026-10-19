@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.5 done; milestones 10 to 14 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.6 done; milestones 10 to 14 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -8288,7 +8288,7 @@ On the user's machine, with the client and the server on it:
 the sources of AzerothCore at the commit of the user's server (bc9198ce7) and against WoWDBDefs;
 validated by the user (decision 31), with his answers to the points the proposal left to decide
 (*Decided by the user after the proposal*); its technical specification written once validated, at
-his request. Being built: steps 15.1 to 15.5 as built, at the end of this milestone.*
+his request. Being built: steps 15.1 to 15.6 as built, at the end of this milestone.*
 
 The world of milestone 9, shown, becomes a world the user edits as a scene of Unity: a window
 *Hierarchy* left of the 3D view lists what is loaded around the camera, by the places of the game;
@@ -10063,6 +10063,38 @@ typed `+5` in the Inspector, then Ctrl+Z, then Ctrl+Y; twenty fence posts select
 `+2` in Z, one undo entry; the inn turned by `+45` in Y, its doodads following; the raw data of a
 doodad against what Noggit shows of it; a tree moved, the camera flown away and back, the tree still
 moved.
+
+#### Step 15.6, as built: the gizmos, kept simple
+
+Built after 9f61ff9, on `main`, kept to the least the user asked for (the drawing kept simple).
+
+- **The keys**: the flight up and down move off E and A to **Space** and **C** (decided after the
+  proposal, checked in 15.1); W, E and R are hotkeys of `scene-tools`, acting while the pointer is
+  over the 3D view, pressed again back to selecting only; the same four modes in the toolbar.
+- **The gizmos**, drawn by the painter of the view over the image as lines projected, about the
+  middle of the origins of the selection, in the axes of the world: *Move*, three arrows (X red, Y
+  green, Z blue); *Rotate*, the ring of the vertical; *Scale*, a handle. Picked on the screen (7
+  points); the drag shows the change by the pointer (yards, degrees, factor) and draws a line from
+  where it started; Ctrl snaps to the yard, to 15 degrees, to tenths.
+- **Written when let go**, as the Inspector writes: `+n` along an axis of the position, `+n` on the
+  rotation about the vertical (the axis Y of the files), `*n` on the scale, through `<provider>.write`
+  for the entities selected, one gesture, one undo entry. A grabbed handle keeps the pointer from the
+  selection; elsewhere a click and a rectangle select as before.
+
+**Not in 15.6, set aside**: the drawing of the change under way (the instances moved at each frame
+through the providers' fast path, `scene::Preview`, `Arena::try_write`, the GPU's preview past 4,096):
+the change shows when let go, its amount by the pointer meanwhile; the planes of *Move* and the move in
+the plane of the view; the rings of X and Y; *Local* and *Center* (each entity about its own origin, in
+the axes of the world, is what is built); *Ground*; the hotkeys acting over the Hierarchy.
+
+**Tests**: the handles grabbed where they are drawn and nowhere else; a drag along X giving its
+yards, snapped to the yard with Ctrl; a quarter turn on the screen 90 degrees about the vertical; a
+drag of the scale handle doubling it; the writes of each handle; the flight on Space and C.
+
+**The user checks**: a tree selected, W, its X arrow dragged, the tree moved when let go, Ctrl+Z; E, the
+ring dragged with Ctrl, the tree turned by 15 degrees; R, the handle dragged, the tree bigger; twenty
+fence posts moved up together by the Z arrow, one Ctrl+Z; the camera flown up with Space and down with
+C.
 
 ### Milestone 10: Lua modules (outline)
 

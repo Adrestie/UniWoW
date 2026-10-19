@@ -5,6 +5,7 @@
 //! Choosing is not a change of the world: nothing enters the history.
 
 mod boxes;
+mod gizmo;
 #[cfg(test)]
 mod tests;
 
@@ -12,6 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 
+use uniwow_api::glam::Vec3;
 use uniwow_api::hotkey::{Hotkey, HotkeyKind, Keys};
 use uniwow_api::scene::{self, Answer, EntityId, Kind, Question, Select};
 use uniwow_api::serde_json::json;
@@ -90,12 +92,28 @@ enum Asked {
     },
 }
 
+/// The changes of a drag of a gizmo, as the providers take them: the field, the axis, the change.
+type Writes = Vec<(&'static str, Option<usize>, String)>;
+
 /// What the tool shares with its module.
 #[derive(Default)]
 struct Shared {
-    /// Whether the pointer is over the view, where F frames the selection.
+    /// Whether the pointer is over the view, where F, W, E and R act.
     hovered: AtomicBool,
+    /// The gizmo shown, and the changes of the drags let go, for the module to write.
+    mode: std::sync::Mutex<gizmo::Mode>,
+    writes: std::sync::Mutex<Vec<(String, Writes)>>,
 }
+
+fn held<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The providers whose entities the gizmos write, and the fields of each.
+const WRITTEN: [(&str, &[&str]); 2] = [
+    ("doodads", &["position", "rotation", "scale"]),
+    ("buildings", &["position", "rotation"]),
+];
 
 /// The tool of the selection.
 struct Selecting {
@@ -110,6 +128,19 @@ struct Selecting {
     last: Option<(egui::Pos2, EntityId)>,
     /// The last refusal of a smart selection, shown in the toolbar.
     said: Option<String>,
+    /// The handle of a gizmo being dragged, where the drag started, and the middle of the selection
+    /// then.
+    grabbed: Option<(gizmo::Handle, egui::Pos2, Vec3)>,
+}
+
+/// The middle of the origins of the entities `ids` the snapshot holds.
+fn middle(snapshot: &scene::Snapshot, ids: &[EntityId]) -> Option<Vec3> {
+    let origins: Vec<Vec3> = ids
+        .iter()
+        .filter_map(|id| snapshot.get(id))
+        .map(|entity| Vec3::from(entity.origin()))
+        .collect();
+    (!origins.is_empty()).then(|| origins.iter().sum::<Vec3>() / origins.len() as f32)
 }
 
 impl Selecting {
@@ -156,10 +187,119 @@ impl Selecting {
     fn like(&mut self, by: &str) {
         self.said = self.editor.call("scene.select_like", json!({ "by": by })).err();
     }
+
+    /// The gizmo of the mode shown about the selection: drawn, grabbed, dragged; its change given
+    /// to the module once let go. Whether it holds the pointer.
+    fn gizmo(&mut self, input: &ToolInput<'_>, painter: &egui::Painter) -> bool {
+        let mode = *held(&self.shared.mode);
+        let response = input.response;
+        let selection = self.scene.selection();
+        let snapshot = self.scene.snapshot();
+        let centre = match self.grabbed {
+            Some((_, _, centre)) => Some(centre),
+            None => middle(&snapshot, &selection.ids),
+        };
+        let Some(centre) = centre.filter(|_| mode != gizmo::Mode::Select) else {
+            self.grabbed = None;
+            return false;
+        };
+        let local = |at: egui::Pos2| egui::pos2(at.x - input.rect.left(), at.y - input.rect.top());
+        let screen = |at: egui::Pos2| egui::pos2(at.x + input.rect.left(), at.y + input.rect.top());
+        let Some(origin) = input.project(centre) else {
+            return false;
+        };
+        // Drawn.
+        match mode {
+            gizmo::Mode::Move => {
+                for axis in 0..3 {
+                    if let Some((_, direction)) = gizmo::along(&input.seen, centre, axis) {
+                        let tip = origin + direction * gizmo::LENGTH;
+                        painter.arrow(origin, tip - origin, egui::Stroke::new(3.0, gizmo::colour(axis)));
+                    }
+                }
+            }
+            gizmo::Mode::Rotate => {
+                let ring: Vec<egui::Pos2> = gizmo::ring(&input.seen, centre).into_iter().map(screen).collect();
+                painter.add(egui::Shape::line(ring, egui::Stroke::new(2.5, gizmo::colour(2))));
+            }
+            gizmo::Mode::Scale => {
+                let corner = origin + egui::vec2(gizmo::LENGTH, -gizmo::LENGTH) * std::f32::consts::FRAC_1_SQRT_2;
+                painter.line_segment([origin, corner], egui::Stroke::new(2.0, egui::Color32::WHITE));
+                painter.rect_filled(
+                    egui::Rect::from_center_size(corner, egui::vec2(12.0, 12.0)),
+                    2.0,
+                    egui::Color32::WHITE,
+                );
+            }
+            gizmo::Mode::Select => {}
+        }
+        // Grabbed.
+        if response.drag_started_by(egui::PointerButton::Primary)
+            && let Some(at) = response.interact_pointer_pos()
+            && let Some(handle) = gizmo::grab(mode, &input.seen, centre, local(at))
+        {
+            self.grabbed = Some((handle, at, centre));
+        }
+        let Some((handle, start, centre)) = self.grabbed else {
+            return false;
+        };
+        // Dragged: the change shown by the pointer, written once let go.
+        let now = response.interact_pointer_pos().unwrap_or(start);
+        let snap = response.ctx.input(|i| i.modifiers.command);
+        let amount = gizmo::dragged(handle, &input.seen, centre, local(start), local(now), snap);
+        let text = match handle {
+            gizmo::Handle::Axis(axis) => format!("{} {amount:+.2} yd", ["X", "Y", "Z"][axis]),
+            gizmo::Handle::Ring => format!("{amount:+.1}°"),
+            gizmo::Handle::Scale => format!("×{amount:.2}"),
+        };
+        painter.line_segment([start, now], egui::Stroke::new(1.0, egui::Color32::WHITE));
+        painter.text(
+            now + egui::vec2(12.0, -12.0),
+            egui::Align2::LEFT_BOTTOM,
+            text,
+            egui::FontId::proportional(13.0),
+            egui::Color32::WHITE,
+        );
+        if response.drag_stopped_by(egui::PointerButton::Primary) {
+            self.grabbed = None;
+            let still = match handle {
+                gizmo::Handle::Scale => (amount - 1.0).abs() < 1e-4,
+                _ => amount.abs() < 1e-4,
+            };
+            if !still {
+                let label = match handle {
+                    gizmo::Handle::Axis(_) => "Move",
+                    gizmo::Handle::Ring => "Rotate",
+                    gizmo::Handle::Scale => "Scale",
+                };
+                held(&self.shared.writes).push((label.to_owned(), gizmo::writes(handle, amount)));
+            }
+        }
+        true
+    }
 }
 
 impl Tool for Selecting {
     fn toolbar(&mut self, ui: &mut egui::Ui) {
+        let mut mode = *held(&self.shared.mode);
+        for (shown, label, hint) in [
+            (gizmo::Mode::Select, "Select", "Select only"),
+            (
+                gizmo::Mode::Move,
+                "Move",
+                "Move along the axes of the world (W); Ctrl: by the yard",
+            ),
+            (
+                gizmo::Mode::Rotate,
+                "Rotate",
+                "Turn about the vertical (E); Ctrl: by 15 degrees",
+            ),
+            (gizmo::Mode::Scale, "Scale", "Scale each one (R); Ctrl: by tenths"),
+        ] {
+            ui.selectable_value(&mut mode, shown, label).on_hover_text(hint);
+        }
+        *held(&self.shared.mode) = mode;
+        ui.separator();
         ui.label("Rectangle:");
         egui::ComboBox::from_id_salt("scene-tools rectangle")
             .selected_text(FILTERS[self.filter].0)
@@ -192,6 +332,9 @@ impl Tool for Selecting {
         let response = input.response;
         self.shared.hovered.store(response.hovered(), Ordering::Relaxed);
         self.answered();
+        if self.gizmo(input, painter) {
+            return;
+        }
         let modifiers = response.ctx.input(|i| i.modifiers);
         if response.clicked_by(egui::PointerButton::Primary)
             && let Some(at) = response.interact_pointer_pos()
@@ -239,11 +382,57 @@ impl Tool for Selecting {
 struct SceneTools {
     shared: Arc<Shared>,
     frame: Option<Hotkey>,
+    /// The hotkeys of the gizmos: Move, Rotate, Scale.
+    gizmos: Vec<(Hotkey, gizmo::Mode)>,
     scene: Option<scene::Handle>,
     view: Option<viewport::Handle>,
 }
 
 impl SceneTools {
+    /// Writes the changes of the drags let go into the selection, each one gesture over the
+    /// providers of its entities.
+    fn write(&self, ctx: &mut Context) {
+        let Some(scene) = &self.scene else {
+            return;
+        };
+        let drags = std::mem::take(&mut *held(&self.shared.writes));
+        if drags.is_empty() {
+            return;
+        }
+        let (selection, snapshot) = (scene.selection(), scene.snapshot());
+        let mut by_provider: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+        for id in &selection.ids {
+            if let Some(entity) = snapshot.get(id) {
+                by_provider
+                    .entry(entity.provider().to_owned())
+                    .or_default()
+                    .push(id.to_string());
+            }
+        }
+        for (label, writes) in drags {
+            let count = selection.ids.len();
+            let gesture = ctx.begin_gesture(&if count == 1 {
+                label
+            } else {
+                format!("{label} {count} objects")
+            });
+            for (provider, ids) in &by_provider {
+                let Some((_, fields)) = WRITTEN.iter().find(|(written, _)| written == provider) else {
+                    continue;
+                };
+                for (field, axis, change) in &writes {
+                    if fields.contains(field) {
+                        ctx.call(
+                            &format!("{provider}.write"),
+                            json!({ "ids": ids, "field": field, "axis": axis, "change": change }),
+                        );
+                    }
+                }
+            }
+            ctx.end_gesture(gesture);
+        }
+    }
+
     /// Frames the selection in the view: the bounds of all its entities the scene holds.
     fn frame(&self, ctx: &mut Context) {
         let Some(scene) = &self.scene else {
@@ -279,6 +468,36 @@ impl Module for SceneTools {
             HotkeyKind::Press,
             Keys::key(egui::Key::F),
         ));
+        self.gizmos = vec![
+            (
+                reg.hotkey("move", "Move gizmo", HotkeyKind::Press, Keys::key(egui::Key::W)),
+                gizmo::Mode::Move,
+            ),
+            (
+                reg.hotkey("rotate", "Rotate gizmo", HotkeyKind::Press, Keys::key(egui::Key::E)),
+                gizmo::Mode::Rotate,
+            ),
+            (
+                reg.hotkey("scale", "Scale gizmo", HotkeyKind::Press, Keys::key(egui::Key::R)),
+                gizmo::Mode::Scale,
+            ),
+        ];
+    }
+
+    fn on_reply(
+        &mut self,
+        _call: uniwow_api::CallId,
+        result: Result<uniwow_api::serde_json::Value, String>,
+        _ctx: &mut Context,
+    ) {
+        match result {
+            Ok(answer) => {
+                for refused in answer["refused"].as_array().cloned().unwrap_or_default() {
+                    log::warn!("the gizmo's change refused: {refused}");
+                }
+            }
+            Err(reason) => log::warn!("the gizmo's change refused: {reason}"),
+        }
     }
 
     fn init(&mut self, ctx: &mut Context) {
@@ -298,6 +517,7 @@ impl Module for SceneTools {
                 dragging: None,
                 last: None,
                 said: None,
+                grabbed: None,
             }),
         );
         self.scene = Some(scene);
@@ -305,9 +525,19 @@ impl Module for SceneTools {
     }
 
     fn windows_ui(&mut self, egui: &egui::Context, ctx: &mut Context) {
-        if self.shared.hovered.load(Ordering::Relaxed) && self.frame.as_ref().is_some_and(|key| key.pressed(egui)) {
-            self.frame(ctx);
+        if self.shared.hovered.load(Ordering::Relaxed) {
+            if self.frame.as_ref().is_some_and(|key| key.pressed(egui)) {
+                self.frame(ctx);
+            }
+            for (key, mode) in &self.gizmos {
+                if key.pressed(egui) {
+                    let mut shown = held(&self.shared.mode);
+                    // Pressed again: back to selecting only.
+                    *shown = if *shown == *mode { gizmo::Mode::Select } else { *mode };
+                }
+            }
         }
+        self.write(ctx);
     }
 
     fn shutdown(&mut self) {

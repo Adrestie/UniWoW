@@ -447,8 +447,8 @@ impl CameraKeys {
             back: held("fly_back", "Fly back", Keys::key(egui::Key::S)),
             left: held("fly_left", "Fly left", Keys::key(egui::Key::Q)),
             right: held("fly_right", "Fly right", Keys::key(egui::Key::D)),
-            up: held("fly_up", "Fly up", Keys::key(egui::Key::E)),
-            down: held("fly_down", "Fly down", Keys::key(egui::Key::A)),
+            up: held("fly_up", "Fly up", Keys::key(egui::Key::Space)),
+            down: held("fly_down", "Fly down", Keys::key(egui::Key::C)),
             faster: held("fly_faster", "Fly faster", Keys::SHIFT),
             orbit: held("orbit", "Turn around the target with the drag", Keys::ALT),
         }
@@ -2549,11 +2549,11 @@ mod tests {
             "Q left, S back"
         );
         assert_eq!(
-            flight(vec![key(Key::Q, false), key(Key::S, false), key(Key::E, true)]),
+            flight(vec![key(Key::Q, false), key(Key::S, false), key(Key::Space, true)]),
             Vec3::Z,
             "E up"
         );
-        assert_eq!(flight(vec![key(Key::A, true)]), Vec3::ZERO, "A down, against E");
+        assert_eq!(flight(vec![key(Key::C, true)]), Vec3::ZERO, "C down, against Space");
         let ctrl = Modifiers {
             ctrl: true,
             command: true,
@@ -2561,8 +2561,8 @@ mod tests {
         };
         assert_eq!(
             flight(vec![
-                key(Key::E, false),
-                key(Key::A, false),
+                key(Key::Space, false),
+                key(Key::C, false),
                 key(Key::Z, true),
                 Event::ModifiersChanged(ctrl)
             ]),
