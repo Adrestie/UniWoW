@@ -9696,6 +9696,83 @@ Left to the steps, which answer them by measure or by reading:
 - **The arena of the instances**: a preview that finds its lock held by a job waits a frame, so that
   a drag over tiles still loading may stutter; counted by the journal from 15.6.
 
+#### Step 15.1, the probes, as measured
+
+Probes not kept (ignored tests of `assets` on the user's client, a library `libs/db` added to the
+runtime then removed), at 11888e6; release build, 16 threads.
+
+**The areas.** `AreaTable.dbc` holds 2,307 rows, and its chains are **never deeper than two**: 220
+zones, 2,087 subzones under a zone; no parent on another map, none missing. The main view of the
+Hierarchy is therefore Continent, Zone, Subzone, as decided (question 5 answered for the chains).
+The areas the chunks carry:
+
+| Map | Tiles | Chunks | Area 0 | Unknown to `AreaTable` | Of another map |
+|---|---|---|---|---|---|
+| Azeroth | 753 | 192,768 | 18,331 | 0 | 0 |
+| Kalimdor | 988 | 252,928 | 18,471 | 0 | 16 (area 3217) |
+| Outland | 800 | 204,800 | 44,877 | 9 | 0 |
+| Northrend | 1,131 | 289,536 | 125,591 (43 %) | 566 | 1 (area 1764) |
+
+So a node *No area* is needed on every continent, and it is large in Northrend; the unknown ids and
+those of another map go there as well, the Inspector saying which id the chunk names.
+
+`Formats::areas`: the 256 words of the headers of `MCNK` are found in 5 to 6 µs a tile; the read of
+the tile's file dominates, 15 to 23 ms a tile on each of 16 threads at once, cold (1.4 ms a tile of
+the wall clock over the four continents, 5 s for the 3,672 tiles). The budget of 1 ms holds for the
+words only: the registry takes them from a file already read (`recent`) where it can, and reads
+them in jobs otherwise.
+
+**The unique ids** over the four continents, each tile's placements read alone:
+
+| Map, kind | Ids | Listings | Listed by several tiles | Listed again with other data | Listed only by tiles they do not stand in | Highest id |
+|---|---|---|---|---|---|---|
+| Azeroth, doodads | 159,575 | 167,168 | 6,907 | 0 | 0 | 5,497,957 |
+| Azeroth, buildings | 1,673 | 2,057 | 285 | 0 | 0 | 3,016,503 |
+| Kalimdor, doodads | 163,633 | 175,348 | 9,956 | 20 (Kalimdor 39_23 with 34_22, 35_23, 38_21, 38_22) | 10 | 5,461,976 |
+| Kalimdor, buildings | 1,430 | 1,882 | 310 | 0 | 0 | 5,461,977 |
+| Outland, doodads | 200,580 | 209,924 | 8,313 | 0 | 2 | 2,631,796 |
+| Outland, buildings | 1,659 | 2,119 | 336 | 0 | 0 | 2,205,753 |
+| Northrend, doodads | 291,860 | 302,497 | 9,705 | 0 | 1 | 5,766,075 |
+| Northrend, buildings | 1,528 | 2,285 | 411 | 0 | 1 | 5,491,075 |
+
+The exceptions are the 20 birds of Kalimdor 39_23 alone, written `doodad:1:<id>@<x>_<y>` as
+designed; the doodads and the buildings of a map share one space of ids (the highest of Kalimdor's
+buildings is its doodads' plus one). The placements of the four continents, read and gathered, take
+1.6 s: the highest id of a map (15.8) is well under its 0.3 s for Northrend.
+
+**The memory of the picking**, each model and building once, positions as three floats:
+
+| Where | Tiles | Doodads, buildings placed | Models: count, positions + indices (u32; u16) | Buildings: count, groups, vertices + indices + BSP | Read |
+|---|---|---|---|---|---|
+| Dalaran (Northrend 30_21), 4 tiles | 81 | 39,629, 738 | 3,010: 12.7 + 13.2 = 25.9 MB (19.3 MB) | 219, 670: 29.6 + 15.3 + 17.2 = 62.1 MB | 1.1 s |
+| The densest square of Northrend (23_23), 4 tiles | 81 | 79,781, 456 | 2,250: 17.2 MB (12.8 MB) | 157, 358: 34.5 MB | 0.5 s |
+| Dalaran, 2 tiles (the scope by default) | 25 | 13,530, 198 | 1,699: 15.2 MB (11.3 MB) | 68, 269: 26.7 MB | 0.3 s |
+
+The models are under the estimate (30 to 60 MB); the buildings at 4 tiles **nearly double it** (62
+against 33 MB), their BSP trees alone 17 MB. Together 88 MB at 4 tiles in Dalaran, 46 MB at the scope
+by default: kept for the scope only, and the BSP trees read again from the building's file when a
+ray reaches one, unless 15.3 measures them needed at each click. The looks of the creatures, live or
+spawned, are not counted here.
+
+**MySQL.** The user's server is MySQL 8.4.8 (the service `MySQL84`, 127.0.0.1:3306), read from its
+greeting without logging in: it offers TLS, and its authentication by default is
+`caching_sha2_password`. Without TLS, the first login of a user after the server starts needs its
+RSA key, which the crate's `mysql_common` asks for (its own reading of PEM keys). The crate `mysql`
+26.0.1, without its default features and with `minimal-rust` (no TLS, no C): 31 new packages in the
+lock (`mysql`, `mysql_common`, `regex` and its two, `sha1`, `sha2`, `digest` and its four, `pem`,
+`base64`, `lru`, `socket2`, `named_pipe`, `winapi` and its two, among others); the release runtime
+exports 21,629 symbols instead of 19,899 (+1,730, 33 % of the limit) and weighs 40.9 MB instead of
+38.2. **Not measured, waiting for the user's password typed at the time**: the login itself, the
+version the session reports, and the rows of `creature` and `gameobject` of each continent with the
+time to read them (2 s budget).
+
+**The hotkeys.** Defaults: the kernel Ctrl+Z, Ctrl+Y; the viewport's flight, held over the view, Z,
+S, Q, D, E (up) and A (down); the Timeline Space, only while the pointer is over its panel; the Curves
+view F and Delete, the dopesheet Delete, each over its own panel. C and Space are bound nowhere over
+the 3D view, and a held hotkey is refused while Ctrl is down: **Space up and C down** collide with
+nothing, nor with Ctrl+C. W and R are free; E is the one conflict, as foreseen. F and Delete of
+15.3 and 15.8 act over the 3D view and the Hierarchy, the others' over their own panels.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
