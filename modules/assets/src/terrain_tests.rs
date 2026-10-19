@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use uniwow_api::formats::{FileRef, TextureFormat, Tile};
+use uniwow_api::formats::{FileRef, SoundEmitter, TextureFormat, Tile};
 
 use crate::chain::{self, Source};
 use crate::tests::{Stored, file, scratch, write_archive};
@@ -470,6 +470,23 @@ fn placements() -> Vec<u8> {
     out
 }
 
+/// The ambient sound of the test chunk `place`: one chunk in seven has one.
+fn sound_of(place: usize) -> Option<SoundEmitter> {
+    (place % 7 == 3).then(|| SoundEmitter {
+        sound: place as u32 + 500,
+        position: [place as f32, 1.0, 2.0],
+        size: [3.0, 4.0, 5.0],
+    })
+}
+
+/// `MCSE` of `sound`, 28 bytes.
+fn sound_bytes(sound: &SoundEmitter) -> Vec<u8> {
+    let mut bytes = sound.sound.to_le_bytes().to_vec();
+    bytes.extend(floats(&sound.position));
+    bytes.extend(floats(&sound.size));
+    bytes
+}
+
 /// A tile of 3.3.5a, its parts found by offsets, its alpha maps declared one byte long when
 /// `short_alphas`, as some of the client are; and what each chunk holds.
 fn write_adt(alphas: Alphas, short_alphas: bool) -> (Vec<u8>, Vec<Made>) {
@@ -513,6 +530,10 @@ fn write_adt(alphas: Alphas, short_alphas: bool) -> (Vec<u8>, Vec<Made>) {
         if made.holes != 0 {
             put_at(&mut data, 0x3C, &LOW_HOLES.to_le_bytes());
         }
+        if let Some(sound) = sound_of(place) {
+            put_at(&mut data, 0x5C, &1u32.to_le_bytes());
+            part(&mut data, 0x58, b"MCSE", &sound_bytes(&sound));
+        }
         out.extend(tagged(b"MCNK", &data));
         chunks.push(made);
     }
@@ -549,6 +570,9 @@ fn write_split(alphas: Alphas, ids: bool) -> ([Vec<u8>; 3], Vec<Made>) {
         data.extend(tagged(b"MCVT", &floats(&made.heights)));
         data.extend(tagged(b"MCCV", &colour_bytes(&made)));
         data.extend(tagged(b"MCNR", &normal_bytes(&made)));
+        if let Some(sound) = sound_of(place) {
+            data.extend(tagged(b"MCSE", &sound_bytes(&sound)));
+        }
         root.extend(tagged(b"MCNK", &data));
         let mut texture = tagged(b"MCLY", &layer_bytes(&made));
         if made.flags & 0x1 != 0 {
@@ -604,6 +628,7 @@ fn same(tile: &Tile, made: &[Made], textures: &[FileRef]) {
         assert_eq!(layers, expected, "{at}");
         assert_eq!(chunk.alphas, made.alphas, "{at}");
         assert_eq!(chunk.shadow, made.shadow, "{at}");
+        assert_eq!(chunk.sounds, Vec::from_iter(sound_of(place)), "{at}: its ambient sound");
         assert_eq!(
             (&chunk.doodad_refs, &chunk.building_refs),
             (&made.doodad_refs, &made.building_refs),

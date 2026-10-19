@@ -7,6 +7,7 @@
 
 pub mod gpu;
 mod horizon;
+mod inspect;
 mod layer;
 mod loading;
 pub mod mesh;
@@ -80,6 +81,61 @@ fn list_maps(formats: &dyn Formats) -> Result<Vec<MapChoice>, String> {
 /// cancelled.
 type Loaded = Result<Option<(Option<TileModel>, TileGpu)>, String>;
 
+/// A tile read for `terrain.read`, kept for the next: its map, its place, the tile and its water.
+type ReadTile = Option<(String, TileId, Arc<formats::Tile>, Arc<Vec<formats::LiquidLayer>>)>;
+
+/// The components of the chunks `arguments` names, of the map shown, `last` the tile read last.
+fn read_chunks(
+    arguments: &serde_json::Value,
+    formats: &Mutex<Option<Arc<dyn Formats>>>,
+    shown: &Mutex<serde_json::Value>,
+    last: &Mutex<ReadTile>,
+) -> Result<serde_json::Value, String> {
+    let formats = lock(formats)
+        .clone()
+        .ok_or("no formats: the module assets is not running")?;
+    let (map, directory) = {
+        let shown = lock(shown);
+        (
+            shown["id"].as_u64(),
+            shown["directory"].as_str().unwrap_or_default().to_owned(),
+        )
+    };
+    let ids = arguments["ids"].as_array().ok_or("'ids' is a list of ids")?;
+    let types = formats.liquid_types().unwrap_or_default();
+    let mut entities = Vec::new();
+    for id in ids {
+        let id: scene::EntityId = id
+            .as_str()
+            .ok_or("'ids' is a list of ids as text")?
+            .parse()
+            .map_err(|_| format!("{id} is not an id"))?;
+        let (Some((place, index)), true) = (id.chunk_place(), Some(u64::from(id.map)) == map) else {
+            continue;
+        };
+        let tile = TileId { x: place.x, y: place.y };
+        let mut kept = lock(last);
+        let held = kept
+            .as_ref()
+            .filter(|(at, place, _, _)| *at == directory && *place == tile)
+            .map(|(_, _, read, water)| (read.clone(), water.clone()));
+        let (read, water) = match held {
+            Some(held) => held,
+            None => {
+                let read = Arc::new(read_tile(&*formats, &directory, tile)?);
+                let water = Arc::new(formats.liquids(&directory, tile.x, tile.y)?.unwrap_or_default());
+                *kept = Some((directory.clone(), tile, read.clone(), water.clone()));
+                (read, water)
+            }
+        };
+        drop(kept);
+        if let Some(components) = inspect::components(&read, index, &water, &types) {
+            entities.push(serde_json::json!({ "id": id.to_string(), "components": components }));
+        }
+    }
+    Ok(serde_json::json!({ "entities": entities }))
+}
+
 /// The tile `tile` of the map `directory`, its alpha maps the share of each layer, as the shader
 /// blends them: those of a map without big alpha made so (`mesh::shares`), whatever the map. A
 /// writer of such a map turns them back into how much each layer covers those before it.
@@ -133,6 +189,8 @@ struct TerrainModule {
     showing: u64,
     /// The models of the full tiles.
     models: HashMap<TileId, TileModel>,
+    /// The formats, for `terrain.read` on the callers' threads.
+    formats: Arc<Mutex<Option<Arc<dyn Formats>>>>,
     /// The loads running, by tile, with their job and the kind each loads.
     loading: HashMap<TileId, (JobId, Kind)>,
     jobs: HashMap<JobId, (u64, TileId, Kind)>,
@@ -694,6 +752,14 @@ impl Module for TerrainModule {
                 Ok(shown)
             }),
         );
+        let (formats, shown, read_last) = (self.formats.clone(), self.shown_map.clone(), Arc::new(Mutex::new(None)));
+        reg.command_on_caller(
+            "terrain.read",
+            "The components of the chunks 'ids' (chunk:<map>:<x>_<y>:<cx>_<cy>) of the map shown, as their tile              stores them: Chunk (its layers of texture, the share each covers, their flags and effects; its area,              flags and holes; its water; its vertex colours; its shadow; its ambient sounds) and its raw fields.              Read from the files, from the calling thread.",
+            serde_json::json!({ "type": "object", "properties": { "ids": { "type": "array" } }, "required": ["ids"] }),
+            serde_json::json!({ "type": "object", "properties": { "entities": { "type": "array" } } }),
+            Arc::new(move |arguments| read_chunks(&arguments, &formats, &shown, &read_last)),
+        );
         let areas = self.areas.clone();
         reg.command_on_caller(
             "terrain.area",
@@ -718,6 +784,7 @@ impl Module for TerrainModule {
     }
 
     fn init(&mut self, ctx: &mut Context) {
+        *lock(&self.formats) = ctx.service(formats::SERVICE);
         self.remembered = ctx.setting(MAP).and_then(|value| value.as_str().map(str::to_owned));
         self.registry = ctx.service(scene::SERVICE);
         if let Some(scene) = &self.registry {

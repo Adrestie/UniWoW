@@ -25,6 +25,12 @@ const WRITTEN: [(&str, &[&str]); 3] = [
     ("spawns", &["position", "rotation"]),
 ];
 
+/// The providers whose entities are read through `<provider>.read` but not written there.
+const READ_ONLY: [&str; 1] = ["terrain"];
+
+/// The components drawn by their own part of the Inspector; the others are drawn as their values.
+const DRAWN: [&str; 4] = ["transform", "model", "raw", "quests"];
+
 /// The fields of the Transform, in their order: their name, their label, whether a vector.
 pub const TRANSFORM: [(&str, &str, bool); 3] = [
     ("position", "Position", true),
@@ -106,7 +112,7 @@ pub fn read(editor: &uniwow_api::Editor, snapshot: &Snapshot, ids: &[EntityId], 
     }
     let mut out = Read::default();
     for (provider, ids) in by_provider {
-        if !WRITTEN.iter().any(|(written, _)| *written == provider) {
+        if !WRITTEN.iter().any(|(written, _)| *written == provider) && !READ_ONLY.contains(&provider.as_str()) {
             continue;
         }
         match editor.call(&format!("{provider}.read"), json!({ "ids": ids })) {
@@ -389,13 +395,19 @@ impl Inspector {
         ui.separator();
         let read = self.read.clone();
         let values: Vec<(EntityId, Value)> = read.values.iter().filter(|(id, _)| ids.contains(id)).cloned().collect();
-        let unread = ids.len() - values.len();
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             if self.raw {
                 self.raw_ui(ui, &values);
             } else {
-                self.transform_ui(ui, &values, unread, &ids, &snapshot, ctx);
+                let placed: Vec<(EntityId, Value)> = values
+                    .iter()
+                    .filter(|(_, value)| value["components"].get("transform").is_some())
+                    .cloned()
+                    .collect();
+                let unplaced = ids.len().saturating_sub(placed.len());
+                self.transform_ui(ui, &placed, unplaced, &ids, &snapshot, ctx);
                 self.model_ui(ui, &values);
+                components_ui(ui, &values);
                 self.quests_ui(ui, &values, ctx);
                 self.declared_ui(ui, &read, &ids, ctx);
             }
@@ -772,6 +784,84 @@ fn quests_found(answer: &Value) -> Vec<(u64, String)> {
         .unwrap_or_default()
 }
 
+/// The components no part of the Inspector draws, of the first entity read: each as its values, a
+/// list of records as a table.
+fn components_ui(ui: &mut egui::Ui, values: &[(EntityId, Value)]) {
+    let Some((first, value)) = values.first() else {
+        return;
+    };
+    let Some(components) = value["components"].as_object() else {
+        return;
+    };
+    for (name, component) in components.iter().filter(|(name, _)| !DRAWN.contains(&name.as_str())) {
+        let mut label = name.clone();
+        if let Some(initial) = label.get_mut(0..1) {
+            initial.make_ascii_uppercase();
+        }
+        if values.len() > 1 {
+            label = format!("{label} (of {first})");
+        }
+        egui::CollapsingHeader::new(label)
+            .id_salt(("inspector component", name))
+            .default_open(true)
+            .show(ui, |ui| fields_ui(ui, name, component));
+    }
+}
+
+/// The fields of `value` under `salt`: a value a line; a list of records a table of their fields.
+fn fields_ui(ui: &mut egui::Ui, salt: &str, value: &Value) {
+    let Some(fields) = value.as_object() else {
+        ui.label(plain(value));
+        return;
+    };
+    egui::Grid::new(("inspector fields", salt))
+        .num_columns(2)
+        .show(ui, |ui| {
+            for (name, field) in fields {
+                ui.label(name);
+                match field {
+                    Value::Array(records) if records.iter().all(Value::is_object) && !records.is_empty() => {
+                        ui.vertical(|ui| {
+                            egui::Grid::new(("inspector records", salt, name))
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    let columns: Vec<&String> = records[0]
+                                        .as_object()
+                                        .map(|first| first.keys().collect())
+                                        .unwrap_or_default();
+                                    for column in &columns {
+                                        ui.label(egui::RichText::new(column.as_str()).weak());
+                                    }
+                                    ui.end_row();
+                                    for record in records {
+                                        for column in &columns {
+                                            ui.label(shown_value(&record[column.as_str()]));
+                                        }
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                    }
+                    other => {
+                        ui.label(shown_value(other));
+                    }
+                }
+                ui.end_row();
+            }
+        });
+}
+
+/// A value as a field shows it: a list of values joined, nothing as a dash.
+pub fn shown_value(value: &Value) -> String {
+    match value {
+        Value::Null => "—".to_owned(),
+        Value::Array(values) if values.is_empty() => "none".to_owned(),
+        Value::Array(values) => values.iter().map(shown_value).collect::<Vec<_>>().join(", "),
+        Value::Number(number) => text(&Shown::Same(number.as_f64().unwrap_or(0.0))),
+        other => plain(other),
+    }
+}
+
 /// The colour `field` common to `values` as `#rrggbb`, `—` when they differ.
 fn colour_text(values: &[(EntityId, Value)], field: &str) -> String {
     let hex = |value: &Value| {
@@ -840,6 +930,10 @@ mod tests {
         assert_eq!(common(&fields, "at", Some(1)).as_deref(), Some("—"));
         assert_eq!(common(&fields, "missing", None), None);
         assert_eq!(colour_text(&fields, "colour"), "#ff8000");
+        assert_eq!(shown_value(&json!(["shadow", "river"])), "shadow, river");
+        assert_eq!(shown_value(&json!([1.0, 2.5, 3.0])), "1, 2.5, 3");
+        assert_eq!(shown_value(&json!(null)), "—");
+        assert_eq!(shown_value(&json!([])), "none");
         let answer = json!({ "entities": [{ "id": "doodad:0:1", "fields": { "tag": "lamp" } }, { "id": "x" }] });
         assert_eq!(fields_of(&answer), [(EntityId::doodad(0, 1), json!({ "tag": "lamp" }))]);
         assert_eq!(text(&Shown::Same(2.5)), "2.5");

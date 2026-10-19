@@ -47,6 +47,7 @@ fn chunk(index: [u32; 2], position: [f32; 3], holes: u64) -> Chunk {
         shadow: vec![255; 4096],
         doodad_refs: Vec::new(),
         building_refs: Vec::new(),
+        sounds: Vec::new(),
     }
 }
 
@@ -1985,4 +1986,63 @@ fn a_ray_meets_the_ground_of_a_chunk_at_its_heights_and_misses_beside_it() {
         direction: Vec3::NEG_Z,
     };
     assert_eq!(model::ray_hits(&chunk, &beside), None);
+}
+
+#[test]
+fn the_component_chunk_gives_the_layers_the_area_the_holes_the_water_and_the_sounds_of_a_chunk() {
+    let mut tile = tile();
+    tile.chunks[9].flags = 0x1 | 0x40 | 0x4;
+    tile.chunks[9].colours = vec![[127, 254, 0, 127]; 145];
+    tile.chunks[9].sounds = vec![uniwow_api::formats::SoundEmitter {
+        sound: 4321,
+        position: [1.0, 2.0, 3.0],
+        size: [10.0, 10.0, 5.0],
+    }];
+    let water = uniwow_api::formats::LiquidLayer {
+        liquid: 2,
+        corner: [3200.0, 1066.667],
+        tiles: 0xFF,
+        heights: vec![5.0; 81],
+        depths: vec![255; 81],
+        coordinates: Vec::new(),
+    };
+    let elsewhere = uniwow_api::formats::LiquidLayer {
+        corner: [0.0, 0.0],
+        ..water.clone()
+    };
+    let read = crate::inspect::components(&tile, [9, 0], &[water, elsewhere], &[]).unwrap();
+    let chunk = &read["chunk"];
+    assert_eq!(chunk["area"], 12);
+    assert_eq!(chunk["holes"], 1);
+    assert_eq!(
+        chunk["flags"],
+        uniwow_api::serde_json::json!(["shadow", "river", "vertex colours"])
+    );
+    let layers = chunk["layers"].as_array().unwrap();
+    assert_eq!(layers.len(), 3);
+    assert_eq!(layers[0]["texture"], "a.blp");
+    assert_eq!(layers[0]["covers"], 100.0, "the first layer lies under the others");
+    assert_eq!(layers[1]["covers"], 78.4, "200 of 255");
+    assert_eq!(layers[1]["flags"], uniwow_api::serde_json::json!(["alpha map"]));
+    assert_eq!(layers[2]["texture"], "missing texture 7");
+    assert_eq!(chunk["shadow"], 100.0);
+    assert_eq!(chunk["vertex colours"], uniwow_api::serde_json::json!([1.0, 2.0, 0.0]));
+    assert_eq!(
+        chunk["water"].as_array().unwrap().len(),
+        1,
+        "the water of its corner alone"
+    );
+    assert_eq!(chunk["water"][0]["squares"], 8);
+    assert_eq!(chunk["water"][0]["highest"], 5.0);
+    assert_eq!(
+        chunk["water"][0]["deepest"],
+        uniwow_api::serde_json::Value::Null,
+        "no depth"
+    );
+    assert_eq!(chunk["sounds"][0]["sound"], 4321);
+    assert_eq!(read["raw"]["holes"], "0x0000000000000200");
+    assert!(
+        crate::inspect::components(&tile, [16, 0], &[], &[]).is_none(),
+        "no such chunk"
+    );
 }

@@ -4,7 +4,9 @@
 //! wow.export (MIT, see THIRD_PARTY.md). A tile of 3.3.5a finds the parts of its chunks by the
 //! offsets of their header, as the client does; a split tile by walking them, as wow.export does.
 
-use uniwow_api::formats::{BIG_ALPHA, Building, Chunk, Doodad, FileRef, Layer, Placements, Tile, Wdl, Wdt};
+use uniwow_api::formats::{
+    BIG_ALPHA, Building, Chunk, Doodad, FileRef, Layer, Placements, SoundEmitter, Tile, Wdl, Wdt,
+};
 
 /// The flags of a chunk.
 const HAS_SHADOW: u32 = 0x1;
@@ -330,6 +332,7 @@ struct Parts<'a> {
     refs: Option<&'a [u8]>,
     doodad_refs: Option<&'a [u8]>,
     building_refs: Option<&'a [u8]>,
+    sounds: Option<&'a [u8]>,
 }
 
 /// The size of the header of a chunk of terrain (`MCNK`).
@@ -376,6 +379,7 @@ impl<'a> Parts<'a> {
             alphas: place(layers > 1, 0x24, b"MCAL")?.map(|(start, _)| &mcnk[start..]),
             shadow: part(flags & HAS_SHADOW != 0, 0x2C, b"MCSH")?,
             colours: part(flags & HAS_COLOURS != 0, 0x74, b"MCCV")?,
+            sounds: part(u32_at(mcnk, 0x5C)? > 0, 0x58, b"MCSE")?,
             ..Self::default()
         })
     }
@@ -396,6 +400,7 @@ impl<'a> Parts<'a> {
                     b"MCSH" => &mut parts.shadow,
                     b"MCRD" => &mut parts.doodad_refs,
                     b"MCRW" => &mut parts.building_refs,
+                    b"MCSE" => &mut parts.sounds,
                     _ => continue,
                 };
                 *slot = Some(data);
@@ -505,7 +510,24 @@ fn chunk(root: &[u8], parts: &Parts, big_alpha: bool) -> Result<Chunk, String> {
         shadow,
         doodad_refs,
         building_refs,
+        sounds: sounds(parts.sounds.unwrap_or_default())?,
     })
+}
+
+/// The ambient sounds of `MCSE`, of 28 bytes each: the sound, the place, the size.
+fn sounds(bytes: &[u8]) -> Result<Vec<SoundEmitter>, String> {
+    bytes
+        .as_chunks::<28>()
+        .0
+        .iter()
+        .map(|entry| {
+            Ok(SoundEmitter {
+                sound: u32_at(entry, 0)?,
+                position: f32s(entry, 4)?,
+                size: f32s(entry, 16)?,
+            })
+        })
+        .collect()
 }
 
 /// The holes of 3.3.5a, a bit per 2 × 2 quads of the 4 × 4, as a bit per quad of the 8 × 8.

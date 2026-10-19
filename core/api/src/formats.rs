@@ -366,6 +366,17 @@ pub struct Chunk {
     /// What stands on the chunk: indices into `Tile::doodads` and `Tile::buildings`.
     pub doodad_refs: Vec<u32>,
     pub building_refs: Vec<u32>,
+    /// Its ambient sounds (`MCSE`).
+    pub sounds: Vec<SoundEmitter>,
+}
+
+/// An ambient sound of a chunk: its sound of `SoundEntries.dbc`, its place in the coordinates of
+/// the files, the size of the box it is heard in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SoundEmitter {
+    pub sound: u32,
+    pub position: [f32; 3],
+    pub size: [f32; 3],
 }
 
 /// A texture layer of a chunk.

@@ -1,7 +1,7 @@
 # UniWoW — Architecture and module catalogue
 
 Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.10 done, 15.11 built
-before its first connection (15.11a to 15.11c), 15.12 done; milestones 10 to 14 outlined. Open questions in section 10.
+before its first connection (15.11a to 15.11c), 15.12 done, 15.13a done; milestones 10 to 14 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -10386,6 +10386,33 @@ not hold refused; the views of the scene drawn by their services with their enti
 not one refused, a view gone forgotten, a view without its service saying so, a service that panics
 reported; each hierarchy view folded on its own; the SDK's classes given their entities (C++ and
 C#).
+
+#### Step 15.13a, as built: the Inspector of a chunk
+
+Built after da95d85, on `main`; the materials (decision 23) are 15.13b.
+
+- **`formats` reads the ambient sounds** of the chunks (`MCSE`, 28 bytes each: the sound of
+  `SoundEntries.dbc`, the place, the size of the box it is heard in), `Chunk::sounds`, in the tiles
+  of 3.3.5a (by the offset and count of the header) and the split ones.
+- **`terrain.read`**, on the calling thread: the components of chunks of the map shown, read from
+  their tile (the tile read last kept for the next): *Chunk*, its layers in their order (the texture
+  by its path, the share of the chunk each covers, as the shader blends them, their flags named and
+  their ground effect), its area, flags named and holes, its water (the layers of `MH2O` at its
+  corner: their type and name, the squares they fill, their lowest and highest heights, their
+  deepest depth), its vertex colours (their mean, 1 leaving the colour as it is), its shadow baked in (the share in
+  shadow), its ambient sounds and how many doodads and buildings stand on it; and its raw fields.
+- **The Inspector** reads the providers that are read but not written (`terrain`), draws the
+  components it has no part for as their values (a list of records a table), the Transform of
+  those it places alone.
+
+**Not in 15.13a**: the previews of the textures and of the alpha maps, the vertex colours and the
+shadow drawn as images; the words of the header of `MCNK` not named (the predicted textures, the
+doodads not to draw); a chunk changed (the terrain is edited in a later milestone).
+
+**Tests**: the ambient sounds of the chunks of the tiles the tests write, of 3.3.5a and split; the
+component of a chunk of a tile the tests make: its layers and their shares, a texture missing,
+its area, flags, holes, the water of its corner alone, its colours, its shadow, its sounds; a
+chunk the tile does not have; the values shown in the Inspector.
 
 ### Milestone 10: Lua modules (outline)
 
