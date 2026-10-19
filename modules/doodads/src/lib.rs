@@ -12,9 +12,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use uniwow_api::formats::{self, TileId, Wdt};
+use uniwow_api::scene::{self, PieceKey};
 use uniwow_api::serde_json::json;
 use uniwow_api::{
-    Context, DockArea, JobId, JobOutcome, Module, Priority, PropertyValue, Registrar, egui, log, models, viewport,
+    Context, DockArea, JobId, JobOutcome, Module, Priority, PropertyValue, Registrar, egui, log, models, vfs, viewport,
 };
 
 use placing::Placing;
@@ -38,6 +39,8 @@ struct DoodadsModule {
     /// The map the terrain shows, by its folder; its WDT once read, or why it could not be, and
     /// the job reading it.
     map: Option<String>,
+    /// Its id in `Map.dbc`, for the scene.
+    map_id: u32,
     wdt: Option<Result<Arc<Wdt>, String>>,
     reading_wdt: Option<JobId>,
     /// The tiles told wanted to `placing`, the reads running, by tile and by job, the tiles placed
@@ -78,6 +81,9 @@ impl DoodadsModule {
         self.took = None;
         self.since = map.is_some().then(Instant::now);
         lock(&self.placing).want(models, map.as_deref().unwrap_or_default(), HashSet::new());
+        if let Some(scene) = ctx.service(scene::SERVICE) {
+            scene.withdraw_provider(ctx.module_id(), None);
+        }
         self.map = map;
     }
 
@@ -109,13 +115,16 @@ impl DoodadsModule {
         ) else {
             return;
         };
-        let map = ctx
-            .editor()
-            .call("terrain.map", json!({}))
-            .ok()
+        let shown = ctx.editor().call("terrain.map", json!({})).ok();
+        let map = shown
+            .as_ref()
             .and_then(|map| Some(map.get("directory")?.as_str()?.to_owned()));
         if map != self.map {
             self.show(map, &*models, ctx);
+            self.map_id = shown
+                .as_ref()
+                .and_then(|map| map.get("id")?.as_u64())
+                .unwrap_or_default() as u32;
         }
         let Some(directory) = self.map.clone() else {
             return;
@@ -152,11 +161,15 @@ impl DoodadsModule {
             };
             let leaving = placing.want(&*models, &directory, set.clone());
             drop(placing);
+            let scene = ctx.service(scene::SERVICE);
             for tile in self.told.difference(&set) {
                 if let Some(job) = self.reading.remove(tile) {
                     ctx.cancel(job);
                 }
                 self.placed.remove(tile);
+                if let Some(scene) = &scene {
+                    scene.withdraw(PieceKey::tile(ctx.module_id(), self.map_id, *tile));
+                }
             }
             if leaving {
                 let (placing, models) = (self.placing.clone(), models.clone());
@@ -180,6 +193,12 @@ impl DoodadsModule {
             }
             let (formats, models, placing, directory) =
                 (formats.clone(), models.clone(), self.placing.clone(), directory.clone());
+            let (scene, vfs, provider, map_id) = (
+                ctx.service(scene::SERVICE),
+                ctx.service(vfs::SERVICE),
+                ctx.module_id().to_owned(),
+                self.map_id,
+            );
             let tile = *tile;
             let label = format!("Place the doodads of the tile {} {} of {directory}", tile.x, tile.y);
             let priority = Priority::distance(tile.nearest(eye));
@@ -194,7 +213,22 @@ impl DoodadsModule {
                 if job.is_cancelled() {
                     return Ok(false);
                 }
-                Ok(lock(&placing).place(&*models, &directory, tile, instances))
+                let (placed, again) = {
+                    let mut placing = lock(&placing);
+                    let placed = placing.place(&*models, &directory, tile, instances);
+                    let again = if placed {
+                        placing.differing(tile)
+                    } else {
+                        HashSet::new()
+                    };
+                    (placed, again)
+                };
+                if placed && let Some(scene) = scene {
+                    let path_of = |file| vfs.as_ref().and_then(|vfs| vfs.path_of(file));
+                    let piece = placing::piece(&read, map_id, tile, &again, &path_of);
+                    scene.publish(PieceKey::tile(&provider, map_id, tile), Arc::new(piece));
+                }
+                Ok(placed)
             });
             self.reading.insert(tile, job);
             self.jobs.insert(job, tile);

@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use uniwow_api::formats::{self, Formats, Wdt};
 use uniwow_api::glam::Vec3;
+use uniwow_api::scene::{self, PieceKey};
 use uniwow_api::theme;
 use uniwow_api::vfs::{self, VfsState};
 use uniwow_api::viewport::{Allowance, Demand, Fog};
@@ -39,6 +40,8 @@ use model::{TILE, TileId, TileModel};
 /// in the window *Settings*). The GPU budget is the view's, shared with its other layers; the
 /// terrain's own, before, is given to the view once.
 const MAP: &str = "map";
+/// The id of the module, the provider of its pieces of the scene.
+const MODULE: &str = "terrain";
 const DISTANCE: &str = "view_distance";
 const OLD_BUDGET: &str = "gpu_budget_mb";
 const MB: u64 = 1024 * 1024;
@@ -157,6 +160,9 @@ struct TerrainModule {
     /// The areas of the chunks of the full tiles, as the command `terrain.area` reads them from any
     /// thread.
     areas: Arc<Mutex<HashMap<TileId, Areas>>>,
+    /// The scene, given the chunks of the full tiles, and the id of the map shown in `Map.dbc`.
+    registry: Option<scene::Handle>,
+    map_id: u32,
 }
 
 /// The area of `AreaTable.dbc` of each chunk of a tile, by its index along Y then X; 0 where the
@@ -223,6 +229,9 @@ impl TerrainModule {
         self.ready.clear();
         self.dropped.extend(self.models.drain().map(|(_, model)| model));
         lock(&self.areas).clear();
+        if let Some(scene) = &self.registry {
+            scene.withdraw_provider(MODULE, None);
+        }
         self.models_bytes = 0;
         self.planned = None;
         self.refused.clear();
@@ -259,6 +268,7 @@ impl TerrainModule {
         let map = &maps[index];
         ctx.set_setting(MAP, serde_json::json!(map.directory));
         *lock(&self.shown_map) = serde_json::json!({ "id": map.id, "directory": map.directory, "name": map.name });
+        self.map_id = map.id;
         self.shown_at = Some(Instant::now());
         let tiles: Vec<TileId> = (0..4096u32)
             .filter(|i| map.wdt.tiles[*i as usize])
@@ -393,9 +403,20 @@ impl TerrainModule {
             Some(model) => {
                 self.models_bytes += model.bytes();
                 lock(&self.areas).insert(id, areas_of(model));
+                if let Some(scene) = &self.registry {
+                    let piece = model::piece(self.map_id, model);
+                    scene.publish(
+                        PieceKey::tile(MODULE, self.map_id, model::shared_id(id)),
+                        Arc::new(piece),
+                    );
+                }
             }
             None => {
-                lock(&self.areas).remove(&id);
+                if lock(&self.areas).remove(&id).is_some()
+                    && let Some(scene) = &self.registry
+                {
+                    scene.withdraw(PieceKey::tile(MODULE, self.map_id, model::shared_id(id)));
+                }
             }
         }
         let old = match model {
@@ -675,6 +696,7 @@ impl Module for TerrainModule {
 
     fn init(&mut self, ctx: &mut Context) {
         self.remembered = ctx.setting(MAP).and_then(|value| value.as_str().map(str::to_owned));
+        self.registry = ctx.service(scene::SERVICE);
         let Some(view) = ctx.service(viewport::SERVICE) else {
             log::info!("no viewport service: the terrain is not drawn");
             return;

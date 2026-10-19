@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and the next in the order of work, not built yet; milestones 10 to 14 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 and 15.2 done; milestones 10 to 14 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -281,6 +281,7 @@ fills it, or *not planned* when no milestone does yet.
 | The live world: entities of the server around a point, their moves | The commands `live-world.state` and `live-world.entities`, the event `live-world.changed` (step 9.3b); the client of the observer, `uniwow_api::server_link` | The same commands and event, through `call` and `subscribe` | The same, through `call` and `subscribe` | Lua: the same, through `uniwow.call` and `uniwow.subscribe` (checked in step 9.3b); Python: milestone 11 |
 | Sounds played: a file of the client, its category of volume, its volume and fades, looped or once | The service `audio` of the module `audio` (`Clip::decode`, `Audio::play`, `set_volume`, `stop`; *The lightning and the sounds of the weather, as built*) | The commands `audio.play`, `audio.volume`, `audio.stop`, `audio.state` through `call` | The same, through `call` | Scripts: the same, through `uniwow.call` |
 | Splitting work over the cores, `parallel_for` | `uniwow_api::parallel_for` (step 9.2a) | — not planned; compiled modules run threads of their own (T7) | — | — |
+| The entities of the scene: published by their providers, listed with their places and names | The service `scene` (`Scene::publish`, `withdraw`, `withdraw_provider`, `snapshot`; `uniwow_api::scene`), step 15.2 | The commands `scene.entities`, `scene.entity` and the event `scene.changed` through `call` and `subscribe`; publishing entities, `scene.publish`: step 15.12 | The same, through `call` and `subscribe` | Scripts: the same, through `uniwow.call` and `uniwow.subscribe`; modules: milestones 10 and 11 |
 | Picking in the 3D view, the selection shown in 3D | — designed in milestone 9; milestone 15, validated, not built | — milestone 15: `scene.pick`, `viewport.ray`, `scene.select` | — | — |
 | The terrain of a map shown in the 3D view, with its horizon | The module `terrain` (steps 9.2c, 9.2e, 9.2f) | — not planned yet | — | — |
 | The statistics of the 3D view: the times of the frames, of the interface thread and of the GPU, what each layer drew | `Layer::stats`; shown in their own panel, *Statistics* (step 9.2e) | — not planned yet | — | — |
@@ -8287,7 +8288,7 @@ On the user's machine, with the client and the server on it:
 the sources of AzerothCore at the commit of the user's server (bc9198ce7) and against WoWDBDefs;
 validated by the user (decision 31), with his answers to the points the proposal left to decide
 (*Decided by the user after the proposal*); its technical specification written once validated, at
-his request. Not built yet.*
+his request. Being built: steps 15.1 and 15.2 as built, at the end of this milestone.*
 
 The world of milestone 9, shown, becomes a world the user edits as a scene of Unity: a window
 *Hierarchy* left of the 3D view lists what is loaded around the camera, by the places of the game;
@@ -9772,6 +9773,96 @@ view F and Delete, the dopesheet Delete, each over its own panel. C and Space ar
 the 3D view, and a held hotkey is refused while Ctrl is down: **Space up and C down** collide with
 nothing, nor with Ctrl+C. W and R are free; E is the one conflict, as foreseen. F and Delete of
 15.3 and 15.8 act over the 3D view and the Hierarchy, the others' over their own panels.
+
+#### Step 15.2, as built: the entities and the registry
+
+Built at b4428d1 and after, without a window: the Commands panel shows the entities.
+
+**The contract**, `uniwow_api::scene`: the kinds and the stable ids of *The entities* above, written
+and read back as text (`doodad:0:183214`, `doodad:1:360868@39_23`, `room:0:4128:17`,
+`live:f13000046b0012e3`); the flags (client, server, live, read only, player); `PieceKey` (a provider,
+a map and a part: a tile, or a number of the provider's own, such as a building's unique id); a
+`Piece` in columns, built by `PieceBuilder`, its labels interned in it; the default names, made when
+shown (`ElwynnTree03 #4521`, *Chunk 3, 15*, *Room 17*, `Chair01 #256`); the service `Scene`
+(`publish`, `withdraw`, `withdraw_provider`, `snapshot`, from any thread); the `Snapshot`, its
+entities each once, the chain of the areas of each, the areas of the chunks of the tiles read
+(`area_at`, `areas_within` for the other zones). `TileId` gains `Default`.
+
+**`formats`**: `Formats::tile_areas(directory, x, y)`, the 256 areas of the headers of `MCNK`, from
+the files of the tiles kept for the last read (`recent`), the root of a split tile as of a whole one
+(named so, `Formats::areas` naming the table already); `Formats::wmo_areas`, `WMOAreaTable.dbc`, its
+28 columns checked on the user's client. Tested on tiles the tests write and over every tile of the
+four continents of the client, against the chunks read whole.
+
+**The module `scene`** (category *World*): the registry, one job at a time (`FIRST`) taking the
+changes gathered since (`scene pending`), the later of a piece winning; the pieces by slot, swapped
+alone, the others shared; the index of the stable ids kept in two copies, the published and the one
+behind, so that a job changes in place the copy no reader holds, the edits it missed applied first;
+the places from `Formats::tile_areas`, read by the job once a tile a map and kept, those of the pieces
+already in found again once the client opens; an area lying in itself, a weather in its zone. A
+unique id listed by several pieces is one entity, its first listing the entity and the others where
+it is also stored, in the order they came: a tile republished keeps its place among them. It
+publishes `scene.changed` once a job has changed something (one job at a time, so once a frame at
+most), its ids listed up to 1,000, `many` past them. A module failing takes its pieces away
+(`kernel.module_failed`); the registry failing is made again empty, the providers' pieces coming back
+as they publish them again. The setting *Scope (tiles)*, 2 by default, of the category *Scene*.
+
+- `scene.entities`, on the calling thread: by kind, text (in the name or the label), provider, the
+  tiles of the scope around the camera or a point, or `all`; paged, 1,000 at most a page; each with its
+  id, kind, name, place (the chain from the zone down), game parent and position.
+- `scene.entity`: one whole, besides: its label, map, bounds, the other zones its bounds reach, the
+  tiles storing it, its listings, its provider, flags and extra number.
+
+**The providers**, each its own pieces, published where it already holds what they need:
+
+| Provider | Its pieces | Published | Withdrawn |
+|---|---|---|---|
+| `doodads` | A tile: its doodads, each listing once; one listed again under its unique id with another look or place than the tile placing it first, `@x_y` (`Placing::differing`); named by the stem of its model (a FileDataID through `Vfs::path_of`) | By the job placing the tile, after placing it | A tile left; every one when the map changes |
+| `buildings` | A building: bare (itself) once its tile is read; whole once its file is: its rooms, named by `WMOAreaTable.dbc` for its name set (else set 0, else `MOGN`, else *Room n*), their bounds in the world; the doodads of the set 0 and of its own set, each under the first room holding it, else under the building | Bare on the interface thread (one entity); whole by the job placing its doodads | The building let go; every one when the map changes |
+| `terrain` | A full tile: its 256 chunks, their bounds from their heights, their area as extra number | On the interface thread, as the model is kept (256 entities, within the 2 ms of the hand-over) | The tile released or made light; every one at a reset |
+| `liquids` | A tile: a water a layer of a chunk, by its place among the chunk's layers, named by its type of `LiquidType.dbc` | Built by the job reading the tile, published as it is held | A tile let go; every one when the map changes |
+| `live-world` | The live entities where they stand, read only, a player flagged | On the interface thread, four times a second at most when the world changed | The map left, or no entity |
+| `lighting` | The lights of `Light.dbc` of the map (the global one at the origin) and its zones of light | By a job, once a map, the tables read | The map left |
+| `weather` | The weather of the zone of the camera: its zone and what it is, read only | On the interface thread, when it changes | When it changes or the camera leaves every zone |
+
+**Not in 15.2**, as the steps say: the bounds of the doodads from the extents of their looks (a box
+of their scale around the origin meanwhile); the column of the components (15.5); the names given by
+the user and the exceptions of the scope for the entities selected or changed (15.3, 15.4, 15.7); the
+filter *on screen* (15.4); the spawns (15.11); the merge of the live and the spawned (15.11c).
+
+**Measured**, on the user's machine, release, by the benchmark of the tests:
+
+| Benchmark | Target | Measured |
+|---|---|---|
+| 140 tiles of 3,576 doodads (500,640) indexed from nothing | 30 ms on 16 threads | 100 ms on one thread (the job), once at the first burst |
+| A tile of 3,576 merged among them | under 5 ms | 2.3 ms; 79 ms for the first tile after the burst, the copy behind brought level once |
+| The bytes an entity in the pieces | 66 (105 with the index) | 74 (the id 24 bytes, the labels interned) |
+
+The index from nothing is made by one job and not over `parallel_for`: once, at the first burst of a
+map, off the interface thread; parallel if the Hierarchy's first tree in 15.4 shows it late.
+
+**Tests**: the ids written and read back, those refused; the names; a point in its tile and chunk;
+the place by the chunk under the origin, its chain, *No area* (area 0); a unique id listed by three
+tiles once, stored in the three, still one when a tile leaves, one listed again with other data an
+entity of its own; a piece swapped replacing its entities alone, the others shared, its added,
+changed and removed counted; a provider withdrawn; a building, its rooms and doodads under their
+parents, the other zones its bounds reach; eight threads reading snapshots while 200 pieces are
+swapped; the lights and zones of light of a map; the areas of a tile against its chunks, and
+`WMOAreaTable.dbc` read, on files the tests write and on the client.
+
+**The user checks**, with the client and the server running (`scene.entities` from the Commands panel
+or the Lua console):
+
+- Around Goldshire, `scene.entities` with `{"text": "inn"}` then `{"kind": ["building", "room"]}`:
+  the inn, its rooms named as the game names them, in Elwynn Forest > Goldshire.
+- `{"kind": "building-doodad", "text": "chair"}`: the chairs of the inn under their room; one by
+  `scene.entity`, its parent, its tiles.
+- `{"kind": "doodad", "text": "ElwynnTree"}`: the trees of Elwynn by their model and unique id.
+- `{"kind": "chunk", "limit": 5}`: chunks with their subzone.
+- `{"kind": ["live", "light", "light-zone", "weather"], "all": true}`: the live entities, the lights,
+  the zones of light and the weather of the zone.
+- Flown from Goldshire to Stormwind at the distances by default: the interface as fluid as before
+  (the statistics of the view against b4428d1).
 
 ### Milestone 10: Lua modules (outline)
 

@@ -10,6 +10,7 @@
 //! storm of the lights and brings the fog nearer; its flashes of lightning light the scene.
 
 mod clouds;
+mod entities;
 mod heavens;
 mod light;
 mod sky;
@@ -24,6 +25,7 @@ use std::time::Instant;
 use uniwow_api::formats::FileRef;
 use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::models::{self, Geosets, Instance, Look, LookState, Motion};
+use uniwow_api::scene::{self, PieceKey};
 use uniwow_api::serde_json::json;
 use uniwow_api::vfs::{self, VfsState};
 use uniwow_api::viewport::{self, MapLight};
@@ -270,6 +272,9 @@ struct LightingModule {
     clouds: clouds::Field,
     clouds_made: Option<Instant>,
     clouds_given: u64,
+    /// The map whose lights were given to the scene, and the job giving them.
+    scene_map: Option<u32>,
+    scene_job: Option<JobId>,
 }
 
 impl LightingModule {
@@ -293,8 +298,45 @@ impl LightingModule {
 
     /// At each frame: the light of the map shown given to the view, none while there is none, nor
     /// then any heavens to the layers of the sky; its models of the sky placed at the eye.
+    /// Gives the scene the lights of the map the terrain shows, once its tables are read, by a job;
+    /// those of the map before taken away.
+    fn give_scene(&mut self, ctx: &mut Context) {
+        let (Some(scene), Some(formats)) = (ctx.service(scene::SERVICE), ctx.service(formats::SERVICE)) else {
+            return;
+        };
+        if self.scene_job.is_some() || !matches!(self.tables, Some(Ok(_))) {
+            return;
+        }
+        let map = ctx
+            .editor()
+            .call("terrain.map", json!({}))
+            .ok()
+            .and_then(|map| map.get("id")?.as_u64())
+            .map(|id| id as u32);
+        if map == self.scene_map {
+            return;
+        }
+        if let Some(before) = self.scene_map {
+            scene.withdraw(PieceKey::part(OWNER, before, 0));
+        }
+        self.scene_map = map;
+        let Some(map) = map else {
+            return;
+        };
+        self.scene_job = Some(ctx.spawn("Give the scene the lights of the map", move |_| {
+            let lights = formats.lights()?;
+            let zones = formats.zone_lights().unwrap_or_default();
+            scene.publish(
+                PieceKey::part(OWNER, map, 0),
+                Arc::new(entities::piece(map, &lights, &zones)),
+            );
+            Ok::<(), String>(())
+        }));
+    }
+
     fn steer(&mut self, ctx: &mut Context) {
         let given = self.light(ctx);
+        self.give_scene(ctx);
         if given.is_none() {
             sky::lock(&self.drawn).heavens = None;
         }
@@ -344,6 +386,7 @@ impl LightingModule {
             }
             self.client = client;
             self.tables = None;
+            self.scene_map = None;
             self.zones_unread = None;
             self.liquids_unread = None;
             self.skyboxes_unread = None;
@@ -973,6 +1016,18 @@ impl Module for LightingModule {
     }
 
     fn on_job(&mut self, job: JobId, outcome: JobOutcome, _ctx: &mut Context) {
+        if self.scene_job == Some(job) {
+            self.scene_job = None;
+            match outcome {
+                JobOutcome::Panicked(message) => log::warn!("the lights are not given to the scene: {message}"),
+                outcome => {
+                    if let Some(Err(reason)) = outcome.take::<Result<(), String>>() {
+                        log::warn!("the lights are not given to the scene: {reason}");
+                    }
+                }
+            }
+            return;
+        }
         if self.setup == Some(job) {
             self.setup = None;
             match outcome {

@@ -19,4 +19,4 @@ name = "Doodads"
 category = "World"
 # Services the module cannot work without, and services it uses when present.
 requires = []
-uses = ["viewport", "models", "formats"]
+uses = ["viewport", "models", "formats", "vfs", "scene"]

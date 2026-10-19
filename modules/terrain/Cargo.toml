@@ -16,4 +16,4 @@ name = "Terrain"
 category = "World"
 # Services the module cannot work without, and services it uses when present.
 requires = []
-uses = ["viewport", "formats"]
+uses = ["viewport", "formats", "scene"]

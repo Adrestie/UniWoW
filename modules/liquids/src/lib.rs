@@ -26,6 +26,7 @@ use uniwow_api::formats::{self, LiquidLayer, TILE, TileId, Wdt};
 use uniwow_api::glam::Vec3;
 use uniwow_api::journal;
 use uniwow_api::liquids::{self, Grid, Immersed, Liquids, Placed, Surfaces};
+use uniwow_api::scene::{self, PieceKey};
 use uniwow_api::serde_json::json;
 use uniwow_api::viewport::Demand;
 use uniwow_api::{
@@ -159,6 +160,8 @@ struct Held {
     gpu: Option<Arc<TileGpu>>,
     grid: Option<Arc<Grid>>,
     layers: Arc<Vec<LiquidLayer>>,
+    /// Its layers as entities of the scene.
+    piece: Arc<scene::Piece>,
 }
 
 /// A read of a tile, or why it could not be read.
@@ -166,7 +169,7 @@ type Read = Result<Held, Refusal>;
 
 /// Reads the liquids of the tile `tile` of the map `directory` through `formats` and puts them on
 /// the GPU of `shared`.
-fn read(formats: &dyn formats::Formats, shared: &Arc<Shared>, directory: &str, tile: TileId) -> Read {
+fn read(formats: &dyn formats::Formats, shared: &Arc<Shared>, directory: &str, map: u32, tile: TileId) -> Read {
     let types = formats.liquid_types()?;
     let layers = formats
         .liquids(directory, tile.x, tile.y)?
@@ -176,11 +179,51 @@ fn read(formats: &dyn formats::Formats, shared: &Arc<Shared>, directory: &str, t
         Some((shared.slot(formats, record)?, mesh::is_water(record.kind)))
     });
     let grid = Grid::of([tile.y as i32, tile.x as i32], meshes.surfaces.iter().copied()).map(Arc::new);
+    let piece = Arc::new(piece(map, tile, &layers, &types));
     Ok(Held {
         gpu: gpu::upload(shared, &meshes)?.map(Arc::new),
         grid,
         layers: Arc::new(layers),
+        piece,
     })
+}
+
+/// The layers of liquid `layers` of the tile `tile` of the map `map` as entities of the scene: a
+/// layer of a chunk each, by its chunk and its place among that chunk's layers, named by its type
+/// of `types`; its bounds those of its chunk, from its lowest height to its highest.
+fn piece(map: u32, tile: TileId, layers: &[LiquidLayer], types: &[formats::LiquidTypeRecord]) -> scene::Piece {
+    use scene::{Entity, EntityId, PieceBuilder, flags};
+    const CHUNK: f32 = TILE / 16.0;
+    let mut builder = PieceBuilder::with_capacity(vec![tile], layers.len());
+    let mut counts: HashMap<[u32; 2], u32> = HashMap::new();
+    for layer in layers {
+        let [x, y] = layer.corner;
+        let Some((_, chunk)) = scene::chunk_at(x - CHUNK / 2.0, y - CHUNK / 2.0) else {
+            continue;
+        };
+        let count = counts.entry(chunk).or_default();
+        let index = *count;
+        *count += 1;
+        let (low, high) = layer
+            .heights
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(low, high), h| (low.min(*h), high.max(*h)));
+        let (low, high) = if low <= high { (low, high) } else { (0.0, 0.0) };
+        let label = types
+            .iter()
+            .find(|record| record.id == u32::from(layer.liquid))
+            .map_or("", |record| record.name.as_str());
+        builder.push(Entity {
+            id: EntityId::water(map, tile, chunk, index),
+            flags: flags::CLIENT,
+            parent: None,
+            label,
+            extra: u32::from(layer.liquid),
+            origin: [x - CHUNK / 2.0, y - CHUNK / 2.0, high],
+            bounds: [[x - CHUNK, y - CHUNK, low], [x, y, high]],
+        });
+    }
+    builder.build()
 }
 
 /// The layers of the tiles `held`, shared, not copied.
@@ -251,6 +294,8 @@ struct LiquidsModule {
     /// The map the terrain shows, by its folder, and its distance; its WDT once read, or why it
     /// could not be, and the job reading it.
     map: Option<String>,
+    /// Its id in `Map.dbc`, for the scene.
+    map_id: u32,
     distance: u32,
     wdt: Option<Result<Arc<Wdt>, String>>,
     reading_wdt: Option<JobId>,
@@ -291,6 +336,9 @@ impl LiquidsModule {
         self.reading_wdt = None;
         self.map = map;
         self.changed = true;
+        if let Some(scene) = ctx.service(scene::SERVICE) {
+            scene.withdraw_provider(ctx.module_id(), None);
+        }
         lock(&self.scene).publishing = Duration::ZERO;
     }
 
@@ -326,6 +374,10 @@ impl LiquidsModule {
             .map_or(DEFAULT_DISTANCE, |distance| distance as u32);
         if map != self.map {
             self.show(map, ctx);
+            self.map_id = shown
+                .as_ref()
+                .and_then(|map| map.get("id")?.as_u64())
+                .unwrap_or_default() as u32;
         }
         let Some(directory) = self.map.clone() else {
             self.publish();
@@ -450,16 +502,20 @@ impl LiquidsModule {
             .saturating_sub(1)
             .max(1);
         let (to_read, release) = steps(&stands, [allowance.load, allowance.keep], [room_load, room_keep], slots);
+        let scene = ctx.service(scene::SERVICE);
         for tile in left.into_iter().chain(release) {
             if self.held.remove(&tile).is_some() {
                 self.changed = true;
+                if let Some(scene) = &scene {
+                    scene.withdraw(PieceKey::tile(ctx.module_id(), self.map_id, tile));
+                }
             }
             if let Some((job, _)) = self.reading.remove(&tile) {
                 ctx.cancel(job);
             }
         }
         for tile in to_read {
-            let (formats, shared, directory) = (formats.clone(), shared.clone(), directory.clone());
+            let (formats, shared, directory, map) = (formats.clone(), shared.clone(), directory.clone(), self.map_id);
             let job = ctx.spawn_with_priority(
                 &format!("Read the liquids of the tile {} {} of {directory}", tile.x, tile.y),
                 Priority::distance(tile.nearest(eye)),
@@ -467,7 +523,7 @@ impl LiquidsModule {
                     if job.is_cancelled() {
                         return None;
                     }
-                    Some(read(&*formats, &shared, &directory, tile))
+                    Some(read(&*formats, &shared, &directory, map, tile))
                 },
             );
             self.reading.insert(tile, (job, given));
@@ -627,7 +683,7 @@ impl Module for LiquidsModule {
         self.steer(ctx);
     }
 
-    fn on_job(&mut self, job: JobId, outcome: JobOutcome, _ctx: &mut Context) {
+    fn on_job(&mut self, job: JobId, outcome: JobOutcome, ctx: &mut Context) {
         if let Some(owner) = self.owner_jobs.remove(&job) {
             let Some(Owned::Pouring(pouring, given, liquids)) = self.owners.get(&owner) else {
                 return;
@@ -682,6 +738,9 @@ impl Module for LiquidsModule {
             JobOutcome::Cancelled => {}
             outcome => match outcome.take::<Option<Read>>() {
                 Some(Some(Ok(held))) => {
+                    if let Some(scene) = ctx.service(scene::SERVICE) {
+                        scene.publish(PieceKey::tile(ctx.module_id(), self.map_id, tile), held.piece.clone());
+                    }
                     self.held.insert(tile, held);
                     self.changed = true;
                 }

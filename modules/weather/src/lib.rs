@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use uniwow_api::formats::AreaRecord;
+use uniwow_api::scene::{self, PieceKey};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::vfs::{self, VfsState};
 use uniwow_api::weather::{self, Effect, Kind};
@@ -185,6 +186,8 @@ struct WeatherModule {
     sheltered: Option<&'static str>,
     /// What is heard of the weather.
     sounds: Sounds,
+    /// The weather given to the scene: its map, its zone and its name.
+    given: Option<(u32, u32, String)>,
 }
 
 impl WeatherModule {
@@ -247,6 +250,51 @@ impl WeatherModule {
             Some((zone.id, zone.name.clone()))
         });
         Some(Place { area, zone })
+    }
+
+    /// Gives the scene the weather of the zone of the camera, `effect`, when it changes: an entity
+    /// of the zone, at the camera; none where the camera is in no zone.
+    fn give_scene(&mut self, ctx: &mut Context, eye: Option<[f32; 3]>, effect: Option<Effect>) {
+        let Some(scene) = ctx.service(scene::SERVICE) else {
+            return;
+        };
+        let map = ctx
+            .editor()
+            .call("terrain.map", json!({}))
+            .ok()
+            .and_then(|map| map.get("id")?.as_u64())
+            .map(|id| id as u32);
+        let zone = self.place.as_ref().and_then(|place| place.zone.clone());
+        let now = match (map, zone, eye) {
+            (Some(map), Some((zone, name)), Some(_)) => {
+                let what = match effect {
+                    Some(effect) => format!("{} at {:.0} %", effect.kind.name(), effect.intensity * 100.0),
+                    None => "fine weather".to_owned(),
+                };
+                Some((map, zone, format!("The weather of {name}: {what}")))
+            }
+            _ => None,
+        };
+        if now == self.given {
+            return;
+        }
+        if let Some((map, _, _)) = &self.given {
+            scene.withdraw(PieceKey::part(ctx.module_id(), *map, 0));
+        }
+        if let (Some((map, zone, label)), Some(eye)) = (&now, eye) {
+            let mut builder = scene::PieceBuilder::new(Vec::new());
+            builder.push(scene::Entity {
+                id: scene::EntityId::weather(*zone),
+                flags: scene::flags::READ_ONLY,
+                parent: None,
+                label,
+                extra: effect.map_or(0, |effect| effect.state()),
+                origin: eye,
+                bounds: scene::box_around(eye, 1.0),
+            });
+            scene.publish(PieceKey::part(ctx.module_id(), *map, 0), Arc::new(builder.build()));
+        }
+        self.given = now;
     }
 
     /// The weather of the server in `zone`, asked of the live world twice a second at most.
@@ -330,6 +378,7 @@ impl WeatherModule {
             falling.liquids = liquids;
             falling.buildings = buildings;
         }
+        self.give_scene(ctx, eye, effect);
         // Heard once the client's archives are open, silent where nothing falls on the eye.
         if self.client.is_some() {
             let thunder_sound = Self::setting(ctx, THUNDER) as u32;

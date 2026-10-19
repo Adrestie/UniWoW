@@ -145,6 +145,13 @@ fn the_client_s_tiles_read_whole_and_hold_together() {
                             placements.doodads == tile.doodads && placements.buildings == tile.buildings,
                             "{map}_{x}_{y}: the placements read alone"
                         );
+                        let areas = client.tile_areas(map, x, y).unwrap().unwrap();
+                        assert!(
+                            tile.chunks
+                                .iter()
+                                .all(|chunk| areas[(chunk.index[1] * 16 + chunk.index[0]) as usize] == chunk.area),
+                            "{map}_{x}_{y}: the areas read alone"
+                        );
                         if let Some(fault) = check(&tile) {
                             panic!("{map}_{x}_{y}: {fault}");
                         }
@@ -675,6 +682,24 @@ fn the_placements_of_a_tile_are_its_doodads_and_buildings_read_alone() {
             (tile.doodads, tile.buildings)
         );
     }
+}
+
+#[test]
+fn the_areas_of_a_tile_are_those_of_its_chunks_read_alone() {
+    let (monolithic, _) = write_adt(Alphas::Compressed, false);
+    let ([root, tex, obj], _) = write_split(Alphas::Compressed, true);
+    for (bytes, tile) in [
+        (&monolithic, terrain::tile(&monolithic, None, None, 0).unwrap()),
+        (&root, terrain::tile(&root, Some(&tex), Some(&obj), 0).unwrap()),
+    ] {
+        let areas = terrain::areas(bytes);
+        assert_eq!(areas.len(), 256);
+        for chunk in &tile.chunks {
+            let [x, y] = chunk.index;
+            assert_eq!(areas[(y * 16 + x) as usize], chunk.area);
+        }
+    }
+    assert_eq!(terrain::areas(&monolithic[..100]), vec![0; 256], "cut short: none");
 }
 
 #[test]

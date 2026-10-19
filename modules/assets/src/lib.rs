@@ -42,7 +42,7 @@ use uniwow_api::formats::{
     self, AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair, FileRef,
     Formats, GameObjectDisplay, HairGeoset, LightBand, LightParamsRecord, LightRecord, LightSkyboxRecord, LiquidLayer,
     LiquidTypeRecord, MapRecord, Model, Placements, SoundEntryRecord, Texture, Tile, Wdl, Wdt, WeatherRecord, Wmo,
-    ZoneLightRecord,
+    WmoAreaRecord, ZoneLightRecord,
 };
 use uniwow_api::vfs::{self, Vfs, VfsState};
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, Registrar, egui, log, rfd, serde_json};
@@ -187,6 +187,19 @@ impl Client {
         liquid::liquids(&root, [x, y])
             .map(Some)
             .map_err(|e| format!("{root_path}: {e}"))
+    }
+
+    fn tile_areas(&self, directory: &str, x: u32, y: u32) -> Result<Option<Vec<u32>>, String> {
+        let wdt = self.wdt(directory)?;
+        if x > 63 || y > 63 || !wdt.tiles[(y * 64 + x) as usize] {
+            return Ok(None);
+        }
+        // The headers of `MCNK` are in the root of a split tile as of a whole one.
+        let root_path = format!("World\\Maps\\{directory}\\{directory}_{x}_{y}.adt");
+        let root = self
+            .tile_file(&root_path)?
+            .ok_or_else(|| format!("{root_path}: named by its WDT, not in the client"))?;
+        Ok(Some(terrain::areas(&root)))
     }
 
     fn wdl(&self, directory: &str) -> Result<Option<Wdl>, String> {
@@ -478,6 +491,17 @@ impl Formats for Files {
     fn liquids(&self, directory: &str, x: u32, y: u32) -> Result<Option<Vec<LiquidLayer>>, String> {
         self.check_thread("the liquids of a tile");
         self.client()?.liquids(directory, x, y)
+    }
+
+    fn tile_areas(&self, directory: &str, x: u32, y: u32) -> Result<Option<Vec<u32>>, String> {
+        self.check_thread("the areas of a tile");
+        self.client()?.tile_areas(directory, x, y)
+    }
+
+    fn wmo_areas(&self) -> Result<Arc<Vec<WmoAreaRecord>>, String> {
+        self.check_thread("WMOAreaTable.dbc");
+        let client = self.client()?;
+        client.tables.wmo_areas(&client.chain)
     }
 
     fn wdl(&self, directory: &str) -> Result<Option<Wdl>, String> {

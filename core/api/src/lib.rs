@@ -70,6 +70,7 @@ pub mod parallel;
 mod property;
 pub mod property_grid;
 mod registrar;
+pub mod scene;
 pub mod sequence;
 mod service;
 pub mod texture_arrays;

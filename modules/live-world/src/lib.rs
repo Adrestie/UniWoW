@@ -20,6 +20,7 @@ mod tests;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
+use uniwow_api::scene::{self, PieceKey};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::server_link::protocol::{DEAD, Kind, MOVING, State, TEMPORARY};
 use uniwow_api::theme::{self, Level};
@@ -338,11 +339,43 @@ struct LiveWorld {
     reading: Option<JobId>,
     /// Whether the connection was up at the last frame, for the notices of its changes.
     was_connected: Option<bool>,
+    /// The world last given to the scene, by its map and sequence, and when.
+    given: Option<(u32, u64)>,
+    given_at: Option<Instant>,
 }
 
 impl LiveWorld {
     fn shared(&self) -> Arc<Shared> {
         lock(&self.current).clone()
+    }
+
+    /// Gives the scene the live entities where they stand, when the world changed, four times a
+    /// second at most; a map left taken away.
+    fn give_scene(&mut self, ctx: &mut Context) {
+        let Some(scene) = ctx.service(scene::SERVICE) else {
+            return;
+        };
+        if self.given_at.is_some_and(|at| at.elapsed() < SCENE_EVERY) {
+            return;
+        }
+        let world = self.shared().world();
+        let now = (world.map, world.sequence);
+        if self.given == Some(now) {
+            return;
+        }
+        if let Some((map, _)) = self.given
+            && map != world.map
+        {
+            scene.withdraw(PieceKey::part(ctx.module_id(), map, 0));
+        }
+        let key = PieceKey::part(ctx.module_id(), world.map, 0);
+        if world.entities.is_empty() {
+            scene.withdraw(key);
+        } else {
+            scene.publish(key, Arc::new(scene_piece(&world, Instant::now())));
+        }
+        self.given = Some(now);
+        self.given_at = Some(Instant::now());
     }
 
     /// Starts the connection thread again with the settings in use. The entities of the one
@@ -575,6 +608,7 @@ impl Module for LiveWorld {
             ctx.notify(level, &text);
         }
         self.was_connected = Some(status.connection == Connection::Connected);
+        self.give_scene(ctx);
         // The displays the entities wanted are read here, one job at a time.
         if self.reading.is_some() {
             return;
@@ -618,6 +652,33 @@ impl Module for LiveWorld {
                 .stopped(format!("its thread stopped, {message}; Apply starts it again"));
         }
     }
+}
+
+/// How often the live entities are given to the scene at most.
+const SCENE_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The live entities of `world` as entities of the scene, where they stand at `now`: read only,
+/// named as the observer names them, a player marked so; its extra number its template's entry.
+pub fn scene_piece(world: &world::World, now: Instant) -> scene::Piece {
+    use scene::{Entity, EntityId, PieceBuilder, flags};
+    let mut builder = PieceBuilder::with_capacity(Vec::new(), world.entities.len());
+    let mut tracked: Vec<_> = world.entities.values().collect();
+    tracked.sort_by_key(|tracked| tracked.entity.guid);
+    for tracked in tracked {
+        let entity = &tracked.entity;
+        let origin = tracked.position_at(now);
+        let player = if entity.kind == Kind::Player { flags::PLAYER } else { 0 };
+        builder.push(Entity {
+            id: EntityId::live(entity.guid),
+            flags: flags::LIVE | flags::READ_ONLY | player,
+            parent: None,
+            label: &entity.name,
+            extra: entity.entry,
+            origin,
+            bounds: scene::box_around(origin, entity.scale.clamp(0.5, 10.0)),
+        });
+    }
+    builder.build()
 }
 
 uniwow_api::export_module!(LiveWorld::default());

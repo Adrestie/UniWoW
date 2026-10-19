@@ -21,7 +21,7 @@ pub const ORIGIN: f32 = 32.0 * TILE;
 pub const CHUNK: f32 = TILE / 16.0;
 
 /// A tile of a map by its place, as its file names it: `<map>_<x>_<y>`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TileId {
     pub x: u32,
     pub y: u32,
@@ -113,6 +113,19 @@ pub struct MapRecord {
     pub name: String,
     /// Its area of `AreaTable.dbc`.
     pub area: u32,
+}
+
+/// A name of a group of a building, of `WMOAreaTable.dbc`: the building by its id (`Wmo::id`), its
+/// placement's name set and the group by its id (`WmoGroup::id`, -1 for the building as a whole),
+/// the area of `AreaTable.dbc` it gives, and its name in the client's locale, empty for none.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WmoAreaRecord {
+    pub id: u32,
+    pub wmo: u32,
+    pub name_set: i32,
+    pub group: i32,
+    pub area: u32,
+    pub name: String,
 }
 
 /// An area of `AreaTable.dbc`.
@@ -1059,6 +1072,25 @@ pub trait Formats: Send + Sync {
     fn liquids(&self, directory: &str, x: u32, y: u32) -> Result<Option<Vec<LiquidLayer>>, String> {
         let _ = (directory, x, y);
         Ok(None)
+    }
+    /// The area of `AreaTable.dbc` of each chunk of the tile `<directory>_<x>_<y>`, at
+    /// `y * 16 + x` of the chunk's index, 0 where it has none, from the headers of its `MCNK` alone;
+    /// none when the WDT of its map has no such tile. By default, from the whole tile.
+    fn tile_areas(&self, directory: &str, x: u32, y: u32) -> Result<Option<Vec<u32>>, String> {
+        Ok(self.tile(directory, x, y)?.map(|tile| {
+            let mut areas = vec![0; 256];
+            for chunk in &tile.chunks {
+                let [across, down] = chunk.index.map(|index| index as usize);
+                if across < 16 && down < 16 {
+                    areas[down * 16 + across] = chunk.area;
+                }
+            }
+            areas
+        }))
+    }
+    /// The names of the groups of the buildings, by increasing id. None by default.
+    fn wmo_areas(&self) -> Result<Arc<Vec<WmoAreaRecord>>, String> {
+        Err("the names of the groups of the buildings are not read".to_owned())
     }
     /// The WDL of the map whose folder is `directory`; none when the client has none.
     fn wdl(&self, directory: &str) -> Result<Option<Wdl>, String>;

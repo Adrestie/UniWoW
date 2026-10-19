@@ -145,6 +145,7 @@ fn the_liquid_at_a_point_is_the_first_whose_cell_there_is_covered_and_its_surfac
             gpu: None,
             grid: None,
             layers: Arc::new(vec![pond]),
+            piece: Arc::default(),
         },
     );
     assert_eq!(module.water.liquid_at(point), None, "not yet given");
@@ -834,7 +835,7 @@ fn a_tile_read_gives_the_water_over_it_by_its_place_in_the_world() {
     };
     let shared = Arc::new(Shared::new(&gpu, &TARGET).expect("the liquids on the device"));
     let tile = TileId { x: 31, y: 49 };
-    let held = crate::read(&Liquid, &shared, "Azeroth", tile).unwrap();
+    let held = crate::read(&Liquid, &shared, "Azeroth", 0, tile).unwrap();
     assert_eq!(
         held.gpu.as_ref().map(|gpu| (gpu.water.len(), gpu.opaque.len())),
         Some((6, 0))

@@ -7,7 +7,7 @@ use std::sync::{Arc, OnceLock};
 use uniwow_api::formats::{
     AnimationRecord, AreaRecord, CharSection, CreatureDisplay, CreatureLook, CreatureModel, FacialHair,
     GameObjectDisplay, HairGeoset, LightBand, LightParamsRecord, LightRecord, LightSkyboxRecord, LiquidTypeRecord,
-    MapRecord, SoundEntryRecord, WeatherRecord,
+    MapRecord, SoundEntryRecord, WeatherRecord, WmoAreaRecord,
 };
 
 use crate::chain::Chain;
@@ -93,6 +93,7 @@ pub struct Tables {
     slot: usize,
     maps: Rows<MapRecord>,
     areas: Rows<AreaRecord>,
+    wmo_areas: Rows<WmoAreaRecord>,
     displays: Rows<CreatureDisplay>,
     models: Rows<CreatureModel>,
     looks: Rows<CreatureLook>,
@@ -120,6 +121,7 @@ impl Tables {
                 .unwrap_or(0),
             maps: OnceLock::new(),
             areas: OnceLock::new(),
+            wmo_areas: OnceLock::new(),
             displays: OnceLock::new(),
             models: OnceLock::new(),
             looks: OnceLock::new(),
@@ -336,6 +338,24 @@ impl Tables {
         };
         self.areas
             .get_or_init(|| read(chain, "AreaTable.dbc", 36, row, |area| area.id))
+            .clone()
+    }
+
+    /// `WMOAreaTable.dbc`: `ID`, `WMOID`, `NameSetID`, `WMOGroupID`, five of sounds, `Flags`,
+    /// `AreaTableID`, then its name, a localised text.
+    pub fn wmo_areas(&self, chain: &Chain) -> Result<Arc<Vec<WmoAreaRecord>>, String> {
+        let row = |dbc: &Dbc, row| {
+            Ok(WmoAreaRecord {
+                id: dbc.u32(row, 0),
+                wmo: dbc.u32(row, 1),
+                name_set: dbc.u32(row, 2) as i32,
+                group: dbc.u32(row, 3) as i32,
+                area: dbc.u32(row, 10),
+                name: dbc.string(row, 11 + self.slot)?,
+            })
+        };
+        self.wmo_areas
+            .get_or_init(|| read(chain, "WMOAreaTable.dbc", 28, row, |area| area.id))
             .clone()
     }
 

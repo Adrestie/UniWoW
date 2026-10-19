@@ -685,6 +685,23 @@ fn sample_tables() -> Vec<(&'static str, Vec<u8>)> {
             ),
         ),
         (
+            "WMOAreaTable.dbc",
+            dbc(
+                28,
+                &[
+                    &[
+                        (0, Int(7)),
+                        (1, Int(106)),
+                        (2, Int(0)),
+                        (3, Int(1234)),
+                        (10, Int(87)),
+                        (13, Text("L'auberge de la Fiole")),
+                    ],
+                    &[(0, Int(3)), (1, Int(106)), (3, Int(u32::MAX)), (13, Text(""))],
+                ],
+            ),
+        ),
+        (
             "CreatureDisplayInfo.dbc",
             dbc(
                 16,
@@ -801,6 +818,23 @@ fn the_tables_of_3_3_5a_read_their_rows_in_the_client_s_locale() {
         (areas[1].map, areas[1].parent, areas[1].name.as_str()),
         (0, 1, "Kharanos")
     );
+    let rooms = tables.wmo_areas(&chain).unwrap();
+    assert_eq!(
+        rooms.iter().map(|room| room.id).collect::<Vec<_>>(),
+        [3, 7],
+        "by increasing id"
+    );
+    assert_eq!(
+        (
+            rooms[1].wmo,
+            rooms[1].name_set,
+            rooms[1].group,
+            rooms[1].area,
+            rooms[1].name.as_str()
+        ),
+        (106, 0, 1234, 87, "L'auberge de la Fiole")
+    );
+    assert_eq!(rooms[0].group, -1, "the building as a whole");
     let display = &tables.creature_displays(&chain).unwrap()[0];
     assert_eq!(
         (display.id, display.model, display.extra, display.scale),
@@ -1269,7 +1303,9 @@ fn the_client_s_tables_read_as_the_client_shows_them() {
     let colours = tables.light_colours(&chain).unwrap();
     let numbers = tables.light_numbers(&chain).unwrap();
     let skies = tables.light_skyboxes(&chain).unwrap();
+    let rooms = tables.wmo_areas(&chain).unwrap();
     let read = start.elapsed();
+    assert!(rooms.len() > 1000 && rooms.iter().any(|room| room.group >= 0 && !room.name.is_empty()));
     // The global light of the Eastern Kingdoms, its params with their 18 colours and 6 numbers.
     let global = lights.iter().find(|light| light.id == 1).unwrap();
     assert_eq!((global.map, global.position), (0, [0.0; 3]));

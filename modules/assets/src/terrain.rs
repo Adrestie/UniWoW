@@ -229,6 +229,24 @@ fn placed<'a>(named: &dyn Fn(&[u8; 4]) -> Option<&'a [u8]>) -> Result<Placements
     })
 }
 
+/// The area of each chunk of the tile of `root`, at `y * 16 + x` of its index, from the headers of
+/// its `MCNK` alone; 0 where a chunk has none or is cut short.
+pub fn areas(root: &[u8]) -> Vec<u32> {
+    let mut areas = vec![0; 256];
+    for (name, data) in chunks(root).unwrap_or_default() {
+        if &name != b"MCNK" {
+            continue;
+        }
+        let (Ok(x), Ok(y), Ok(area)) = (u32_at(data, 4), u32_at(data, 8), u32_at(data, 0x34)) else {
+            continue;
+        };
+        if x < 16 && y < 16 {
+            areas[(y * 16 + x) as usize] = area;
+        }
+    }
+    areas
+}
+
 /// What stands on the tile of `root` and, split, of `obj`, its `_obj0`: its chunks of terrain not
 /// parsed.
 pub fn placements(root: &[u8], obj: Option<&[u8]>) -> Result<Placements, String> {

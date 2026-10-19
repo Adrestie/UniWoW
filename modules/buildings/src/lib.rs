@@ -11,6 +11,7 @@ mod cells;
 mod cells_tests;
 mod colours;
 mod doodads;
+mod entities;
 mod eye;
 #[cfg(test)]
 mod eye_tests;
@@ -23,18 +24,19 @@ mod occlusion;
 mod tests;
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use uniwow_api::arena::{self, Refusal};
 use uniwow_api::buildings::{self as service, Eye};
 use uniwow_api::formats::{self, Building, DoodadSet, FileRef, TileId, Wdt, WmoDoodad};
 use uniwow_api::glam::Vec3;
+use uniwow_api::scene::{self, PieceKey};
 use uniwow_api::serde_json::json;
 use uniwow_api::viewport::Demand;
 use uniwow_api::{
     Context, DockArea, JobId, JobOutcome, Module, Priority, PropertyValue, Registrar, SettingSpec, egui, liquids, log,
-    models, viewport,
+    models, vfs, viewport,
 };
 
 use doodads::Owners;
@@ -67,6 +69,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// A file of a building read: on the GPU, what its doodads need, and the liquids of its groups.
 pub struct WmoFile {
     pub gpu: Arc<WmoGpu>,
+    /// Its id for `WMOAreaTable.dbc`, and its groups as the scene lists them.
+    pub id: u32,
+    pub rooms: Vec<entities::Room>,
     pub sets: Vec<DoodadSet>,
     pub doodads: Vec<WmoDoodad>,
     /// The groups holding each doodad, whether each is lit as the rooms are, and the lights of the
@@ -167,6 +172,10 @@ struct BuildingsModule {
     /// The map the terrain shows, by its folder; its WDT once read, or why it could not be, and
     /// the job reading it.
     map: Option<String>,
+    /// Its id in `Map.dbc`, for the scene.
+    map_id: u32,
+    /// The names of the rooms of `WMOAreaTable.dbc`, read by the first job that needs them.
+    room_names: Arc<OnceLock<entities::RoomNames>>,
     wdt: Option<Result<Arc<Wdt>, String>>,
     reading_wdt: Option<JobId>,
     /// The buildings of the tiles held, the reads of tiles running, by tile and by job, the tiles
@@ -239,14 +248,23 @@ impl BuildingsModule {
         if let Some(models) = models {
             lock(&self.owners).want(models, map.as_deref().unwrap_or_default(), HashSet::new());
         }
+        if let Some(scene) = ctx.service(scene::SERVICE) {
+            scene.withdraw_provider(ctx.module_id(), None);
+        }
         self.map = map;
     }
 
     /// Keeps the building `id` the tiles brought: its file wanted, read when the budget allows it.
-    fn bring(&mut self, id: u32) {
+    fn bring(&mut self, id: u32, ctx: &mut Context) {
         let Some(building) = self.kept.get(id) else {
             return;
         };
+        if let Some(scene) = ctx.service(scene::SERVICE) {
+            let vfs = ctx.service(vfs::SERVICE);
+            let path_of = |file| vfs.as_ref().and_then(|vfs| vfs.path_of(file));
+            let piece = entities::bare(self.map_id, building, self.kept.tiles_of(id), &path_of);
+            scene.publish(PieceKey::part(ctx.module_id(), self.map_id, id), Arc::new(piece));
+        }
         let file = building.file.clone();
         self.grounds.insert(id, budget::ground(building));
         self.building_files.insert(id, file.clone());
@@ -275,12 +293,15 @@ impl BuildingsModule {
             let inside = doodads::lit_inside(&wmo.groups, &holders);
             let lamps = doodads::lamps(&wmo.groups, &wmo.lights, &doodads, &holders);
             let liquids = liquid::liquids(&wmo);
+            let (id, rooms) = (wmo.id, entities::rooms(&wmo));
             if !wmo.faults.is_empty() {
                 log::warn!("{read:?}: {} faults, the first {}", wmo.faults.len(), wmo.faults[0]);
             }
             let gpu = gpu::upload(&shared, &*formats, wmo)?;
             Ok(WmoFile {
                 gpu: Arc::new(gpu),
+                id,
+                rooms,
                 sets,
                 doodads,
                 holders,
@@ -321,6 +342,9 @@ impl BuildingsModule {
     /// Lets the building `id` go: its file, when no other building kept has it, dropped.
     fn take_away(&mut self, id: u32, ctx: &mut Context) {
         self.grounds.remove(&id);
+        if let Some(scene) = ctx.service(scene::SERVICE) {
+            scene.withdraw(PieceKey::part(ctx.module_id(), self.map_id, id));
+        }
         let Some(file) = self.building_files.remove(&id) else {
             return;
         };
@@ -376,13 +400,13 @@ impl BuildingsModule {
             return;
         }
         let models = ctx.service(models::SERVICE);
-        let map = ctx
-            .editor()
-            .call("terrain.map", json!({}))
-            .ok()
+        let shown = ctx.editor().call("terrain.map", json!({})).ok();
+        let map = shown
+            .as_ref()
             .and_then(|map| Some(map.get("directory")?.as_str()?.to_owned()));
         let liquids = ctx.service(liquids::SERVICE);
         if map != self.map {
+            let id = shown.as_ref().and_then(|map| map.get("id")?.as_u64());
             if let (Some(liquids), Some(directory)) = (&liquids, &self.map) {
                 for id in self.poured.keys() {
                     liquids.clear(&owner(directory, *id));
@@ -390,6 +414,7 @@ impl BuildingsModule {
             }
             self.poured.clear();
             self.show(map, models.as_deref(), ctx);
+            self.map_id = id.unwrap_or_default() as u32;
         }
         let Some(directory) = self.map.clone() else {
             return;
@@ -615,11 +640,23 @@ impl BuildingsModule {
             });
             self.doodad_jobs.insert(job);
         }
+        let (scene, vfs, formats) = (
+            ctx.service(scene::SERVICE),
+            ctx.service(vfs::SERVICE),
+            ctx.service(formats::SERVICE),
+        );
         for (id, building, file) in ready {
             if self.told.contains(&id) {
                 continue;
             }
             let (owners, models, map) = (self.owners.clone(), models.clone(), directory.to_owned());
+            let (scene, vfs, formats, names) = (scene.clone(), vfs.clone(), formats.clone(), self.room_names.clone());
+            let (key, tiles, map_id) = (
+                PieceKey::part(ctx.module_id(), self.map_id, id),
+                self.kept.tiles_of(id),
+                self.map_id,
+            );
+            let placed = building.clone();
             let transform = formats::placement(building.position, building.rotation, building.scale);
             let named = building.doodad_set;
             let distance = budget::distance(self.eye, budget::ground(&building));
@@ -635,7 +672,18 @@ impl BuildingsModule {
                     &file.lamps,
                     named,
                 );
-                lock(&owners).place(&*models, &map, id, &parts);
+                let placing = lock(&owners).place(&*models, &map, id, &parts);
+                if placing && let Some(scene) = scene {
+                    let names = names.get_or_init(|| {
+                        formats
+                            .and_then(|formats| formats.wmo_areas().ok())
+                            .map(|rows| entities::room_names(&rows))
+                            .unwrap_or_default()
+                    });
+                    let path_of = |file| vfs.as_ref().and_then(|vfs| vfs.path_of(file));
+                    let piece = entities::whole(map_id, &placed, tiles, &file, names, &path_of);
+                    scene.publish(key, Arc::new(piece));
+                }
             });
             self.doodad_jobs.insert(job);
         }
@@ -775,7 +823,7 @@ impl Module for BuildingsModule {
                         self.take_away(id, ctx);
                     }
                     for id in brought {
-                        self.bring(id);
+                        self.bring(id, ctx);
                     }
                 }
                 Err(reason) => {

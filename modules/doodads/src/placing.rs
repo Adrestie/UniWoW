@@ -4,8 +4,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use uniwow_api::formats::{Placements, TileId, placement};
+use uniwow_api::formats::{FileRef, Placements, TileId, placement};
 use uniwow_api::models::{Geosets, Instance, Look, Models, Motion};
+use uniwow_api::scene::{self, Entity, EntityId, Piece, PieceBuilder, flags};
 
 /// The owner of the doodads the tile `tile` of the map `directory` places.
 pub fn owner(directory: &str, tile: TileId) -> String {
@@ -123,6 +124,27 @@ impl Placing {
         }
     }
 
+    /// The doodads of the tile `tile` placed that another tile placed first with another look or
+    /// place: listed again under their unique id with other data, entities of their own.
+    pub fn differing(&self, tile: TileId) -> HashSet<u64> {
+        let Some(listed) = self.tiles.get(&tile) else {
+            return HashSet::new();
+        };
+        listed
+            .iter()
+            .filter(|(id, instance)| {
+                let Some(placer) = self.placer.get(id).filter(|placer| **placer != tile) else {
+                    return false;
+                };
+                let Some(first) = self.tiles.get(placer).and_then(|listed| listed.get(id)) else {
+                    return false;
+                };
+                first.look != instance.look || !first.transform.abs_diff_eq(instance.transform, 0.01)
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// The tiles placed, the doodads placed, and those the tiles list.
     pub fn counts(&self) -> [usize; 3] {
         [
@@ -131,4 +153,46 @@ impl Placing {
             self.tiles.values().map(HashMap::len).sum(),
         ]
     }
+}
+
+/// The entities of the doodads of the tile `tile` of the map `map`, for the scene: each listing
+/// once by its unique id, those of `again` as entities of their own; each named by the stem of its
+/// model, `path_of` giving the paths of the FileDataIDs; its bounds a yard around its origin, its
+/// scale counted, until the extents of the looks are known.
+pub fn piece(
+    placements: &Placements,
+    map: u32,
+    tile: TileId,
+    again: &HashSet<u64>,
+    path_of: &dyn Fn(u32) -> Option<String>,
+) -> Piece {
+    let mut seen = HashSet::new();
+    let mut builder = PieceBuilder::with_capacity(vec![tile], placements.doodads.len());
+    let mut stems: HashMap<FileRef, String> = HashMap::new();
+    for doodad in placements.doodads.iter().filter(|doodad| seen.insert(doodad.unique_id)) {
+        let id = match again.contains(&u64::from(doodad.unique_id)) {
+            true => EntityId::doodad_again(map, doodad.unique_id, tile),
+            false => EntityId::doodad(map, doodad.unique_id),
+        };
+        let label = stems.entry(doodad.file.clone()).or_insert_with(|| match &doodad.file {
+            FileRef::Id(file) => {
+                path_of(*file).map_or_else(|| scene::stem(&doodad.file), |path| scene::stem(&FileRef::Path(path)))
+            }
+            file => scene::stem(file),
+        });
+        let origin = placement(doodad.position, doodad.rotation, doodad.scale)
+            .w_axis
+            .truncate()
+            .to_array();
+        builder.push(Entity {
+            id,
+            flags: flags::CLIENT,
+            parent: None,
+            label,
+            extra: 0,
+            origin,
+            bounds: scene::box_around(origin, doodad.scale.max(0.1)),
+        });
+    }
+    builder.build()
 }

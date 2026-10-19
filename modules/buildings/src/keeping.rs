@@ -66,6 +66,17 @@ impl Kept {
         self.buildings.get(&id).map(|(building, _)| building)
     }
 
+    /// The tiles held that list the building `id`, in their order.
+    pub fn tiles_of(&self, id: u32) -> Vec<TileId> {
+        let mut tiles: Vec<TileId> = self
+            .buildings
+            .get(&id)
+            .map(|(_, tiles)| tiles.iter().copied().collect())
+            .unwrap_or_default();
+        tiles.sort();
+        tiles
+    }
+
     pub fn holds(&self, tile: TileId) -> bool {
         self.tiles.contains_key(&tile)
     }

@@ -97,6 +97,32 @@ impl TileModel {
     }
 }
 
+/// The tile `id` as the formats name it.
+pub fn shared_id(id: TileId) -> uniwow_api::formats::TileId {
+    uniwow_api::formats::TileId { x: id.x, y: id.y }
+}
+
+/// The chunks of the tile `model` of the map `map` as entities of the scene: each by its tile and
+/// index, its origin the middle of its bounds.
+pub fn piece(map: u32, model: &TileModel) -> uniwow_api::scene::Piece {
+    use uniwow_api::scene::{Entity, EntityId, PieceBuilder, flags};
+    let tile = shared_id(model.id);
+    let mut builder = PieceBuilder::with_capacity(vec![tile], model.tile.chunks.len());
+    for chunk in &model.tile.chunks {
+        let bounds = chunk_bounds(model.id, chunk);
+        builder.push(Entity {
+            id: EntityId::chunk(map, tile, chunk.index),
+            flags: flags::CLIENT,
+            parent: None,
+            label: "",
+            extra: chunk.area,
+            origin: [0, 1, 2].map(|axis| (bounds[0][axis] + bounds[1][axis]) / 2.0),
+            bounds,
+        });
+    }
+    builder.build()
+}
+
 /// The corner of a chunk as the client places it: by its tile and its index, the base of its
 /// heights only taken from the file, whose position some tiles made by tools give wrong.
 pub fn chunk_corner(tile: TileId, chunk: &Chunk) -> [f32; 3] {
