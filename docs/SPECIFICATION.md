@@ -1,6 +1,6 @@
 # UniWoW — Architecture and module catalogue
 
-Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 and 15.2 done; milestones 10 to 14 outlined. Open questions in section 10.
+Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.3 done; milestones 10 to 14 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -282,7 +282,7 @@ fills it, or *not planned* when no milestone does yet.
 | Sounds played: a file of the client, its category of volume, its volume and fades, looped or once | The service `audio` of the module `audio` (`Clip::decode`, `Audio::play`, `set_volume`, `stop`; *The lightning and the sounds of the weather, as built*) | The commands `audio.play`, `audio.volume`, `audio.stop`, `audio.state` through `call` | The same, through `call` | Scripts: the same, through `uniwow.call` |
 | Splitting work over the cores, `parallel_for` | `uniwow_api::parallel_for` (step 9.2a) | — not planned; compiled modules run threads of their own (T7) | — | — |
 | The entities of the scene: published by their providers, listed with their places and names | The service `scene` (`Scene::publish`, `withdraw`, `withdraw_provider`, `snapshot`; `uniwow_api::scene`), step 15.2 | The commands `scene.entities`, `scene.entity` and the event `scene.changed` through `call` and `subscribe`; publishing entities, `scene.publish`: step 15.12 | The same, through `call` and `subscribe` | Scripts: the same, through `uniwow.call` and `uniwow.subscribe`; modules: milestones 10 and 11 |
-| Picking in the 3D view, the selection shown in 3D | — designed in milestone 9; milestone 15, validated, not built | — milestone 15: `scene.pick`, `viewport.ray`, `scene.select` | — | — |
+| Picking in the 3D view, the selection shown in 3D | The service `scene` (`select`, `selection`, `pick`, `within`, `ask`, `add_picker`, `locked_kinds`), the tools of the viewport (`Viewport::add_tool`, `last_view`), the module `scene-tools`: step 15.3; the tint and the outline to come | The commands `scene.selection`, `scene.select`, `scene.select_like`, `scene.pick`, `scene.lock`, `viewport.ray` and the event `scene.selection_changed` through `call` and `subscribe`; the narrow phase of picking for Rust modules only (other languages picked by their boxes) | The same, through `call` and `subscribe` | Scripts: the same, through `uniwow.call` and `uniwow.subscribe` |
 | The terrain of a map shown in the 3D view, with its horizon | The module `terrain` (steps 9.2c, 9.2e, 9.2f) | — not planned yet | — | — |
 | The statistics of the 3D view: the times of the frames, of the interface thread and of the GPU, what each layer drew | `Layer::stats`; shown in their own panel, *Statistics* (step 9.2e) | — not planned yet | — | — |
 | Hotkeys: declared, read, bound to other keys by the user in *Edit > Hotkey* | `Registrar::hotkey`, `Hotkey::pressed`, `held` (step 9.2d) | — not planned yet | — | — |
@@ -8288,7 +8288,7 @@ On the user's machine, with the client and the server on it:
 the sources of AzerothCore at the commit of the user's server (bc9198ce7) and against WoWDBDefs;
 validated by the user (decision 31), with his answers to the points the proposal left to decide
 (*Decided by the user after the proposal*); its technical specification written once validated, at
-his request. Being built: steps 15.1 and 15.2 as built, at the end of this milestone.*
+his request. Being built: steps 15.1 to 15.3 as built, at the end of this milestone.*
 
 The world of milestone 9, shown, becomes a world the user edits as a scene of Unity: a window
 *Hierarchy* left of the 3D view lists what is loaded around the camera, by the places of the game;
@@ -9864,7 +9864,83 @@ or the Lua console):
 - Flown from Goldshire to Stormwind at the distances by default: the interface as fluid as before
   (the statistics of the view against b4428d1).
 
-### Milestone 10: Lua modules (outline)
+#### Step 15.3, as built: the selection, picking and the selection shown in 3D
+
+Built after 0fe2926, on `main`.
+
+**The view's contract** (`uniwow_api::viewport`): `Ray` (through a point of the view; against a box,
+a triangle; into the axes of a model, its distances staying those of the world), `Seen` (the view of
+a frame: its transform, its eye, its size in points; a ray at a point, a point projected),
+`Tool` and `ToolInput` (the response of the view, its rectangle, the view of the frame), and on the
+service `add_tool`, `remove_tools`, `last_view`, with defaults so that no other implementation
+changes. The viewport draws the tools' buttons in a toolbar along the top of the view, then gives
+each the pointer, inside `catch_unwind`, a tool that panics removed and its module reported, its
+tools going with its layers when it fails. The command `viewport.ray` gives the ray under a point of
+the view to every language.
+
+**The selection** (module `scene`): the ids in the order they were chosen, the last the active one,
+a generation; changed from any thread through the service or `scene.select` (set, add, toggle,
+remove, clear), never entering the history; `scene.selection_changed` at the end of the frame it
+changed in. An entity unloaded while selected stays selected. `scene.select_like`: the entities
+within the scope of the model of the active one, or of its kind in its zone (the smart selections),
+also two buttons of the toolbar.
+
+**Locks**: by kind for now, the chunks, the water, the lights, the zones of light, the weathers and
+the areas locked at first (their boxes lie under or around the others); `scene.lock` locks or
+unlocks a kind. The locks of an entity and of a branch come with the Hierarchy (15.4).
+
+**Picking**, on a thread of `scene` of its own (`spawn_thread`, questions through a channel, so a
+click never waits behind the pool's jobs), or on the calling thread for `scene.pick`:
+
+1. the broad phase: the bounds of each piece (kept with it by the registry), then of its entities
+   not locked, by the distance the ray enters them;
+2. the narrow phase, nearest box first, until the nearest exact hit is nearer than the next box,
+   by the providers' `Picker`: the terrain by the 256 triangles of a chunk from the heights of its
+   full tiles; the doodads by the triangles of the finest level of their model at rest; the
+   buildings by the triangles of their groups, a room by its group, a building doodad by its model.
+   The triangles are read from the archives for the file a ray reaches and kept in a cache by
+   provider (48 MB for the doodads, 96 MB for the buildings, the whole let go when passed), not kept
+   for every look drawn: 15.1 measured them up to 88 MB in Dalaran at 4 tiles. A building's first
+   ray reads its file, a fraction of a second for the largest. The water, the live entities and the
+   kinds of other languages are picked by their boxes.
+
+A hit gives the deepest entity and the chain of its game parents. **The tool *Selection*** of the new
+module `scene-tools`: a click selects the outermost of the chain; a click again within 4 points on the
+same entity, while one of the chain is the only one selected, the next down, past the deepest the
+outermost again; Ctrl toggles, Shift adds; a click on nothing clears. A rectangle dragged from the
+left button selects the entities whose origin falls in it in front of the eye, of the kinds its
+filter in the toolbar leaves (everything, doodads, buildings, building doodads, live), Ctrl and Shift
+as for a click. F frames the selection, while the pointer is over the view (its hotkey, bindable).
+
+**The selection shown in 3D: the boxes** (a layer of `scene-tools`): one draw of instanced lines, a
+box 24 bytes, its 12 edges made by the vertex shader, its buffer written when the selection or the
+registry changes, the first 10,000 selected, tested against the depth, in the last blended phase; in
+orange, the colour of the selection. A chunk selected is framed by its box.
+
+**Not in 15.3, set aside for a part of its own**: the tint (the flag of highlight of the instances,
+`Models::mark`, the shaders of `models` and `buildings`) and the outline (the mask of each layer,
+`Layer::draw_mask`, its pass after the frame, `Viewport::set_outline`), with the setting of the three
+options of decision 14. Both are work in the drawing of three modules; the boxes show the selection
+for every kind meanwhile. The keys that fly up and down move off E and A with the gizmos (15.6).
+
+**Tests**: a ray through the view, against boxes, triangles and a model scaled; a selection set,
+added, toggled, removed and cleared; the nearest entity not locked picked, a provider's picker
+missing one, a chain from a building down to a chair; a rectangle keeping the origins within it of
+its kinds; the choice of a click going down the chain and back; the boxes of the selection, an
+entity unloaded without one, and drawn by the software adapter along the edges of a box; the ground
+of a chunk met at its heights, missed beside it; a ray against a mesh.
+
+**The user checks**, with the client and the server running, together with those of 15.2:
+
+- A click on a tree of Elwynn: the tree, its box in orange. A click on the inn of Goldshire: the inn;
+  again on the same spot: the room; again: a chair if the click fell on one, else the inn again.
+  Ctrl and Shift.
+- A rectangle over the fence of Brackwell with the filter *Doodads*: the fence posts only.
+- A click on the ground: nothing (the chunks locked); `scene.lock` with `{"kind": "chunk", "locked":
+  false}` from the Commands panel, then a click on the ground: the chunk framed.
+- *Same model* with a tree selected: the trees of that model around; F frames them.
+- In Dalaran, a click on a building: the first a fraction of a second (its file read), the next at
+  once.
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
 hosts them through a contract of the core open to the module of any language: their own Lua state

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::{ServiceKey, egui_wgpu, glam, wgpu};
+use crate::{ServiceKey, egui, egui_wgpu, glam, wgpu};
 
 /// Provide with `Registrar::provide(SERVICE, …)`, ask with `Context::service(SERVICE)`.
 pub const SERVICE: ServiceKey<Handle> = ServiceKey::new("viewport");
@@ -48,6 +48,177 @@ pub trait Viewport: Send + Sync {
     /// `set_fog` otherwise. None takes back the light `owner` gave, as does its failure. Without it,
     /// the fixed sun (`Sun::default`) and the fog set by `set_fog`.
     fn set_light(&self, owner: &str, light: Option<MapLight>);
+
+    /// Adds a tool of the view, which receives the left button and the pointer over it and draws its
+    /// buttons in the toolbar along its top (`Tool`). `owner` is the id of the module adding it; its
+    /// tools go with its layers when it fails. None by default.
+    fn add_tool(&self, owner: &str, tool: Box<dyn Tool>) {
+        let _ = (owner, tool);
+    }
+
+    /// Removes every tool added by `owner`.
+    fn remove_tools(&self, owner: &str) {
+        let _ = owner;
+    }
+
+    /// The view of the last frame drawn, as the tools and the commands of other threads see it;
+    /// none before the first, or by default.
+    fn last_view(&self) -> Option<Seen> {
+        None
+    }
+}
+
+/// The view of a frame drawn: the camera's transform and place, and the size of the view in points
+/// of the interface, its top left at 0, 0.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Seen {
+    pub view_proj: glam::Mat4,
+    pub eye: glam::Vec3,
+    pub size: [f32; 2],
+}
+
+impl Seen {
+    /// The ray through the point `at` of the view, in points from its top left.
+    pub fn ray(&self, at: [f32; 2]) -> Option<Ray> {
+        let ndc = [
+            at[0] / self.size[0].max(1.0) * 2.0 - 1.0,
+            1.0 - at[1] / self.size[1].max(1.0) * 2.0,
+        ];
+        Ray::through(self.view_proj, self.eye, ndc)
+    }
+
+    /// Where the point `position` of the world falls in the view, in points from its top left; none
+    /// behind the eye.
+    pub fn project(&self, position: glam::Vec3) -> Option<[f32; 2]> {
+        let clip = self.view_proj * position.extend(1.0);
+        if clip.w <= 0.0 {
+            return None;
+        }
+        Some([
+            (clip.x / clip.w + 1.0) / 2.0 * self.size[0],
+            (1.0 - clip.y / clip.w) / 2.0 * self.size[1],
+        ])
+    }
+}
+
+/// A ray of the world: its origin and its direction, of length 1 in the world; a distance along it
+/// is in yards.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ray {
+    pub origin: glam::Vec3,
+    pub direction: glam::Vec3,
+}
+
+impl Ray {
+    /// The ray from `eye` through the point `ndc` of the view `view_proj`, in its coordinates from
+    /// -1 to 1, Y up; none where the transform cannot be inverted.
+    pub fn through(view_proj: glam::Mat4, eye: glam::Vec3, ndc: [f32; 2]) -> Option<Ray> {
+        let inverse = view_proj.inverse();
+        // Reverse Z: a depth of 0.5 is twice as far as the near plane, well in front of the eye.
+        let point = inverse * glam::Vec4::new(ndc[0], ndc[1], 0.5, 1.0);
+        if point.w.abs() < f32::EPSILON || !point.is_finite() {
+            return None;
+        }
+        let direction = (point.truncate() / point.w - eye).try_normalize()?;
+        Some(Ray { origin: eye, direction })
+    }
+
+    pub fn at(&self, distance: f32) -> glam::Vec3 {
+        self.origin + self.direction * distance
+    }
+
+    /// The ray in the axes of a model placed by `transform`: its direction scaled with it, so that
+    /// a distance along it stays one of the world.
+    pub fn into_model(&self, transform: &glam::Mat4) -> Ray {
+        let inverse = transform.inverse();
+        Ray {
+            origin: inverse.transform_point3(self.origin),
+            direction: inverse.transform_vector3(self.direction),
+        }
+    }
+
+    /// Where it enters the box `bounds`, its distance, 0 from inside; none where it misses.
+    pub fn hits_box(&self, bounds: [[f32; 3]; 2]) -> Option<f32> {
+        let (mut near, mut far) = (0.0f32, f32::INFINITY);
+        for (axis, (&low, &high)) in bounds[0].iter().zip(&bounds[1]).enumerate() {
+            let (origin, direction) = (self.origin[axis], self.direction[axis]);
+            if direction.abs() < 1e-12 {
+                if origin < low || origin > high {
+                    return None;
+                }
+                continue;
+            }
+            let (a, b) = ((low - origin) / direction, (high - origin) / direction);
+            near = near.max(a.min(b));
+            far = far.min(a.max(b));
+            if near > far {
+                return None;
+            }
+        }
+        Some(near)
+    }
+
+    /// Where it meets the triangle `a`, `b`, `c`, of either side, its distance; none where it misses.
+    pub fn hits_triangle(&self, a: glam::Vec3, b: glam::Vec3, c: glam::Vec3) -> Option<f32> {
+        let (ab, ac) = (b - a, c - a);
+        let p = self.direction.cross(ac);
+        let det = ab.dot(p);
+        if det.abs() < 1e-12 {
+            return None;
+        }
+        let inverse = 1.0 / det;
+        let t = self.origin - a;
+        let u = t.dot(p) * inverse;
+        if !(0.0..=1.0).contains(&u) {
+            return None;
+        }
+        let q = t.cross(ab);
+        let v = self.direction.dot(q) * inverse;
+        if v < 0.0 || u + v > 1.0 {
+            return None;
+        }
+        let distance = ac.dot(q) * inverse;
+        (distance >= 0.0).then_some(distance)
+    }
+}
+
+/// A tool of the 3D view, such as the selection or the gizmos: called on the interface thread at
+/// each frame the view is drawn, inside `catch_unwind`, a tool that panics removed and its module
+/// reported. The camera keeps the right and middle buttons, the wheel and the flying keys.
+pub trait Tool: Send {
+    /// Draws its buttons in the toolbar along the top of the view; none by default.
+    fn toolbar(&mut self, ui: &mut egui::Ui) {
+        let _ = ui;
+    }
+
+    /// The pointer over the view at this frame: the response of the view (the left button pressed,
+    /// dragged, released, clicked twice, the modifiers), and the view; `painter` paints over the
+    /// image. Nothing by default.
+    fn pointer(&mut self, input: &ToolInput<'_>, painter: &egui::Painter) {
+        let _ = (input, painter);
+    }
+}
+
+/// What a tool receives at each frame.
+pub struct ToolInput<'a> {
+    pub response: &'a egui::Response,
+    /// The view on the screen, in points.
+    pub rect: egui::Rect,
+    /// The view of the frame, its size that of `rect`.
+    pub seen: Seen,
+}
+
+impl ToolInput<'_> {
+    /// The ray under the point `at` of the screen.
+    pub fn ray_at(&self, at: egui::Pos2) -> Option<Ray> {
+        self.seen.ray([at.x - self.rect.left(), at.y - self.rect.top()])
+    }
+
+    /// Where the point `position` of the world falls on the screen; none behind the eye.
+    pub fn project(&self, position: glam::Vec3) -> Option<egui::Pos2> {
+        let [x, y] = self.seen.project(position)?;
+        Some(egui::pos2(self.rect.left() + x, self.rect.top() + y))
+    }
 }
 
 /// The light of the map at the place of the camera and the hour: its sun, the colour of its fog in
@@ -587,6 +758,43 @@ pub struct LayerStats {
 #[cfg(test)]
 mod tests {
     use super::{Allowance, BAND, BANDS, Demand, Phase, Stage, allow};
+
+    #[test]
+    fn a_ray_through_the_view_meets_boxes_and_triangles_at_their_distance() {
+        use glam::{Mat4, Vec3};
+        let eye = Vec3::new(0.0, 0.0, 10.0);
+        let view = Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
+        let projection = Mat4::perspective_infinite_reverse_rh(1.0, 1.0, 0.5);
+        let seen = super::Seen {
+            view_proj: projection * view,
+            eye,
+            size: [200.0, 200.0],
+        };
+        let ray = seen.ray([100.0, 100.0]).unwrap();
+        assert!((ray.direction - Vec3::NEG_Z).length() < 1e-4);
+        assert!((ray.hits_box([[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]]).unwrap() - 9.0).abs() < 1e-4);
+        assert_eq!(ray.hits_box([[5.0, 5.0, -1.0], [6.0, 6.0, 1.0]]), None);
+        let hit = ray.hits_triangle(
+            Vec3::new(-1.0, -1.0, 2.0),
+            Vec3::new(1.0, -1.0, 2.0),
+            Vec3::new(0.0, 1.0, 2.0),
+        );
+        assert!((hit.unwrap() - 8.0).abs() < 1e-4);
+        let away = ray.hits_triangle(
+            Vec3::new(2.0, 2.0, 0.0),
+            Vec3::new(3.0, 2.0, 0.0),
+            Vec3::new(2.0, 3.0, 0.0),
+        );
+        assert_eq!(away, None);
+        let projected = seen.project(Vec3::ZERO).unwrap();
+        assert!((projected[0] - 100.0).abs() < 1e-3 && (projected[1] - 100.0).abs() < 1e-3);
+        // A model scaled twice: the distance along the ray in its axes stays one of the world.
+        let placed =
+            Mat4::from_scale_rotation_translation(Vec3::splat(2.0), glam::Quat::IDENTITY, Vec3::new(0.0, 0.0, 1.0));
+        let local = ray.into_model(&placed);
+        let unit = local.hits_box([[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]]).unwrap();
+        assert!((unit - 7.0).abs() < 1e-4, "{unit}");
+    }
 
     #[test]
     fn the_sky_then_the_opaque_are_drawn_in_the_first_pass_what_is_revealed_after_them_then_the_blended() {

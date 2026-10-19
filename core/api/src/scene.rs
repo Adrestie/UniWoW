@@ -4,12 +4,16 @@
 //! and the module `scene` keeps them in its registry, indexed by jobs, read by anyone from a
 //! snapshot shared between threads (rule T3). Nothing is changed through it: it lists.
 
+pub mod meshes;
+
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::Arc;
+use std::sync::mpsc::Receiver;
 
 use crate::ServiceKey;
 use crate::formats::{FileRef, TileId};
+use crate::viewport::{Ray, Seen};
 
 /// Provide with `Registrar::provide(SERVICE, …)`, ask with `Context::service(SERVICE)`.
 pub const SERVICE: ServiceKey<Handle> = ServiceKey::new("scene");
@@ -35,6 +39,145 @@ pub trait Scene: Send + Sync {
 
     /// The registry as its last job left it.
     fn snapshot(&self) -> Arc<Snapshot>;
+
+    /// The selection as it is now.
+    fn selection(&self) -> Arc<Selection>;
+
+    /// Changes the selection, from any thread: said by `scene.selection_changed` at the end of the
+    /// frame. Choosing is not a change of the world: no undo entry.
+    fn select(&self, change: Select);
+
+    /// Gives the narrow phase of the picking of `provider`'s entities: without one, a box hit is
+    /// the hit.
+    fn add_picker(&self, provider: &str, picker: Arc<dyn Picker>);
+
+    /// The kinds locked: their entities are not picked in the 3D view, by a click or a rectangle,
+    /// but can be chosen in the Hierarchy. The chunks, the water, the lights, the zones of light and
+    /// the weathers by default.
+    fn locked_kinds(&self) -> Vec<Kind>;
+
+    fn set_kind_locked(&self, kind: Kind, locked: bool);
+
+    /// The nearest entity the ray `ray` hits, not locked, with the chain of its parents; none for
+    /// none. On the calling thread.
+    fn pick(&self, ray: &Ray) -> Option<Hit>;
+
+    /// The entities not locked, of `kinds` (every kind not locked when empty), whose origin falls in
+    /// front of the eye within `rect` of the view `seen`, in points from its top left; on the calling
+    /// thread.
+    fn within(&self, seen: &Seen, rect: [[f32; 2]; 2], kinds: &[Kind]) -> Vec<EntityId>;
+
+    /// Asks `question` of the thread of `scene`, never queued behind the jobs of the pool: its
+    /// answer comes through the receiver.
+    fn ask(&self, question: Question) -> Receiver<Answer>;
+}
+
+/// Topic published by the module `scene` at the end of a frame its selection changed in. Payload:
+/// `{ "generation", "ids", "active" }`, the ids as text, the active one the last chosen.
+pub const SELECTION_CHANGED_TOPIC: &str = "scene.selection_changed";
+
+/// The entities selected, in the order they were chosen, the last the active one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Selection {
+    pub generation: u64,
+    pub ids: Vec<EntityId>,
+}
+
+/// A change of the selection.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Select {
+    Set(Vec<EntityId>),
+    Add(Vec<EntityId>),
+    /// Each removed when selected, added otherwise.
+    Toggle(Vec<EntityId>),
+    Remove(Vec<EntityId>),
+    Clear,
+}
+
+impl Selection {
+    pub fn active(&self) -> Option<EntityId> {
+        self.ids.last().copied()
+    }
+
+    pub fn contains(&self, id: &EntityId) -> bool {
+        self.ids.contains(id)
+    }
+
+    /// The ids selected once `change` is made, each once, in the order they were chosen.
+    pub fn changed(&self, change: &Select) -> Vec<EntityId> {
+        let mut ids = self.ids.clone();
+        let add = |ids: &mut Vec<EntityId>, id: &EntityId| {
+            ids.retain(|kept| kept != id);
+            ids.push(*id);
+        };
+        match change {
+            Select::Set(chosen) => {
+                ids.clear();
+                for id in chosen {
+                    add(&mut ids, id);
+                }
+            }
+            Select::Add(chosen) => {
+                for id in chosen {
+                    add(&mut ids, id);
+                }
+            }
+            Select::Toggle(chosen) => {
+                for id in chosen {
+                    if ids.contains(id) {
+                        ids.retain(|kept| kept != id);
+                    } else {
+                        ids.push(*id);
+                    }
+                }
+            }
+            Select::Remove(chosen) => ids.retain(|kept| !chosen.contains(kept)),
+            Select::Clear => ids.clear(),
+        }
+        ids
+    }
+}
+
+/// What the narrow phase of the picking finds of an entity whose box the ray hits.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Picked {
+    /// Its surface, at that distance along the ray.
+    Hit(f32),
+    Missed,
+    /// Not known: its box is its surface.
+    ByBox,
+}
+
+/// The narrow phase of the picking of a provider's entities, from the thread of `scene` or any
+/// other: the triangles of a model at rest, the heights of a chunk.
+pub trait Picker: Send + Sync {
+    fn intersect(&self, entity: &EntityRef<'_>, ray: &Ray) -> Picked;
+}
+
+/// An entity a ray hit: the deepest, its distance, and the chain from the outermost of its parents
+/// down to it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hit {
+    pub id: EntityId,
+    pub distance: f32,
+    pub chain: Vec<EntityId>,
+}
+
+/// A question to the thread of `scene`.
+#[derive(Clone, Debug)]
+pub enum Question {
+    Pick(Ray),
+    Within {
+        seen: Seen,
+        rect: [[f32; 2]; 2],
+        kinds: Vec<Kind>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub enum Answer {
+    Picked(Option<Hit>),
+    Within(Vec<EntityId>),
 }
 
 /// The kinds of entity.
@@ -631,6 +774,24 @@ pub struct Placed {
     pub generation: u64,
     pub piece: Arc<Piece>,
     pub areas: Box<[u32]>,
+    /// The bounds of all its entities, for the broad phase of the picking.
+    pub bounds: [[f32; 3]; 2],
+}
+
+/// The bounds of every entity of `piece`; a box of nothing at the origin for none.
+pub fn piece_bounds(piece: &Piece) -> [[f32; 3]; 2] {
+    if piece.is_empty() {
+        return [[0.0; 3]; 2];
+    }
+    piece
+        .bounds
+        .iter()
+        .fold([[f32::MAX; 3], [f32::MIN; 3]], |[low, high], [a, b]| {
+            [
+                [low[0].min(a[0]), low[1].min(a[1]), low[2].min(a[2])],
+                [high[0].max(b[0]), high[1].max(b[1]), high[2].max(b[2])],
+            ]
+        })
 }
 
 /// Where an entity is listed: the slot of its piece and its row.
@@ -902,6 +1063,19 @@ mod tests {
         let corner = [32.0 * TILE - TILE * 21.0 - 0.01, 32.0 * TILE - TILE * 30.0 - 0.01];
         assert_eq!(chunk_at(corner[0], corner[1]), Some((tile, [0, 0])));
         assert_eq!(chunk_at(40000.0, 0.0), None);
+    }
+
+    #[test]
+    fn a_selection_changes_by_set_add_toggle_remove_and_clear_the_last_chosen_active() {
+        let [a, b, c] = [1, 2, 3].map(|n| EntityId::doodad(0, n));
+        let selection = |ids: Vec<EntityId>| Selection { generation: 1, ids };
+        let one = selection(vec![a, b]);
+        assert_eq!(one.changed(&Select::Set(vec![c])), [c]);
+        assert_eq!(one.changed(&Select::Add(vec![a, c])), [b, a, c]);
+        assert_eq!(one.changed(&Select::Toggle(vec![a, c])), [b, c]);
+        assert_eq!(one.changed(&Select::Remove(vec![b])), [a]);
+        assert!(one.changed(&Select::Clear).is_empty());
+        assert_eq!(one.active(), Some(b));
     }
 
     #[test]

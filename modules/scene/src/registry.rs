@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use uniwow_api::formats::TileId;
+use uniwow_api::scene::piece_bounds;
 use uniwow_api::scene::{Area, EntityId, Index, Kind, Listing, Piece, PieceKey, Placed, Snapshot, TileAreas, chunk_at};
 
 /// A change asked of the registry, gathered until its next job.
@@ -185,6 +186,7 @@ impl Registry {
                     generation: placed.generation,
                     piece: placed.piece.clone(),
                     areas,
+                    bounds: placed.bounds,
                 }));
             }
         }
@@ -240,6 +242,7 @@ impl Registry {
                     self.slots[slot as usize] = Some(Arc::new(Placed {
                         key,
                         generation,
+                        bounds: piece_bounds(&piece),
                         piece,
                         areas,
                     }));

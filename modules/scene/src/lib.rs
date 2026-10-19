@@ -5,17 +5,24 @@
 //! `scene` from any thread; one job at a time indexes them, and `scene.changed` says so once a
 //! frame at most. Nothing is changed: it lists.
 
+mod picking;
 mod registry;
 #[cfg(test)]
 mod tests;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use uniwow_api::formats::{self, Formats, TileId};
-use uniwow_api::scene::{self, Area, EntityId, EntityRef, Kind, PieceKey, Snapshot, chunk_at};
+use uniwow_api::scene::{
+    self, Answer, Area, EntityId, EntityRef, Hit, Kind, Picker, PieceKey, Question, Select, Selection, Snapshot,
+    chunk_at,
+};
 use uniwow_api::serde_json::{self, Value, json};
+use uniwow_api::viewport::{Ray, Seen};
 use uniwow_api::{
     Context, Event, JobId, JobOutcome, MODULE_FAILED_TOPIC, Module, PropertyValue, Registrar, SettingSpec, journal, log,
 };
@@ -46,6 +53,40 @@ struct Shared {
     /// The map the terrain shows, by its id, and the camera, as the interface thread last saw them.
     camera: Mutex<Option<(u32, [f32; 3])>>,
     scope: AtomicU32,
+    selection: Mutex<Arc<Selection>>,
+    locked: Mutex<Vec<Kind>>,
+    pickers: Mutex<HashMap<String, Arc<dyn Picker>>>,
+    /// The questions to the thread of `scene`, each with where its answer goes; none until it runs.
+    questions: Mutex<Option<Sender<Asked>>>,
+}
+
+/// A question to the thread of `scene`, with where its answer goes.
+type Asked = (Question, Sender<Answer>);
+
+/// The kinds locked at first: their entities lie under or around the others.
+const LOCKED: [Kind; 6] = [
+    Kind::Chunk,
+    Kind::Water,
+    Kind::Light,
+    Kind::LightZone,
+    Kind::Weather,
+    Kind::Area,
+];
+
+impl Shared {
+    fn answer(&self, question: Question) -> Answer {
+        let snapshot = lock(&self.published).clone();
+        let locked = lock(&self.locked).clone();
+        match question {
+            Question::Pick(ray) => {
+                let pickers = lock(&self.pickers).clone();
+                Answer::Picked(picking::pick(&snapshot, &ray, &locked, &pickers))
+            }
+            Question::Within { seen, rect, kinds } => {
+                Answer::Within(picking::within(&snapshot, &seen, rect, &kinds, &locked))
+            }
+        }
+    }
 }
 
 struct Service(Arc<Shared>);
@@ -65,6 +106,68 @@ impl scene::Scene for Service {
 
     fn snapshot(&self) -> Arc<Snapshot> {
         journal::lock(&self.0.published, "scene registry").clone()
+    }
+
+    fn selection(&self) -> Arc<Selection> {
+        journal::lock(&self.0.selection, "scene selection").clone()
+    }
+
+    fn select(&self, change: Select) {
+        let mut selection = journal::lock(&self.0.selection, "scene selection");
+        let ids = selection.changed(&change);
+        if ids != selection.ids {
+            *selection = Arc::new(Selection {
+                generation: selection.generation + 1,
+                ids,
+            });
+        }
+    }
+
+    fn add_picker(&self, provider: &str, picker: Arc<dyn Picker>) {
+        lock(&self.0.pickers).insert(provider.to_owned(), picker);
+    }
+
+    fn locked_kinds(&self) -> Vec<Kind> {
+        lock(&self.0.locked).clone()
+    }
+
+    fn set_kind_locked(&self, kind: Kind, locked: bool) {
+        let mut kinds = lock(&self.0.locked);
+        kinds.retain(|kept| *kept != kind);
+        if locked {
+            kinds.push(kind);
+        }
+    }
+
+    fn pick(&self, ray: &Ray) -> Option<Hit> {
+        match self.0.answer(Question::Pick(*ray)) {
+            Answer::Picked(hit) => hit,
+            Answer::Within(_) => None,
+        }
+    }
+
+    fn within(&self, seen: &Seen, rect: [[f32; 2]; 2], kinds: &[Kind]) -> Vec<EntityId> {
+        let question = Question::Within {
+            seen: *seen,
+            rect,
+            kinds: kinds.to_vec(),
+        };
+        match self.0.answer(question) {
+            Answer::Within(ids) => ids,
+            Answer::Picked(_) => Vec::new(),
+        }
+    }
+
+    fn ask(&self, question: Question) -> Receiver<Answer> {
+        let (answer, answered) = mpsc::channel();
+        let sent = lock(&self.0.questions)
+            .as_ref()
+            .is_some_and(|questions| questions.send((question.clone(), answer.clone())).is_ok());
+        if !sent {
+            // No thread of its own: answered here.
+            let _ = answer.send(self.0.answer(question));
+        }
+        answered
     }
 }
 
@@ -128,6 +231,9 @@ struct SceneModule {
     /// The registry, here between its jobs; the job running.
     registry: Option<Box<Registry>>,
     job: Option<JobId>,
+    /// The thread answering the questions, and the generation of the selection last said.
+    thread: Option<JobId>,
+    said: u64,
 }
 
 impl SceneModule {
@@ -146,6 +252,11 @@ impl SceneModule {
             _ => None,
         };
         *journal::lock(&self.shared.camera, "scene camera") = camera;
+        let selection = journal::lock(&self.shared.selection, "scene selection").clone();
+        if selection.generation != self.said {
+            self.said = selection.generation;
+            ctx.publish(scene::SELECTION_CHANGED_TOPIC, selection_json(&selection));
+        }
         if self.job.is_some() || journal::lock(&self.shared.pending, "scene pending").is_empty() {
             return;
         }
@@ -164,6 +275,123 @@ impl SceneModule {
             (registry, summary)
         }));
     }
+}
+
+/// The selection as the commands and the event give it.
+fn selection_json(selection: &Selection) -> Value {
+    json!({
+        "generation": selection.generation,
+        "ids": texts(&selection.ids),
+        "active": selection.active().map(|id| id.to_string()),
+    })
+}
+
+/// The ids of a list of ids written as text.
+fn read_ids(arguments: &Value) -> Result<Vec<EntityId>, String> {
+    match arguments.get("ids") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(ids)) => ids
+            .iter()
+            .map(|id| id.as_str().ok_or("'ids' is a list of ids as text")?.parse())
+            .collect(),
+        Some(_) => Err("'ids' is a list of ids as text".to_owned()),
+    }
+}
+
+/// `scene.select`: the selection changed as `mode` says.
+fn select(arguments: Value, shared: &Arc<Shared>) -> Result<Value, String> {
+    use scene::Scene as _;
+    let ids = read_ids(&arguments)?;
+    let change = match arguments.get("mode").and_then(Value::as_str).unwrap_or("set") {
+        "set" => Select::Set(ids),
+        "add" => Select::Add(ids),
+        "toggle" => Select::Toggle(ids),
+        "remove" => Select::Remove(ids),
+        "clear" => Select::Clear,
+        other => return Err(format!("no mode '{other}': set, add, toggle, remove or clear")),
+    };
+    let service = Service(shared.clone());
+    service.select(change);
+    Ok(selection_json(&service.selection()))
+}
+
+/// `scene.pick`: the nearest entity a ray hits.
+fn pick(arguments: Value, shared: &Shared) -> Result<Value, String> {
+    let vector = |key: &str| -> Result<[f32; 3], String> {
+        let values = arguments
+            .get(key)
+            .and_then(Value::as_array)
+            .ok_or(format!("'{key}' is [x, y, z]"))?;
+        let number = |at: usize| values.get(at).and_then(Value::as_f64).map(|v| v as f32);
+        match (number(0), number(1), number(2)) {
+            (Some(x), Some(y), Some(z)) => Ok([x, y, z]),
+            _ => Err(format!("'{key}' is [x, y, z]")),
+        }
+    };
+    let direction = uniwow_api::glam::Vec3::from(vector("direction")?)
+        .try_normalize()
+        .ok_or("'direction' has no length")?;
+    let ray = Ray {
+        origin: vector("origin")?.into(),
+        direction,
+    };
+    let snapshot = lock(&shared.published).clone();
+    Ok(match shared.answer(Question::Pick(ray)) {
+        Answer::Picked(Some(hit)) => json!({
+            "id": hit.id.to_string(),
+            "name": snapshot.get(&hit.id).map(|entity| entity.name()),
+            "distance": hit.distance,
+            "chain": texts(&hit.chain),
+        }),
+        _ => Value::Null,
+    })
+}
+
+/// `scene.lock`: a kind locked or not; the kinds locked.
+fn lock_kind(arguments: Value, shared: &Arc<Shared>) -> Result<Value, String> {
+    use scene::Scene as _;
+    let service = Service(shared.clone());
+    if let Some(kind) = arguments.get("kind").and_then(Value::as_str) {
+        let kind = Kind::parse(kind).ok_or_else(|| format!("no kind '{kind}'"))?;
+        let locked = arguments.get("locked").and_then(Value::as_bool).unwrap_or(true);
+        service.set_kind_locked(kind, locked);
+    }
+    let kinds: Vec<&str> = service.locked_kinds().into_iter().map(Kind::name).collect();
+    Ok(json!({ "locked": kinds }))
+}
+
+/// `scene.select_like`: the entities within the scope like the active one: of the same model, or of
+/// its kind in its zone.
+fn select_like(arguments: Value, shared: &Arc<Shared>) -> Result<Value, String> {
+    use scene::Scene as _;
+    let service = Service(shared.clone());
+    let snapshot = lock(&shared.published).clone();
+    let id = match arguments.get("id").and_then(Value::as_str) {
+        Some(id) => id.parse()?,
+        None => service.selection().active().ok_or("nothing selected")?,
+    };
+    let like = snapshot
+        .get(&id)
+        .ok_or_else(|| format!("no entity {id} in the scene"))?;
+    let by = arguments.get("by").and_then(Value::as_str).unwrap_or("model");
+    let (label, kind) = (like.label().to_owned(), id.kind);
+    let zone = snapshot.place(like.area()).first().map(|(area, _)| *area);
+    let filter = Filter::read(&json!({}), shared)?;
+    let ids: Vec<EntityId> = snapshot
+        .entities()
+        .filter(|entity| filter.keeps(entity) && entity.id().kind == kind)
+        .filter(|entity| match by {
+            "model" => entity.label() == label,
+            "kind-in-zone" => snapshot.place(entity.area()).first().map(|(area, _)| *area) == zone,
+            _ => false,
+        })
+        .map(|entity| entity.id())
+        .collect();
+    if !matches!(by, "model" | "kind-in-zone") {
+        return Err(format!("no way '{by}': model or kind-in-zone"));
+    }
+    service.select(Select::Set(ids));
+    Ok(selection_json(&service.selection()))
 }
 
 /// The ids of `ids` as text.
@@ -351,6 +579,64 @@ impl Module for SceneModule {
     fn register(&mut self, reg: &mut Registrar) {
         self.registry = Some(Box::default());
         self.shared.scope.store(2, Ordering::Relaxed);
+        *lock(&self.shared.locked) = LOCKED.to_vec();
+        let (for_selection, for_select, for_pick, for_lock, for_like) = (
+            self.shared.clone(),
+            self.shared.clone(),
+            self.shared.clone(),
+            self.shared.clone(),
+            self.shared.clone(),
+        );
+        reg.command_on_caller(
+            "scene.selection",
+            "The entities selected, in the order they were chosen, the last the active one.",
+            json!({ "type": "object" }),
+            json!({ "type": "object", "properties": { "generation": { "type": "integer" }, "ids": { "type": "array" }, "active": { "type": ["string", "null"] } } }),
+            Arc::new(move |_| Ok(selection_json(&lock(&for_selection.selection)))),
+        )
+        .command_on_caller(
+            "scene.select",
+            "Changes the selection: 'mode' set (by default), add, toggle, remove or clear, of the entities 'ids'. \
+             Choosing is not a change of the world: no undo entry. The selection after.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "mode": { "type": "string", "enum": ["set", "add", "toggle", "remove", "clear"] },
+                    "ids": { "type": "array", "items": { "type": "string" } }
+                }
+            }),
+            json!({ "type": "object" }),
+            Arc::new(move |arguments| select(arguments, &for_select)),
+        )
+        .command_on_caller(
+            "scene.pick",
+            "The nearest entity of the scene the ray from 'origin' along 'direction' hits, its kind not locked: its \
+             id, name, distance and the chain of its parents from the outermost; null for none.",
+            json!({
+                "type": "object",
+                "properties": { "origin": { "type": "array" }, "direction": { "type": "array" } },
+                "required": ["origin", "direction"]
+            }),
+            json!({ "type": ["object", "null"] }),
+            Arc::new(move |arguments| pick(arguments, &for_pick)),
+        )
+        .command_on_caller(
+            "scene.lock",
+            "Locks a kind of entity, or unlocks it with 'locked': false: its entities are then not picked in the 3D \
+             view; without a kind, only the kinds locked. The chunks, the water, the lights, the zones of light, the \
+             weathers and the areas are locked at first.",
+            json!({ "type": "object", "properties": { "kind": { "type": "string" }, "locked": { "type": "boolean" } } }),
+            json!({ "type": "object", "properties": { "locked": { "type": "array" } } }),
+            Arc::new(move |arguments| lock_kind(arguments, &for_lock)),
+        )
+        .command_on_caller(
+            "scene.select_like",
+            "Selects the entities within the scope like the entity 'id', the active one by default: 'by' model (the \
+             same model, of its kind), or kind-in-zone (its kind in its zone).",
+            json!({ "type": "object", "properties": { "id": { "type": "string" }, "by": { "type": "string", "enum": ["model", "kind-in-zone"] } } }),
+            json!({ "type": "object" }),
+            Arc::new(move |arguments| select_like(arguments, &for_like)),
+        );
         let service: scene::Handle = Arc::new(Service(self.shared.clone()));
         let (for_entities, for_entity) = (self.shared.clone(), self.shared.clone());
         reg.settings("Scene", vec![scope_setting()])
@@ -400,6 +686,28 @@ impl Module for SceneModule {
             );
     }
 
+    fn init(&mut self, ctx: &mut Context) {
+        // The questions answered on a thread of their own, never behind the jobs of the pool.
+        let (questions, asked) = mpsc::channel::<Asked>();
+        *lock(&self.shared.questions) = Some(questions);
+        let shared = self.shared.clone();
+        self.thread = Some(ctx.spawn_thread("Answer the picking of the scene", move |job| {
+            while !job.is_cancelled() {
+                match asked.recv_timeout(Duration::from_millis(100)) {
+                    Ok((question, answer)) => {
+                        let _ = answer.send(shared.answer(question));
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        }));
+    }
+
+    fn shutdown(&mut self) {
+        *lock(&self.shared.questions) = None;
+    }
+
     fn windows_ui(&mut self, _egui: &uniwow_api::egui::Context, ctx: &mut Context) {
         self.steer(ctx);
     }
@@ -413,6 +721,14 @@ impl Module for SceneModule {
     }
 
     fn on_job(&mut self, job: JobId, outcome: JobOutcome, ctx: &mut Context) {
+        if self.thread == Some(job) {
+            self.thread = None;
+            *lock(&self.shared.questions) = None;
+            if let JobOutcome::Panicked(message) = outcome {
+                log::error!("the thread of the picking stopped, the questions answered where asked: {message}");
+            }
+            return;
+        }
         if self.job != Some(job) {
             return;
         }

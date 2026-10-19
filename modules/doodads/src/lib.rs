@@ -61,6 +61,45 @@ struct DoodadsModule {
     took: Option<(Duration, usize)>,
     /// What `placing` counted last: the tiles placed, the doodads placed and those listed.
     counts: [usize; 3],
+    /// The model and the transform of each doodad of the tiles placed, for the picking.
+    picked: Picked,
+}
+
+type Picked = Arc<Mutex<HashMap<TileId, Arc<placing::Placed>>>>;
+
+/// The picking of the doodads: the ray against the triangles at rest of their model.
+struct Models {
+    placed: Picked,
+    meshes: scene::meshes::MeshCache,
+}
+
+/// The bytes of the triangles of the models the picking keeps.
+const MESHES: usize = 48 << 20;
+
+impl scene::Picker for Models {
+    fn intersect(&self, entity: &scene::EntityRef<'_>, ray: &uniwow_api::viewport::Ray) -> scene::Picked {
+        let id = entity.id();
+        let Some(tile) = entity.placed.piece.tiles.first() else {
+            return scene::Picked::ByBox;
+        };
+        let Some((file, transform)) = lock(&self.placed)
+            .get(tile)
+            .and_then(|placed| placed.get(&id.key).cloned())
+        else {
+            return scene::Picked::ByBox;
+        };
+        match self.meshes.model(&file) {
+            Some(meshes) if meshes.iter().any(|mesh| !mesh.triangles.is_empty()) => {
+                let local = ray.into_model(&transform);
+                meshes
+                    .iter()
+                    .filter_map(|mesh| mesh.hits(&local))
+                    .min_by(f32::total_cmp)
+                    .map_or(scene::Picked::Missed, scene::Picked::Hit)
+            }
+            _ => scene::Picked::ByBox,
+        }
+    }
 }
 
 impl DoodadsModule {
@@ -84,6 +123,7 @@ impl DoodadsModule {
         if let Some(scene) = ctx.service(scene::SERVICE) {
             scene.withdraw_provider(ctx.module_id(), None);
         }
+        lock(&self.picked).clear();
         self.map = map;
     }
 
@@ -170,6 +210,7 @@ impl DoodadsModule {
                 if let Some(scene) = &scene {
                     scene.withdraw(PieceKey::tile(ctx.module_id(), self.map_id, *tile));
                 }
+                lock(&self.picked).remove(tile);
             }
             if leaving {
                 let (placing, models) = (self.placing.clone(), models.clone());
@@ -193,11 +234,12 @@ impl DoodadsModule {
             }
             let (formats, models, placing, directory) =
                 (formats.clone(), models.clone(), self.placing.clone(), directory.clone());
-            let (scene, vfs, provider, map_id) = (
+            let (scene, vfs, provider, map_id, picked) = (
                 ctx.service(scene::SERVICE),
                 ctx.service(vfs::SERVICE),
                 ctx.module_id().to_owned(),
                 self.map_id,
+                self.picked.clone(),
             );
             let tile = *tile;
             let label = format!("Place the doodads of the tile {} {} of {directory}", tile.x, tile.y);
@@ -226,6 +268,7 @@ impl DoodadsModule {
                 if placed && let Some(scene) = scene {
                     let path_of = |file| vfs.as_ref().and_then(|vfs| vfs.path_of(file));
                     let piece = placing::piece(&read, map_id, tile, &again, &path_of);
+                    lock(&picked).insert(tile, Arc::new(placing::placed(&read)));
                     scene.publish(PieceKey::tile(&provider, map_id, tile), Arc::new(piece));
                 }
                 Ok(placed)
@@ -257,6 +300,16 @@ impl Module for DoodadsModule {
     fn register(&mut self, reg: &mut Registrar) {
         reg.panel("doodads", "Doodads", DockArea::Right)
             .settings("Doodads", vec![formats::distance_setting(DISTANCE)]);
+    }
+
+    fn init(&mut self, ctx: &mut Context) {
+        if let (Some(scene), Some(formats)) = (ctx.service(scene::SERVICE), ctx.service(formats::SERVICE)) {
+            let picker = Models {
+                placed: self.picked.clone(),
+                meshes: scene::meshes::MeshCache::new(formats, MESHES),
+            };
+            scene.add_picker(ctx.module_id(), Arc::new(picker));
+        }
     }
 
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {

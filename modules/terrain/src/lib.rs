@@ -163,6 +163,26 @@ struct TerrainModule {
     /// The scene, given the chunks of the full tiles, and the id of the map shown in `Map.dbc`.
     registry: Option<scene::Handle>,
     map_id: u32,
+    /// The heights of the chunks of the full tiles, for the picking of the scene.
+    heights: Arc<Mutex<HashMap<formats::TileId, Arc<Vec<model::Heights>>>>>,
+}
+
+/// The picking of the chunks: the ray against the ground of the chunk, from its heights.
+struct Ground(Arc<Mutex<HashMap<formats::TileId, Arc<Vec<model::Heights>>>>>);
+
+impl scene::Picker for Ground {
+    fn intersect(&self, entity: &scene::EntityRef<'_>, ray: &uniwow_api::viewport::Ray) -> scene::Picked {
+        let Some((tile, index)) = entity.id().chunk_place() else {
+            return scene::Picked::ByBox;
+        };
+        let Some(chunks) = lock(&self.0).get(&tile).cloned() else {
+            return scene::Picked::ByBox;
+        };
+        match chunks.iter().find(|chunk| chunk.index == index) {
+            Some(chunk) => model::ray_hits(chunk, ray).map_or(scene::Picked::Missed, scene::Picked::Hit),
+            None => scene::Picked::ByBox,
+        }
+    }
 }
 
 /// The area of `AreaTable.dbc` of each chunk of a tile, by its index along Y then X; 0 where the
@@ -229,6 +249,7 @@ impl TerrainModule {
         self.ready.clear();
         self.dropped.extend(self.models.drain().map(|(_, model)| model));
         lock(&self.areas).clear();
+        lock(&self.heights).clear();
         if let Some(scene) = &self.registry {
             scene.withdraw_provider(MODULE, None);
         }
@@ -403,6 +424,7 @@ impl TerrainModule {
             Some(model) => {
                 self.models_bytes += model.bytes();
                 lock(&self.areas).insert(id, areas_of(model));
+                lock(&self.heights).insert(model::shared_id(id), Arc::new(model::heights(model)));
                 if let Some(scene) = &self.registry {
                     let piece = model::piece(self.map_id, model);
                     scene.publish(
@@ -412,6 +434,7 @@ impl TerrainModule {
                 }
             }
             None => {
+                lock(&self.heights).remove(&model::shared_id(id));
                 if lock(&self.areas).remove(&id).is_some()
                     && let Some(scene) = &self.registry
                 {
@@ -697,6 +720,9 @@ impl Module for TerrainModule {
     fn init(&mut self, ctx: &mut Context) {
         self.remembered = ctx.setting(MAP).and_then(|value| value.as_str().map(str::to_owned));
         self.registry = ctx.service(scene::SERVICE);
+        if let Some(scene) = &self.registry {
+            scene.add_picker(MODULE, Arc::new(Ground(self.heights.clone())));
+        }
         let Some(view) = ctx.service(viewport::SERVICE) else {
             log::info!("no viewport service: the terrain is not drawn");
             return;

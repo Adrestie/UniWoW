@@ -155,6 +155,23 @@ impl Placing {
     }
 }
 
+/// The model and the transform of each doodad of a tile, by its unique id, for the picking.
+pub type Placed = HashMap<u64, (FileRef, uniwow_api::glam::Mat4)>;
+
+/// The doodads of `placements`, each listing once, by their unique id.
+pub fn placed(placements: &Placements) -> Placed {
+    let mut found = Placed::new();
+    for doodad in &placements.doodads {
+        found.entry(u64::from(doodad.unique_id)).or_insert_with(|| {
+            (
+                doodad.file.clone(),
+                placement(doodad.position, doodad.rotation, doodad.scale),
+            )
+        });
+    }
+    found
+}
+
 /// The entities of the doodads of the tile `tile` of the map `map`, for the scene: each listing
 /// once by its unique id, those of `again` as entities of their own; each named by the stem of its
 /// model, `path_of` giving the paths of the FileDataIDs; its bounds a yard around its origin, its

@@ -146,6 +146,60 @@ fn owner(directory: &str, id: u32) -> String {
     format!("buildings/{directory}/{id}")
 }
 
+type Picks = Arc<Mutex<HashMap<u32, Arc<entities::Picked>>>>;
+
+/// The bytes of the triangles of the buildings and their doodads the picking keeps.
+const MESHES: usize = 96 << 20;
+
+/// The picking of the buildings: the ray against the triangles of their groups, or of a group for a
+/// room, and of the models of their doodads.
+struct Walls {
+    picked: Picks,
+    meshes: scene::meshes::MeshCache,
+}
+
+impl scene::Picker for Walls {
+    fn intersect(&self, entity: &scene::EntityRef<'_>, ray: &uniwow_api::viewport::Ray) -> scene::Picked {
+        let id = entity.id();
+        let Some(building) = lock(&self.picked).get(&(id.key as u32)).cloned() else {
+            return scene::Picked::ByBox;
+        };
+        let nearest = |meshes: &[scene::meshes::Mesh], ray: &uniwow_api::viewport::Ray| {
+            meshes
+                .iter()
+                .filter_map(|mesh| mesh.hits(ray))
+                .min_by(f32::total_cmp)
+                .map_or(scene::Picked::Missed, scene::Picked::Hit)
+        };
+        match id.kind {
+            scene::Kind::Building | scene::Kind::Room => {
+                let Some(groups) = self.meshes.wmo(&building.file) else {
+                    return scene::Picked::ByBox;
+                };
+                let local = ray.into_model(&building.transform);
+                match id.kind {
+                    scene::Kind::Room => groups.get(id.sub as usize).map_or(scene::Picked::ByBox, |group| {
+                        nearest(std::slice::from_ref(group), &local)
+                    }),
+                    _ => nearest(&groups, &local),
+                }
+            }
+            scene::Kind::BuildingDoodad => {
+                let Some((file, transform)) = building.doodads.get(&id.sub) else {
+                    return scene::Picked::ByBox;
+                };
+                match self.meshes.model(file) {
+                    Some(meshes) if meshes.iter().any(|mesh| !mesh.triangles.is_empty()) => {
+                        nearest(&meshes, &ray.into_model(transform))
+                    }
+                    _ => scene::Picked::ByBox,
+                }
+            }
+            _ => scene::Picked::ByBox,
+        }
+    }
+}
+
 /// The service `buildings`: where the eye stood among the buildings, as the layer left it in the
 /// scene.
 struct Seen(Arc<Mutex<Scene>>);
@@ -176,6 +230,8 @@ struct BuildingsModule {
     map_id: u32,
     /// The names of the rooms of `WMOAreaTable.dbc`, read by the first job that needs them.
     room_names: Arc<OnceLock<entities::RoomNames>>,
+    /// What the picking needs of each building kept, by its unique id.
+    picked: Picks,
     wdt: Option<Result<Arc<Wdt>, String>>,
     reading_wdt: Option<JobId>,
     /// The buildings of the tiles held, the reads of tiles running, by tile and by job, the tiles
@@ -251,6 +307,7 @@ impl BuildingsModule {
         if let Some(scene) = ctx.service(scene::SERVICE) {
             scene.withdraw_provider(ctx.module_id(), None);
         }
+        lock(&self.picked).clear();
         self.map = map;
     }
 
@@ -262,6 +319,7 @@ impl BuildingsModule {
         if let Some(scene) = ctx.service(scene::SERVICE) {
             let vfs = ctx.service(vfs::SERVICE);
             let path_of = |file| vfs.as_ref().and_then(|vfs| vfs.path_of(file));
+            lock(&self.picked).insert(id, Arc::new(entities::picked(building, None)));
             let piece = entities::bare(self.map_id, building, self.kept.tiles_of(id), &path_of);
             scene.publish(PieceKey::part(ctx.module_id(), self.map_id, id), Arc::new(piece));
         }
@@ -345,6 +403,7 @@ impl BuildingsModule {
         if let Some(scene) = ctx.service(scene::SERVICE) {
             scene.withdraw(PieceKey::part(ctx.module_id(), self.map_id, id));
         }
+        lock(&self.picked).remove(&id);
         let Some(file) = self.building_files.remove(&id) else {
             return;
         };
@@ -651,6 +710,7 @@ impl BuildingsModule {
             }
             let (owners, models, map) = (self.owners.clone(), models.clone(), directory.to_owned());
             let (scene, vfs, formats, names) = (scene.clone(), vfs.clone(), formats.clone(), self.room_names.clone());
+            let picks = self.picked.clone();
             let (key, tiles, map_id) = (
                 PieceKey::part(ctx.module_id(), self.map_id, id),
                 self.kept.tiles_of(id),
@@ -682,6 +742,7 @@ impl BuildingsModule {
                     });
                     let path_of = |file| vfs.as_ref().and_then(|vfs| vfs.path_of(file));
                     let piece = entities::whole(map_id, &placed, tiles, &file, names, &path_of);
+                    lock(&picks).insert(id, Arc::new(entities::picked(&placed, Some(&file))));
                     scene.publish(key, Arc::new(piece));
                 }
             });
@@ -703,6 +764,13 @@ impl Module for BuildingsModule {
     }
 
     fn init(&mut self, ctx: &mut Context) {
+        if let (Some(scene), Some(formats)) = (ctx.service(scene::SERVICE), ctx.service(formats::SERVICE)) {
+            let picker = Walls {
+                picked: self.picked.clone(),
+                meshes: scene::meshes::MeshCache::new(formats, MESHES),
+            };
+            scene.add_picker(ctx.module_id(), Arc::new(picker));
+        }
         let (Some(view), Some(gpu)) = (ctx.service(viewport::SERVICE), ctx.gpu().cloned()) else {
             log::info!("no 3D view: the buildings are not drawn");
             return;

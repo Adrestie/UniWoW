@@ -1959,3 +1959,30 @@ fn the_area_at_a_place_is_that_of_its_chunk_among_the_full_tiles() {
     assert_eq!(crate::area_at(&areas, x + 1.0, y - 1.0), None);
     assert_eq!(crate::area_at(&areas, ORIGIN + 1.0, 0.0), None);
 }
+
+#[test]
+fn a_ray_meets_the_ground_of_a_chunk_at_its_heights_and_misses_beside_it() {
+    use crate::model;
+    use uniwow_api::glam::Vec3;
+    use uniwow_api::viewport::Ray;
+    // A slope rising by a yard a vertex along the rows, the corner at 100 yards up.
+    let heights: Vec<f32> = (0..145).map(|vertex| model::vertex_place(vertex)[0]).collect();
+    let chunk = model::Heights {
+        index: [0, 0],
+        corner: [1000.0, 2000.0, 100.0],
+        heights,
+    };
+    // Over the vertex of row 2, column 3: 2 yards up the slope.
+    let [x, y, z] = model::vertex_position(chunk.corner, 2 * 17 + 3, 2.0);
+    let down = Ray {
+        origin: Vec3::new(x, y, z + 50.0),
+        direction: Vec3::NEG_Z,
+    };
+    let hit = model::ray_hits(&chunk, &down).unwrap();
+    assert!((hit - 50.0).abs() < 1e-3, "{hit}");
+    let beside = Ray {
+        origin: Vec3::new(x + 500.0, y, z + 50.0),
+        direction: Vec3::NEG_Z,
+    };
+    assert_eq!(model::ray_hits(&chunk, &beside), None);
+}

@@ -24,8 +24,8 @@ use uniwow_api::glam::{Mat4, Vec3};
 use uniwow_api::hotkey::{Hotkey, HotkeyKind, Keys};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::viewport::{
-    self, Allowance, Demand, Drawing, Fog, Frame, Label, Layer, MAX_FRAME_WAIT, MapLight, Phase, Pyramid, Sky, Sun,
-    Target, View, Water,
+    self, Allowance, Demand, Drawing, Fog, Frame, Label, Layer, MAX_FRAME_WAIT, MapLight, Phase, Pyramid, Seen, Sky,
+    Sun, Target, Tool, ToolInput, View, Water,
 };
 use uniwow_api::{
     Context, DockArea, Event, MODULE_FAILED_TOPIC, Module, PropertyKind, PropertyValue, Registrar, SettingSpec, egui,
@@ -332,6 +332,17 @@ fn uploads_setting() -> SettingSpec {
     )
 }
 
+/// The lock of `mutex`, poisoned or not.
+fn held<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The tools of the view, by the module that added each.
+type Tools = Arc<Mutex<Vec<(String, Box<dyn Tool>)>>>;
+
+/// The height of the toolbar of the tools, along the top of the view, in points.
+const TOOLBAR: f32 = 26.0;
+
 /// Implementation of the service, sharing the layer list, the frame signal and the budget with the
 /// module.
 struct Service {
@@ -339,6 +350,8 @@ struct Service {
     frames: Arc<FrameSignal>,
     budget: Budget,
     lighting: Arc<Mutex<Lighting>>,
+    tools: Tools,
+    seen: Arc<Mutex<Option<Seen>>>,
 }
 
 impl viewport::Viewport for Service {
@@ -393,6 +406,18 @@ impl viewport::Viewport for Service {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .give(owner, light);
+    }
+
+    fn add_tool(&self, owner: &str, tool: Box<dyn Tool>) {
+        held(&self.tools).push((owner.to_owned(), tool));
+    }
+
+    fn remove_tools(&self, owner: &str) {
+        held(&self.tools).retain(|(added, _)| added != owner);
+    }
+
+    fn last_view(&self) -> Option<Seen> {
+        *held(&self.seen)
     }
 }
 
@@ -521,6 +546,10 @@ struct ViewportModule {
     budget: Budget,
     /// The fog the layers draw with, as the terrain sets it, and the light of the map.
     lighting: Arc<Mutex<Lighting>>,
+    /// The tools of the view, and the view of the last frame with the eye it was drawn from.
+    tools: Tools,
+    seen: Arc<Mutex<Option<Seen>>>,
+    eye: Vec3,
 }
 
 impl Default for ViewportModule {
@@ -547,6 +576,9 @@ impl Default for ViewportModule {
             labels: (Mat4::IDENTITY, Vec::new()),
             budget: Arc::default(),
             lighting: Arc::default(),
+            tools: Arc::default(),
+            seen: Arc::default(),
+            eye: Vec3::ZERO,
         }
     }
 }
@@ -558,6 +590,8 @@ impl Module for ViewportModule {
             frames: self.frames.clone(),
             budget: self.budget.clone(),
             lighting: self.lighting.clone(),
+            tools: self.tools.clone(),
+            seen: self.seen.clone(),
         });
         let gpu_memory = reg.gpu_memory;
         reg.panel("view", "3D View", DockArea::Center)
@@ -618,6 +652,23 @@ impl Module for ViewportModule {
             json!({ "type": "object", "properties": { "position": point, "target": point, "fov": { "type": "number" } }, "required": ["position", "target"] }),
             answer.clone(),
             Arc::new(move |arguments| look_at(&moved, &arguments)),
+        );
+        let seen = self.seen.clone();
+        reg.command_on_caller(
+            "viewport.ray",
+            "The ray of the world under the point x, y of the 3D view, in points from its top left, from the view of the \
+             last frame drawn: its origin, the eye, and its direction, of length 1.",
+            json!({ "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" } }, "required": ["x", "y"] }),
+            json!({ "type": "object", "properties": { "origin": point, "direction": point } }),
+            Arc::new(move |arguments| {
+                let number = |key: &str| arguments.get(key).and_then(Value::as_f64).map(|v| v as f32);
+                let (Some(x), Some(y)) = (number("x"), number("y")) else {
+                    return Err("'x' and 'y' are numbers".to_owned());
+                };
+                let seen = (*held(&seen)).ok_or("no frame of the view drawn yet")?;
+                let ray = seen.ray([x, y]).ok_or("no ray there")?;
+                Ok(json!({ "origin": ray.origin.to_array(), "direction": ray.direction.to_array() }))
+            }),
         );
         reg.command_on_caller(
             "viewport.frame",
@@ -688,6 +739,13 @@ impl Module for ViewportModule {
             egui::FontId::proportional(12.0),
             egui::Color32::from_gray(150),
         );
+        let seen = Seen {
+            view_proj: self.labels.0,
+            eye: self.eye,
+            size: [rect.width(), rect.height()],
+        };
+        *held(&self.seen) = Some(seen);
+        self.use_tools(ui, rect, &response, seen, ctx);
         let painter = ui.painter_at(rect);
         for label in &self.labels.1 {
             let Some(at) = project(&self.labels.0, rect, label.position) else {
@@ -756,10 +814,57 @@ impl ViewportModule {
         });
     }
 
-    /// What the module `id`, failed, gave the view taken back: its layers, what it told the budget,
-    /// its light.
+    /// The tools: their buttons along the top of the view, then the pointer given to each; a tool
+    /// that panics removed and its module reported.
+    fn use_tools(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        response: &egui::Response,
+        seen: Seen,
+        ctx: &mut Context,
+    ) {
+        let mut tools = std::mem::take(&mut *held(&self.tools));
+        if tools.is_empty() {
+            return;
+        }
+        let input = ToolInput { response, rect, seen };
+        let painter = ui.painter_at(rect);
+        let strip = egui::Rect::from_min_size(
+            rect.min + egui::vec2(6.0, 4.0),
+            egui::vec2(rect.width() - 12.0, TOOLBAR),
+        );
+        let mut bar = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(strip)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        tools.retain_mut(|(owner, tool)| {
+            let used = catch_unwind(AssertUnwindSafe(|| {
+                tool.toolbar(&mut bar);
+                tool.pointer(&input, &painter);
+            }));
+            match used {
+                Ok(()) => true,
+                Err(panic) => {
+                    let message = panic_text(panic);
+                    log::error!("a tool of {owner} failed and is removed: {message}");
+                    ctx.report_failure(owner, &format!("its tool of the 3D view failed: {message}"));
+                    false
+                }
+            }
+        });
+        // Those added meanwhile after.
+        let mut kept = held(&self.tools);
+        tools.append(&mut kept);
+        *kept = tools;
+    }
+
+    /// What the module `id`, failed, gave the view taken back: its layers, its tools, what it told
+    /// the budget, its light.
     fn failed(&self, id: &str) {
         remove(&self.layers, id);
+        held(&self.tools).retain(|(owner, _)| owner != id);
         let mut state = budget(&self.budget);
         if state.demands.remove(id).is_some() {
             state.allow();
@@ -897,6 +1002,7 @@ impl ViewportModule {
             self.timer.as_mut(),
         );
         self.labels = (view.view_proj, drawn.labels);
+        self.eye = view.eye;
         for (owner, message) in drawn.failures {
             ctx.report_failure(&owner, &message);
         }
@@ -1824,6 +1930,8 @@ mod tests {
             frames: Arc::default(),
             budget: Default::default(),
             lighting: lighting.clone(),
+            tools: Arc::default(),
+            seen: Arc::default(),
         };
         use uniwow_api::viewport::Viewport as _;
         let set = viewport::Fog {
@@ -1931,6 +2039,8 @@ mod tests {
             frames: Arc::default(),
             budget: shared.clone(),
             lighting: Arc::default(),
+            tools: Arc::default(),
+            seen: Arc::default(),
         };
         use uniwow_api::viewport::Viewport as _;
         service.set_budget(100 << 20);
@@ -2068,6 +2178,8 @@ mod tests {
             frames: Arc::default(),
             budget: module.budget.clone(),
             lighting: Arc::default(),
+            tools: Arc::default(),
+            seen: Arc::default(),
         };
         use uniwow_api::viewport::Viewport as _;
         service.set_budget(512 << 20);

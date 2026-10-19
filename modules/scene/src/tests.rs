@@ -323,3 +323,165 @@ fn a_tile_of_3_576_merges_in_milliseconds_and_500_000_index_in_a_fraction_of_a_s
     assert!(one.as_millis() < 500, "a tile merged in {one:?}");
     assert!(whole.as_secs() < 20, "500,000 indexed in {whole:?}");
 }
+
+mod picking {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use uniwow_api::glam::{Mat4, Vec3};
+    use uniwow_api::scene::{Entity, EntityId, EntityRef, Kind, Picked, Picker, PieceBuilder, PieceKey, flags};
+    use uniwow_api::viewport::{Ray, Seen};
+
+    use super::{ELWYNN, middle};
+    use crate::picking::{pick, within};
+    use crate::registry::{Change, Registry};
+
+    /// Misses the doodad 2 whatever its box says, as a model whose leaves the ray passes between.
+    struct Leaves;
+
+    impl Picker for Leaves {
+        fn intersect(&self, entity: &EntityRef<'_>, ray: &Ray) -> Picked {
+            match entity.id() {
+                id if id == EntityId::doodad(0, 2) => Picked::Missed,
+                _ => ray
+                    .hits_box(entity.bounds())
+                    .map_or(Picked::Missed, |d| Picked::Hit(d + 0.5)),
+            }
+        }
+    }
+
+    #[test]
+    fn a_ray_picks_the_nearest_entity_not_locked_its_parents_first_in_its_chain() {
+        let at = middle(ELWYNN, [5, 5]);
+        let mut builder = PieceBuilder::new(vec![ELWYNN]);
+        let entity = |id, parent, origin: [f32; 3], half| Entity {
+            id,
+            flags: flags::CLIENT,
+            parent,
+            label: "",
+            extra: 0,
+            origin,
+            bounds: [origin.map(|v| v - half), origin.map(|v| v + half)],
+        };
+        // Along the ray, down from above: a chunk at the ground, a doodad 2 over it, a doodad 1
+        // higher, and a building whose room holds a chair.
+        let up = |z: f32| [at[0], at[1], z];
+        builder.push(entity(EntityId::chunk(0, ELWYNN, [5, 5]), None, up(0.0), 1.0));
+        builder.push(entity(EntityId::doodad(0, 2), None, up(20.0), 1.0));
+        builder.push(entity(EntityId::doodad(0, 1), None, up(10.0), 1.0));
+        let snapshot = super::publish(
+            &mut Registry::default(),
+            vec![Change::Publish(
+                PieceKey::tile("doodads", 0, ELWYNN),
+                Arc::new(builder.build()),
+            )],
+        );
+        let ray = Ray {
+            origin: Vec3::from(up(100.0)),
+            direction: Vec3::NEG_Z,
+        };
+        let none = HashMap::new();
+        let locked = [Kind::Chunk];
+        assert_eq!(
+            pick(&snapshot, &ray, &locked, &none).unwrap().id,
+            EntityId::doodad(0, 2)
+        );
+        let pickers: HashMap<String, Arc<dyn Picker>> = HashMap::from([("doodads".to_owned(), Arc::new(Leaves) as _)]);
+        let hit = pick(&snapshot, &ray, &locked, &pickers).unwrap();
+        assert_eq!(hit.id, EntityId::doodad(0, 1), "the doodad 2 missed by its picker");
+        assert!((hit.distance - 89.5).abs() < 1e-3, "{}", hit.distance);
+        assert_eq!(pick(&snapshot, &ray, &[], &pickers).unwrap().id, EntityId::doodad(0, 1));
+        let below = Ray {
+            origin: Vec3::from(up(5.0)),
+            direction: Vec3::NEG_Z,
+        };
+        assert_eq!(pick(&snapshot, &below, &locked, &none), None, "the chunk locked");
+        assert_eq!(
+            pick(&snapshot, &below, &[], &none).unwrap().id,
+            EntityId::chunk(0, ELWYNN, [5, 5])
+        );
+
+        let mut builder = PieceBuilder::new(vec![ELWYNN]);
+        let inn = builder.push(entity(EntityId::building(0, 9), None, up(50.0), 20.0));
+        let room = builder.push(entity(EntityId::room(0, 9, 1), Some(inn), up(50.0), 5.0));
+        builder.push(entity(EntityId::building_doodad(0, 9, 4), Some(room), up(48.0), 1.0));
+        let snapshot = super::publish(
+            &mut Registry::default(),
+            vec![Change::Publish(
+                PieceKey::part("buildings", 0, 9),
+                Arc::new(builder.build()),
+            )],
+        );
+        // From inside the building, its box entered at once: the chair, by the narrow phase of a
+        // picker that finds the building's walls far.
+        struct Walls;
+        impl Picker for Walls {
+            fn intersect(&self, entity: &EntityRef<'_>, ray: &Ray) -> Picked {
+                match entity.id().kind {
+                    Kind::Building | Kind::Room => Picked::Missed,
+                    _ => ray.hits_box(entity.bounds()).map_or(Picked::Missed, Picked::Hit),
+                }
+            }
+        }
+        let pickers: HashMap<String, Arc<dyn Picker>> = HashMap::from([("buildings".to_owned(), Arc::new(Walls) as _)]);
+        let inside = Ray {
+            origin: Vec3::from(up(52.0)),
+            direction: Vec3::NEG_Z,
+        };
+        let hit = pick(&snapshot, &inside, &[], &pickers).unwrap();
+        assert_eq!(
+            hit.chain,
+            [
+                EntityId::building(0, 9),
+                EntityId::room(0, 9, 1),
+                EntityId::building_doodad(0, 9, 4)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rectangle_keeps_the_origins_in_front_of_the_eye_within_it_of_the_kinds_of_its_filter() {
+        let mut builder = PieceBuilder::new(vec![ELWYNN]);
+        let at = middle(ELWYNN, [5, 5]);
+        for (n, dx) in [(1, 0.0), (2, 5.0), (3, 40.0)] {
+            let origin = [at[0] + dx, at[1], at[2]];
+            builder.push(Entity {
+                id: EntityId::doodad(0, n),
+                flags: flags::CLIENT,
+                parent: None,
+                label: "",
+                extra: 0,
+                origin,
+                bounds: [origin; 2],
+            });
+        }
+        builder.push(Entity {
+            id: EntityId::chunk(0, ELWYNN, [5, 5]),
+            flags: flags::CLIENT,
+            parent: None,
+            label: "",
+            extra: 0,
+            origin: at,
+            bounds: [at; 2],
+        });
+        let snapshot = super::publish(
+            &mut Registry::default(),
+            vec![Change::Publish(
+                PieceKey::tile("doodads", 0, ELWYNN),
+                Arc::new(builder.build()),
+            )],
+        );
+        let eye = Vec3::from(at) + Vec3::new(0.0, 0.0, 50.0);
+        let seen = Seen {
+            view_proj: Mat4::perspective_infinite_reverse_rh(1.0, 1.0, 0.5)
+                * Mat4::look_at_rh(eye, Vec3::from(at), Vec3::X),
+            eye,
+            size: [400.0, 400.0],
+        };
+        let mut found = within(&snapshot, &seen, [[150.0, 150.0], [250.0, 250.0]], &[], &[Kind::Chunk]);
+        found.sort();
+        assert_eq!(found, [EntityId::doodad(0, 1), EntityId::doodad(0, 2)]);
+        let chunks = within(&snapshot, &seen, [[150.0, 150.0], [250.0, 250.0]], &[Kind::Chunk], &[]);
+        assert_eq!(chunks, [EntityId::chunk(0, ELWYNN, [5, 5])]);
+    }
+}

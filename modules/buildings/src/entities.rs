@@ -13,6 +13,44 @@ use crate::WmoFile;
 /// The middle of the world in the axes of the files.
 const ORIGIN: f32 = 32.0 * 1600.0 / 3.0;
 
+/// What the picking needs of a building placed: its file, its transform, and the model and the
+/// transform in the world of each doodad of its sets placed, by its place in `MODD`.
+pub struct Picked {
+    pub file: FileRef,
+    pub transform: Mat4,
+    pub doodads: HashMap<u32, (FileRef, Mat4)>,
+}
+
+/// What the picking needs of `building`, its doodads from its file `file` when it is read.
+pub fn picked(building: &Building, file: Option<&WmoFile>) -> Picked {
+    let transform = placement(building.position, building.rotation, building.scale);
+    let mut doodads = HashMap::new();
+    if let Some(file) = file {
+        let mut chosen = vec![0usize];
+        if building.doodad_set != 0 && usize::from(building.doodad_set) < file.sets.len() {
+            chosen.push(usize::from(building.doodad_set));
+        }
+        for set in chosen.into_iter().filter_map(|set| file.sets.get(set)) {
+            let first = set.first as usize;
+            for place in first..(first + set.count as usize).min(file.doodads.len()) {
+                let doodad = &file.doodads[place];
+                let [x, y, z, w] = doodad.rotation;
+                let own = Mat4::from_scale_rotation_translation(
+                    Vec3::splat(doodad.scale),
+                    uniwow_api::glam::Quat::from_xyzw(x, y, z, w).normalize(),
+                    Vec3::from(doodad.position),
+                );
+                doodads.insert(place as u32, (doodad.file.clone(), transform * own));
+            }
+        }
+    }
+    Picked {
+        file: building.file.clone(),
+        transform,
+        doodads,
+    }
+}
+
 /// A group of a building as the scene lists it: its id (`WmoGroup::id`), its name of `MOGN`, and its
 /// bounds in the building's axes.
 #[derive(Clone, Debug, PartialEq)]

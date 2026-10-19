@@ -123,6 +123,57 @@ pub fn piece(map: u32, model: &TileModel) -> uniwow_api::scene::Piece {
     builder.build()
 }
 
+/// The heights of a chunk as the picking reads them: its index, its corner and its 145 heights.
+pub struct Heights {
+    pub index: [u32; 2],
+    pub corner: [f32; 3],
+    pub heights: Vec<f32>,
+}
+
+/// The heights of every chunk of `model`.
+pub fn heights(model: &TileModel) -> Vec<Heights> {
+    model
+        .tile
+        .chunks
+        .iter()
+        .map(|chunk| Heights {
+            index: chunk.index,
+            corner: chunk_corner(model.id, chunk),
+            heights: chunk.heights.clone(),
+        })
+        .collect()
+}
+
+/// Where `ray` meets the ground of the chunk `chunk`, by the four triangles of each of its 8 × 8
+/// quads around its inner vertex; none where it misses.
+pub fn ray_hits(chunk: &Heights, ray: &uniwow_api::viewport::Ray) -> Option<f32> {
+    use uniwow_api::glam::Vec3;
+    if chunk.heights.len() < 145 {
+        return None;
+    }
+    let at = |vertex: usize| Vec3::from(vertex_position(chunk.corner, vertex, chunk.heights[vertex]));
+    let mut nearest: Option<f32> = None;
+    for row in 0..8 {
+        for column in 0..8 {
+            let outer = |r: usize, c: usize| r * 17 + c;
+            let inner = at(row * 17 + 9 + column);
+            let corners = [
+                outer(row, column),
+                outer(row, column + 1),
+                outer(row + 1, column + 1),
+                outer(row + 1, column),
+            ];
+            for side in 0..4 {
+                let (a, b) = (at(corners[side]), at(corners[(side + 1) % 4]));
+                if let Some(distance) = ray.hits_triangle(a, b, inner) {
+                    nearest = Some(nearest.map_or(distance, |nearest| nearest.min(distance)));
+                }
+            }
+        }
+    }
+    nearest
+}
+
 /// The corner of a chunk as the client places it: by its tile and its index, the base of its
 /// heights only taken from the file, whose position some tiles made by tools give wrong.
 pub fn chunk_corner(tile: TileId, chunk: &Chunk) -> [f32; 3] {

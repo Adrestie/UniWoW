@@ -3933,6 +3933,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "uniwow-module-scene-tools"
+version = "0.1.0"
+dependencies = [
+ "uniwow-api",
+]
+
+[[package]]
 name = "uniwow-module-scripting-lua"
 version = "0.1.0"
 dependencies = [
