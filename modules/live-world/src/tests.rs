@@ -699,3 +699,29 @@ fn the_connection_shows_a_dot_pulsing_while_it_is_tried_and_tells_when_it_comes_
     ));
     assert_eq!(notice(Some(false), Connection::ServerStopped), None);
 }
+
+#[test]
+fn a_creature_or_a_game_object_of_a_spawn_is_given_as_that_spawn_the_others_by_their_guid() {
+    let now = Instant::now();
+    let mut alone = entity(0xf130_0000_0000_0007, Kind::Creature, [0.0; 3]);
+    alone.spawn = 0;
+    let (world, _) = World::default().snapshot(
+        1,
+        0,
+        1,
+        vec![
+            entity(79753, Kind::Creature, [0.0; 3]),
+            entity(5714, Kind::GameObject, [0.0; 3]),
+            alone,
+            entity(8, Kind::Player, [0.0; 3]),
+        ],
+        now,
+    );
+    let piece = crate::scene_piece(&world, now);
+    let mut ids: Vec<String> = piece.ids.iter().map(ToString::to_string).collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        ["creature:79753", "gameobject:5714", "live:8", "live:f130000000000007"]
+    );
+}

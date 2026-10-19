@@ -92,7 +92,7 @@ pub struct Read {
 fn read(editor: &uniwow_api::Editor, snapshot: &Snapshot, ids: &[EntityId]) -> Read {
     let mut by_provider: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for id in ids {
-        if let Some(entity) = snapshot.get(id) {
+        if let Some(entity) = snapshot.editable(id) {
             by_provider
                 .entry(entity.provider().to_owned())
                 .or_default()
@@ -145,6 +145,11 @@ pub struct Inspector {
     said: Vec<String>,
     /// The Transform copied, its fields by name.
     copied: Option<Value>,
+    /// The search among the quests, the call answering it and the quests found.
+    quest_search: String,
+    searched: String,
+    searching: Option<(CallId, String)>,
+    found: Vec<(u64, String)>,
 }
 
 impl Inspector {
@@ -196,7 +201,7 @@ impl Inspector {
     ) {
         let mut by_provider: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for id in ids {
-            if let Some(entity) = snapshot.get(id) {
+            if let Some(entity) = snapshot.editable(id) {
                 by_provider
                     .entry(entity.provider().to_owned())
                     .or_default()
@@ -230,6 +235,14 @@ impl Inspector {
 
     /// Takes the answer to a write; whether it was one.
     pub fn on_reply(&mut self, call: CallId, result: Result<Value, String>) -> bool {
+        if self.searching.as_ref().is_some_and(|(searching, _)| *searching == call) {
+            self.searching = None;
+            self.found = result.map(|answer| quests_found(&answer)).unwrap_or_else(|reason| {
+                self.said.push(reason);
+                Vec::new()
+            });
+            return true;
+        }
         let Some(at) = self.waiting.iter().position(|waiting| *waiting == call) else {
             return false;
         };
@@ -309,6 +322,7 @@ impl Inspector {
             } else {
                 self.transform_ui(ui, &values, unread, &ids, &snapshot, ctx);
                 self.model_ui(ui, &values);
+                self.quests_ui(ui, &values, ctx);
             }
             for refused in read.refused.iter().chain(&self.said) {
                 ui.colored_label(ui.visuals().warn_fg_color, refused);
@@ -319,7 +333,7 @@ impl Inspector {
     fn header(&self, ui: &mut egui::Ui, snapshot: &Snapshot, scene: &scene::Handle, ids: &[EntityId]) {
         let names = scene.names();
         if let [id] = ids {
-            let Some(entity) = snapshot.get(id) else {
+            let Some(entity) = snapshot.editable(id) else {
                 ui.label(format!("{id}"));
                 ui.colored_label(ui.visuals().warn_fg_color, "Out of reach: its tile is not loaded.");
                 return;
@@ -354,7 +368,10 @@ impl Inspector {
             if !tiles.is_empty() {
                 ui.label(egui::RichText::new(format!("Stored in the tiles {}", tiles.join(", "))).weak());
             }
-            if entity.flags() & scene::flags::READ_ONLY != 0 {
+            if let Some(live) = snapshot.live(id).filter(|live| live.id().kind != Kind::Live) {
+                let [x, y, z] = live.origin();
+                ui.label(format!("● Live: now at {x:.1}, {y:.1}, {z:.1}"));
+            } else if entity.flags() & scene::flags::READ_ONLY != 0 {
                 ui.label(egui::RichText::new("Read only").weak());
             }
         } else {
@@ -477,6 +494,75 @@ impl Inspector {
         });
     }
 
+    /// The quests the template of the spawns shown starts and ends, one template at a time: each
+    /// taken away by its button, and those a search finds given.
+    fn quests_ui(&mut self, ui: &mut egui::Ui, values: &[(EntityId, Value)], ctx: &mut Context) {
+        let Some((_, first)) = values.first() else {
+            return;
+        };
+        let Some(quests) = first["components"]["quests"].as_array() else {
+            return;
+        };
+        egui::CollapsingHeader::new("Quests").default_open(true).show(ui, |ui| {
+            let template = &first["components"]["model"]["template"];
+            if values
+                .iter()
+                .any(|(_, value)| value["components"]["model"]["template"] != *template)
+            {
+                ui.label(egui::RichText::new("The quests of one template at a time.").weak());
+                return;
+            }
+            let ids: Vec<String> = values.iter().map(|(id, _)| id.to_string()).collect();
+            let mut changes = Vec::new();
+            if quests.is_empty() {
+                ui.label(egui::RichText::new("No quest.").weak());
+            }
+            egui::Grid::new("inspector quests").num_columns(3).show(ui, |ui| {
+                for quest in quests {
+                    let (id, role) = (quest["quest"].as_u64().unwrap_or(0), plain(&quest["role"]));
+                    ui.label(format!("{role} {id}"));
+                    ui.label(plain(&quest["title"]));
+                    if ui.small_button("✖").on_hover_text("Take this quest away").clicked() {
+                        changes.push((id, role, false));
+                    }
+                    ui.end_row();
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("🔍");
+                ui.text_edit_singleline(&mut self.quest_search)
+                    .on_hover_text("A quest by its title or its id");
+            });
+            let search = self.quest_search.trim().to_owned();
+            if !search.is_empty() && self.searched != search {
+                let call = ctx.call("spawns.quest_titles", json!({ "search": search }));
+                self.searching = Some((call, search.clone()));
+                self.searched = search.clone();
+            }
+            if search.is_empty() {
+                self.found.clear();
+                self.searched.clear();
+            }
+            for (id, title) in &self.found {
+                ui.horizontal(|ui| {
+                    ui.label(format!("{id} {title}"));
+                    for role in ["starts", "ends"] {
+                        if ui.small_button(format!("+ {role}")).clicked() {
+                            changes.push((*id, role.to_owned(), true));
+                        }
+                    }
+                });
+            }
+            for (quest, role, given) in changes {
+                let call = ctx.call(
+                    "spawns.quests",
+                    json!({ "ids": ids, "quest": quest, "role": role, "given": given }),
+                );
+                self.waiting.push(call);
+            }
+        });
+    }
+
     fn raw_ui(&self, ui: &mut egui::Ui, values: &[(EntityId, Value)]) {
         let [(id, value)] = values else {
             ui.label(egui::RichText::new("The raw data of one entity read at a time.").weak());
@@ -497,6 +583,19 @@ impl Inspector {
                 });
             });
     }
+}
+
+/// The quests of an answer of `spawns.quest_titles`: their ids and titles.
+fn quests_found(answer: &Value) -> Vec<(u64, String)> {
+    answer["quests"]
+        .as_array()
+        .map(|quests| {
+            quests
+                .iter()
+                .filter_map(|quest| Some((quest["quest"].as_u64()?, plain(&quest["title"]))))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A value of JSON as text, a string without its quotes.

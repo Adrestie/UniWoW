@@ -1099,6 +1099,39 @@ impl Snapshot {
         })
     }
 
+    /// The entity `id` as the module that edits it lists it: its first listing that is not of the
+    /// world as it runs, else its first (a live creature merged with its spawn is the spawn's).
+    pub fn editable(&self, id: &EntityId) -> Option<EntityRef<'_>> {
+        let listings = self.listings(id);
+        let entity = |listing: &Listing| {
+            Some(EntityRef {
+                snapshot: self,
+                placed: self.placed(listing.slot)?,
+                row: listing.row as usize,
+            })
+        };
+        listings
+            .iter()
+            .filter_map(entity)
+            .find(|found| found.flags() & flags::LIVE == 0)
+            .or_else(|| listings.first().and_then(entity))
+    }
+
+    /// The listing of `id` by the world as it runs, where it runs: a live creature merged with its
+    /// spawn, where it stands now.
+    pub fn live(&self, id: &EntityId) -> Option<EntityRef<'_>> {
+        self.listings(id)
+            .iter()
+            .filter_map(|listing| {
+                Some(EntityRef {
+                    snapshot: self,
+                    placed: self.placed(listing.slot)?,
+                    row: listing.row as usize,
+                })
+            })
+            .find(|found| found.flags() & flags::LIVE != 0)
+    }
+
     /// Whether the row `row` of the piece in `slot` is its entity, not a listing of it by another
     /// tile.
     pub fn is_first(&self, slot: u32, row: u32, id: &EntityId) -> bool {

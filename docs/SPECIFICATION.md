@@ -1,7 +1,7 @@
 # UniWoW — Architecture and module catalogue
 
 Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.10 done, 15.11 built
-before its first connection; milestones 10 to 14 outlined. Open questions in section 10.
+before its first connection (15.11a to 15.11c); milestones 10 to 14 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -10284,6 +10284,36 @@ spawns of the whole map placed at once on the interface thread, to measure on th
 template, a number written as text read, no model its scale by default; a spawn moved, turned,
 duplicated with guids above the highest, deleted, laid over the rows and kept in the project; the view
 *Server* of a template with its spawns.
+
+#### Step 15.11c, as built: the live merged with the spawns, the quests
+
+Built after b2d28fb, on `main`; tested on rows and entities the tests make, waiting for the user's
+database.
+
+- **The merge**: `live-world` gives a creature or a game object of a spawn of the database (its
+  `spawn` not zero) as that spawn, `creature:<guid>` or `gameobject:<guid>`, flagged *Live*; the
+  others and the players stay `live:<guid>`, under *Live*. The registry lists the two under one id:
+  `Snapshot::editable` the listing of the module that edits it (the spawn), `Snapshot::live` the
+  one of the world as it runs. The Inspector, the gizmos, Ctrl+D and Delete reach the spawn; the
+  Inspector says where it runs now (`● Live: now at x, y, z`), the Hierarchy marks its row `●`; the
+  module `spawns` no longer draws the model of a spawn shown live, looked at again each time the
+  scene changes.
+- **The component *Quests***: the quests each template starts and ends, read with the spawns from
+  `creature_queststarter`, `creature_questender`, `gameobject_queststarter`,
+  `gameobject_questender`, and their titles from `quest_template`; `spawns.read` gives them,
+  `spawns.quests` gives or takes one from the templates of spawns (one undo entry, in the project),
+  `spawns.quest_titles` searches the titles. The Inspector draws them for one template at a time, a
+  quest taken by its ✖, a quest searched given as the one that starts or ends it.
+
+**Not in 15.11c**: the quests drawn by their module itself (the drawings of modules are 15.12, the
+Inspector draws them meanwhile); the quests read again for each map rather than once a server; a
+spawn hidden while live looked for over the spawns of the map at each change of the scene, to
+measure on the user's database.
+
+**Tests**: a creature and a game object of spawns given as their spawns, one without a spawn and a
+player by their guids; a spawn and its live listing one entity, edited where it was put and live
+where it runs, the spawn alone again once the world leaves; the quests of rows read, searched by
+title and id, given, taken, given back and kept in the project, read in the component.
 
 ### Milestone 10: Lua modules (outline)
 

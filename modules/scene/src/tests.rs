@@ -508,3 +508,52 @@ mod picking {
         assert_eq!(chunks, [EntityId::chunk(0, ELWYNN, [5, 5])]);
     }
 }
+
+#[test]
+fn a_live_creature_of_a_spawn_is_the_spawn_edited_where_it_was_put_and_live_where_it_runs() {
+    let mut registry = Registry::default();
+    let guard = EntityId::creature(79753);
+    let at = middle(ELWYNN, [3, 15]);
+    let mut spawns = PieceBuilder::new(vec![ELWYNN]);
+    spawns.push(Entity {
+        flags: flags::SERVER,
+        ..doodad(guard, "Stormwind City Guard", at)
+    });
+    let now = [at[0] + 5.0, at[1], at[2]];
+    let mut live = PieceBuilder::new(Vec::new());
+    live.push(Entity {
+        flags: flags::LIVE | flags::READ_ONLY,
+        ..doodad(guard, "Stormwind City Guard", now)
+    });
+    live.push(Entity {
+        flags: flags::LIVE | flags::READ_ONLY,
+        ..doodad(EntityId::live(0xf130), "Rabbit", now)
+    });
+    let snapshot = publish(
+        &mut registry,
+        vec![
+            Change::Publish(PieceKey::part("live-world", 0, 0), Arc::new(live.build())),
+            Change::Publish(PieceKey::tile("spawns", 0, ELWYNN), Arc::new(spawns.build())),
+        ],
+    );
+    assert_eq!(
+        snapshot.entities().filter(|entity| entity.id() == guard).count(),
+        1,
+        "one entity"
+    );
+    let edited = snapshot.editable(&guard).unwrap();
+    assert_eq!((edited.provider(), edited.origin()), ("spawns", at));
+    let running = snapshot.live(&guard).unwrap();
+    assert_eq!((running.provider(), running.origin()), ("live-world", now));
+    // Live alone: the world as it runs gives it, nothing to edit it but that.
+    let rabbit = EntityId::live(0xf130);
+    assert_eq!(snapshot.editable(&rabbit).unwrap().provider(), "live-world");
+    assert!(snapshot.live(&rabbit).is_some());
+    // The spawn alone: no live listing.
+    let snapshot = publish(
+        &mut registry,
+        vec![Change::Withdraw(PieceKey::part("live-world", 0, 0))],
+    );
+    assert!(snapshot.live(&guard).is_none());
+    assert_eq!(snapshot.editable(&guard).unwrap().provider(), "spawns");
+}

@@ -2,7 +2,7 @@
 //! `gameobject` of a map joined to their templates; changed, created and deleted in memory, laid
 //! over the rows; given to the scene by tile.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use uniwow_api::db::Rows;
 use uniwow_api::formats::TileId;
@@ -18,6 +18,87 @@ pub const OBJECTS: &str = "SELECT g.guid, g.id, g.position_x, g.position_y, g.po
      t.name, t.displayId, t.size FROM gameobject g JOIN gameobject_template t ON t.entry = g.id WHERE g.map = ?";
 /// The highest guid of each table, so that a spawn created takes one above.
 pub const HIGHEST: [&str; 2] = ["SELECT MAX(guid) FROM creature", "SELECT MAX(guid) FROM gameobject"];
+
+/// The quests the templates start and end: the tables `creature_queststarter`,
+/// `creature_questender`, `gameobject_queststarter`, `gameobject_questender`, in that order.
+pub const LINKS: [(Kind, bool, &str); 4] = [
+    (Kind::Creature, false, "SELECT id, quest FROM creature_queststarter"),
+    (Kind::Creature, true, "SELECT id, quest FROM creature_questender"),
+    (Kind::GameObject, false, "SELECT id, quest FROM gameobject_queststarter"),
+    (Kind::GameObject, true, "SELECT id, quest FROM gameobject_questender"),
+];
+/// The titles of the quests.
+pub const TITLES: &str = "SELECT ID, LogTitle FROM quest_template";
+
+/// A template that starts or ends a quest: its kind, its entry, the quest, whether it ends it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Link {
+    pub kind: Kind,
+    pub entry: u32,
+    pub quest: u32,
+    pub ends: bool,
+}
+
+impl Link {
+    fn role(&self) -> &'static str {
+        if self.ends { "ends" } else { "starts" }
+    }
+}
+
+/// The quests of the database: their titles, and which template starts or ends each.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Quests {
+    pub titles: BTreeMap<u32, String>,
+    pub links: BTreeSet<Link>,
+}
+
+impl Quests {
+    /// The quests as `TITLES` and the rows of `LINKS` give them, in the order of `LINKS`.
+    pub fn of_rows(titles: &Rows, links: &[Rows]) -> Self {
+        let number = |value: Option<&Value>| match value? {
+            Value::Number(number) => number.as_u64(),
+            Value::String(text) => text.trim().parse().ok(),
+            _ => None,
+        };
+        let titles = titles
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let title = row.get(1).and_then(Value::as_str).unwrap_or_default();
+                Some((number(row.first())? as u32, title.to_owned()))
+            })
+            .collect();
+        let links = LINKS
+            .iter()
+            .zip(links)
+            .flat_map(|((kind, ends, _), rows)| {
+                rows.rows.iter().filter_map(move |row| {
+                    Some(Link {
+                        kind: *kind,
+                        entry: number(row.first())? as u32,
+                        quest: number(row.get(1))? as u32,
+                        ends: *ends,
+                    })
+                })
+            })
+            .collect();
+        Self { titles, links }
+    }
+
+    /// The quests whose title holds `search` without case, or whose id it is; `limit` at most, by
+    /// id.
+    pub fn search(&self, search: &str, limit: usize) -> Vec<(u32, &str)> {
+        let search = search.trim().to_lowercase();
+        self.titles
+            .iter()
+            .filter(|(id, title)| {
+                search.is_empty() || title.to_lowercase().contains(&search) || id.to_string() == search
+            })
+            .take(limit)
+            .map(|(id, title)| (*id, title.as_str()))
+            .collect()
+    }
+}
 
 /// A spawn: a creature or a game object, its guid, its template and its name, its look, its place.
 #[derive(Clone, Debug, PartialEq)]
@@ -102,6 +183,9 @@ pub struct Changes {
     pub added: HashMap<EntityId, Spawn>,
     pub deleted: HashSet<EntityId>,
     pub given: HashMap<String, u64>,
+    /// The quests given to templates and taken from them.
+    pub linked: BTreeSet<Link>,
+    pub unlinked: BTreeSet<Link>,
 }
 
 impl Changes {
@@ -130,6 +214,34 @@ impl Changes {
         out
     }
 
+    /// The quests of the template of `kind` and `entry` as the user changed them, by quest.
+    pub fn quests_of(&self, quests: &Quests, kind: Kind, entry: u32) -> Vec<Link> {
+        let of = |link: &&Link| link.kind == kind && link.entry == entry;
+        let mut out: BTreeSet<Link> = quests
+            .links
+            .iter()
+            .filter(of)
+            .filter(|link| !self.unlinked.contains(link))
+            .copied()
+            .collect();
+        out.extend(self.linked.iter().filter(of));
+        let mut out: Vec<Link> = out.into_iter().collect();
+        out.sort_by_key(|link| (link.quest, link.ends));
+        out
+    }
+
+    /// `link` given (`given`) or taken, the quests of the database being `quests`; whether it
+    /// changed anything.
+    pub fn link(&mut self, quests: &Quests, link: Link, given: bool) -> bool {
+        let held = quests.links.contains(&link);
+        match (given, held) {
+            (true, true) => self.unlinked.remove(&link),
+            (true, false) => self.linked.insert(link),
+            (false, true) => self.unlinked.insert(link),
+            (false, false) => self.linked.remove(&link),
+        }
+    }
+
     /// A guid of `kind` above `highest` and every one given before.
     pub fn give(&mut self, kind: Kind, highest: u64) -> u64 {
         let given = self.given.entry(kind.name().to_owned()).or_insert(0);
@@ -146,6 +258,14 @@ impl Changes {
         let mut deleted: Vec<_> = self.deleted.iter().collect();
         deleted.sort();
         let given: BTreeMap<&String, &u64> = self.given.iter().collect();
+        let links = |links: &BTreeSet<Link>| -> Vec<Value> {
+            links
+                .iter()
+                .map(|link| {
+                    json!({ "kind": link.kind.name(), "entry": link.entry, "quest": link.quest, "role": link.role() })
+                })
+                .collect()
+        };
         json!({
             "moved": moved.into_iter().map(|(id, (position, orientation))| json!({
                 "id": id.to_string(), "position": position, "orientation": orientation,
@@ -156,6 +276,8 @@ impl Changes {
             })).collect::<Vec<_>>(),
             "deleted": deleted.into_iter().map(ToString::to_string).collect::<Vec<_>>(),
             "guids given": given,
+            "quests given": links(&self.linked),
+            "quests taken": links(&self.unlinked),
         })
     }
 
@@ -166,6 +288,23 @@ impl Changes {
         };
         let list = |key: &str| section[key].as_array().cloned().unwrap_or_default();
         let id = |entry: &Value| entry["id"].as_str()?.parse::<EntityId>().ok();
+        let links = |key: &str| -> BTreeSet<Link> {
+            list(key)
+                .iter()
+                .filter_map(|entry| {
+                    Some(Link {
+                        kind: if entry["kind"].as_str()? == Kind::GameObject.name() {
+                            Kind::GameObject
+                        } else {
+                            Kind::Creature
+                        },
+                        entry: entry["entry"].as_u64()? as u32,
+                        quest: entry["quest"].as_u64()? as u32,
+                        ends: entry["role"].as_str()? == "ends",
+                    })
+                })
+                .collect()
+        };
         Self {
             moved: list("moved")
                 .iter()
@@ -208,6 +347,8 @@ impl Changes {
                         .collect()
                 })
                 .unwrap_or_default(),
+            linked: links("quests given"),
+            unlinked: links("quests taken"),
         }
     }
 }
@@ -247,8 +388,8 @@ pub fn pieces(spawns: &[Spawn]) -> BTreeMap<TileId, Piece> {
 
 /// The components of the spawn `spawn` for the Inspector: *Transform* (its position in the world,
 /// its orientation in degrees about the vertical as the rotation about the axis Y of the files, no
-/// scale), *Spawn* and *Template*.
-pub fn read(spawn: &Spawn, changed: bool) -> Value {
+/// scale), *Model* (its template), *Quests* (those its template starts and ends) and its columns.
+pub fn read(spawn: &Spawn, changed: bool, quests: &[Link], titles: &BTreeMap<u32, String>) -> Value {
     let table = if spawn.kind == Kind::GameObject {
         "gameobject"
     } else {
@@ -267,6 +408,11 @@ pub fn read(spawn: &Spawn, changed: bool) -> Value {
                 "name": spawn.name,
                 "display": spawn.display,
             },
+            "quests": quests.iter().map(|link| json!({
+                "quest": link.quest,
+                "title": titles.get(&link.quest).cloned().unwrap_or_default(),
+                "role": link.role(),
+            })).collect::<Vec<_>>(),
             "raw": {
                 "guid": spawn.guid,
                 "table": table,
@@ -434,7 +580,66 @@ mod tests {
         assert_eq!(ids, [EntityId::creature(79753), EntityId::creature(80_001)]);
         assert_eq!(laid[0].position, position);
         assert_eq!(Changes::of_section(&changes.section()), changes);
-        let read = read(&laid[0], true);
+        let read = read(&laid[0], true, &[], &BTreeMap::new());
         assert_eq!(read["components"]["model"]["template"], json!("creature_template 68"));
+    }
+
+    #[test]
+    fn the_quests_of_a_template_are_read_given_and_taken_in_memory() {
+        let titles = rows(
+            &["ID", "LogTitle"],
+            vec![
+                vec![json!(783), json!("A Threat Within")],
+                vec![json!(7), json!("Kobold Camp Cleanup")],
+                vec![json!("33"), json!("Wolves Across the Border")],
+            ],
+        );
+        let links = [
+            rows(&["id", "quest"], vec![vec![json!(197), json!(7)]]),
+            rows(
+                &["id", "quest"],
+                vec![vec![json!(197), json!(7)], vec![json!(823), json!(783)]],
+            ),
+            rows(&["id", "quest"], vec![]),
+            rows(&["id", "quest"], vec![]),
+        ];
+        let quests = Quests::of_rows(&titles, &links);
+        assert_eq!(quests.titles.len(), 3, "an id written as text read");
+        assert_eq!(quests.search("wolves", 10), [(33, "Wolves Across the Border")]);
+        assert_eq!(quests.search("783", 10), [(783, "A Threat Within")]);
+        assert_eq!(quests.search("", 2).len(), 2);
+        let mut changes = Changes::default();
+        let starts = |quest| Link {
+            kind: Kind::Creature,
+            entry: 197,
+            quest,
+            ends: false,
+        };
+        let held = |changes: &Changes| -> Vec<(u32, bool)> {
+            changes
+                .quests_of(&quests, Kind::Creature, 197)
+                .iter()
+                .map(|link| (link.quest, link.ends))
+                .collect()
+        };
+        assert_eq!(held(&changes), [(7, false), (7, true)]);
+        assert!(changes.link(&quests, starts(33), true));
+        assert!(changes.link(&quests, starts(7), false));
+        assert!(!changes.link(&quests, starts(7), false), "taken twice changes nothing");
+        assert_eq!(held(&changes), [(7, true), (33, false)]);
+        assert_eq!(Changes::of_section(&changes.section()), changes);
+        let spawn = &spawns(&guard(), Kind::Creature)[0];
+        let read = read(
+            spawn,
+            false,
+            &changes.quests_of(&quests, Kind::Creature, 197),
+            &quests.titles,
+        );
+        assert_eq!(
+            read["components"]["quests"][1],
+            json!({ "quest": 33, "title": "Wolves Across the Border", "role": "starts" })
+        );
+        assert!(changes.link(&quests, starts(7), true), "given back");
+        assert!(changes.unlinked.is_empty());
     }
 }

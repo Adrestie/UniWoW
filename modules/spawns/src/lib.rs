@@ -2,7 +2,8 @@
 //! of the map the terrain shows, read by a job through the service `world-db` once it is connected,
 //! with their templates' names and looks; given to the scene by tile, drawn through `models` by
 //! their looks; their places changed, created and deleted in memory, each one undo entry, kept in the
-//! project. Nothing is written to the database.
+//! project. The quests their templates start and end read with them and changed in memory (step
+//! 15.11c). Nothing is written to the database.
 
 mod data;
 
@@ -17,13 +18,13 @@ use uniwow_api::serde_json::{Value, json};
 use uniwow_api::world_db::{self, State};
 use uniwow_api::{Command, Context, DockArea, JobId, JobOutcome, Module, Registrar, egui, log};
 
-use data::{Changes, Spawn};
+use data::{Changes, Link, Quests, Spawn};
 
 /// The id of the module, the provider of its pieces and the owner of its instances.
 const MODULE: &str = "spawns";
 
-/// What a reading job gives back: the spawns of a map, and the highest guid of each table.
-type Read = Result<(Vec<Spawn>, u64, u64), String>;
+/// What a reading job gives back: the spawns of a map, the highest guid of each table, the quests.
+type Read = Result<(Vec<Spawn>, u64, u64, Quests), String>;
 
 /// The looks of the displays, by kind and display: a look and its scale, none for none.
 type Looks = HashMap<(Kind, u32), Option<(LookId, f32)>>;
@@ -62,14 +63,29 @@ struct SpawnsModule {
     /// The spawns as the database has them, and the highest guid of each table.
     spawns: Arc<Vec<Spawn>>,
     highest: [u64; 2],
+    quests: Arc<Quests>,
     changes: Changes,
     looks: Looks,
     resolving: Option<JobId>,
     /// The tiles given to the scene and placed, for those to take away.
     tiles: BTreeSet<TileId>,
     refused: Option<String>,
+    /// The spawns the world as it runs shows live, not drawn again; the generation of the scene they
+    /// were seen in.
+    live: BTreeSet<EntityId>,
+    seen: u64,
     models: Option<models::Handle>,
     scene: Option<scene::Handle>,
+}
+
+/// The spawns of `spawns` that the world as it runs lists in `snapshot`: a live creature or game
+/// object of a spawn is listed by its spawn's id.
+fn live_of(snapshot: &scene::Snapshot, spawns: &[Spawn]) -> BTreeSet<EntityId> {
+    spawns
+        .iter()
+        .map(Spawn::id)
+        .filter(|id| snapshot.live(id).is_some())
+        .collect()
 }
 
 fn owner(map: u32, tile: TileId) -> String {
@@ -100,6 +116,9 @@ impl SpawnsModule {
             }
             let mut by_tile: BTreeMap<TileId, Vec<Instance>> = BTreeMap::new();
             for spawn in &spawns {
+                if self.live.contains(&spawn.id()) {
+                    continue;
+                }
                 let (Some(tile), Some(Some((look, scale)))) = (
                     data::tile_of(spawn.position),
                     self.looks.get(&(spawn.kind, spawn.display)),
@@ -189,6 +208,7 @@ impl SpawnsModule {
             self.clear();
             self.map = map;
         }
+        self.see_live();
         let (Some(map), Some(database)) = (self.map, ctx.service(world_db::SERVICE)) else {
             return;
         };
@@ -207,9 +227,37 @@ impl SpawnsModule {
                 spawns.extend(data::spawns(&objects, Kind::GameObject));
                 let highest_creature = data::highest(&database.query(data::HIGHEST[0], &[])?);
                 let highest_object = data::highest(&database.query(data::HIGHEST[1], &[])?);
-                Ok((spawns, highest_creature, highest_object))
+                let titles = database.query(data::TITLES, &[])?;
+                let links = data::LINKS
+                    .iter()
+                    .map(|(_, _, query)| database.query(query, &[]))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok((
+                    spawns,
+                    highest_creature,
+                    highest_object,
+                    Quests::of_rows(&titles, &links),
+                ))
             }),
         );
+    }
+
+    /// The spawns the world as it runs shows live, again when the scene changed; placed again when
+    /// they are other ones.
+    fn see_live(&mut self) {
+        let Some(scene) = &self.scene else {
+            return;
+        };
+        let snapshot = scene.snapshot();
+        if snapshot.generation == self.seen {
+            return;
+        }
+        self.seen = snapshot.generation;
+        let live = live_of(&snapshot, &self.changes.laid_over(&self.spawns));
+        if live != self.live {
+            self.live = live;
+            self.refresh();
+        }
     }
 
     /// The looks of the displays not yet resolved, asked of a job.
@@ -283,12 +331,65 @@ impl Module for SpawnsModule {
                 "Deletes the spawns 'ids', in memory; one undo entry.",
                 ids,
                 json!({ "type": "object", "properties": { "deleted": { "type": "integer" } } }),
+            )
+            .command(
+                "spawns.quests",
+                "Gives the quest 'quest' to the templates of the spawns 'ids' ('given' true) or takes it from them, \
+                 as the one that 'starts' or 'ends' it ('role'); in memory, one undo entry.",
+                json!({ "type": "object", "properties": { "ids": { "type": "array" }, "quest": { "type": "integer" }, "role": { "type": "string" }, "given": { "type": "boolean" } }, "required": ["ids", "quest", "role", "given"] }),
+                json!({ "type": "object", "properties": { "changed": { "type": "integer" } } }),
+            )
+            .command(
+                "spawns.quest_titles",
+                "The quests whose title holds 'search' (without case) or whose id it is, 50 at most: their ids and titles.",
+                json!({ "type": "object", "properties": { "search": { "type": "string" } } }),
+                json!({ "type": "object", "properties": { "quests": { "type": "array" } } }),
             );
     }
 
     fn on_command(&mut self, name: &str, arguments: Value, ctx: &mut Context) -> Result<Value, String> {
+        if name == "spawns.quest_titles" {
+            let search = arguments["search"].as_str().unwrap_or_default();
+            let quests: Vec<Value> = self
+                .quests
+                .search(search, 50)
+                .into_iter()
+                .map(|(id, title)| json!({ "quest": id, "title": title }))
+                .collect();
+            return Ok(json!({ "quests": quests }));
+        }
         let ids = Self::ids(&arguments)?;
         match name {
+            "spawns.quests" => {
+                let quest = arguments["quest"].as_u64().ok_or("'quest' is the id of a quest")? as u32;
+                let ends = match arguments["role"].as_str() {
+                    Some("starts") => false,
+                    Some("ends") => true,
+                    _ => return Err("'role' is starts or ends".to_owned()),
+                };
+                let given = arguments["given"].as_bool().ok_or("'given' is true or false")?;
+                let mut after = self.changes.clone();
+                let templates: BTreeSet<(Kind, u32)> = ids
+                    .iter()
+                    .filter_map(|id| self.find(id))
+                    .map(|spawn| (spawn.kind, spawn.entry))
+                    .collect();
+                let changed = templates
+                    .into_iter()
+                    .filter(|(kind, entry)| {
+                        let link = Link {
+                            kind: *kind,
+                            entry: *entry,
+                            quest,
+                            ends,
+                        };
+                        after.link(&self.quests, link, given)
+                    })
+                    .count();
+                let verb = if given { "Give" } else { "Take" };
+                self.change(format!("{verb} the quest {quest}"), after, ctx);
+                Ok(json!({ "changed": changed }))
+            }
             "spawns.read" => {
                 let entities: Vec<Value> = ids
                     .iter()
@@ -297,6 +398,8 @@ impl Module for SpawnsModule {
                         Some(data::read(
                             &spawn,
                             self.changes.moved.contains_key(id) || self.changes.added.contains_key(id),
+                            &self.changes.quests_of(&self.quests, spawn.kind, spawn.entry),
+                            &self.quests.titles,
                         ))
                     })
                     .collect();
@@ -412,10 +515,11 @@ impl Module for SpawnsModule {
         if self.reading == Some(job) {
             self.reading = None;
             match outcome.take::<Read>() {
-                Some(Ok((spawns, creatures, objects))) => {
+                Some(Ok((spawns, creatures, objects, quests))) => {
                     log::info!("{} spawns of the map read from the world database", spawns.len());
                     self.spawns = Arc::new(spawns);
                     self.highest = [creatures, objects];
+                    self.quests = Arc::new(quests);
                     self.refused = None;
                     self.refresh();
                 }

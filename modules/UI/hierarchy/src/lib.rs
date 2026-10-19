@@ -270,6 +270,7 @@ impl Module for HierarchyModule {
         self.prefabs_ui(ui, &scene, ctx);
         ui.separator();
         let locks = scene.locks();
+        let snapshot = scene.snapshot();
         let tree = self.tree.clone();
         let mut area = egui::ScrollArea::vertical().auto_shrink(false);
         if let Some(row) = self.scroll_to.take() {
@@ -317,6 +318,11 @@ impl Module for HierarchyModule {
                     } else {
                         node.label.clone()
                     };
+                    // A spawn of the database the world as it runs shows now.
+                    let live = node
+                        .entity
+                        .is_some_and(|id| id.kind != Kind::Live && snapshot.live(&id).is_some());
+                    let label = if live { format!("{label} ●") } else { label };
                     let mut text = egui::RichText::new(label);
                     if node.entity.is_none() {
                         text = text.strong();

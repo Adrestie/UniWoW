@@ -428,7 +428,7 @@ impl SceneTools {
         let ids = scene.groups().expanded(&selection.ids);
         let mut by_provider: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
         for id in &ids {
-            if let Some(entity) = snapshot.get(id).filter(|entity| MADE.contains(&entity.provider())) {
+            if let Some(entity) = snapshot.editable(id).filter(|entity| MADE.contains(&entity.provider())) {
                 by_provider
                     .entry(entity.provider().to_owned())
                     .or_default()
@@ -565,7 +565,7 @@ impl SceneTools {
         let ids = scene.groups().expanded(&selection.ids);
         let mut by_provider: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
         for id in &ids {
-            if let Some(entity) = snapshot.get(id) {
+            if let Some(entity) = snapshot.editable(id) {
                 by_provider
                     .entry(entity.provider().to_owned())
                     .or_default()

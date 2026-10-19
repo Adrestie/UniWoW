@@ -668,8 +668,14 @@ pub fn scene_piece(world: &world::World, now: Instant) -> scene::Piece {
         let entity = &tracked.entity;
         let origin = tracked.position_at(now);
         let player = if entity.kind == Kind::Player { flags::PLAYER } else { 0 };
+        // A creature or a game object of a spawn of the database is that spawn, live.
+        let id = match (entity.kind, entity.spawn) {
+            (Kind::Creature, spawn) if spawn != 0 => EntityId::creature(u64::from(spawn)),
+            (Kind::GameObject, spawn) if spawn != 0 => EntityId::game_object(u64::from(spawn)),
+            _ => EntityId::live(entity.guid),
+        };
         builder.push(Entity {
-            id: EntityId::live(entity.guid),
+            id,
             flags: flags::LIVE | flags::READ_ONLY | player,
             parent: None,
             label: &entity.name,
