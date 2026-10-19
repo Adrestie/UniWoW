@@ -10,7 +10,7 @@ impl Shell {
     /// Applies the queued undoable commands. Those applied for a caller with an undo group open on
     /// the calling thread go into the group instead of the history.
     pub(super) fn apply_pending_for(&mut self, caller: Option<(&str, ThreadId)>) {
-        for (owner, mut command) in std::mem::take(&mut self.host.pending) {
+        for (owner, mut command, gesture) in std::mem::take(&mut self.host.pending) {
             let Some(index) = self.running_index(&owner) else {
                 continue;
             };
@@ -35,6 +35,10 @@ impl Shell {
                         document,
                         command,
                     };
+                    if let Some(open) = gesture.and_then(|gesture| self.host.gestures.get_mut(&gesture)) {
+                        open.parts.push(part);
+                        continue;
+                    }
                     match caller.and_then(|(caller, thread)| self.groups.parts_of(caller, thread)) {
                         Some(parts) => parts.push(part),
                         None => self.history.push(part),
@@ -61,6 +65,9 @@ impl Shell {
     /// history must have first. Once its work ends, `undo` and `redo` serve the calls waiting, its
     /// changes among them, before going on.
     pub(super) fn blocking_undo(&self) -> Option<String> {
+        if let Some(open) = self.host.gestures.values().find(|open| !open.parts.is_empty()) {
+            return Some(format!("a gesture is under way: {}", open.label));
+        }
         self.groups.blocking_undo().or_else(|| {
             self.slots
                 .iter()
@@ -163,6 +170,58 @@ impl Shell {
 
     pub(super) fn push_closed(&mut self, closed: Closed) {
         self.history.push_group(closed.label, closed.parts);
+    }
+
+    /// Makes the entry of each gesture ended whose calls are all answered; a gesture left open with
+    /// no call waiting closed after two frames, said in the log.
+    pub(super) fn settle_gestures(&mut self) {
+        let mut done = Vec::new();
+        // A gesture is its module's own only within the call it was opened in.
+        self.host.opened.clear();
+        for (id, open) in &mut self.host.gestures {
+            if open.waiting > 0 {
+                open.idle = 0;
+                continue;
+            }
+            if open.ended {
+                done.push(*id);
+            } else {
+                open.idle += 1;
+                if open.idle > 2 {
+                    log::warn!("the gesture '{}' of '{}' was left open: closed", open.label, open.owner);
+                    done.push(*id);
+                }
+            }
+        }
+        done.sort_unstable();
+        for id in done {
+            if let Some(open) = self.host.gestures.remove(&id) {
+                self.history.push_group(open.label, open.parts);
+            }
+        }
+    }
+
+    /// The gestures of the module `id`, failed, closed with what they hold; its changes in the
+    /// others taken out, as from the history.
+    pub(super) fn close_gestures_of(&mut self, id: &str) {
+        for open in self.host.gestures.values_mut() {
+            open.parts.retain(|part| part.owner != id);
+        }
+        self.host.opened.remove(id);
+        let mut theirs: Vec<u64> = self
+            .host
+            .gestures
+            .iter()
+            .filter(|(_, open)| open.owner == id)
+            .map(|(gesture, _)| *gesture)
+            .collect();
+        theirs.sort_unstable();
+        for gesture in theirs {
+            if let Some(open) = self.host.gestures.remove(&gesture) {
+                log::warn!("the gesture '{}' closed: '{id}' failed", open.label);
+                self.history.push_group(open.label, open.parts);
+            }
+        }
     }
 }
 

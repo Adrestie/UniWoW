@@ -83,7 +83,7 @@ pub mod weather;
 
 pub use command::{AppliedChange, Command};
 pub use commands::{CallId, CommandHandler, CommandInfo, CommandSpec, RunsOn, decode_arguments};
-pub use context::{Context, Host};
+pub use context::{Context, Gesture, Host};
 pub use editor::{Editor, EditorBackend};
 pub use event::Event;
 pub use job::{JobContext, JobFn, JobId, JobOutcome, Priority};

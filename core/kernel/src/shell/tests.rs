@@ -2304,3 +2304,225 @@ fn a_module_that_fails_is_shut_down_once_a_failure_there_only_logged() {
     harness.frame(RawInput::default());
     assert_eq!(*lock(&value), 2);
 }
+
+/// What a gesture of the module `Gesturer` does at a frame: its label, its own change, the calls it
+/// makes (a command and how much it adds), and whether it ends the gesture or leaves it open.
+#[derive(Clone, Default)]
+struct Plan {
+    label: &'static str,
+    own: Option<i64>,
+    calls: Vec<(&'static str, i64)>,
+    end: bool,
+    /// Panics once the gesture is open, as a module failing in the middle of one.
+    panic: bool,
+}
+
+/// Opens a gesture at each frame a plan is waiting, as the Inspector does when a value is typed.
+struct Gesturer {
+    plans: Arc<Mutex<std::collections::VecDeque<Plan>>>,
+    value: Arc<Mutex<i64>>,
+}
+
+impl Module for Gesturer {
+    fn register(&mut self, _reg: &mut Registrar) {}
+
+    fn windows_ui(&mut self, _egui: &egui::Context, ctx: &mut Context) {
+        let Some(plan) = lock(&self.plans).pop_front() else {
+            return;
+        };
+        let gesture = ctx.begin_gesture(plan.label);
+        if let Some(by) = plan.own {
+            ctx.execute(Own(by));
+        }
+        for (name, by) in &plan.calls {
+            ctx.call(name, json!({ "by": by }));
+        }
+        if plan.panic {
+            panic!("the gesturer breaks in its gesture");
+        }
+        if plan.end {
+            ctx.end_gesture(gesture);
+        }
+    }
+}
+
+struct Own(i64);
+
+impl Command for Own {
+    fn label(&self) -> String {
+        format!("own {}", self.0)
+    }
+
+    fn apply(&mut self, module: &mut dyn Any) {
+        let gesturer: &mut Gesturer = module.downcast_mut().expect("the gesturer");
+        *lock(&gesturer.value) += self.0;
+    }
+
+    fn revert(&mut self, module: &mut dyn Any) {
+        let gesturer: &mut Gesturer = module.downcast_mut().expect("the gesturer");
+        *lock(&gesturer.value) -= self.0;
+    }
+}
+
+/// Offers `relay.add`, which adds through another module's command, called in turn.
+struct Relay;
+
+impl Module for Relay {
+    fn register(&mut self, reg: &mut Registrar) {
+        reg.command("relay.add", "Adds through a.add", json!({}), json!({}));
+    }
+
+    fn on_command(&mut self, _name: &str, arguments: Value, ctx: &mut Context) -> Result<Value, String> {
+        ctx.call("a.add", arguments);
+        Ok(json!({}))
+    }
+}
+
+type Plans = Arc<Mutex<std::collections::VecDeque<Plan>>>;
+
+/// The modules `a` and `b` (counters), `relay`, and the gesturer `g`.
+fn gesturing() -> (Harness, Plans, [Arc<Mutex<i64>>; 3]) {
+    let (a, a_value) = counter("a");
+    let (b, b_value) = counter("b");
+    let plans: Plans = Arc::default();
+    let own = Arc::new(Mutex::new(0));
+    let gesturer = Gesturer {
+        plans: plans.clone(),
+        value: own.clone(),
+    };
+    let harness = Harness::new(vec![
+        ("a", a),
+        ("b", b),
+        ("relay", Box::new(Relay)),
+        ("g", Box::new(gesturer)),
+    ]);
+    (harness, plans, [a_value, b_value, own])
+}
+
+fn values(values: &[Arc<Mutex<i64>>; 3]) -> [i64; 3] {
+    [0, 1, 2].map(|at| *lock(&values[at]))
+}
+
+#[test]
+fn a_gesture_across_modules_and_the_calls_of_its_calls_is_one_entry() {
+    let (mut harness, plans, counted) = gesturing();
+    lock(&plans).push_back(Plan {
+        label: "Move 3 doodads",
+        own: Some(100),
+        calls: vec![("a.add", 1), ("b.add", 2), ("relay.add", 4)],
+        end: true,
+        ..Plan::default()
+    });
+    harness.until("the gesture's entry", |shell| {
+        shell.history.undo_label().is_some() && shell.host.gestures.is_empty()
+    });
+    assert_eq!(values(&counted), [5, 2, 100]);
+    assert_eq!(harness.shell.history.undo_label().as_deref(), Some("Move 3 doodads"));
+    harness.shell.undo();
+    assert_eq!(values(&counted), [0, 0, 0], "every part undone at once");
+    assert_eq!(harness.shell.history.undo_label(), None, "one entry");
+    harness.shell.redo();
+    assert_eq!(values(&counted), [5, 2, 100]);
+    // A change outside any gesture is an entry of its own.
+    harness.call("a", "a.add", json!({ "by": 10 })).unwrap();
+    harness.shell.undo();
+    assert_eq!(values(&counted), [5, 2, 100]);
+}
+
+#[test]
+fn a_gesture_blocks_undo_while_it_holds_a_change_and_one_left_open_is_closed() {
+    let (mut harness, plans, counted) = gesturing();
+    lock(&plans).push_back(Plan {
+        label: "left open",
+        calls: vec![("a.add", 1)],
+        ..Plan::default()
+    });
+    harness.until("the call served", |_| values(&counted)[0] == 1);
+    assert!(
+        harness.shell.blocking_undo().is_some() || harness.shell.host.gestures.is_empty(),
+        "Undo waits while the gesture holds its change"
+    );
+    harness.until("the gesture closed", |shell| shell.host.gestures.is_empty());
+    assert_eq!(harness.shell.history.undo_label().as_deref(), Some("left open"));
+    harness.shell.undo();
+    assert_eq!(values(&counted)[0], 0);
+}
+
+#[test]
+fn a_module_failing_in_its_gesture_closes_it_its_calls_refused_with_it() {
+    let (mut harness, plans, counted) = gesturing();
+    lock(&plans).push_back(Plan {
+        label: "broken",
+        own: Some(7),
+        calls: vec![("a.add", 3)],
+        panic: true,
+        ..Plan::default()
+    });
+    harness.until("the gesturer failed", |shell| {
+        matches!(shell.slots[3].state, State::Failed(_))
+    });
+    harness.until("the gesture closed", |shell| shell.host.gestures.is_empty());
+    for _ in 0..5 {
+        harness.frame(RawInput::default());
+    }
+    // Its own change never applied, its call refused with it: nothing to undo.
+    assert_eq!(values(&counted), [0, 0, 0]);
+    assert_eq!(harness.shell.history.undo_label(), None);
+    assert!(harness.shell.blocking_undo().is_none());
+}
+
+/// Gestures and changes of their own at random, seeded: each gesture one entry, every entry undone
+/// leaving nothing, every one redone giving the same values back.
+#[test]
+fn gestures_and_lone_changes_at_random_are_each_one_entry() {
+    let mut random = Random::new(15_05);
+    for _round in 0..20 {
+        let (mut harness, plans, counted) = gesturing();
+        let mut entries = 0;
+        let mut expected = [0i64; 3];
+        for step in 0..12 {
+            if random.below(3) == 0 {
+                let by = random.below(9) as i64 + 1;
+                harness.call("b", "b.add", json!({ "by": by })).unwrap();
+                expected[1] += by;
+                entries += 1;
+                continue;
+            }
+            let mut plan = Plan {
+                label: ["one", "two", "three"][step % 3],
+                end: true,
+                ..Plan::default()
+            };
+            if random.below(2) == 0 {
+                let by = random.below(5) as i64 + 1;
+                plan.own = Some(by);
+                expected[2] += by;
+            }
+            for _ in 0..random.below(4) {
+                let (name, at) = [("a.add", 0), ("b.add", 1), ("relay.add", 0)][random.below(3) as usize];
+                let by = random.below(5) as i64 + 1;
+                plan.calls.push((name, by));
+                expected[at] += by;
+            }
+            if plan.own.is_none() && plan.calls.is_empty() {
+                continue;
+            }
+            lock(&plans).push_back(plan);
+            entries += 1;
+            harness.until("the gesture's entry", |shell| {
+                lock(&plans).is_empty() && shell.host.gestures.is_empty()
+            });
+        }
+        assert_eq!(values(&counted), expected);
+        for _ in 0..entries {
+            assert!(harness.shell.history.undo_label().is_some());
+            harness.shell.undo();
+        }
+        assert_eq!(values(&counted), [0, 0, 0], "every entry undone");
+        assert_eq!(harness.shell.history.undo_label(), None, "{entries} entries");
+        for _ in 0..entries {
+            harness.shell.redo();
+        }
+        assert_eq!(values(&counted), expected, "every entry redone");
+    }
+}

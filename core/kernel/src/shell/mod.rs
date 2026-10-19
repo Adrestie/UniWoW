@@ -596,6 +596,7 @@ impl Shell {
         // Its jobs and script runs stop; from now on the bridge refuses whatever they still ask.
         self.host.pool.cancel_owner(&id);
         self.host.bridge.close_subscriptions(&id);
+        self.close_gestures_of(&id);
         let purged = self.history.purge(&id) + self.groups.purge(&id);
         if purged > 0 {
             log::warn!("{purged} changes of '{id}' can no longer be undone");

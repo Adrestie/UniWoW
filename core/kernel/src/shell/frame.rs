@@ -70,6 +70,7 @@ impl Shell {
         self.apply_reported();
         self.dispatch_events();
         self.apply_reported();
+        self.settle_gestures();
         timed("kernel: events", start);
         let start = Instant::now();
         self.play(ctx, Instant::now());

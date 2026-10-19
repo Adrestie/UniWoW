@@ -36,7 +36,17 @@ pub trait Host {
     fn editor(&self, caller: &str) -> Editor;
     /// Shows `text` of `owner` in a notice over the editor's window for a few seconds.
     fn notify(&mut self, _owner: &str, _level: Level, _text: &str) {}
+    /// Opens a gesture of `owner` (`Context::begin_gesture`); its number. None by default.
+    fn begin_gesture(&mut self, _owner: &str, _label: &str) -> u64 {
+        0
+    }
+    /// Ends the gesture `gesture` of `owner`.
+    fn end_gesture(&mut self, _owner: &str, _gesture: u64) {}
 }
+
+/// A gesture of the user open (`Context::begin_gesture`), by its number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Gesture(pub u64);
 
 /// Access to the kernel for one module, passed to every `Module` method after `register`.
 pub struct Context<'a> {
@@ -196,6 +206,21 @@ impl<'a> Context<'a> {
     ) -> JobId {
         self.host
             .spawn_thread(self.module, label, Box::new(move |context| Box::new(job(context))))
+    }
+
+    /// Opens a gesture of the user, `label` in the Edit menu, on the interface thread: every undoable
+    /// change applied while it is open, by this module's own commands and by the commands its calls
+    /// (`Context::call`) run in any module, those calls' own calls included, joins one entry of the
+    /// history, its parts owned each by the module whose data it changed (rule E2). It closes once
+    /// ended and every one of its calls answered; one left open is closed at the end of the frames
+    /// after its last answer, or when its module fails.
+    pub fn begin_gesture(&mut self, label: &str) -> Gesture {
+        Gesture(self.host.begin_gesture(self.module, label))
+    }
+
+    /// Ends the gesture `gesture`: its entry is made once its calls are answered.
+    pub fn end_gesture(&mut self, gesture: Gesture) {
+        self.host.end_gesture(self.module, gesture.0);
     }
 
     /// Asks one of this module's jobs to stop (as the Jobs panel's Cancel button does).

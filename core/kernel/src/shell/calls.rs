@@ -81,6 +81,10 @@ impl Shell {
             } => {
                 // What the caller published before calling goes first.
                 self.collect_from_threads();
+                let gesture = match &reply {
+                    ReplyTo::Module(module, call) => self.host.call_gestures.remove(&(module.clone(), call.0)),
+                    _ => None,
+                };
                 if self.host.bridge.active(&caller).is_ok()
                     && let Some((owner, handler, module)) = self.compiled_command(&name)
                 {
@@ -98,9 +102,19 @@ impl Shell {
                             result,
                         });
                     }));
+                    // Its changes, recorded on its thread, are its own entries.
+                    if let Some(gesture) = gesture {
+                        self.host.call_answered(gesture);
+                    }
                     return;
                 }
+                let serving = self.host.serving;
+                self.host.serving = gesture.or(serving);
                 let result = self.run_command(&caller, thread, &name, arguments);
+                self.host.serving = serving;
+                if let Some(gesture) = gesture {
+                    self.host.call_answered(gesture);
+                }
                 self.reply(&caller, &name, reply, result);
             }
             Request::Answer {

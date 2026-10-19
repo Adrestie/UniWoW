@@ -26,12 +26,30 @@ pub struct Reported {
     pub message: String,
 }
 
+/// A gesture of the user open: its label, the module that opened it, its changes so far, whether
+/// its module ended it, its calls not yet answered, and the frames it stayed open with none.
+pub struct Gesture {
+    pub label: String,
+    pub owner: String,
+    pub parts: Vec<crate::history::Part>,
+    pub ended: bool,
+    pub waiting: usize,
+    pub idle: u32,
+}
+
 /// Kernel state reachable from modules through `Context`.
 pub struct KernelHost {
     /// Published this frame, delivered at the end of it.
     pub events: Vec<Event>,
-    /// Queued commands with the id of their module.
-    pub pending: Vec<(String, Box<dyn Command>)>,
+    /// Queued commands with the id of their module and the gesture they join, if any.
+    pub pending: Vec<(String, Box<dyn Command>, Option<u64>)>,
+    /// The gestures open, by number; the one each module has open in its call, the one of the call
+    /// being served, and the gesture of each call of a module made within one.
+    pub gestures: HashMap<u64, Gesture>,
+    pub opened: HashMap<String, u64>,
+    pub serving: Option<u64>,
+    pub call_gestures: HashMap<(String, u64), u64>,
+    next_gesture: u64,
     /// Documents closed without saving, with the id of their module, whose changes the history
     /// forgets.
     pub forgotten: Vec<(String, String)>,
@@ -125,6 +143,11 @@ impl KernelHost {
         Self {
             events: Vec::new(),
             pending: Vec::new(),
+            gestures: HashMap::new(),
+            opened: HashMap::new(),
+            serving: None,
+            call_gestures: HashMap::new(),
+            next_gesture: 0,
             forgotten: Vec::new(),
             views: HashMap::new(),
             modal_shown: false,
@@ -140,6 +163,19 @@ impl KernelHost {
             pool,
             bridge,
             next_call: 0,
+        }
+    }
+
+    /// The gesture `owner`'s changes and calls join now: the one it opened in its call, else the one
+    /// of the call being served.
+    pub fn gesture_of(&self, owner: &str) -> Option<u64> {
+        self.opened.get(owner).copied().or(self.serving)
+    }
+
+    /// A call of the gesture `gesture` answered.
+    pub fn call_answered(&mut self, gesture: u64) {
+        if let Some(open) = self.gestures.get_mut(&gesture) {
+            open.waiting = open.waiting.saturating_sub(1);
         }
     }
 
@@ -160,7 +196,35 @@ impl Host for KernelHost {
     }
 
     fn execute(&mut self, owner: &str, command: Box<dyn Command>) {
-        self.pending.push((owner.to_owned(), command));
+        let gesture = self.gesture_of(owner);
+        self.pending.push((owner.to_owned(), command, gesture));
+    }
+
+    fn begin_gesture(&mut self, owner: &str, label: &str) -> u64 {
+        self.next_gesture += 1;
+        let id = self.next_gesture;
+        self.gestures.insert(
+            id,
+            Gesture {
+                label: label.to_owned(),
+                owner: owner.to_owned(),
+                parts: Vec::new(),
+                ended: false,
+                waiting: 0,
+                idle: 0,
+            },
+        );
+        self.opened.insert(owner.to_owned(), id);
+        id
+    }
+
+    fn end_gesture(&mut self, owner: &str, gesture: u64) {
+        if self.opened.get(owner) == Some(&gesture) {
+            self.opened.remove(owner);
+        }
+        if let Some(open) = self.gestures.get_mut(&gesture) {
+            open.ended = true;
+        }
     }
 
     fn forget_document(&mut self, owner: &str, document: &str) {
@@ -259,6 +323,12 @@ impl Host for KernelHost {
     fn call(&mut self, caller: &str, name: &str, arguments: serde_json::Value) -> CallId {
         self.next_call += 1;
         let id = CallId(self.next_call);
+        if let Some(gesture) = self.gesture_of(caller)
+            && let Some(open) = self.gestures.get_mut(&gesture)
+        {
+            open.waiting += 1;
+            self.call_gestures.insert((caller.to_owned(), id.0), gesture);
+        }
         self.bridge.queue(Request::Call {
             caller: caller.to_owned(),
             thread: std::thread::current().id(),
