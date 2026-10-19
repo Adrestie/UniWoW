@@ -14,6 +14,7 @@ use scene::{SceneView, modifiers};
 use uniwow_api::curve::{self, CurveChange, CurveEditor, CurveOptions, CurveOutput, ShownCurve, TimeAxis};
 use uniwow_api::dopesheet::{self, Dopesheet, DopesheetInput, KeysChange, RowProperty};
 use uniwow_api::property_grid::PropertyGrid;
+use uniwow_api::scene_view::{self, SceneView as SceneViewer};
 use uniwow_api::sequence::{Sequence, Track, number_colour, number_names, tracks_to_json};
 use uniwow_api::ui::data::TreeItem;
 use uniwow_api::ui::{Handle, Kind, Object, Property, SharedUi, Signal, SignalData, Ui, lock};
@@ -33,6 +34,12 @@ pub struct PanelView {
     dopesheet: Option<Arc<dyn Dopesheet>>,
     /// The property grid, which draws the property grids, when a running module provides it.
     property_grid: Option<Arc<dyn PropertyGrid>>,
+    /// The views of the scene, which draw the hierarchy views and the inspector views, when
+    /// running modules provide them.
+    scene_views: [Option<Arc<dyn SceneViewer>>; 2],
+    /// The id each view of the scene was drawn under, and which of the two it is, for its service
+    /// to forget it once it is gone.
+    scene_view_ids: HashMap<Handle, (egui::Id, usize)>,
     /// The module's editor: the labels and values of the properties its sequences animate and its
     /// grids show.
     editor: Option<Editor>,
@@ -239,7 +246,9 @@ fn expands(store: &Ui, handle: Handle) -> bool {
                 | Kind::DopesheetView
                 | Kind::TreeView
                 | Kind::TableView
-                | Kind::PropertyGrid => true,
+                | Kind::PropertyGrid
+                | Kind::HierarchyView
+                | Kind::InspectorView => true,
                 Kind::VBoxLayout | Kind::HBoxLayout | Kind::GridLayout | Kind::GroupBox => {
                     object.children.iter().any(|child| expands(store, *child))
                 }
@@ -265,6 +274,41 @@ impl PanelView {
         self.property_grid = property_grid;
         self.editor = Some(editor);
         self.backend = Some(backend);
+    }
+
+    /// The services drawing the hierarchy views and the inspector views.
+    pub fn set_scene_views(&mut self, views: [Option<Arc<dyn SceneViewer>>; 2]) {
+        self.scene_views = views;
+    }
+
+    /// Draws a hierarchy view (`which` 0) or an inspector view (1) through its service.
+    fn scene_view(&mut self, handle: Handle, object: &Object, which: usize, ui: &mut egui::Ui) -> egui::Response {
+        let size = egui::vec2(
+            ui.available_width(),
+            ui.available_height().max(object.minimum_height as f32),
+        );
+        let (key, name) = [
+            (scene_view::HIERARCHY.id(), "hierarchy"),
+            (scene_view::INSPECTOR.id(), "inspector"),
+        ][which];
+        let Some(service) = self.scene_views[which].clone() else {
+            return ui
+                .allocate_ui(size, |ui| {
+                    ui.weak(format!("No {name} view: no running module provides one."))
+                })
+                .response;
+        };
+        let id = ui.id().with(("uniwow-scene-view", handle));
+        self.scene_view_ids.insert(handle, (id, which));
+        let entities = object.entities.clone().unwrap_or_default();
+        let inner = ui.allocate_ui(size, |ui| {
+            catch_unwind(AssertUnwindSafe(|| service.show(ui, id, &entities)))
+        });
+        if let Err(panic) = inner.inner {
+            self.failures
+                .push((key, format!("the {name} view panicked: {}", panic_text(&*panic))));
+        }
+        inner.response
     }
 
     /// Why services panicked, once, with the id of each service: its provider is the culprit (F5).
@@ -365,6 +409,14 @@ impl PanelView {
             AxisKey::View(view) => alive(view),
         });
         self.grids.forget_gone(alive, self.property_grid.as_ref());
+        let scene_views = self.scene_views.clone();
+        self.scene_view_ids.retain(|handle, (id, which)| {
+            let kept = alive(handle);
+            if !kept && let Some(service) = &scene_views[*which] {
+                service.forget(*id);
+            }
+            kept
+        });
         let sheet = self.dopesheet.clone();
         self.sheet_ids.retain(|handle, id| {
             let kept = alive(handle);
@@ -408,6 +460,32 @@ impl PanelView {
         }
         drop(store);
         self.grids.write(self.editor.as_ref(), self.backend.as_ref());
+    }
+
+    /// Draws the object `handle` of a module and what it holds, inside a window of another; whether
+    /// it holds one.
+    pub fn show_object(
+        &mut self,
+        shared: &SharedUi,
+        handle: Handle,
+        ui: &mut egui::Ui,
+        gpu: Option<&egui_wgpu::RenderState>,
+    ) -> bool {
+        self.prepare(shared, ui.ctx());
+        let mut store = lock(shared);
+        store.set_wake(ui.ctx());
+        self.forget_gone(&mut store);
+        if store.object(handle).is_none() {
+            return false;
+        }
+        let mut events = Vec::new();
+        self.object(&mut store, shared, handle, ui, gpu, &mut events);
+        for event in events {
+            store.emit(event);
+        }
+        drop(store);
+        self.grids.write(self.editor.as_ref(), self.backend.as_ref());
+        true
     }
 
     /// Draws the dialogs of a module that are shown, each in a modal window over the editor, and
@@ -821,6 +899,8 @@ impl PanelView {
                 let service = self.property_grid.clone();
                 Some(self.grids.show(service, handle, object, ui, &mut self.failures))
             }
+            Kind::HierarchyView => Some(self.scene_view(handle, object, 0, ui)),
+            Kind::InspectorView => Some(self.scene_view(handle, object, 1, ui)),
         }
     }
 
@@ -2460,6 +2540,96 @@ mod tests {
         events: Vec<egui::Event>,
     ) -> Vec<(String, egui::Pos2)> {
         texts_and_count(ctx, panels, shared, events).0
+    }
+
+    /// A view of the scene that keeps the entities it was asked to show, and the views forgotten;
+    /// panics when told.
+    #[derive(Default)]
+    struct Viewer {
+        shown: Mutex<Vec<Vec<String>>>,
+        forgotten: Mutex<usize>,
+        panics: bool,
+    }
+
+    impl uniwow_api::scene_view::SceneView for Viewer {
+        fn show(&self, ui: &mut egui::Ui, _id: egui::Id, entities: &[String]) {
+            assert!(!self.panics, "the viewer breaks");
+            ui.label("viewed");
+            self.shown.lock().unwrap().push(entities.to_vec());
+        }
+
+        fn forget(&self, _id: egui::Id) {
+            *self.forgotten.lock().unwrap() += 1;
+        }
+    }
+
+    #[test]
+    fn the_views_of_the_scene_are_drawn_by_their_services_and_forgotten_once_gone() {
+        let (shared, inspector) = data_view(Kind::InspectorView);
+        lock(&shared)
+            .set_text(inspector, Property::Entities, r#"["doodad:0:7"]"#)
+            .unwrap();
+        assert!(
+            lock(&shared)
+                .set_text(inspector, Property::Entities, r#"["tree:1"]"#)
+                .is_err()
+        );
+        let (hierarchy_shared, _) = data_view(Kind::HierarchyView);
+        let viewer = Arc::new(Viewer::default());
+        let mut panels = PanelView::default();
+        panels.set_scene_views([None, Some(viewer.clone())]);
+        let ctx = egui::Context::default();
+        let texts = texts_drawn(&ctx, &mut panels, &shared, Vec::new());
+        assert!(texts.iter().any(|(text, _)| text == "viewed"));
+        assert_eq!(*viewer.shown.lock().unwrap(), [vec!["doodad:0:7".to_owned()]]);
+        // No module drawing hierarchy views: said so.
+        let mut others = PanelView::default();
+        let texts = texts_drawn(&ctx, &mut others, &hierarchy_shared, Vec::new());
+        assert!(texts.iter().any(|(text, _)| text.starts_with("No hierarchy view")));
+        // Gone: forgotten by its service.
+        lock(&shared).destroy(inspector).unwrap();
+        texts_drawn(&ctx, &mut panels, &shared, Vec::new());
+        assert_eq!(*viewer.forgotten.lock().unwrap(), 1);
+        // A service that panics is reported, its provider to blame.
+        let (shared, _) = data_view(Kind::InspectorView);
+        let breaking = Arc::new(Viewer {
+            panics: true,
+            ..Viewer::default()
+        });
+        panels.set_scene_views([None, Some(breaking)]);
+        texts_drawn(&ctx, &mut panels, &shared, Vec::new());
+        let failures = panels.take_failures();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].0, uniwow_api::scene_view::INSPECTOR.id());
+    }
+
+    #[test]
+    fn a_layout_of_a_module_outside_its_panels_is_drawn_inside_a_window_of_another() {
+        let shared = Ui::new(Arc::new(|_job| {}));
+        let layout = {
+            let mut store = lock(&shared);
+            let layout = store.create(Kind::VBoxLayout, None).unwrap();
+            let label = store.create(Kind::Label, None).unwrap();
+            store.set_text(label, Property::Text, "weight 3").unwrap();
+            store.add_to(layout, label, [0, 0, 1, 1]).unwrap();
+            layout
+        };
+        let ctx = egui::Context::default();
+        let mut panels = PanelView::default();
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+            ..egui::RawInput::default()
+        };
+        let mut drawn = false;
+        let mut output = ctx.run_ui(input(), |ui| drawn = panels.show_object(&shared, layout, ui, None));
+        output.textures_delta.clear();
+        assert!(drawn);
+        assert!(output.shapes.iter().any(|clipped| matches!(&clipped.shape,
+            egui::Shape::Text(text) if text.galley.text() == "weight 3")));
+        ctx.run_ui(input(), |ui| drawn = panels.show_object(&shared, layout + 99, ui, None))
+            .textures_delta
+            .clear();
+        assert!(!drawn, "no such object");
     }
 
     #[test]

@@ -45,6 +45,12 @@ numbered!(
         /// animatable properties of the catalogue with a field for each, drawn by the module
         /// properties; a value changed by hand is one undo entry the editor records
         PropertyGrid = 29,
+        /// the Hierarchy of the scene, its view, filter and selection those of the window
+        /// Hierarchy, folded on its own; drawn by the module hierarchy
+        HierarchyView = 30,
+        /// the components of the entities ENTITIES names, of the selection when none; drawn by the
+        /// module properties
+        InspectorView = 31,
     }
 );
 
@@ -144,6 +150,9 @@ numbered!(
         /// property grid, text: JSON [path, ...], the paths of the properties shown,
         /// `<module>/<name>`; 100000 at most
         Paths = 47,
+        /// inspector view, text: JSON [id, ...], the ids of the entities shown as the scene writes
+        /// them, none for the selection; 10000 at most
+        Entities = 48,
     }
 );
 

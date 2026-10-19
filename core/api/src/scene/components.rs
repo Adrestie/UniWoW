@@ -57,11 +57,14 @@ pub struct Component {
     pub fields: Vec<Field>,
     pub read: String,
     pub write: Option<String>,
+    /// A layout of the module's interface objects drawn under the fields: a drawing of its own.
+    pub layout: Option<u64>,
 }
 
 impl Component {
     /// The component `value` declares, of the module `module`: `{"name", "label", "kinds": [...],
-    /// "fields": [{"name", "label", "kind", "read_only"}], "read", "write"}`.
+    /// "fields": [{"name", "label", "kind", "read_only"}], "read", "write", "layout"}`, the layout
+    /// the handle of one of its interface objects.
     pub fn of_json(module: &str, value: &Value) -> Result<Self, String> {
         let text = |key: &str| value[key].as_str().map(str::to_owned);
         let name = text("name")
@@ -107,6 +110,7 @@ impl Component {
             fields,
             read: text("read").ok_or("a component names its 'read' command")?,
             write: text("write"),
+            layout: value["layout"].as_u64().filter(|handle| *handle != 0),
         })
     }
 
@@ -129,11 +133,12 @@ mod tests {
             &json!({
                 "name": "tag", "label": "Tag (C#)", "kinds": ["doodad"],
                 "fields": [{ "name": "tag", "kind": "text" }, { "name": "weight", "kind": "number" }],
-                "read": "cs.tag_read", "write": "cs.tag_write",
+                "read": "cs.tag_read", "write": "cs.tag_write", "layout": 12,
             }),
         )
         .unwrap();
         assert_eq!(tag.fields[1].kind, FieldKind::Number);
+        assert_eq!(tag.layout, Some(12));
         assert_eq!(tag.fields[0].label, "tag");
         assert!(tag.fits([Kind::Doodad, Kind::Doodad]));
         assert!(!tag.fits([Kind::Doodad, Kind::Building]));

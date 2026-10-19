@@ -253,6 +253,14 @@ int main() {
     expect(text_object == grid.handle() && text_property == UNIWOW_PROPERTY_PATHS && text_set == R"(["cube/colour"])",
            "a property grid is given the paths of its properties");
 
+    uniwow::InspectorView inspector;
+    inspector.setEntities(R"(["doodad:0:183214"])");
+    expect(text_object == inspector.handle() && text_property == UNIWOW_PROPERTY_ENTITIES &&
+               text_set == R"(["doodad:0:183214"])",
+           "an inspector view is given the entities it shows");
+    uniwow::HierarchyView hierarchy;
+    expect(hierarchy.handle() != inspector.handle(), "a hierarchy view is made");
+
     std::printf("%d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

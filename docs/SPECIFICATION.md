@@ -1,7 +1,7 @@
 # UniWoW — Architecture and module catalogue
 
 Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.10 done, 15.11 built
-before its first connection (15.11a to 15.11c), 15.12a done; milestones 10 to 14 outlined. Open questions in section 10.
+before its first connection (15.11a to 15.11c), 15.12 done; milestones 10 to 14 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -10352,6 +10352,40 @@ declared again in place of its own, a name of another module refused, gone with 
 entities of a module a piece of its own; the values of several entities shown together, a colour
 `#rrggbb`; a note written, coloured, taken away, kept in the project; the kernel telling the
 modules that another stopped.
+
+#### Step 15.12b, as built: the Hierarchy and the Inspector as objects, the drawings of a module's own
+
+Built after d88dd04, on `main`.
+
+- **The objects** `HierarchyView` (kind 30) and `InspectorView` (kind 31), and the property
+  `Entities` (48: an inspector view's entities as JSON ids, none for the selection, 10,000 at most,
+  each an id of the scene), numbers of `sdk/bindings.toml` (`uniwow.h` keeps version 5); their
+  classes in `sdk/uniwow.hpp` and `sdk/UniWoW.cs`. The kernel draws them through the services
+  `hierarchy-view` and `inspector-view` (`uniwow_api::scene_view::SceneView`), as it draws the
+  property grids: a view no module draws says so, a panic of a service is its provider's failure, a
+  view gone forgotten by its service.
+- **`hierarchy` draws a hierarchy view** from the tree of its window (its view, filter and
+  selection), each view folded on its own, a click selecting, the notes' colours; the tree kept made
+  while a view shows it, the window hidden.
+- **`properties` draws an inspector view**: its header, the *Transform* and the components
+  declared, of the entities it names or of the selection, read by jobs of the module as the
+  Inspector's (again when the scene changes or after a write); a value typed is written in a gesture
+  the module opens at its next frame. The booleans and colours are shown, not edited, there.
+- **A drawing of a module's own**: a component declared names a `layout`, the handle of one of its
+  interface objects, which the Inspector draws under its fields through `Context::draw_object_of`
+  (`Host::draw_object`: the kernel draws the object of the module's objects handed to it, its
+  signals going to that module). The sample C# module draws the weights of the doodads read as bars
+  in a painting area under *Tag (C#)*.
+
+**Not in 15.12b**: *Add Component*, the menus of the components, the raw mode and the header's
+zones in an inspector view; the selection by Ctrl and Shift, the menus and renaming in a hierarchy
+view.
+
+**Tests**: a layout of a module outside its panels drawn inside another's window, a handle it does
+not hold refused; the views of the scene drawn by their services with their entities, an id that is
+not one refused, a view gone forgotten, a view without its service saying so, a service that panics
+reported; each hierarchy view folded on its own; the SDK's classes given their entities (C++ and
+C#).
 
 ### Milestone 10: Lua modules (outline)
 

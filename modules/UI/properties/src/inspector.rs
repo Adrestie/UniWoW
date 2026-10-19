@@ -26,7 +26,7 @@ const WRITTEN: [(&str, &[&str]); 3] = [
 ];
 
 /// The fields of the Transform, in their order: their name, their label, whether a vector.
-const TRANSFORM: [(&str, &str, bool); 3] = [
+pub const TRANSFORM: [(&str, &str, bool); 3] = [
     ("position", "Position", true),
     ("rotation", "Rotation", true),
     ("scale", "Scale", false),
@@ -94,7 +94,7 @@ pub struct Read {
 
 /// Reads the components of `ids` through the read commands of their providers, `snapshot` naming
 /// them.
-fn read(editor: &uniwow_api::Editor, snapshot: &Snapshot, ids: &[EntityId], components: &[Component]) -> Read {
+pub fn read(editor: &uniwow_api::Editor, snapshot: &Snapshot, ids: &[EntityId], components: &[Component]) -> Read {
     let mut by_provider: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for id in ids {
         if let Some(entity) = snapshot.editable(id) {
@@ -131,6 +131,27 @@ fn read(editor: &uniwow_api::Editor, snapshot: &Snapshot, ids: &[EntityId], comp
         }
     }
     out
+}
+
+/// The ids of `ids` as text by the provider that edits each.
+pub fn by_provider(snapshot: &Snapshot, ids: &[EntityId]) -> BTreeMap<String, Vec<String>> {
+    let mut by_provider: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for id in ids {
+        if let Some(entity) = snapshot.editable(id) {
+            by_provider
+                .entry(entity.provider().to_owned())
+                .or_default()
+                .push(id.to_string());
+        }
+    }
+    by_provider
+}
+
+/// Whether the entities of `provider` have their `field` written through `<provider>.write`.
+pub fn writes(provider: &str, field: &str) -> bool {
+    WRITTEN
+        .iter()
+        .any(|(written, fields)| *written == provider && fields.contains(&field))
 }
 
 /// The fields of each entity of an answer of a component's read command.
@@ -693,6 +714,12 @@ impl Inspector {
                                 ui.end_row();
                             }
                         });
+                    // A drawing of the module's own under its fields.
+                    if let Some(layout) = component.layout
+                        && !ctx.draw_object_of(&component.module, layout, ui)
+                    {
+                        ui.label(egui::RichText::new("Its drawing is not at hand.").weak());
+                    }
                 });
             if let (Some(command), false) = (&component.write, writes.is_empty()) {
                 let written: Vec<String> = values.iter().map(|(id, _)| id.to_string()).collect();

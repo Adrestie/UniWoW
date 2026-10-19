@@ -9,6 +9,7 @@
 #[cfg(test)]
 mod tests;
 mod tree;
+mod views;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -49,6 +50,8 @@ struct Made {
 #[derive(Default)]
 struct HierarchyModule {
     scene: Option<scene::Handle>,
+    /// What the objects `HierarchyView` are drawn from.
+    views: Arc<views::Shared>,
     /// The colours of the notes of the editor by entity, and their number as `notes` last gave them.
     noted: HashMap<EntityId, egui::Color32>,
     notes_generation: Option<u64>,
@@ -238,11 +241,24 @@ impl HierarchyModule {
 
 impl Module for HierarchyModule {
     fn register(&mut self, reg: &mut Registrar) {
-        reg.panel("hierarchy", "Hierarchy", DockArea::Left);
+        let service: Arc<dyn uniwow_api::scene_view::SceneView> = Arc::new(views::Views::new(self.views.clone()));
+        reg.panel("hierarchy", "Hierarchy", DockArea::Left)
+            .provide(uniwow_api::scene_view::HIERARCHY, service);
+    }
+
+    fn windows_ui(&mut self, _egui: &egui::Context, ctx: &mut Context) {
+        // The tree kept made while an object HierarchyView shows it, the window hidden.
+        if self.views.drawn.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            self.steer(ctx);
+            self.read_notes(ctx);
+        }
     }
 
     fn init(&mut self, ctx: &mut Context) {
         self.scene = ctx.service(scene::SERVICE);
+        if let Some(scene) = &self.scene {
+            let _ = self.views.scene.set(scene.clone());
+        }
         self.unfolded.insert("map".to_owned());
         self.unfolded.insert("live".to_owned());
     }
@@ -264,6 +280,7 @@ impl Module for HierarchyModule {
             outcome => {
                 if let Some(Some(tree)) = outcome.take::<Option<Tree>>() {
                     self.tree = Arc::new(tree);
+                    *views::lock(&self.views.tree) = self.tree.clone();
                     self.made = Some(made);
                     self.folded = true;
                 }
@@ -285,6 +302,7 @@ impl HierarchyModule {
         };
         if let Some(colours) = answer["colours"].as_object() {
             self.noted = noted_colours(colours);
+            *views::lock(&self.views.noted) = Arc::new(self.noted.clone());
         }
         self.notes_generation = answer["generation"].as_u64();
     }

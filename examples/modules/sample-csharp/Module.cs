@@ -80,8 +80,15 @@ static unsafe class Module
     static readonly Dictionary<string, (string Tag, double Weight)> tags = [];
     static readonly object tagsLock = new();
 
-    const string TagDeclaration =
-        """{"components":[{"name":"cs.tag","label":"Tag (C#)","kinds":["doodad"],"fields":[{"name":"tag","label":"Tag","kind":"text"},{"name":"weight","label":"Weight","kind":"number"}],"read":"cs.tag_read","write":"cs.tag_write"}]}""";
+    // The drawing of its own the Inspector shows under the fields of Tag (C#): the weights of the
+    // doodads last read as bars.
+    static VBoxLayout tagLayout = null!;
+    static PaintArea tagBars = null!;
+    static double[] shownWeights = [];
+
+    static string TagDeclaration() =>
+        """{"components":[{"name":"cs.tag","label":"Tag (C#)","kinds":["doodad"],"fields":[{"name":"tag","label":"Tag","kind":"text"},{"name":"weight","label":"Weight","kind":"number"}],"read":"cs.tag_read","write":"cs.tag_write","layout":"""
+        + Invariant($"{tagLayout.Handle}") + "}]}";
 
     static readonly PanelDeclaration[] Panels =
         [new("counter", "Counter", Area.Right), new("data", "Data", Area.Right)];
@@ -98,6 +105,7 @@ static unsafe class Module
             Editor.Start(api);
             BuildPanel();
             BuildData();
+            BuildTag();
             Editor.DeclareProperty("value", "Value", ValueKind.Number, Minimum, Maximum, [counter], WriteValue);
             Editor.Describe(info, "sample-csharp", "0.1.0", Commands, Panels, ApplyChange);
             described = true;
@@ -455,7 +463,7 @@ static unsafe class Module
     {
         for (int attempt = 0; attempt < 40; attempt++)
         {
-            var (ok, answer) = Editor.Call("scene.declare", TagDeclaration);
+            var (ok, answer) = Editor.Call("scene.declare", TagDeclaration());
             if (ok)
             {
                 return;
@@ -465,6 +473,36 @@ static unsafe class Module
                 Editor.Log(LogLevel.Warning, "the component Tag (C#) is not declared: " + answer);
             }
             Thread.Sleep(500);
+        }
+    }
+
+    static void BuildTag()
+    {
+        tagLayout = new VBoxLayout();
+        tagBars = new PaintArea();
+        tagBars.SetMinimumHeight(48);
+        tagBars.Paint(PaintWeights);
+        tagLayout.AddWidget(tagBars);
+    }
+
+    static void PaintWeights(Painter painter, double width, double height)
+    {
+        double[] weights;
+        lock (tagsLock)
+        {
+            weights = shownWeights;
+        }
+        painter.SetPen(Colors.Rgba(70, 70, 70));
+        painter.SetBrush(Colors.Rgba(28, 28, 28));
+        painter.DrawRect(0, 0, width, height, 4);
+        double highest = Math.Max(1, weights.DefaultIfEmpty(0).Max(Math.Abs));
+        double step = (width - 16) / Math.Max(1, weights.Length);
+        painter.SetPen(Colors.Rgba(0, 0, 0, 0), 0);
+        painter.SetBrush(Colors.Rgba(255, 184, 46));
+        for (int i = 0; i < weights.Length; i++)
+        {
+            double bar = Math.Max(1, (height - 12) * Math.Abs(weights[i]) / highest);
+            painter.DrawRect(8 + i * step + 1, height - 6 - bar, Math.Max(1, step - 2), bar, 2);
         }
     }
 
@@ -501,7 +539,10 @@ static unsafe class Module
                 var (tag, weight) = tags.TryGetValue(id, out var held) ? held : ("", 0.0);
                 return "{\"id\":\"" + Text(id) + "\",\"fields\":" + Fields(tag, weight) + "}";
             });
-            return "{\"entities\":[" + string.Join(",", entities) + "]}";
+            shownWeights = [.. ids.Select(id => tags.TryGetValue(id, out var held) ? held.Weight : 0.0)];
+            string answer = "{\"entities\":[" + string.Join(",", entities) + "]}";
+            tagBars.Update();
+            return answer;
         }
     }
 

@@ -66,6 +66,26 @@ pub fn read_paths(text: &str) -> Result<Vec<String>, String> {
         .collect()
 }
 
+/// The most entities an inspector view shows.
+pub const MAX_ENTITIES: usize = 10_000;
+
+/// Reads the entities an inspector view shows: `["doodad:0:183214", ...]`, each an id of the scene.
+pub fn read_entities(text: &str) -> Result<Vec<String>, String> {
+    let value = json(text, "entities")?;
+    let list = value.as_array().ok_or("entities come as a list")?;
+    if list.len() > MAX_ENTITIES {
+        return Err(format!("an inspector view shows {MAX_ENTITIES} entities at most"));
+    }
+    list.iter()
+        .map(|id| {
+            let id = id.as_str().ok_or("an entity is its id as text")?;
+            id.parse::<crate::scene::EntityId>()
+                .map(|parsed| parsed.to_string())
+                .map_err(|_| format!("'{id}' is not the id of an entity"))
+        })
+        .collect()
+}
+
 /// Reads the tracks of a sequence from their JSON text (`sequence::tracks_from_json`).
 pub fn read_tracks(text: &str) -> Result<Vec<Track>, String> {
     let value = serde_json::from_str(text).map_err(|error| format!("the tracks are not JSON: {error}"))?;
@@ -240,6 +260,8 @@ pub struct Object {
     pub table: Option<Arc<Table>>,
     /// The paths of the properties a property grid shows.
     pub paths: Option<Arc<Vec<String>>>,
+    /// The ids of the entities an inspector view shows, none for the selection.
+    pub entities: Option<Arc<Vec<String>>>,
     /// The id of a tree view's current item or a table view's current row, 0 for none.
     pub current_item: u64,
     /// The column of a table view's current cell.
@@ -298,6 +320,8 @@ impl Object {
                     | Kind::TreeView
                     | Kind::TableView
                     | Kind::PropertyGrid
+                    | Kind::HierarchyView
+                    | Kind::InspectorView
             ) {
                 200.0
             } else {
@@ -317,6 +341,7 @@ impl Object {
             tree_version: 0,
             table: (kind == Kind::TableView).then(Arc::default),
             paths: (kind == Kind::PropertyGrid).then(Arc::default),
+            entities: (kind == Kind::InspectorView).then(Arc::default),
             current_item: 0,
             current_column: 0,
             time: 0.0,
@@ -697,6 +722,7 @@ impl Ui {
             Property::Rows => return self.set_rows(handle, Rows::new(read_rows(text)?)?).map(drop),
             Property::Columns => return self.set_columns(handle, read_columns(text)?),
             Property::Paths => return self.set_paths(handle, read_paths(text)?),
+            Property::Entities => return self.set_entities(handle, read_entities(text)?),
             _ => {}
         }
         let object = self.get_mut(handle)?;
@@ -750,6 +776,27 @@ impl Ui {
             .as_mut()
             .ok_or_else(|| format!("a {kind:?} is not a property grid"))?;
         *shown = Arc::new(paths);
+        self.changed(handle);
+        Ok(())
+    }
+
+    /// The entities an inspector view shows, none for the selection.
+    pub fn entities(&self, handle: Handle) -> Result<Arc<Vec<String>>, String> {
+        let object = self.get(handle)?;
+        object
+            .entities
+            .clone()
+            .ok_or_else(|| format!("a {:?} is not an inspector view", object.kind))
+    }
+
+    pub fn set_entities(&mut self, handle: Handle, entities: Vec<String>) -> Result<(), String> {
+        let object = self.get_mut(handle)?;
+        let kind = object.kind;
+        let shown = object
+            .entities
+            .as_mut()
+            .ok_or_else(|| format!("a {kind:?} is not an inspector view"))?;
+        *shown = Arc::new(entities);
         self.changed(handle);
         Ok(())
     }
@@ -1015,6 +1062,7 @@ impl Ui {
             Property::Rows => data::rows_to_json(self.table(handle)?.rows()).to_string(),
             Property::Columns => serde_json::json!(self.table(handle)?.columns()).to_string(),
             Property::Paths => serde_json::json!(*self.paths(handle)?).to_string(),
+            Property::Entities => serde_json::json!(*self.entities(handle)?).to_string(),
             other => return Err(format!("{other:?} is not a text")),
         })
     }

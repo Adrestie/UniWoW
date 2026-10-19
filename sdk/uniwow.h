@@ -63,8 +63,12 @@ enum {
     UNIWOW_TREE_VIEW = 27,      /* items with a text and children, folded or unfolded, one current, as QTreeWidget */
     UNIWOW_TABLE_VIEW = 28,     /* rows of cells under headers, edited in place and sorted by a column, as
                                    QTableWidget; only the rows in sight are drawn */
-    UNIWOW_PROPERTY_GRID = 29   /* animatable properties of the catalogue with a field for each, drawn by the module
+    UNIWOW_PROPERTY_GRID = 29,  /* animatable properties of the catalogue with a field for each, drawn by the module
                                    properties; a value changed by hand is one undo entry the editor records */
+    UNIWOW_HIERARCHY_VIEW = 30, /* the Hierarchy of the scene, its view, filter and selection those of the window
+                                   Hierarchy, folded on its own; drawn by the module hierarchy */
+    UNIWOW_INSPECTOR_VIEW = 31  /* the components of the entities ENTITIES names, of the selection when none; drawn
+                                   by the module properties */
 };
 /* </generated kind> */
 
@@ -134,8 +138,10 @@ enum {
                                              a table of 50000 rows or more is sorted off the interface's thread, its
                                              former order shown meanwhile */
     UNIWOW_PROPERTY_SORT_DESCENDING = 46, /* table view: sorted from the highest */
-    UNIWOW_PROPERTY_PATHS = 47            /* property grid, text: JSON [path, ...], the paths of the properties
+    UNIWOW_PROPERTY_PATHS = 47,           /* property grid, text: JSON [path, ...], the paths of the properties
                                              shown, `<module>/<name>`; 100000 at most */
+    UNIWOW_PROPERTY_ENTITIES = 48         /* inspector view, text: JSON [id, ...], the ids of the entities shown as
+                                             the scene writes them, none for the selection; 10000 at most */
 };
 /* </generated property> */
 

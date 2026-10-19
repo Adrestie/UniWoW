@@ -4,6 +4,7 @@
 //! of every language, and writes and records the values it changes.
 
 mod inspector;
+mod views;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -230,17 +231,67 @@ fn number_field(ui: &mut egui::Ui, value: &mut f64, range: [f64; 2], speed: f64)
 #[derive(Default)]
 struct PropertiesModule {
     inspector: inspector::Inspector,
+    /// What the objects `InspectorView` are drawn from, and the jobs reading for them.
+    views: Arc<views::Shared>,
+    reading: HashMap<uniwow_api::JobId, (Vec<uniwow_api::scene::EntityId>, views::ReadFor)>,
+}
+
+/// The most lists of entities whose values the views keep.
+const KEPT_READS: usize = 32;
+
+impl PropertiesModule {
+    /// Reads the values the views want again, by jobs; makes the writes they asked, in one gesture.
+    fn serve_views(&mut self, ctx: &mut uniwow_api::Context) {
+        let Some(scene) = self.views.scene.get().cloned() else {
+            return;
+        };
+        let wanted: Vec<_> = views::lock(&self.views.wanted).drain().collect();
+        let snapshot = scene.snapshot();
+        let read_for = (
+            snapshot.generation,
+            self.views.written.load(std::sync::atomic::Ordering::Relaxed),
+        );
+        for ids in wanted {
+            if self.reading.values().any(|(reading, _)| *reading == ids) {
+                continue;
+            }
+            let (editor, snapshot, components) = (ctx.editor(), snapshot.clone(), scene.components());
+            let for_job = ids.clone();
+            let job = ctx.spawn("Read the components of a view of the Inspector", move |_| {
+                inspector::read(&editor, &snapshot, &for_job, &components)
+            });
+            self.reading.insert(job, (ids, read_for));
+        }
+        let writes: Vec<views::Write> = std::mem::take(&mut *views::lock(&self.views.writes));
+        if let Some((_, _, label)) = writes.first() {
+            let gesture = ctx.begin_gesture(label);
+            for (command, arguments, _) in &writes {
+                ctx.call(command, arguments.clone());
+            }
+            ctx.end_gesture(gesture);
+            self.views.written.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 impl Module for PropertiesModule {
     fn register(&mut self, reg: &mut Registrar) {
         let grid: Arc<dyn PropertyGrid> = Arc::new(Grid::default());
+        let views: Arc<dyn uniwow_api::scene_view::SceneView> = Arc::new(views::Views::new(self.views.clone()));
         reg.provide(property_grid::SERVICE, grid)
+            .provide(uniwow_api::scene_view::INSPECTOR, views)
             .panel("inspector", "Inspector", uniwow_api::DockArea::Right);
     }
 
     fn init(&mut self, ctx: &mut uniwow_api::Context) {
         self.inspector.init(ctx);
+        if let Some(scene) = ctx.service(uniwow_api::scene::SERVICE) {
+            let _ = self.views.scene.set(scene);
+        }
+    }
+
+    fn windows_ui(&mut self, _egui: &egui::Context, ctx: &mut uniwow_api::Context) {
+        self.serve_views(ctx);
     }
 
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut uniwow_api::Context) {
@@ -257,6 +308,16 @@ impl Module for PropertiesModule {
     }
 
     fn on_job(&mut self, job: uniwow_api::JobId, outcome: uniwow_api::JobOutcome, _ctx: &mut uniwow_api::Context) {
+        if let Some((ids, read_for)) = self.reading.remove(&job) {
+            if let Some(read) = outcome.take::<inspector::Read>() {
+                let mut reads = views::lock(&self.views.reads);
+                if reads.len() >= KEPT_READS {
+                    reads.clear();
+                }
+                reads.insert(ids, (read_for, Arc::new(read)));
+            }
+            return;
+        }
         self.inspector.on_job(job, outcome);
     }
 }

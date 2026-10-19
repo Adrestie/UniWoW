@@ -42,6 +42,12 @@ pub trait Host {
     }
     /// Ends the gesture `gesture` of `owner`.
     fn end_gesture(&mut self, _owner: &str, _gesture: u64) {}
+    /// Draws the object `handle` of the interface objects the module `module` handed the kernel
+    /// (`adopt_objects`; a compiled module's own), a layout and what it holds, inside a window of
+    /// `owner`; its signals go to `module`. Whether it was drawn: false by default.
+    fn draw_object(&mut self, _owner: &str, _module: &str, _handle: u64, _ui: &mut egui::Ui) -> bool {
+        false
+    }
 }
 
 /// A gesture of the user open (`Context::begin_gesture`), by its number.
@@ -138,6 +144,13 @@ impl<'a> Context<'a> {
     /// of compiled modules, and turns what the user does into their signals.
     pub fn draw_objects(&mut self, objects: &SharedUi, panel: &str, ui: &mut egui::Ui) {
         self.host.draw_panel(self.module, objects, panel, ui);
+    }
+
+    /// Draws the object `handle` of the module `module`'s interface objects in `ui`: a drawing of
+    /// its own inside a window of this module, such as a component's in the Inspector (step
+    /// 15.12b). Whether it was drawn: the module runs and has handed the kernel its objects.
+    pub fn draw_object_of(&mut self, module: &str, handle: u64, ui: &mut egui::Ui) -> bool {
+        self.host.draw_object(self.module, module, handle, ui)
     }
 
     /// Draws the dialogs shown among interface objects, each in a modal window over the editor.

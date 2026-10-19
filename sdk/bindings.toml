@@ -41,6 +41,8 @@ entries = [
     [27, "TreeView", "TREE_VIEW", "items with a text and children, folded or unfolded, one current, as QTreeWidget"],
     [28, "TableView", "TABLE_VIEW", "rows of cells under headers, edited in place and sorted by a column, as QTableWidget; only the rows in sight are drawn"],
     [29, "PropertyGrid", "PROPERTY_GRID", "animatable properties of the catalogue with a field for each, drawn by the module properties; a value changed by hand is one undo entry the editor records"],
+    [30, "HierarchyView", "HIERARCHY_VIEW", "the Hierarchy of the scene, its view, filter and selection those of the window Hierarchy, folded on its own; drawn by the module hierarchy"],
+    [31, "InspectorView", "INSPECTOR_VIEW", "the components of the entities ENTITIES names, of the selection when none; drawn by the module properties"],
 ]
 
 [property]
@@ -96,6 +98,7 @@ entries = [
     [45, "SortColumn", "SORT_COLUMN", "table view: two numbers, the column the rows are shown sorted by, -1 for the module's order, and 1 when from the highest, sorted once; the column alone keeps the direction; a column the table does not have is refused; a table of 50000 rows or more is sorted off the interface's thread, its former order shown meanwhile"],
     [46, "SortDescending", "SORT_DESCENDING", "table view: sorted from the highest"],
     [47, "Paths", "PATHS", "property grid, text: JSON [path, ...], the paths of the properties shown, `<module>/<name>`; 100000 at most"],
+    [48, "Entities", "ENTITIES", "inspector view, text: JSON [id, ...], the ids of the entities shown as the scene writes them, none for the selection; 10000 at most"],
 ]
 
 [value_kind]

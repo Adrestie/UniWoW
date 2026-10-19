@@ -278,6 +278,13 @@ static unsafe class Program
         Expect(Fake.Text == (grid.Handle, (uint)Property.Paths, """["cube/colour"]"""),
                "a property grid is given the paths of its properties");
 
+        var inspector = new InspectorView();
+        inspector.SetEntities("""["doodad:0:183214"]""");
+        Expect(Fake.Text == (inspector.Handle, (uint)Property.Entities, """["doodad:0:183214"]"""),
+               "an inspector view is given the entities it shows");
+        var hierarchy = new HierarchyView();
+        Expect(hierarchy.Handle != inspector.Handle, "a hierarchy view is made");
+
         Console.WriteLine($"{failures} failure(s)");
         return failures == 0 ? 0 : 1;
     }

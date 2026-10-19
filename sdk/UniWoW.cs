@@ -168,6 +168,10 @@ public enum Kind : uint
                         // the rows in sight are drawn
     PropertyGrid = 29,  // animatable properties of the catalogue with a field for each, drawn by the module properties;
                         // a value changed by hand is one undo entry the editor records
+    HierarchyView = 30, // the Hierarchy of the scene, its view, filter and selection those of the window Hierarchy,
+                        // folded on its own; drawn by the module hierarchy
+    InspectorView = 31, // the components of the entities ENTITIES names, of the selection when none; drawn by the
+                        // module properties
 }
 // </generated kind>
 
@@ -235,6 +239,8 @@ public enum Property : uint
     SortDescending = 46, // table view: sorted from the highest
     Paths = 47,          // property grid, text: JSON [path, ...], the paths of the properties shown, `<module>/<name>`;
                          // 100000 at most
+    Entities = 48,       // inspector view, text: JSON [id, ...], the ids of the entities shown as the scene writes
+                         // them, none for the selection; 10000 at most
 }
 // </generated property>
 
@@ -1160,6 +1166,23 @@ public class PropertyGrid() : Widget(Make(Kind.PropertyGrid))
 {
     public void SetPaths(string json) => WriteText(Property.Paths, json);
     public string Paths() => ReadText(Property.Paths);
+    public void SetMinimumHeight(double height) => WriteNumbers(Property.MinimumHeight, height);
+}
+
+/// <summary>The Hierarchy of the scene inside a module's panel: its view, filter and selection
+/// those of the window Hierarchy, folded on its own; drawn by the module hierarchy.</summary>
+public class HierarchyView() : Widget(Make(Kind.HierarchyView))
+{
+    public void SetMinimumHeight(double height) => WriteNumbers(Property.MinimumHeight, height);
+}
+
+/// <summary>The components of entities of the scene inside a module's panel, of the selection
+/// while no entity is given; drawn by the module properties. SetEntities takes the JSON list of
+/// their ids as the scene writes them, [] for the selection.</summary>
+public class InspectorView() : Widget(Make(Kind.InspectorView))
+{
+    public void SetEntities(string json) => WriteText(Property.Entities, json);
+    public string Entities() => ReadText(Property.Entities);
     public void SetMinimumHeight(double height) => WriteNumbers(Property.MinimumHeight, height);
 }
 

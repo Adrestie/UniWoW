@@ -676,6 +676,25 @@ class PropertyGrid : public Widget {
     void setMinimumHeight(double height) const { setNumbers(UNIWOW_PROPERTY_MINIMUM_HEIGHT, {height}); }
 };
 
+// The Hierarchy of the scene inside a module's panel: its view, filter and selection those of the
+// window Hierarchy, folded on its own; drawn by the module hierarchy.
+class HierarchyView : public Widget {
+  public:
+    HierarchyView() : Widget(make(UNIWOW_HIERARCHY_VIEW)) {}
+    void setMinimumHeight(double height) const { setNumbers(UNIWOW_PROPERTY_MINIMUM_HEIGHT, {height}); }
+};
+
+// The components of entities of the scene inside a module's panel, of the selection while no
+// entity is given; drawn by the module properties.
+class InspectorView : public Widget {
+  public:
+    InspectorView() : Widget(make(UNIWOW_INSPECTOR_VIEW)) {}
+    // The JSON list of the ids of the entities shown, as the scene writes them: [] for the selection.
+    void setEntities(const std::string &json) const { setString(UNIWOW_PROPERTY_ENTITIES, json); }
+    std::string entities() const { return string(UNIWOW_PROPERTY_ENTITIES); }
+    void setMinimumHeight(double height) const { setNumbers(UNIWOW_PROPERTY_MINIMUM_HEIGHT, {height}); }
+};
+
 // A modal window, as QDialog: while it is shown, the rest of the editor cannot be used. It is
 // created hidden; the user closing it, with Escape or its close button, hides it and sends rejected.
 class Dialog : public Object {

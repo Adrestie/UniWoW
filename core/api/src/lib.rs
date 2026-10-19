@@ -73,6 +73,7 @@ mod property;
 pub mod property_grid;
 mod registrar;
 pub mod scene;
+pub mod scene_view;
 pub mod sequence;
 mod service;
 pub mod texture_arrays;

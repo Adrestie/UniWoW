@@ -5,6 +5,7 @@ use std::sync::{Arc, Weak};
 use uniwow_api::curve::{self, CurveEditor};
 use uniwow_api::dopesheet::{self, Dopesheet};
 use uniwow_api::property_grid::{self, PropertyGrid};
+use uniwow_api::scene_view::{self, SceneView};
 use uniwow_api::theme::Level;
 use uniwow_api::ui::{self, SharedUi};
 use uniwow_api::{CallId, Command, Editor, Event, Host, JobFn, JobId, Priority, egui, egui_wgpu, serde_json};
@@ -110,12 +111,27 @@ impl KernelHost {
             .cloned()
     }
 
+    /// A view of the scene, which draws the objects `HierarchyView` or `InspectorView`, when a
+    /// running module provides it.
+    fn scene_view(&self, key: uniwow_api::ServiceKey<Arc<dyn SceneView>>) -> Option<Arc<dyn SceneView>> {
+        self.services
+            .get(key.id())?
+            .value
+            .downcast_ref::<Arc<dyn SceneView>>()
+            .cloned()
+    }
+
     /// The view of `owner`'s objects, with the services and the editor it draws with.
     fn view(&mut self, owner: &str, objects: &SharedUi) -> &mut PanelView {
         let (curve_editor, sheet, grid) = (self.curve_editor(), self.dopesheet(), self.property_grid());
+        let scene_views = [
+            self.scene_view(scene_view::HIERARCHY),
+            self.scene_view(scene_view::INSPECTOR),
+        ];
         let (editor, backend) = (self.editor(owner), self.bridge.clone());
         let view = self.views.entry(view_key(owner, objects)).or_default();
         view.set_services(curve_editor, sheet, grid, editor, backend);
+        view.set_scene_views(scene_views);
         view
     }
 
@@ -251,6 +267,23 @@ impl Host for KernelHost {
         let gpu = self.gpu.clone();
         self.view(owner, objects).show(objects, panel, ui, gpu.as_ref());
         self.report_service_failures(owner, objects);
+    }
+
+    fn draw_object(&mut self, _owner: &str, module: &str, handle: u64, ui: &mut egui::Ui) -> bool {
+        let Some(objects) = self
+            .adopted
+            .iter()
+            .filter(|(owner, _)| owner == module)
+            .find_map(|(_, kept)| kept.upgrade())
+        else {
+            return false;
+        };
+        let gpu = self.gpu.clone();
+        let drawn = self
+            .view(module, &objects)
+            .show_object(&objects, handle as ui::Handle, ui, gpu.as_ref());
+        self.report_service_failures(module, &objects);
+        drawn
     }
 
     fn draw_dialogs(&mut self, owner: &str, objects: &SharedUi, egui: &egui::Context) {
