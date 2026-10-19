@@ -300,15 +300,7 @@ impl SpawnsModule {
             })
             .unwrap_or_default();
         let mut after = self.changes.clone();
-        let made = data::made_of_doodad(
-            &mut after,
-            model,
-            position,
-            rotation,
-            scale,
-            self.highest,
-            &displays,
-        );
+        let made = data::made_of_doodad(&mut after, model, position, rotation, scale, self.highest, &displays);
         self.change("Make a doodad a game object".to_owned(), after, ctx);
         if let Some(doodad) = arguments["doodad"].as_str() {
             ctx.call("doodads.delete", json!({ "ids": [doodad] }));
