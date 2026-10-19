@@ -304,6 +304,9 @@ impl Module for PropertiesModule {
         result: Result<uniwow_api::serde_json::Value, String>,
         _ctx: &mut uniwow_api::Context,
     ) {
+        if self.inspector.on_made(call, &result) {
+            return;
+        }
         self.inspector.on_reply(call, result);
     }
 

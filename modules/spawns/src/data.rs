@@ -15,9 +15,11 @@ pub const CREATURES: &str = "SELECT c.guid, c.id1, c.position_x, c.position_y, c
      LEFT JOIN creature_template_model m ON m.CreatureID = c.id1 AND m.Idx = 0 WHERE c.map = ?";
 /// The game objects of a map, with their template's name, look and size.
 pub const OBJECTS: &str = "SELECT g.guid, g.id, g.position_x, g.position_y, g.position_z, g.orientation, \
-     t.name, t.displayId, t.size FROM gameobject g JOIN gameobject_template t ON t.entry = g.id WHERE g.map = ?";
+     g.rotation0, g.rotation1, g.rotation2, g.rotation3, t.name, t.displayId, t.size FROM gameobject g      JOIN gameobject_template t ON t.entry = g.id WHERE g.map = ?";
 /// The highest guid of each table, so that a spawn created takes one above.
 pub const HIGHEST: [&str; 2] = ["SELECT MAX(guid) FROM creature", "SELECT MAX(guid) FROM gameobject"];
+/// The highest entry of the templates of game objects, so that a template created takes one above.
+pub const HIGHEST_TEMPLATE: &str = "SELECT MAX(entry) FROM gameobject_template";
 
 /// The quests the templates start and end: the tables `creature_queststarter`,
 /// `creature_questender`, `gameobject_queststarter`, `gameobject_questender`, in that order.
@@ -111,6 +113,14 @@ pub struct Spawn {
     pub position: [f32; 3],
     pub orientation: f32,
     pub scale: f32,
+    /// A game object's rotation, a quaternion x, y, z, w in the world; none for a creature.
+    pub rotation: Option<[f32; 4]>,
+}
+
+/// The rotation about the vertical by `yaw` radians, as a quaternion x, y, z, w.
+pub fn yaw_quaternion(yaw: f32) -> [f32; 4] {
+    let (sin, cos) = (yaw / 2.0).sin_cos();
+    [0.0, 0.0, sin, cos]
 }
 
 impl Spawn {
@@ -161,6 +171,21 @@ pub fn spawns(rows: &Rows, kind: Kind) -> Vec<Spawn> {
                 ],
                 orientation: number(at(row, orientation)).unwrap_or(0.0) as f32,
                 scale: number(at(row, scale)).filter(|scale| *scale > 0.0).unwrap_or(1.0) as f32,
+                rotation: (kind == Kind::GameObject).then(|| {
+                    let part = |name: &str| number(at(row, column(name))).unwrap_or(0.0) as f32;
+                    let rotation = [
+                        part("rotation0"),
+                        part("rotation1"),
+                        part("rotation2"),
+                        part("rotation3"),
+                    ];
+                    // A row without a rotation of its own turns by its orientation alone.
+                    if rotation == [0.0; 4] {
+                        yaw_quaternion(number(at(row, orientation)).unwrap_or(0.0) as f32)
+                    } else {
+                        rotation
+                    }
+                }),
             })
         })
         .collect()
@@ -186,6 +211,114 @@ pub struct Changes {
     /// The quests given to templates and taken from them.
     pub linked: BTreeSet<Link>,
     pub unlinked: BTreeSet<Link>,
+    /// The templates of game objects created (step 15.14), by entry.
+    pub templates: BTreeMap<u32, Template>,
+    /// The rows of `GameObjectDisplayInfo` prepared for models no row names: their ids and models.
+    pub displays: BTreeMap<u32, String>,
+}
+
+/// A template of game objects created in memory: its entry, name, display and size. Its type is 2
+/// (a giver of quests) once it gives one, 5 (generic) otherwise.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Template {
+    pub entry: u32,
+    pub name: String,
+    pub display: u32,
+    pub size: f32,
+}
+
+impl Template {
+    /// Its type of `gameobject_template`, as its quests make it.
+    pub fn kind(&self, quests: &[Link]) -> u32 {
+        if quests.is_empty() { 5 } else { 2 }
+    }
+}
+
+/// What a doodad made a game object gives (decision 21): its spawn and its template; the row of
+/// `GameObjectDisplayInfo` prepared for its model when none names it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Made {
+    pub spawn: Spawn,
+    pub template: Template,
+    pub display: Option<(u32, String)>,
+}
+
+/// The game object made of the doodad of the model `model` placed at `position` (in the world)
+/// turned by `rotation` (degrees about the axes of its file) and scaled by `scale`: its spawn at the
+/// same place and rotation (its quaternion, its yaw as its orientation), a template of its size and
+/// its model's display, of an existing row of `GameObjectDisplayInfo` (`displays`) or a row prepared
+/// above the highest of them. Its guid and entry given above `highest` and those given before.
+pub fn made_of_doodad(
+    changes: &mut Changes,
+    model: &str,
+    position: [f32; 3],
+    rotation: [f32; 3],
+    scale: f32,
+    highest: [u64; 3],
+    displays: &[(u32, String)],
+) -> Made {
+    let highest_display = displays.iter().map(|(id, _)| *id).max().unwrap_or(0);
+    let placed = uniwow_api::formats::placement(scene::file_of_world(position), rotation, 1.0);
+    let (_, turned, _) = placed.to_scale_rotation_translation();
+    let forward = turned * uniwow_api::glam::Vec3::X;
+    let yaw = forward.y.atan2(forward.x).rem_euclid(std::f32::consts::TAU);
+    // The model as the table names it, `.mdx` for an M2.
+    let lowered = model.to_ascii_lowercase();
+    let named = match lowered.strip_suffix(".m2") {
+        Some(stem) => format!("{stem}.mdx"),
+        None => lowered.clone(),
+    };
+    let same = |path: &str| {
+        let path = path.to_ascii_lowercase().replace('/', "\\");
+        path == named || path == lowered
+    };
+    let display = displays
+        .iter()
+        .map(|(id, path)| (*id, path.as_str()))
+        .chain(changes.displays.iter().map(|(id, path)| (*id, path.as_str())))
+        .find(|(_, path)| same(path))
+        .map(|(id, _)| id);
+    let prepared = match display {
+        Some(_) => None,
+        None => {
+            let id = changes.give_named("display", u64::from(highest_display)) as u32;
+            changes.displays.insert(id, model.to_owned());
+            Some((id, model.to_owned()))
+        }
+    };
+    let display = display.or(prepared.as_ref().map(|(id, _)| *id)).unwrap_or(0);
+    let stem = model
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(model)
+        .rsplit_once('.')
+        .map_or(model, |(stem, _)| stem)
+        .to_owned();
+    let entry = changes.give_named("gameobject_template", highest[2]) as u32;
+    let template = Template {
+        entry,
+        name: stem.clone(),
+        display,
+        size: scale,
+    };
+    changes.templates.insert(entry, template.clone());
+    let spawn = Spawn {
+        kind: Kind::GameObject,
+        guid: changes.give(Kind::GameObject, highest[1]),
+        entry,
+        name: stem,
+        display,
+        position,
+        orientation: yaw,
+        scale,
+        rotation: Some(turned.to_array()),
+    };
+    changes.added.insert(spawn.id(), spawn.clone());
+    Made {
+        spawn,
+        template,
+        display: prepared,
+    }
 }
 
 impl Changes {
@@ -208,6 +341,10 @@ impl Changes {
         for spawn in &mut out {
             if let Some((position, orientation)) = self.moved.get(&spawn.id()) {
                 spawn.position = *position;
+                if spawn.orientation != *orientation && spawn.rotation.is_some() {
+                    // Turned about the vertical by the user: its rotation that turn alone.
+                    spawn.rotation = Some(yaw_quaternion(*orientation));
+                }
                 spawn.orientation = *orientation;
             }
         }
@@ -244,7 +381,12 @@ impl Changes {
 
     /// A guid of `kind` above `highest` and every one given before.
     pub fn give(&mut self, kind: Kind, highest: u64) -> u64 {
-        let given = self.given.entry(kind.name().to_owned()).or_insert(0);
+        self.give_named(kind.name(), highest)
+    }
+
+    /// A number of the series `series` above `highest` and every one given before.
+    pub fn give_named(&mut self, series: &str, highest: u64) -> u64 {
+        let given = self.given.entry(series.to_owned()).or_insert(0);
         *given = (*given).max(highest) + 1;
         *given
     }
@@ -273,7 +415,13 @@ impl Changes {
             "created": added.into_iter().map(|spawn| json!({
                 "id": spawn.id().to_string(), "entry": spawn.entry, "name": spawn.name, "display": spawn.display,
                 "position": spawn.position, "orientation": spawn.orientation, "scale": spawn.scale,
+                "rotation": spawn.rotation,
             })).collect::<Vec<_>>(),
+            "templates": self.templates.values().map(|template| json!({
+                "entry": template.entry, "name": template.name, "display": template.display, "size": template.size,
+            })).collect::<Vec<_>>(),
+            "displays prepared": self.displays.iter().map(|(id, model)| json!({ "id": id, "model": model }))
+                .collect::<Vec<_>>(),
             "deleted": deleted.into_iter().map(ToString::to_string).collect::<Vec<_>>(),
             "guids given": given,
             "quests given": links(&self.linked),
@@ -330,6 +478,10 @@ impl Changes {
                             position: vector(&entry["position"])?,
                             orientation: entry["orientation"].as_f64().unwrap_or(0.0) as f32,
                             scale: entry["scale"].as_f64().unwrap_or(1.0) as f32,
+                            rotation: entry["rotation"]
+                                .as_array()
+                                .filter(|parts| parts.len() == 4)
+                                .map(|parts| [0, 1, 2, 3].map(|at| parts[at].as_f64().unwrap_or(0.0) as f32)),
                         },
                     ))
                 })
@@ -349,6 +501,25 @@ impl Changes {
                 .unwrap_or_default(),
             linked: links("quests given"),
             unlinked: links("quests taken"),
+            templates: list("templates")
+                .iter()
+                .filter_map(|template| {
+                    let entry = template["entry"].as_u64()? as u32;
+                    Some((
+                        entry,
+                        Template {
+                            entry,
+                            name: template["name"].as_str().unwrap_or_default().to_owned(),
+                            display: template["display"].as_u64().unwrap_or(0) as u32,
+                            size: template["size"].as_f64().unwrap_or(1.0) as f32,
+                        },
+                    ))
+                })
+                .collect(),
+            displays: list("displays prepared")
+                .iter()
+                .filter_map(|display| Some((display["id"].as_u64()? as u32, display["model"].as_str()?.to_owned())))
+                .collect(),
         }
     }
 }
@@ -641,5 +812,81 @@ mod tests {
         );
         assert!(changes.link(&quests, starts(7), true), "given back");
         assert!(changes.unlinked.is_empty());
+    }
+
+    #[test]
+    fn a_doodad_made_a_game_object_keeps_its_place_rotation_and_size_and_its_model_s_display() {
+        use uniwow_api::glam::{Mat4, Quat, Vec3};
+        let mut changes = Changes::default();
+        let (position, rotation, scale) = ([-8913.25, -120.5, 82.75], [12.0, 137.5, -7.25], 1.75);
+        let displays = vec![(310, r"World\Generic\Lamp.mdx".to_owned())];
+        let made = made_of_doodad(
+            &mut changes,
+            r"world\generic\lamp.m2",
+            position,
+            rotation,
+            scale,
+            [10, 5000, 190_000],
+            &displays,
+        );
+        assert_eq!(made.display, None, "the display that names its model");
+        assert_eq!(made.template.display, 310);
+        assert_eq!((made.template.entry, made.spawn.guid), (190_001, 5001));
+        assert_eq!(made.template.size, 1.75, "a template of its size");
+        assert_eq!(made.template.name, "lamp");
+        assert_eq!(made.template.kind(&[]), 5);
+        let link = Link {
+            kind: Kind::GameObject,
+            entry: 190_001,
+            quest: 7,
+            ends: false,
+        };
+        assert_eq!(made.template.kind(&[link]), 2, "a giver of quests");
+        // Drawn as the doodad was, to a hundredth of a yard and of a degree.
+        let doodad = uniwow_api::formats::placement(scene::file_of_world(position), rotation, scale);
+        let object = Mat4::from_scale_rotation_translation(
+            Vec3::splat(made.template.size),
+            Quat::from_array(made.spawn.rotation.unwrap()),
+            Vec3::from(made.spawn.position),
+        );
+        let (_, doodad_turn, doodad_at) = doodad.to_scale_rotation_translation();
+        let (_, object_turn, object_at) = object.to_scale_rotation_translation();
+        assert!(doodad_at.distance(object_at) < 0.01, "{doodad_at} {object_at}");
+        assert!(doodad_turn.angle_between(object_turn).to_degrees() < 0.01);
+        assert!(doodad.abs_diff_eq(object, 0.01));
+        let forward = object_turn * Vec3::X;
+        assert!((made.spawn.orientation - forward.y.atan2(forward.x).rem_euclid(std::f32::consts::TAU)).abs() < 1e-4);
+        // A model no row names: a row prepared above the highest, the same for the next of it.
+        let first = made_of_doodad(
+            &mut changes,
+            r"world\new\totem.m2",
+            position,
+            [0.0; 3],
+            1.0,
+            [10, 5000, 190_000],
+            &displays,
+        );
+        assert_eq!(first.display, Some((311, r"world\new\totem.m2".to_owned())));
+        let second = made_of_doodad(
+            &mut changes,
+            r"world\new\totem.m2",
+            position,
+            [0.0; 3],
+            1.0,
+            [10, 5000, 190_000],
+            &displays,
+        );
+        assert_eq!((second.display, second.template.display), (None, 311));
+        assert_eq!(second.template.entry, 190_003);
+        assert_eq!(changes.added.len(), 3);
+        // Kept in the project whole.
+        assert_eq!(Changes::of_section(&changes.section()), changes);
+        // Turned about the vertical: its rotation that turn alone.
+        let mut turned = changes.clone();
+        turned.added.clear();
+        let spawn = made.spawn.clone();
+        turned.moved.insert(spawn.id(), (spawn.position, 1.0));
+        let laid = turned.laid_over(std::slice::from_ref(&spawn));
+        assert_eq!(laid[0].rotation, Some(yaw_quaternion(1.0)));
     }
 }

@@ -237,6 +237,10 @@ struct ReadFor {
 
 #[derive(Default)]
 pub struct Inspector {
+    /// The doodad offered to be made a game object, waiting for the user's answer; then the call
+    /// making it, the doodad deleted by it in its gesture.
+    offered: Option<EntityId>,
+    making: Option<(CallId, EntityId)>,
     scene: Option<scene::Handle>,
     /// The entities it keeps showing while locked.
     locked: Option<Vec<EntityId>>,
@@ -439,6 +443,7 @@ impl Inspector {
                 self.transform_ui(ui, &placed, unplaced, &ids, &snapshot, ctx);
                 self.model_ui(ui, &values);
                 self.materials_ui(ui, &values, ctx);
+                self.server_ui(ui, &values, ctx);
                 components_ui(ui, &values);
                 self.quests_ui(ui, &values, ctx);
                 self.declared_ui(ui, &read, &ids, ctx);
@@ -882,6 +887,79 @@ impl Inspector {
             ctx.end_gesture(gesture);
             self.waiting.push(call);
         }
+    }
+
+    /// The offer of decision 21 for one doodad shown: made a game object, a template and a spawn of
+    /// the world database in memory, the doodad deleted, as one gesture.
+    fn server_ui(&mut self, ui: &mut egui::Ui, values: &[(EntityId, Value)], ctx: &mut Context) {
+        let [(id, value)] = values else {
+            return;
+        };
+        if id.kind != Kind::Doodad {
+            return;
+        }
+        if self.making.is_some() {
+            ui.label(egui::RichText::new("Making it a game object…").weak());
+            return;
+        }
+        if self.offered != Some(*id) {
+            if ui
+                .button("Make it a game object…")
+                .on_hover_text("A server component: a template and a spawn of the world database, in memory")
+                .clicked()
+            {
+                self.offered = Some(*id);
+            }
+            return;
+        }
+        ui.label(
+            "The doodad is deleted; a template of game object of its size and a spawn at its place are created \
+             in memory, with a row of GameObjectDisplayInfo prepared when none names its model. One undo entry.",
+        );
+        ui.horizontal(|ui| {
+            if ui.button("Make it a game object").clicked() {
+                self.offered = None;
+                let transform = &value["components"]["transform"];
+                let gesture = ctx.begin_gesture("Make a doodad a game object");
+                let call = ctx.call(
+                    "spawns.from_doodad",
+                    json!({
+                        "model": value["components"]["model"]["file"],
+                        "position": transform["position"],
+                        "rotation": transform["rotation"],
+                        "scale": transform["scale"],
+                        "doodad": id.to_string(),
+                    }),
+                );
+                ctx.end_gesture(gesture);
+                self.making = Some((call, *id));
+            }
+            if ui.button("Cancel").clicked() {
+                self.offered = None;
+            }
+        });
+    }
+
+    /// Takes the answer to the creation of a game object made of a doodad, which deleted the doodad
+    /// in the same gesture; whether it was one. The game object selected.
+    pub fn on_made(&mut self, call: CallId, result: &Result<Value, String>) -> bool {
+        let Some((waited, _)) = self.making else {
+            return false;
+        };
+        if waited != call {
+            return false;
+        }
+        self.making = None;
+        match result {
+            Ok(answer) => {
+                self.written += 1;
+                if let (Some(scene), Some(made)) = (&self.scene, answer["id"].as_str().and_then(|id| id.parse().ok())) {
+                    scene.select(scene::Select::Set(vec![made]));
+                }
+            }
+            Err(reason) => self.said.push(format!("Not made a game object: {reason}")),
+        }
+        true
     }
 
     fn raw_ui(&self, ui: &mut egui::Ui, values: &[(EntityId, Value)]) {

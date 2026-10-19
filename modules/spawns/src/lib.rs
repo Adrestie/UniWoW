@@ -24,7 +24,7 @@ use data::{Changes, Link, Quests, Spawn};
 const MODULE: &str = "spawns";
 
 /// What a reading job gives back: the spawns of a map, the highest guid of each table, the quests.
-type Read = Result<(Vec<Spawn>, u64, u64, Quests), String>;
+type Read = Result<(Vec<Spawn>, [u64; 3], Quests), String>;
 
 /// The looks of the displays, by kind and display: a look and its scale, none for none.
 type Looks = HashMap<(Kind, u32), Option<(LookId, f32)>>;
@@ -62,7 +62,7 @@ struct SpawnsModule {
     reading: Option<JobId>,
     /// The spawns as the database has them, and the highest guid of each table.
     spawns: Arc<Vec<Spawn>>,
-    highest: [u64; 2],
+    highest: [u64; 3],
     quests: Arc<Quests>,
     changes: Changes,
     looks: Looks,
@@ -70,6 +70,8 @@ struct SpawnsModule {
     /// The tiles given to the scene and placed, for those to take away.
     tiles: BTreeSet<TileId>,
     refused: Option<String>,
+    /// The client's tables, for the displays of game objects.
+    formats: Option<Arc<dyn uniwow_api::formats::Formats>>,
     /// The spawns the world as it runs shows live, not drawn again; the generation of the scene they
     /// were seen in.
     live: BTreeSet<EntityId>,
@@ -134,7 +136,9 @@ impl SpawnsModule {
                     look: *look,
                     transform: Mat4::from_scale_rotation_translation(
                         Vec3::splat(scale * spawn.scale),
-                        Quat::from_rotation_z(spawn.orientation),
+                        spawn
+                            .rotation
+                            .map_or_else(|| Quat::from_rotation_z(spawn.orientation), Quat::from_array),
                         Vec3::from(spawn.position),
                     ),
                     alpha: 1.0,
@@ -196,6 +200,7 @@ impl SpawnsModule {
     fn steer(&mut self, ctx: &mut Context) {
         if self.models.is_none() {
             self.models = ctx.service(models::SERVICE);
+            self.formats = ctx.service(uniwow_api::formats::SERVICE);
             self.scene = ctx.service(scene::SERVICE);
         }
         let map = ctx
@@ -225,19 +230,17 @@ impl SpawnsModule {
                 let objects = database.query(data::OBJECTS, &[json!(map)])?;
                 let mut spawns = data::spawns(&creatures, Kind::Creature);
                 spawns.extend(data::spawns(&objects, Kind::GameObject));
-                let highest_creature = data::highest(&database.query(data::HIGHEST[0], &[])?);
-                let highest_object = data::highest(&database.query(data::HIGHEST[1], &[])?);
+                let highest = [
+                    data::highest(&database.query(data::HIGHEST[0], &[])?),
+                    data::highest(&database.query(data::HIGHEST[1], &[])?),
+                    data::highest(&database.query(data::HIGHEST_TEMPLATE, &[])?),
+                ];
                 let titles = database.query(data::TITLES, &[])?;
                 let links = data::LINKS
                     .iter()
                     .map(|(_, _, query)| database.query(query, &[]))
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok((
-                    spawns,
-                    highest_creature,
-                    highest_object,
-                    Quests::of_rows(&titles, &links),
-                ))
+                Ok((spawns, highest, Quests::of_rows(&titles, &links)))
             }),
         );
     }
@@ -260,6 +263,64 @@ impl SpawnsModule {
         }
     }
 
+    /// The doodad `arguments` describes made a game object (`spawns.from_doodad`).
+    fn make_game_object(&mut self, arguments: &Value, ctx: &mut Context) -> Result<Value, String> {
+        if self.read_for.is_none() || self.reading.is_some() {
+            return Err(
+                "the spawns of the world database are not read: its guids and entries are not known".to_owned(),
+            );
+        }
+        let vector = |key: &str| -> Result<[f32; 3], String> {
+            let values = arguments[key].as_array().filter(|values| values.len() == 3);
+            let values = values.ok_or_else(|| format!("'{key}' is three numbers"))?;
+            let mut out = [0.0; 3];
+            for (at, value) in out.iter_mut().zip(values) {
+                *at = value
+                    .as_f64()
+                    .filter(|value| value.is_finite())
+                    .ok_or_else(|| format!("'{key}' is three numbers"))? as f32;
+            }
+            Ok(out)
+        };
+        let model = arguments["model"]
+            .as_str()
+            .filter(|model| !model.is_empty())
+            .ok_or("'model' is the path of a model")?;
+        let (position, rotation) = (vector("position")?, vector("rotation")?);
+        let scale = arguments["scale"].as_f64().filter(|scale| *scale > 0.0).unwrap_or(1.0) as f32;
+        let displays: Vec<(u32, String)> = self
+            .formats
+            .as_ref()
+            .and_then(|formats| formats.game_object_displays().ok())
+            .map(|displays| {
+                displays
+                    .iter()
+                    .map(|display| (display.id, display.path.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut after = self.changes.clone();
+        let made = data::made_of_doodad(
+            &mut after,
+            model,
+            position,
+            rotation,
+            scale,
+            self.highest,
+            &displays,
+        );
+        self.change("Make a doodad a game object".to_owned(), after, ctx);
+        if let Some(doodad) = arguments["doodad"].as_str() {
+            ctx.call("doodads.delete", json!({ "ids": [doodad] }));
+        }
+        Ok(json!({
+            "id": made.spawn.id().to_string(),
+            "template": made.template.entry,
+            "display": made.template.display,
+            "prepared": made.display.is_some(),
+        }))
+    }
+
     /// The looks of the displays not yet resolved, asked of a job.
     fn resolve(&mut self, ctx: &mut Context) {
         let Some(models) = self.models.clone() else {
@@ -280,11 +341,21 @@ impl SpawnsModule {
         if wanted.is_empty() {
             return;
         }
+        let prepared = self.changes.displays.clone();
         self.resolving = Some(ctx.spawn("Read the looks of the spawns", move |_| -> Looks {
             wanted
                 .into_iter()
                 .map(|(kind, display)| {
                     let look = match kind {
+                        // A row prepared for a doodad made a game object: its model.
+                        Kind::GameObject if prepared.contains_key(&display) => Some((
+                            models.look(&models::Look {
+                                model: uniwow_api::formats::FileRef::Path(prepared[&display].clone()),
+                                textures: Vec::new(),
+                                geosets: models::Geosets::Default,
+                            }),
+                            1.0,
+                        )),
                         Kind::GameObject => models
                             .object(display)
                             .ok()
@@ -344,10 +415,19 @@ impl Module for SpawnsModule {
                 "The quests whose title holds 'search' (without case) or whose id it is, 50 at most: their ids and titles.",
                 json!({ "type": "object", "properties": { "search": { "type": "string" } } }),
                 json!({ "type": "object", "properties": { "quests": { "type": "array" } } }),
+            )
+            .command(
+                "spawns.from_doodad",
+                "Makes the doodad of the 'model' at 'position' (in the world), turned by 'rotation' (degrees about the                  axes of its file) and scaled by 'scale', a game object, in memory, one undo entry: a template of its                  size (type 5, 2 once it gives a quest) and a spawn at its place, its rotation and yaw; a row of                  GameObjectDisplayInfo prepared when none names its model. The 'doodad' given by its id deleted with it,                  in the gesture of the call. Once the spawns of the world database are read.",
+                json!({ "type": "object", "properties": { "model": { "type": "string" }, "position": { "type": "array" }, "rotation": { "type": "array" }, "scale": { "type": "number" } }, "required": ["model", "position", "rotation"] }),
+                json!({ "type": "object", "properties": { "id": { "type": "string" }, "template": { "type": "integer" }, "display": { "type": "integer" }, "prepared": { "type": "boolean" } } }),
             );
     }
 
     fn on_command(&mut self, name: &str, arguments: Value, ctx: &mut Context) -> Result<Value, String> {
+        if name == "spawns.from_doodad" {
+            return self.make_game_object(&arguments, ctx);
+        }
         if name == "spawns.quest_titles" {
             let search = arguments["search"].as_str().unwrap_or_default();
             let quests: Vec<Value> = self
@@ -395,12 +475,33 @@ impl Module for SpawnsModule {
                     .iter()
                     .filter_map(|id| {
                         let spawn = self.find(id)?;
-                        Some(data::read(
+                        let quests = self.changes.quests_of(&self.quests, spawn.kind, spawn.entry);
+                        let mut read = data::read(
                             &spawn,
                             self.changes.moved.contains_key(id) || self.changes.added.contains_key(id),
-                            &self.changes.quests_of(&self.quests, spawn.kind, spawn.entry),
+                            &quests,
                             &self.quests.titles,
-                        ))
+                        );
+                        if let Some(template) = self
+                            .changes
+                            .templates
+                            .get(&spawn.entry)
+                            .filter(|_| spawn.kind == Kind::GameObject)
+                        {
+                            read["components"]["template"] = json!({
+                                "entry": template.entry,
+                                "name": template.name,
+                                "type": template.kind(&quests),
+                                "display": template.display,
+                                "display prepared": self.changes.displays.get(&template.display),
+                                "size": template.size,
+                                "created": true,
+                            });
+                        }
+                        if let Some(rotation) = spawn.rotation {
+                            read["components"]["raw"]["rotation"] = json!(rotation);
+                        }
+                        Some(read)
                     })
                     .collect();
                 Ok(json!({ "entities": entities }))
@@ -422,6 +523,9 @@ impl Module for SpawnsModule {
                             match after.added.get_mut(id) {
                                 Some(added) => {
                                     added.position = place.0;
+                                    if added.orientation != place.1 && added.rotation.is_some() {
+                                        added.rotation = Some(data::yaw_quaternion(place.1));
+                                    }
                                     added.orientation = place.1;
                                 }
                                 None => {
@@ -515,10 +619,10 @@ impl Module for SpawnsModule {
         if self.reading == Some(job) {
             self.reading = None;
             match outcome.take::<Read>() {
-                Some(Ok((spawns, creatures, objects, quests))) => {
+                Some(Ok((spawns, highest, quests))) => {
                     log::info!("{} spawns of the map read from the world database", spawns.len());
                     self.spawns = Arc::new(spawns);
-                    self.highest = [creatures, objects];
+                    self.highest = highest;
                     self.quests = Arc::new(quests);
                     self.refused = None;
                     self.refresh();

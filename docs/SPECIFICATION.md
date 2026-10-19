@@ -1,7 +1,7 @@
 # UniWoW — Architecture and module catalogue
 
 Status: **validated**. Milestones 1 to 7 built and validated; milestone 8 built, its acceptance on the user's machine to come; milestone 9 validated; milestone 15, the world edited, validated and being built: steps 15.1 to 15.10 done, 15.11 built
-before its first connection (15.11a to 15.11c), steps 15.12 and 15.13 done; milestones 10 to 14 outlined. Open questions in section 10.
+before its first connection (15.11a to 15.11c), steps 15.12 to 15.14 done; milestones 10 to 14 outlined. Open questions in section 10.
 
 UniWoW is a standalone desktop application (outside the game client) used to modify a
 WoW 3.3.5a (build 12340) client and an AzerothCore server: maps, data, assets, interface,
@@ -10444,6 +10444,37 @@ equipment of a character's display.
 one the display fills; those of a building and its doodad sets; a texture replaced drawn in place of
 the model's whatever its source, another index left alone; the textures replaced kept in the
 project; a doodad set written, below 0 refused; what the Inspector asks for each kind.
+
+#### Step 15.14, as built: a doodad made a game object
+
+Built after 4b78cf6, on `main`; tested on data the tests make, waiting for the user's database.
+
+- **`spawns.from_doodad`** (decision 21), once the spawns of the world database are read (their
+  guids and entries known): of a doodad's model, place (in the world), rotation (degrees about the
+  axes of its file) and scale, in memory, one undo entry: a template of game objects
+  (`gameobject_template`, its entry above the highest of the database and those given, named by its
+  model, its `size` the doodad's scale, its type 5, 2 once it gives a quest), its display the row of
+  `GameObjectDisplayInfo` that names its model (`.m2` as `.mdx`), else a row prepared above the
+  highest for the client's table and the server's copy; and a spawn (`gameobject`) at its place, its
+  quaternion the doodad's rotation and its orientation its yaw. The doodad given is deleted by a call
+  made while serving, so in the caller's gesture: the whole one undo entry.
+- **The spawns keep the rotation of game objects** (`rotation0` to `rotation3`, a row without one
+  turning by its orientation), drawn with it; turned about the vertical by the user, their rotation
+  that turn alone. The templates created and the rows prepared are in the project; the Inspector
+  shows a template created (`created`, its type, its display prepared) and the quaternion raw.
+- **The offer** in the Inspector, for one doodad shown: *Make it a game object…*, what it does said,
+  *Make it a game object* or *Cancel*; the game object made selected, a refusal said (the database
+  not read).
+
+**Not in 15.14**: the offer made by adding a server component to a doodad (*Add Component* is still
+to come: a button meanwhile); the rows exported (milestone 15 writes nothing, rule E1); a building
+made a game object (its type and display differ).
+
+**Tests**: a doodad made a game object drawn as the doodad was to a hundredth of a yard and of a
+degree, its yaw its orientation; a scaled doodad given a template of its size; the display that
+names its model found, a row prepared for a model none names and kept for the next of it; the
+guids and entries given above the highest; the type 2 once it gives a quest; the whole kept in the
+project; turned by the user, its rotation that turn alone.
 
 ### Milestone 10: Lua modules (outline)
 
