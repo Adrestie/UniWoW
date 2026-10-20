@@ -56,6 +56,8 @@ struct Made {
 #[derive(Default)]
 struct HierarchyModule {
     scene: Option<scene::Handle>,
+    /// Why the last zone could not be framed.
+    said: Option<String>,
     /// The zone chosen in the tree, framed by F; the extents of the zones of the map, read once a
     /// map by a job.
     zone: Option<u32>,
@@ -206,36 +208,79 @@ impl HierarchyModule {
         self.scroll_to = self.rows.iter().position(|(row, _)| *row == node);
     }
 
-    /// Frames the zone chosen in the 3D view: its extent, its height that of the spawns known there
-    /// when there are some.
-    fn frame_zone(&self, ctx: &mut Context) {
+    /// The places of the entities the tree lists under the zone `zone`, its subzones' with them:
+    /// held by the scene, or known far from the camera.
+    fn places_under(&self, zone: u32) -> Vec<[f32; 3]> {
+        let Some(scene) = &self.scene else {
+            return Vec::new();
+        };
+        let key = format!("area:{zone}");
+        let Some(start) = self.tree.nodes.iter().position(|node| node.key == key) else {
+            return Vec::new();
+        };
+        let snapshot = scene.snapshot();
+        let (mut out, mut stack) = (Vec::new(), vec![start as u32]);
+        while let Some(at) = stack.pop() {
+            let node = &self.tree.nodes[at as usize];
+            if let Some(id) = node.entity {
+                let place = snapshot
+                    .get(&id)
+                    .map(|entity| entity.origin())
+                    .or_else(|| self.tree.known.get(&id).copied());
+                out.extend(place);
+            }
+            stack.extend(node.children.iter().copied());
+        }
+        out
+    }
+
+    /// Frames the zone chosen in the 3D view: the extent of its chunks, else that of the entities
+    /// listed under it (a zone of the inside of buildings, which no chunk names); its height that
+    /// of those entities, else 0 to 150 yards. Whether it could.
+    fn frame_zone(&mut self, ctx: &mut Context) {
         let Some(zone) = self.zone else {
             return;
         };
-        let Some([low, high]) = self.extents.get(&zone).copied() else {
-            log::info!("the extent of the zone {zone} is not read yet");
+        let places = self.places_under(zone);
+        let from_places = || {
+            let first = places.first()?;
+            let mut extent = [[first[0], first[1]], [first[0], first[1]]];
+            for at in &places {
+                for axis in 0..2 {
+                    extent[0][axis] = extent[0][axis].min(at[axis]);
+                    extent[1][axis] = extent[1][axis].max(at[axis]);
+                }
+            }
+            Some(extent)
+        };
+        let Some([low, high]) = self.extents.get(&zone).copied().or_else(from_places) else {
+            self.said = Some(if self.extents_job.is_some() {
+                "The extents of the zones are still being read: F again in a moment.".to_owned()
+            } else {
+                "This zone has no chunk of terrain and nothing listed in it: nothing to frame.".to_owned()
+            });
             return;
         };
-        let inside = |at: &[f32; 3]| (low[0]..=high[0]).contains(&at[0]) && (low[1]..=high[1]).contains(&at[1]);
-        let heights: Vec<f32> = self
-            .tree
-            .known
-            .values()
-            .filter(|at| inside(at))
-            .map(|at| at[2])
-            .collect();
+        let inside = |at: &&[f32; 3]| (low[0]..=high[0]).contains(&at[0]) && (low[1]..=high[1]).contains(&at[1]);
+        let heights: Vec<f32> = places.iter().filter(inside).map(|at| at[2]).collect();
         let (bottom, top) = if heights.is_empty() {
             (0.0, 150.0)
         } else {
             (
                 heights.iter().copied().fold(f32::MAX, f32::min),
-                heights.iter().copied().fold(f32::MIN, f32::max),
+                heights.iter().copied().fold(f32::MIN, f32::max) + 10.0,
             )
         };
+        // A box of a few yards at least, for a zone of one entity.
+        let (low, high) = (
+            [low[0].min(high[0] - 10.0), low[1].min(high[1] - 10.0)],
+            [high[0].max(low[0] + 10.0), high[1].max(low[1] + 10.0)],
+        );
         let (min, max) = ([low[0], low[1], bottom], [high[0], high[1], top]);
-        if let Err(reason) = ctx.editor().call("viewport.frame", json!({ "min": min, "max": max })) {
-            log::warn!("the zone {zone} is not framed: {reason}");
-        }
+        self.said = match ctx.editor().call("viewport.frame", json!({ "min": min, "max": max })) {
+            Ok(_) => None,
+            Err(reason) => Some(format!("The zone is not framed: {reason}")),
+        };
     }
 
     /// Frames the entity `id` in the 3D view: one far from the camera by its known place, which
@@ -426,6 +471,9 @@ impl HierarchyModule {
             self.rows = self.tree.rows(&self.unfolded);
         }
         self.header(ui);
+        if let Some(said) = &self.said {
+            ui.colored_label(ui.visuals().warn_fg_color, said);
+        }
         let selected: Vec<String> = selection.ids.iter().map(ToString::to_string).collect();
         ui.horizontal(|ui| {
             if ui
@@ -604,6 +652,7 @@ impl HierarchyModule {
                         .is_some_and(|area| area != 0) =>
                 {
                     self.zone = tree.nodes[self.rows[index].0 as usize].area;
+                    self.said = None;
                     scene.select(Select::Clear);
                 }
                 (_, _, None) => {
