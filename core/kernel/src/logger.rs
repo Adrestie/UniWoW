@@ -32,6 +32,26 @@ static INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 
 struct Logger;
 
+/// Whether the last record of `wgpu_hal` was a message of the Vulkan loader taken down to debug,
+/// for the list of its objects that follows it to go with it.
+static LOADER_DEMOTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The level a record is kept at: a message of the Vulkan loader that a layer's JSON file is
+/// missing, which another program registered on the system (an overlay that left its manifest
+/// behind), and the list of its objects after it, taken down to debug; every other as it came.
+fn level_of(target: &str, level: Level, message: &str, previous_demoted: bool) -> (Level, bool) {
+    if !target.starts_with("wgpu_hal") {
+        return (level, false);
+    }
+    let missing_layer = message.contains("Loader Message") && message.contains("Failed to open JSON file");
+    let its_objects = previous_demoted && message.trim_start().starts_with("objects:");
+    if missing_layer || its_objects {
+        (Level::Debug, true)
+    } else {
+        (level, false)
+    }
+}
+
 impl Log for Logger {
     fn enabled(&self, metadata: &Metadata) -> bool {
         let noisy = ["wgpu", "naga", "eframe", "egui"]
@@ -44,11 +64,20 @@ impl Log for Logger {
         if !self.enabled(record.metadata()) {
             return;
         }
+        let message = record.args().to_string();
+        let previous = LOADER_DEMOTED.load(std::sync::atomic::Ordering::Relaxed);
+        let (level, demoted) = level_of(record.target(), record.level(), &message, previous);
+        if record.target().starts_with("wgpu_hal") {
+            LOADER_DEMOTED.store(demoted, std::sync::atomic::Ordering::Relaxed);
+        }
+        if level > Level::Warn && record.target().starts_with("wgpu") {
+            return;
+        }
         let line = LogLine {
             seconds: START.get_or_init(Instant::now).elapsed().as_secs_f32(),
-            level: record.level(),
+            level,
             source: source_of(record.target()),
-            message: record.args().to_string(),
+            message,
         };
         eprintln!("[{:>5}] {}: {}", line.level, line.source, line.message);
         if line.level == Level::Error && record.target() != NOTIFIED {
@@ -157,7 +186,7 @@ pub fn wake(ctx: &egui::Context) {
 mod tests {
     use uniwow_api::log::{Level, Log, Record};
 
-    use super::{Logger, NOTIFIED, drain_errors, take_errors};
+    use super::{Logger, NOTIFIED, drain_errors, level_of, take_errors};
 
     fn log(level: Level, target: &str, message: &str) {
         Logger.log(
@@ -190,6 +219,40 @@ mod tests {
         assert!(
             !drain_errors().iter().any(|line| line.message.contains("notices test")),
             "taken once"
+        );
+    }
+
+    #[test]
+    fn a_layer_another_program_left_behind_is_no_error_but_the_other_messages_of_vulkan_are() {
+        let missing = "GENERAL [Loader Message (0x0)]\n\tloader_get_json: Failed to open JSON file \
+                       C:\\Program Files (x86)\\Epic Games\\EOSOverlayVkLayer-Win64.json";
+        assert_eq!(
+            level_of("wgpu_hal::vulkan::instance", Level::Error, missing, false),
+            (Level::Debug, true)
+        );
+        let objects = "\tobjects: (type: INSTANCE, hndl: 0x2bfcdd9ee70, name: ?)";
+        assert_eq!(
+            level_of("wgpu_hal::vulkan::instance", Level::Error, objects, true),
+            (Level::Debug, true)
+        );
+        assert_eq!(
+            level_of("wgpu_hal::vulkan::instance", Level::Error, objects, false),
+            (Level::Error, false),
+            "the objects of a real error kept"
+        );
+        let real = "VALIDATION [VUID-vkCmdDraw-None-02699 (0x0)]";
+        assert_eq!(
+            level_of("wgpu_hal::vulkan::instance", Level::Error, real, false),
+            (Level::Error, false)
+        );
+        let other_loader = "GENERAL [Loader Message (0x0)]\n\tloader_scanned_icd_add: Could not get ICD";
+        assert_eq!(
+            level_of("wgpu_hal::vulkan::instance", Level::Error, other_loader, false),
+            (Level::Error, false)
+        );
+        assert_eq!(
+            level_of("uniwow_kernel", Level::Error, missing, false),
+            (Level::Error, false)
         );
     }
 }
