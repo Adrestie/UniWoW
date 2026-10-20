@@ -7,3 +7,6 @@ edition.workspace = true
 [dependencies]
 mysql = { version = "28.0.4", default-features = false, features = ["minimal-rust"] }
 serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security_Credentials"] }

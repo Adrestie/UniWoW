@@ -1,9 +1,12 @@
 //! The world database of AzerothCore (step 15.11a), read only: its address, port, user and database
-//! in the panel *World database*; its password asked at each start in a window of its own, masked,
-//! kept in memory for the session only to connect again, never written (not in the settings, the
-//! project, the log, the notices, nor a message of failure). The connection lives on a thread of its
-//! own, its session read only; the service `world-db` and the command `world-db.query` run one
-//! statement at a time beginning with `SELECT`, `SHOW`, `DESCRIBE` or `EXPLAIN`.
+//! in the panel *World database*; its password asked in a window of its own, masked, and kept, when
+//! the user leaves *Remember password* checked, in the Credential Manager of Windows once the
+//! connection is made (never in the settings, the project, the log, the notices, nor a message of
+//! failure). With *Connect automatically at startup* (checked by default) and a password kept, the
+//! editor connects at its start without the window, which opens again if refused. The connection
+//! lives on a thread of its own, its session read only; the service `world-db` and the command
+//! `world-db.query` run one statement at a time beginning with `SELECT`, `SHOW`, `DESCRIBE` or
+//! `EXPLAIN`.
 
 #[cfg(test)]
 mod tests;
@@ -12,6 +15,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use uniwow_api::db::secret::{self, Vault};
 use uniwow_api::db::{Connection, Rows, Settings};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::world_db::{self, State};
@@ -119,6 +123,36 @@ fn serve(shared: Arc<Shared>, asked: Receiver<Asked>, cancelled: impl Fn() -> bo
 /// The keys of the settings, kept by the module: never the password.
 const KEYS: [&str; 4] = ["host", "port", "user", "database"];
 
+/// The setting of the connection made at the start of the editor with the password kept.
+const AT_START: &str = "connect_at_start";
+
+/// What the module does at its start: connect with the password kept, or ask it.
+#[derive(Debug, PartialEq)]
+enum Start {
+    Connect(String),
+    Ask,
+}
+
+/// What the module does at its start, connecting at the start as `at_start` says, the password kept
+/// for the connection being `kept`.
+fn start(at_start: bool, kept: Result<Option<String>, String>) -> Start {
+    match (at_start, kept) {
+        (true, Ok(Some(password))) if !password.is_empty() => Start::Connect(password),
+        (_, Err(reason)) => {
+            log::warn!("{reason}");
+            Start::Ask
+        }
+        _ => Start::Ask,
+    }
+}
+
+/// A connection asked, waiting for its outcome: the password to keep once connected (none when
+/// the user chose not to), and whether it was made at the start without the window.
+struct Pending {
+    keep: Option<(String, String, String)>,
+    automatic: bool,
+}
+
 fn settings_of(ctx: &Context) -> Settings {
     let defaults = Settings::default();
     let text = |key: &str, default: &str| {
@@ -137,7 +171,6 @@ fn settings_of(ctx: &Context) -> Settings {
     }
 }
 
-#[derive(Default)]
 struct WorldDbModule {
     shared: Arc<Shared>,
     thread: Option<JobId>,
@@ -145,16 +178,89 @@ struct WorldDbModule {
     editing: Option<Settings>,
     password: String,
     asking: bool,
+    /// Whether the password typed is kept once connected (*Remember password*).
+    remember: bool,
+    pending: Option<Pending>,
+    /// Where passwords are kept, and whether one is for the connection of the settings.
+    vault: Arc<dyn Vault>,
+    kept: Option<bool>,
+}
+
+impl Default for WorldDbModule {
+    fn default() -> Self {
+        Self {
+            shared: Arc::default(),
+            thread: None,
+            editing: None,
+            password: String::new(),
+            asking: false,
+            remember: true,
+            pending: None,
+            vault: Arc::new(secret::System),
+            kept: None,
+        }
+    }
 }
 
 impl WorldDbModule {
-    fn connect(&mut self, ctx: &mut Context) {
+    /// Connects with `password`, kept once connected when `keep`, made at the start when
+    /// `automatic`.
+    fn connect_with(&mut self, ctx: &mut Context, password: String, keep: bool, automatic: bool) {
         let settings = settings_of(ctx);
-        let password = std::mem::take(&mut self.password);
+        self.pending = Some(Pending {
+            keep: keep.then(|| (secret::target(&settings), settings.user.clone(), password.clone())),
+            automatic,
+        });
+        if !keep && let Err(reason) = self.vault.forget(&secret::target(&settings)) {
+            log::warn!("{reason}");
+        }
+        self.kept = None;
+        // Connecting from now: a refusal said before is no outcome of this one.
+        self.shared.set(State::Connecting);
         if let Some(asked) = lock(&self.shared.asked).as_ref() {
             let _ = asked.send(Asked::Connect(settings, password));
         }
         self.asking = false;
+    }
+
+    fn connect(&mut self, ctx: &mut Context) {
+        let password = std::mem::take(&mut self.password);
+        self.connect_with(ctx, password, self.remember, false);
+    }
+
+    /// The outcome of the connection asked: its password kept once connected; the window opened
+    /// again when one made at the start is refused.
+    fn settle(&mut self) {
+        use world_db::WorldDb as _;
+        let state = Service(self.shared.clone()).state();
+        let Some(pending) = &mut self.pending else {
+            return;
+        };
+        match state {
+            State::Connected(_) => {
+                if let Some((target, user, password)) = pending.keep.take()
+                    && let Err(reason) = self.vault.set(&target, &user, &password)
+                {
+                    log::warn!("{reason}");
+                }
+                self.pending = None;
+                self.kept = None;
+            }
+            State::Refused(_) => {
+                self.asking |= pending.automatic;
+                self.pending = None;
+            }
+            State::Waiting | State::Connecting => {}
+        }
+    }
+
+    /// Whether a password is kept for the connection of the settings, asked of the vault once.
+    fn is_kept(&mut self, ctx: &Context) -> bool {
+        *self.kept.get_or_insert_with(|| {
+            self.vault
+                .get(&secret::target(&settings_of(ctx)))
+                .is_ok_and(|kept| kept.is_some())
+        })
     }
 }
 
@@ -209,8 +315,11 @@ impl Module for WorldDbModule {
             serve(shared, receiver, || job.is_cancelled());
         }));
         self.shared.set(State::Waiting);
-        // Asked at each start.
-        self.asking = true;
+        let at_start = ctx.setting(AT_START).and_then(|value| value.as_bool()).unwrap_or(true);
+        match start(at_start, self.vault.get(&secret::target(&settings_of(ctx)))) {
+            Start::Connect(password) => self.connect_with(ctx, password, true, true),
+            Start::Ask => self.asking = true,
+        }
     }
 
     fn shutdown(&mut self) {
@@ -219,9 +328,15 @@ impl Module for WorldDbModule {
     }
 
     fn windows_ui(&mut self, egui: &egui::Context, ctx: &mut Context) {
+        self.settle();
         if !self.asking {
             return;
         }
+        let mut at_start = ctx.setting(AT_START).and_then(|value| value.as_bool()).unwrap_or(true);
+        let refused = match lock(&self.shared.state).clone() {
+            Some(State::Refused(reason)) => Some(reason),
+            _ => None,
+        };
         let settings = settings_of(ctx);
         let mut connect = false;
         let mut later = false;
@@ -231,9 +346,12 @@ impl Module for WorldDbModule {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(egui, |ui| {
                 ui.label(format!(
-                    "The password of {} for {} on {}:{}, read only; kept for this session alone, never written.",
+                    "The password of {} for {} on {}:{}, read only.",
                     settings.user, settings.database, settings.host, settings.port
                 ));
+                if let Some(reason) = &refused {
+                    ui.colored_label(ui.visuals().warn_fg_color, format!("Refused: {reason}"));
+                }
                 let field = ui.add(
                     egui::TextEdit::singleline(&mut self.password)
                         .password(true)
@@ -242,6 +360,9 @@ impl Module for WorldDbModule {
                 if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     connect = true;
                 }
+                ui.checkbox(&mut self.remember, "Remember password")
+                    .on_hover_text("Kept in the Credential Manager of Windows once connected, for your account alone");
+                ui.checkbox(&mut at_start, "Connect automatically at startup");
                 ui.horizontal(|ui| {
                     connect |= ui.button("Connect").clicked();
                     later = ui.button("Not now").clicked();
@@ -252,6 +373,9 @@ impl Module for WorldDbModule {
                         .small(),
                 );
             });
+        if at_start != ctx.setting(AT_START).and_then(|value| value.as_bool()).unwrap_or(true) {
+            ctx.set_setting(AT_START, json!(at_start));
+        }
         if connect {
             self.connect(ctx);
         } else if later {
@@ -313,7 +437,26 @@ impl Module for WorldDbModule {
             {
                 self.asking = true;
             }
+            let kept = self.is_kept(ctx);
+            if ui
+                .add_enabled(kept, egui::Button::new("Forget password"))
+                .on_hover_text("Takes the password kept out of the Credential Manager of Windows")
+                .clicked()
+            {
+                if let Err(reason) = self.vault.forget(&secret::target(&settings_of(ctx))) {
+                    log::warn!("{reason}");
+                }
+                self.kept = None;
+            }
         });
+        let mut at_start = ctx.setting(AT_START).and_then(|value| value.as_bool()).unwrap_or(true);
+        if ui
+            .checkbox(&mut at_start, "Connect automatically at startup")
+            .on_hover_text("With the password kept; the window asks it otherwise")
+            .changed()
+        {
+            ctx.set_setting(AT_START, json!(at_start));
+        }
     }
 
     fn on_job(&mut self, job: JobId, outcome: JobOutcome, _ctx: &mut Context) {

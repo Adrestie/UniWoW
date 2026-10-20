@@ -168,6 +168,8 @@ fn from_mysql(value: mysql::Value) -> Value {
     }
 }
 
+pub mod secret;
+
 #[cfg(test)]
 mod fake_server;
 

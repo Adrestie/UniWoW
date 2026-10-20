@@ -8919,10 +8919,12 @@ of each (template or spawn) is in *Checked before proposing*.
   library to install on Windows), and keeps up with the protocol and the ways of authentication of
   MySQL 8. The runtime's fingerprint changes once; its symbols are counted (step 15.1).
 - **The module `world-db`**: the address, port, user and database (`127.0.0.1`, 3306, `acore`,
-  `acore_world` by default) in its category of *Settings*; at each start, once they are set, a window
-  of its own asks the password (masked, *Connect* or *Not now*), kept in memory for the session
-  only, to connect again, and never written: not in the settings, the project, the log, the notices,
-  nor a message of failure; a test reads them all after a session. The connection is opened in a
+  `acore_world` by default) in its category of *Settings*; a window of its own asks the password
+  (masked, *Connect* or *Not now*). Changed after 15.14 at the user's request: the password is kept,
+  *Remember password* checked by default, in the Credential Manager of Windows once connected, and
+  with *Connect automatically at startup* (checked by default) the editor connects at its start
+  without the window, which opens again when refused; never in the settings, the project, the log,
+  the notices, nor a message of failure. The connection is opened in a
   thread of its own and set read only for the session (`SET SESSION TRANSACTION READ ONLY`); the
   service runs only one statement at a time beginning with `SELECT`, `SHOW`, `DESCRIBE` or
   `EXPLAIN`. Its state (connected, refused and why, no server) is a dot in its panel, as the live
@@ -10495,6 +10497,19 @@ leaving them out; drawn in red by a layer of its own, closed, a little above the
 the creatures selected, or all with *Show every patrol path* in its panel. Read only. Tests: the
 points of a path in order, a path read by both queries kept once, one point no path, the segments
 closed.
+
+#### After 15.14: the connection remembered
+
+Asked by the user: the module `world-db` keeps the password, *Remember password* being checked (by
+default) in its window, in the Credential Manager of Windows (`libs/db`, `secret::System`: a generic
+credential of the target `UniWoW world-db <user>@<host>:<port>`, readable by the user's account
+alone), written once the connection is made; never in the settings, the project or the log.
+*Connect automatically at startup* (a setting, checked by default, in the window and the panel):
+with a password kept, the editor connects at its start without the window; refused, it opens with
+the reason. *Forget password* in the panel takes it out of the Credential Manager. Tests: a password
+kept by Windows, read back and forgotten under a target of the test; what the module does at its
+start; a password kept once connected and not before, nothing kept when refused, a refusal at the
+start asking again.
 
 ### Milestone 10: Lua modules (outline)
 

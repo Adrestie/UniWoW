@@ -58,3 +58,60 @@ fn a_connection_refused_is_said_without_its_password_and_the_queries_wait_for_no
     stop.store(true, Ordering::Relaxed);
     thread.join().unwrap();
 }
+
+#[test]
+fn at_the_start_the_password_kept_connects_unless_the_user_chose_otherwise() {
+    use crate::{Start, start};
+    assert_eq!(
+        start(true, Ok(Some("kept".to_owned()))),
+        Start::Connect("kept".to_owned())
+    );
+    assert_eq!(
+        start(false, Ok(Some("kept".to_owned()))),
+        Start::Ask,
+        "not at the start"
+    );
+    assert_eq!(start(true, Ok(None)), Start::Ask, "none kept");
+    assert_eq!(start(true, Ok(Some(String::new()))), Start::Ask);
+    assert_eq!(start(true, Err("unreadable".to_owned())), Start::Ask);
+}
+
+#[test]
+fn a_password_is_kept_once_connected_and_a_refusal_at_the_start_asks_again() {
+    use uniwow_api::db::secret::{self, Memory, Vault};
+    let vault = Arc::new(Memory::default());
+    let mut module = crate::WorldDbModule {
+        vault: vault.clone(),
+        ..crate::WorldDbModule::default()
+    };
+    let target = secret::target(&Settings::default());
+    // Asked by the window with Remember password: kept once connected, not before.
+    module.pending = Some(crate::Pending {
+        keep: Some((target.clone(), "acore".to_owned(), "typed".to_owned())),
+        automatic: false,
+    });
+    module.shared.set(State::Connecting);
+    module.settle();
+    assert_eq!(vault.get(&target).unwrap(), None, "not before it connects");
+    module.shared.set(State::Connected("8.4.8".to_owned()));
+    module.settle();
+    assert_eq!(vault.get(&target).unwrap().as_deref(), Some("typed"));
+    assert!(module.pending.is_none());
+    // Refused, typed: nothing kept, the window not opened by itself.
+    vault.forget(&target).unwrap();
+    module.pending = Some(crate::Pending {
+        keep: Some((target.clone(), "acore".to_owned(), "wrong".to_owned())),
+        automatic: false,
+    });
+    module.shared.set(State::Refused("Access denied".to_owned()));
+    module.settle();
+    assert_eq!(vault.get(&target).unwrap(), None);
+    assert!(!module.asking);
+    // Refused at the start, with the password kept: the window opened again.
+    module.pending = Some(crate::Pending {
+        keep: None,
+        automatic: true,
+    });
+    module.settle();
+    assert!(module.asking);
+}
