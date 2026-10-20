@@ -232,7 +232,12 @@ impl SpawnsModule {
         self.read_for = Some((map, server));
         self.reading = Some(
             ctx.spawn_thread("Read the spawns of the map from the world database", move |_| -> Read {
-                let creatures = database.query(data::CREATURES, &[json!(map)])?;
+                // The names of this database's version of AzerothCore.
+                let schema = data::Schema::of(
+                    &database.query(data::ENTRY_COLUMN, &[])?,
+                    &database.query(data::MODELS_TABLE, &[])?,
+                );
+                let creatures = database.query(&data::creatures(schema), &[json!(map)])?;
                 let objects = database.query(data::OBJECTS, &[json!(map)])?;
                 let mut spawns = data::spawns(&creatures, Kind::Creature);
                 spawns.extend(data::spawns(&objects, Kind::GameObject));
@@ -248,8 +253,8 @@ impl SpawnsModule {
                     .collect::<Result<Vec<_>, _>>()?;
                 // The patrol paths, which a database without those tables leaves out.
                 let mut paths = paths::Paths::new();
-                for query in [paths::ADDON_PATHS, paths::SMART_PATHS] {
-                    match database.query(query, &[json!(map)]) {
+                for query in [paths::addon_paths(schema.entry), paths::smart_paths(schema.entry)] {
+                    match database.query(&query, &[json!(map)]) {
                         Ok(rows) => paths::add_paths(&mut paths, &rows),
                         Err(reason) => log::warn!("the patrol paths are not read: {reason}"),
                     }

@@ -51,6 +51,9 @@ pub struct CommandsPanel {
     next_call: u64,
     waiting: Option<u64>,
     answer: Option<Result<Value, String>>,
+    /// The answer of a command of the calling thread, run on a thread of its own: it may wait, for
+    /// rows of the database or a job, which the interface thread must not.
+    threaded: Option<(u64, std::sync::mpsc::Receiver<Result<Value, String>>)>,
 }
 
 impl CommandsPanel {
@@ -59,6 +62,37 @@ impl CommandsPanel {
         if self.waiting == Some(call) {
             self.waiting = None;
             self.answer = Some(result);
+        }
+    }
+
+    /// Calls `name`, a command of the calling thread, on a thread of its own, giving up the answer
+    /// still awaited, if any; `wake` drawn again once it answers.
+    fn call_on_thread(&mut self, bridge: &std::sync::Arc<Bridge>, name: &str, arguments: Value, wake: egui::Context) {
+        self.next_call += 1;
+        self.waiting = Some(self.next_call);
+        self.answer = None;
+        let (sent, answer) = std::sync::mpsc::channel();
+        let (bridge, name) = (bridge.clone(), name.to_owned());
+        std::thread::spawn(move || {
+            let _ = sent.send(bridge.call("kernel", &name, arguments));
+            wake.request_repaint();
+        });
+        self.threaded = Some((self.next_call, answer));
+    }
+
+    /// Takes the answer of the command run on a thread of its own, once it came.
+    fn settle_threaded(&mut self) {
+        let Some((call, answer)) = &self.threaded else {
+            return;
+        };
+        match answer.try_recv() {
+            Ok(result) => {
+                let call = *call;
+                self.threaded = None;
+                self.answer(call, result);
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.threaded = None,
         }
     }
 
@@ -76,7 +110,8 @@ impl CommandsPanel {
         });
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, bridge: &Bridge) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, bridge: &std::sync::Arc<Bridge>) {
+        self.settle_threaded();
         let commands = bridge.commands();
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
@@ -123,6 +158,9 @@ impl CommandsPanel {
                     // replaces the one awaited, or the wait is given up.
                     if ui.button("Call").clicked() {
                         match serde_json::from_str::<Value>(&self.arguments) {
+                            Ok(arguments) if command.on_caller => {
+                                self.call_on_thread(bridge, &command.name, arguments, ui.ctx().clone())
+                            }
                             Ok(arguments) => self.call(bridge, &command.name, arguments),
                             Err(error) => self.answer = Some(Err(format!("invalid JSON: {error}"))),
                         }
@@ -182,5 +220,25 @@ mod tests {
         assert!(panel.answer.is_none(), "the answer of the call replaced is dropped");
         panel.answer(calls[1], Ok(json!("quick")));
         assert_eq!(panel.answer, Some(Ok(json!("quick"))));
+    }
+
+    #[test]
+    fn a_command_of_the_calling_thread_runs_on_a_thread_of_its_own_and_its_answer_is_shown() {
+        let (bridge, _requests) = Bridge::new(None);
+        let bridge = std::sync::Arc::new(bridge);
+        let mut panel = CommandsPanel::default();
+        // Unknown here: what matters is where it ran and that its answer came back.
+        panel.call_on_thread(&bridge, "x.rows", json!({}), uniwow_api::egui::Context::default());
+        let started = std::time::Instant::now();
+        while panel.answer.is_none() && started.elapsed() < std::time::Duration::from_secs(5) {
+            panel.settle_threaded();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            matches!(&panel.answer, Some(Err(error)) if error.contains("x.rows")),
+            "{:?}",
+            panel.answer
+        );
+        assert!(panel.threaded.is_none());
     }
 }

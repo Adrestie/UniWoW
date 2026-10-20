@@ -499,7 +499,7 @@ impl Inspector {
                 if entity.provider() != "spawns" {
                     ui.colored_label(
                         ui.visuals().warn_fg_color,
-                        "Its spawn is not read from the world database (see the panels World database and Spawns):                          no Spawn, Template, Quests nor patrol path.",
+                        "Its spawn is not read from the world database (see the panels World database and Spawns): no Spawn, Template, Quests nor patrol path.",
                     );
                 }
             } else if entity.flags() & scene::flags::READ_ONLY != 0 {

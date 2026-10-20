@@ -9,13 +9,55 @@ use uniwow_api::formats::TileId;
 use uniwow_api::scene::{self, Entity, EntityId, Kind, Piece, PieceBuilder, flags};
 use uniwow_api::serde_json::{Value, json};
 
-/// The creatures of a map, with their template's name and first look.
-pub const CREATURES: &str = "SELECT c.guid, c.id1, c.position_x, c.position_y, c.position_z, c.orientation, \
-     t.name, m.CreatureDisplayID, m.DisplayScale FROM creature c JOIN creature_template t ON t.entry = c.id1 \
-     LEFT JOIN creature_template_model m ON m.CreatureID = c.id1 AND m.Idx = 0 WHERE c.map = ?";
+/// What the world database's version of AzerothCore names: the column of a creature's template
+/// (`id1` since spawns may take several templates, `id` before), and whether the looks of the
+/// templates are in `creature_template_model` (their `modelid1` and `scale` before).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Schema {
+    pub entry: &'static str,
+    pub models_table: bool,
+}
+
+/// Whether `creature` has the column `id1`: rows when it has.
+pub const ENTRY_COLUMN: &str = "SHOW COLUMNS FROM creature LIKE 'id1'";
+/// Whether the table `creature_template_model` is: rows when it is.
+pub const MODELS_TABLE: &str = "SHOW TABLES LIKE 'creature_template_model'";
+
+impl Schema {
+    /// The schema the answers to `ENTRY_COLUMN` and `MODELS_TABLE` tell.
+    pub fn of(entry_column: &Rows, models_table: &Rows) -> Self {
+        Self {
+            entry: if entry_column.rows.is_empty() { "id" } else { "id1" },
+            models_table: !models_table.rows.is_empty(),
+        }
+    }
+}
+
+/// The creatures of a map, with their template's name and first look, their template's entry as
+/// `id1` whatever the schema calls it.
+pub fn creatures(schema: Schema) -> String {
+    let entry = schema.entry;
+    let looks = if schema.models_table {
+        format!(
+            "m.CreatureDisplayID, m.DisplayScale FROM creature c JOIN creature_template t ON t.entry = c.{entry} \
+             LEFT JOIN creature_template_model m ON m.CreatureID = c.{entry} AND m.Idx = 0"
+        )
+    } else {
+        format!(
+            "t.modelid1 AS CreatureDisplayID, t.scale AS DisplayScale FROM creature c \
+             JOIN creature_template t ON t.entry = c.{entry}"
+        )
+    };
+    format!(
+        "SELECT c.guid, c.{entry} AS id1, c.position_x, c.position_y, c.position_z, c.orientation, t.name, \
+         {looks} WHERE c.map = ?"
+    )
+}
+
 /// The game objects of a map, with their template's name, look and size.
 pub const OBJECTS: &str = "SELECT g.guid, g.id, g.position_x, g.position_y, g.position_z, g.orientation, \
-     g.rotation0, g.rotation1, g.rotation2, g.rotation3, t.name, t.displayId, t.size FROM gameobject g      JOIN gameobject_template t ON t.entry = g.id WHERE g.map = ?";
+     g.rotation0, g.rotation1, g.rotation2, g.rotation3, t.name, t.displayId, t.size FROM gameobject g \
+     JOIN gameobject_template t ON t.entry = g.id WHERE g.map = ?";
 /// The highest guid of each table, so that a spawn created takes one above.
 pub const HIGHEST: [&str; 2] = ["SELECT MAX(guid) FROM creature", "SELECT MAX(guid) FROM gameobject"];
 /// The highest entry of the templates of game objects, so that a template created takes one above.
@@ -888,5 +930,82 @@ mod tests {
         turned.moved.insert(spawn.id(), (spawn.position, 1.0));
         let laid = turned.laid_over(std::slice::from_ref(&spawn));
         assert_eq!(laid[0].rotation, Some(yaw_quaternion(1.0)));
+    }
+
+    #[test]
+    fn the_creatures_are_read_by_the_names_of_each_version_of_azerothcore() {
+        let rows_of = |count: usize| Rows {
+            columns: vec!["Field".to_owned()],
+            rows: vec![vec![json!("x")]; count],
+        };
+        let recent = Schema::of(&rows_of(1), &rows_of(1));
+        assert_eq!(
+            recent,
+            Schema {
+                entry: "id1",
+                models_table: true
+            }
+        );
+        let query = creatures(recent);
+        assert!(
+            query.contains("c.id1 AS id1") && query.contains("creature_template_model m"),
+            "{query}"
+        );
+        let older = Schema::of(&rows_of(0), &rows_of(0));
+        assert_eq!(
+            older,
+            Schema {
+                entry: "id",
+                models_table: false
+            }
+        );
+        let query = creatures(older);
+        assert!(query.contains("c.id AS id1"), "{query}");
+        assert!(
+            query.contains("t.modelid1 AS CreatureDisplayID") && !query.contains("creature_template_model"),
+            "{query}"
+        );
+        assert!(!query.contains("c.id1"), "{query}");
+        for paths in [crate::paths::addon_paths("id"), crate::paths::smart_paths("id")] {
+            assert!(
+                paths.contains("c.id ")
+                    || paths.contains(
+                        "c.id
+"
+                    )
+                    || paths.contains("= c.id"),
+                "{paths}"
+            );
+            assert!(!paths.contains("c.id1"), "{paths}");
+        }
+        // Read as the rows of either give them: the entry under `id1`.
+        let rows = Rows {
+            columns: [
+                "guid",
+                "id1",
+                "position_x",
+                "position_y",
+                "position_z",
+                "orientation",
+                "name",
+                "CreatureDisplayID",
+                "DisplayScale",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            rows: vec![vec![
+                json!(79666),
+                json!(68),
+                json!(-8800.0),
+                json!(640.0),
+                json!(94.0),
+                json!(0.0),
+                json!("Stormwind City Guard"),
+                json!(3167),
+                json!(1.0),
+            ]],
+        };
+        assert_eq!(spawns(&rows, Kind::Creature)[0].entry, 68);
+        assert!(uniwow_api::db::allowed(ENTRY_COLUMN).is_ok() && uniwow_api::db::allowed(MODELS_TABLE).is_ok());
     }
 }

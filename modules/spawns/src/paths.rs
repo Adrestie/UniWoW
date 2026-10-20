@@ -12,18 +12,27 @@ use uniwow_api::viewport::{Layer, Phase, Target, View};
 use uniwow_api::{bytemuck, egui_wgpu, wgpu};
 
 /// The paths of `creature_addon` and `creature_template_addon` of the creatures of a map: the
-/// spawn, the path, the point and its place.
-pub const ADDON_PATHS: &str = "SELECT c.guid, w.id AS path, w.point, w.position_x, w.position_y, w.position_z \
-     FROM creature c LEFT JOIN creature_addon a ON a.guid = c.guid \
-     LEFT JOIN creature_template_addon t ON t.entry = c.id1 \
-     JOIN waypoint_data w ON w.id = IF(a.path_id IS NOT NULL AND a.path_id <> 0, a.path_id, t.path_id) \
-     WHERE c.map = ? ORDER BY c.guid, w.point";
+/// spawn, the path, the point and its place; `entry` the column of a creature's template.
+pub fn addon_paths(entry: &str) -> String {
+    format!(
+        "SELECT c.guid, w.id AS path, w.point, w.position_x, w.position_y, w.position_z \
+         FROM creature c LEFT JOIN creature_addon a ON a.guid = c.guid \
+         LEFT JOIN creature_template_addon t ON t.entry = c.{entry} \
+         JOIN waypoint_data w ON w.id = IF(a.path_id IS NOT NULL AND a.path_id <> 0, a.path_id, t.path_id) \
+         WHERE c.map = ? ORDER BY c.guid, w.point"
+    )
+}
+
 /// The paths the SmartAI scripts of the creatures of a map start (`SMART_ACTION_WP_START`, 53), of
 /// their template or of the spawn itself.
-pub const SMART_PATHS: &str = "SELECT c.guid, w.entry AS path, w.pointid, w.position_x, w.position_y, \
-     w.position_z FROM creature c JOIN smart_scripts s ON s.source_type = 0 AND s.action_type = 53 \
-     AND (s.entryorguid = c.id1 OR s.entryorguid = -CAST(c.guid AS SIGNED)) \
-     JOIN waypoints w ON w.entry = s.action_param2 WHERE c.map = ? ORDER BY c.guid, w.entry, w.pointid";
+pub fn smart_paths(entry: &str) -> String {
+    format!(
+        "SELECT c.guid, w.entry AS path, w.pointid, w.position_x, w.position_y, w.position_z \
+         FROM creature c JOIN smart_scripts s ON s.source_type = 0 AND s.action_type = 53 \
+         AND (s.entryorguid = c.{entry} OR s.entryorguid = -CAST(c.guid AS SIGNED)) \
+         JOIN waypoints w ON w.entry = s.action_param2 WHERE c.map = ? ORDER BY c.guid, w.entry, w.pointid"
+    )
+}
 
 /// The paths of each spawn by its guid, each its points in order, in the world.
 pub type Paths = BTreeMap<u64, Vec<Vec<[f32; 3]>>>;

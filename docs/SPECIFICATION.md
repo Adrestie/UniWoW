@@ -10511,6 +10511,16 @@ kept by Windows, read back and forgotten under a target of the test; what the mo
 start; a password kept once connected and not before, nothing kept when refused, a refusal at the
 start asking again.
 
+#### After 15.14: the versions of the world database
+
+The user's `acore_world` is older than his sources: `creature` names its template `id` (not `id1`).
+The module `spawns` asks, before it reads, `SHOW COLUMNS FROM creature LIKE 'id1'` and `SHOW TABLES
+LIKE 'creature_template_model'`, and reads the creatures, their looks (`creature_template_model`, or
+the template's `modelid1` and `scale` before it) and their paths by the names the database has.
+The panel *Commands* runs a command of the calling thread on a thread of its own, its answer shown
+once it comes: `world-db.query` waits for its rows, which the interface thread must not. Tests: the
+queries of each version, the creatures read by either; a command run off the interface thread.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
