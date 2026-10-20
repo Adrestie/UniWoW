@@ -10584,6 +10584,12 @@ providers' movers where a moving entity stands at this moment (`Scene::add_mover
 at; the boxes of the selection and the line to the place of spawn are drawn again at each frame
 while one of them moves. Test: a box moved by where its entity stands now.
 
+Then, a zone framed: a click on a zone or subzone of the tree chooses it (its row shown chosen, the
+entities selected let go, its triangle alone folding it); F frames the camera on it. The extent of
+each area of the map, a zone holding its subzones, read once a map by a job from the areas of the
+chunks of every tile of its WDT; its height that of the spawns known there, or 0 to 150 yards. Test:
+a zone spanning its chunks and those of its subzones.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which

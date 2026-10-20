@@ -10,6 +10,7 @@
 mod tests;
 mod tree;
 mod views;
+mod zones;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -55,6 +56,12 @@ struct Made {
 #[derive(Default)]
 struct HierarchyModule {
     scene: Option<scene::Handle>,
+    /// The zone chosen in the tree, framed by F; the extents of the zones of the map, read once a
+    /// map by a job.
+    zone: Option<u32>,
+    extents: Arc<zones::Extents>,
+    extents_for: Option<String>,
+    extents_job: Option<JobId>,
     /// When the tree was asked last.
     built: Option<std::time::Instant>,
     /// What the objects `HierarchyView` are drawn from.
@@ -100,6 +107,25 @@ impl HierarchyModule {
             .as_ref()
             .and_then(|map| map.get("id")?.as_u64())
             .map(|id| id as u32);
+        let directory = shown
+            .as_ref()
+            .and_then(|map| Some(map.get("directory")?.as_str()?.to_owned()));
+        if directory != self.extents_for
+            && let (Some(folder), Some(formats)) = (directory.clone(), ctx.service(uniwow_api::formats::SERVICE))
+            && !snapshot.areas.is_empty()
+        {
+            self.extents_for = directory;
+            self.extents = Arc::default();
+            self.zone = None;
+            let areas = snapshot.areas.clone();
+            if let Some(job) = self.extents_job.take() {
+                ctx.cancel(job);
+            }
+            self.extents_job = Some(ctx.spawn("Read the extents of the zones of the map", move |job| {
+                let tiles = zones::read(&*formats, &folder, || job.is_cancelled());
+                zones::extents(&tiles, &areas)
+            }));
+        }
         let known = scene.known();
         let kept: Vec<EntityId> = selection
             .ids
@@ -178,6 +204,38 @@ impl HierarchyModule {
         self.folded = true;
         self.rows = self.tree.rows(&self.unfolded);
         self.scroll_to = self.rows.iter().position(|(row, _)| *row == node);
+    }
+
+    /// Frames the zone chosen in the 3D view: its extent, its height that of the spawns known there
+    /// when there are some.
+    fn frame_zone(&self, ctx: &mut Context) {
+        let Some(zone) = self.zone else {
+            return;
+        };
+        let Some([low, high]) = self.extents.get(&zone).copied() else {
+            log::info!("the extent of the zone {zone} is not read yet");
+            return;
+        };
+        let inside = |at: &[f32; 3]| (low[0]..=high[0]).contains(&at[0]) && (low[1]..=high[1]).contains(&at[1]);
+        let heights: Vec<f32> = self
+            .tree
+            .known
+            .values()
+            .filter(|at| inside(at))
+            .map(|at| at[2])
+            .collect();
+        let (bottom, top) = if heights.is_empty() {
+            (0.0, 150.0)
+        } else {
+            (
+                heights.iter().copied().fold(f32::MAX, f32::min),
+                heights.iter().copied().fold(f32::MIN, f32::max),
+            )
+        };
+        let (min, max) = ([low[0], low[1], bottom], [high[0], high[1], top]);
+        if let Err(reason) = ctx.editor().call("viewport.frame", json!({ "min": min, "max": max })) {
+            log::warn!("the zone {zone} is not framed: {reason}");
+        }
     }
 
     /// Frames the entity `id` in the 3D view: one far from the camera by its known place, which
@@ -309,6 +367,13 @@ impl Module for HierarchyModule {
     }
 
     fn on_job(&mut self, job: JobId, outcome: JobOutcome, _ctx: &mut Context) {
+        if self.extents_job == Some(job) {
+            self.extents_job = None;
+            if let Some(extents) = outcome.take::<zones::Extents>() {
+                self.extents = Arc::new(extents);
+            }
+            return;
+        }
         if self.job.as_ref().is_none_or(|(running, _)| *running != job) {
             return;
         }
@@ -416,7 +481,8 @@ impl HierarchyModule {
                         }
                         return;
                     }
-                    let selected = node.entity.is_some_and(|id| selection.contains(&id));
+                    let selected = node.entity.is_some_and(|id| selection.contains(&id))
+                        || (node.entity.is_none() && node.area.is_some() && node.area == self.zone);
                     let label = if locked {
                         format!("🔒 {}", node.label)
                     } else {
@@ -523,8 +589,23 @@ impl HierarchyModule {
                         Select::Set(ids)
                     });
                 }
-                (_, _, Some(id)) if modifiers.command => scene.select(Select::Toggle(vec![id])),
-                (_, _, Some(id)) => scene.select(Select::Set(vec![id])),
+                (_, _, Some(id)) if modifiers.command => {
+                    self.zone = None;
+                    scene.select(Select::Toggle(vec![id]))
+                }
+                (_, _, Some(id)) => {
+                    self.zone = None;
+                    scene.select(Select::Set(vec![id]))
+                }
+                // A zone chosen: F frames it; the entities selected let go, for F to be the zone's.
+                (_, _, None)
+                    if tree.nodes[self.rows[index].0 as usize]
+                        .area
+                        .is_some_and(|area| area != 0) =>
+                {
+                    self.zone = tree.nodes[self.rows[index].0 as usize].area;
+                    scene.select(Select::Clear);
+                }
                 (_, _, None) => {
                     let key = tree.nodes[self.rows[index].0 as usize].key.clone();
                     if !self.unfolded.remove(&key) {
@@ -539,6 +620,15 @@ impl HierarchyModule {
         }
         if let Some(id) = framed {
             self.frame(id, ctx);
+        }
+        // F frames the zone chosen, no field being typed in.
+        let typing = ui.ctx().egui_wants_keyboard_input();
+        if !typing
+            && self.zone.is_some()
+            && scene.selection().ids.is_empty()
+            && ui.input(|i| i.key_pressed(egui::Key::F))
+        {
+            self.frame_zone(ctx);
         }
         if let Some((ids, areas, locked)) = locking {
             scene.set_locked(&ids, &areas, locked);
