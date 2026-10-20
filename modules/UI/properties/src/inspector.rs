@@ -495,6 +495,13 @@ impl Inspector {
             if let Some(live) = snapshot.live(id).filter(|live| live.id().kind != Kind::Live) {
                 let [x, y, z] = live.origin();
                 ui.label(format!("● Live: now at {x:.1}, {y:.1}, {z:.1}"));
+                // The world as it runs alone lists it: its spawn not read from the world database.
+                if entity.provider() != "spawns" {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        "Its spawn is not read from the world database (see the panels World database and Spawns):                          no Spawn, Template, Quests nor patrol path.",
+                    );
+                }
             } else if entity.flags() & scene::flags::READ_ONLY != 0 {
                 ui.label(egui::RichText::new("Read only").weak());
             }
