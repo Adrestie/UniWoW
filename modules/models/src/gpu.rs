@@ -368,24 +368,9 @@ impl Shared {
             bind_group_layouts: &[Some(&camera_layout), Some(&batch_layout), skin],
             immediate_size: 0,
         });
-        let posing = if skin.is_some() {
-            include_str!("skin.wgsl")
-        } else {
-            include_str!("rest.wgsl")
-        };
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("models"),
-            source: wgpu::ShaderSource::Wgsl(
-                [
-                    viewport::FOG_WGSL,
-                    viewport::LIGHT_WGSL,
-                    include_str!("common.wgsl"),
-                    posing,
-                    include_str!("models.wgsl"),
-                ]
-                .concat()
-                .into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(models_shader(skin.is_some()).into()),
         });
         let address = |wrap: bool| {
             if wrap {
@@ -579,4 +564,32 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, texture: &Texture) -> Resu
         view: gpu_texture.create_view(&wgpu::TextureViewDescriptor::default()),
         bytes: size,
     })
+}
+
+/// The shader of the models, of those skinned by their bones or at rest.
+fn models_shader(skinned: bool) -> String {
+    let posing = if skinned {
+        include_str!("skin.wgsl")
+    } else {
+        include_str!("rest.wgsl")
+    };
+    [
+        viewport::FOG_WGSL,
+        viewport::LIGHT_WGSL,
+        include_str!("common.wgsl"),
+        posing,
+        include_str!("models.wgsl"),
+    ]
+    .concat()
+}
+
+#[cfg(test)]
+mod wgsl_tests {
+    #[test]
+    fn its_shaders_parse_and_validate() {
+        for skinned in [false, true] {
+            uniwow_api::viewport::check_wgsl(&super::models_shader(skinned))
+                .unwrap_or_else(|error| panic!("models, skinned {skinned}: {error}"));
+        }
+    }
 }

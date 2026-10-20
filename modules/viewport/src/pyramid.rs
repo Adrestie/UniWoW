@@ -263,3 +263,16 @@ impl Pyramid {
         &self.texture
     }
 }
+
+#[cfg(test)]
+mod wgsl_tests {
+    #[test]
+    fn its_shaders_parse_and_validate() {
+        for samples in [1, 4] {
+            uniwow_api::viewport::check_wgsl(&super::first_source(samples))
+                .unwrap_or_else(|error| panic!("pyramid first, {samples} samples: {error}"));
+        }
+        uniwow_api::viewport::check_wgsl(&super::reduce_source())
+            .unwrap_or_else(|error| panic!("pyramid reduce: {error}"));
+    }
+}
