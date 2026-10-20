@@ -550,10 +550,22 @@ fn a_live_creature_of_a_spawn_is_the_spawn_edited_where_it_was_put_and_live_wher
     assert_eq!(snapshot.editable(&rabbit).unwrap().provider(), "live-world");
     assert!(snapshot.live(&rabbit).is_some());
     // The spawn alone: no live listing.
+    // Picked where it runs, not at its place of the database, where nothing is drawn.
+    let ray = |at: [f32; 3]| uniwow_api::viewport::Ray {
+        origin: uniwow_api::glam::Vec3::new(at[0], at[1], at[2] + 50.0),
+        direction: uniwow_api::glam::Vec3::NEG_Z,
+    };
+    let (none, open) = (HashMap::new(), uniwow_api::scene::Locks::default());
+    let picked = crate::picking::pick(&snapshot, &ray(now), &open, &none).map(|hit| hit.id);
+    assert_eq!(picked, Some(guard), "where it runs");
+    let picked = crate::picking::pick(&snapshot, &ray(at), &open, &none).map(|hit| hit.id);
+    assert_eq!(picked, None, "not at its spawn's place while live");
     let snapshot = publish(
         &mut registry,
         vec![Change::Withdraw(PieceKey::part("live-world", 0, 0))],
     );
     assert!(snapshot.live(&guard).is_none());
+    let picked = crate::picking::pick(&snapshot, &ray(at), &open, &none).map(|hit| hit.id);
+    assert_eq!(picked, Some(guard), "at its spawn's place once the world leaves");
     assert_eq!(snapshot.editable(&guard).unwrap().provider(), "spawns");
 }

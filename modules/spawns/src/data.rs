@@ -158,6 +158,34 @@ pub struct Spawn {
     pub scale: f32,
     /// A game object's rotation, a quaternion x, y, z, w in the world; none for a creature.
     pub rotation: Option<[f32; 4]>,
+    /// The game event it belongs to (`game_event_creature`, `game_event_gameobject`): spawned
+    /// while it runs when above 0, taken away while it runs when below; 0 for none.
+    pub event: i32,
+}
+
+/// The game events of the spawns: the creatures', then the game objects'.
+pub const EVENTS: [&str; 2] = [
+    "SELECT guid, eventEntry FROM game_event_creature",
+    "SELECT guid, eventEntry FROM game_event_gameobject",
+];
+
+/// The events of `rows` (guid, event) given to the spawns of `kind` of `spawns`.
+pub fn set_events(spawns: &mut [Spawn], kind: Kind, rows: &Rows) {
+    let number = |value: Option<&Value>| match value? {
+        Value::Number(number) => number.as_i64(),
+        Value::String(text) => text.trim().parse().ok(),
+        _ => None,
+    };
+    let events: HashMap<u64, i32> = rows
+        .rows
+        .iter()
+        .filter_map(|row| Some((number(row.first())? as u64, number(row.get(1))? as i32)))
+        .collect();
+    for spawn in spawns.iter_mut().filter(|spawn| spawn.kind == kind) {
+        if let Some(event) = events.get(&spawn.guid) {
+            spawn.event = *event;
+        }
+    }
 }
 
 /// The rotation about the vertical by `yaw` radians, as a quaternion x, y, z, w.
@@ -229,6 +257,7 @@ pub fn spawns(rows: &Rows, kind: Kind) -> Vec<Spawn> {
                         rotation
                     }
                 }),
+                event: 0,
             })
         })
         .collect()
@@ -355,6 +384,7 @@ pub fn made_of_doodad(
         orientation: yaw,
         scale,
         rotation: Some(turned.to_array()),
+        event: 0,
     };
     changes.added.insert(spawn.id(), spawn.clone());
     Made {
@@ -525,6 +555,7 @@ impl Changes {
                                 .as_array()
                                 .filter(|parts| parts.len() == 4)
                                 .map(|parts| [0, 1, 2, 3].map(|at| parts[at].as_f64().unwrap_or(0.0) as f32)),
+                            event: 0,
                         },
                     ))
                 })
@@ -635,6 +666,7 @@ pub fn read(spawn: &Spawn, changed: bool, quests: &[Link], titles: &BTreeMap<u32
                 "position_y": spawn.position[1],
                 "position_z": spawn.position[2],
                 "orientation": spawn.orientation,
+                "game event": spawn.event,
             },
         },
     })
@@ -1008,5 +1040,34 @@ mod tests {
         };
         assert_eq!(spawns(&rows, Kind::Creature)[0].entry, 68);
         assert!(uniwow_api::db::allowed(ENTRY_COLUMN).is_ok() && uniwow_api::db::allowed(MODELS_TABLE).is_ok());
+    }
+
+    #[test]
+    fn the_spawns_of_game_events_are_told_by_their_event() {
+        let mut spawns = spawns(&guard(), Kind::Creature);
+        spawns.extend(spawns_of_objects());
+        let rows = |pairs: Vec<(u64, i64)>| Rows {
+            columns: vec!["guid".to_owned(), "eventEntry".to_owned()],
+            rows: pairs
+                .into_iter()
+                .map(|(guid, event)| vec![json!(guid), json!(event)])
+                .collect(),
+        };
+        set_events(&mut spawns, Kind::Creature, &rows(vec![(79753, 2), (5714, 9)]));
+        set_events(&mut spawns, Kind::GameObject, &rows(vec![(5714, -12)]));
+        let events: Vec<(EntityId, i32)> = spawns.iter().map(|spawn| (spawn.id(), spawn.event)).collect();
+        assert_eq!(
+            events,
+            [
+                (EntityId::creature(79753), 2),
+                (EntityId::creature(79754), 0),
+                (EntityId::game_object(5714), -12),
+            ],
+            "a guid of the other table left alone"
+        );
+        assert_eq!(
+            read(&spawns[0], false, &[], &BTreeMap::new())["components"]["raw"]["game event"],
+            2
+        );
     }
 }

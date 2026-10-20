@@ -71,6 +71,8 @@ struct SpawnsModule {
     /// The tiles given to the scene and placed, for those to take away.
     tiles: BTreeSet<TileId>,
     refused: Option<String>,
+    /// Whether the spawns of game events are shown whether the events run or not.
+    show_events: bool,
     /// The patrol paths of the spawns, those drawn, whether all are, and what they were drawn for.
     paths: Arc<paths::Paths>,
     drawn: Arc<std::sync::Mutex<paths::Drawn>>,
@@ -107,7 +109,14 @@ impl SpawnsModule {
         let Some(map) = self.map else {
             return;
         };
-        let spawns = self.changes.laid_over(&self.spawns);
+        // The spawns of game events left out unless the user shows them or the world as it runs
+        // has them: the server spawns those of the events running alone.
+        let spawns: Vec<Spawn> = self
+            .changes
+            .laid_over(&self.spawns)
+            .into_iter()
+            .filter(|spawn| self.show_events || spawn.event <= 0 || self.live.contains(&spawn.id()))
+            .collect();
         let pieces = data::pieces(&spawns);
         let now: BTreeSet<TileId> = pieces.keys().copied().collect();
         if let Some(scene) = &self.scene {
@@ -241,6 +250,13 @@ impl SpawnsModule {
                 let objects = database.query(data::OBJECTS, &[json!(map)])?;
                 let mut spawns = data::spawns(&creatures, Kind::Creature);
                 spawns.extend(data::spawns(&objects, Kind::GameObject));
+                // The game events of the spawns, which a database without those tables leaves out.
+                for (kind, query) in [Kind::Creature, Kind::GameObject].into_iter().zip(data::EVENTS) {
+                    match database.query(query, &[]) {
+                        Ok(rows) => data::set_events(&mut spawns, kind, &rows),
+                        Err(reason) => log::warn!("the game events of the spawns are not read: {reason}"),
+                    }
+                }
                 let highest = [
                     data::highest(&database.query(data::HIGHEST[0], &[])?),
                     data::highest(&database.query(data::HIGHEST[1], &[])?),
@@ -653,6 +669,19 @@ impl Module for SpawnsModule {
                         self.quests.titles.len(),
                         self.quests.links.len()
                     ));
+                    let in_events = self.spawns.iter().filter(|spawn| spawn.event > 0).count();
+                    if ui
+                        .checkbox(
+                            &mut self.show_events,
+                            format!("Show the spawns of game events ({in_events})"),
+                        )
+                        .on_hover_text(
+                            "Otherwise those of the events the server runs now alone, as the live world shows them",
+                        )
+                        .changed()
+                    {
+                        self.refresh();
+                    }
                     ui.checkbox(
                         &mut self.all_paths,
                         format!("Show every patrol path ({} creatures walk one)", self.paths.len()),

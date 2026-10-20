@@ -36,14 +36,26 @@ pub fn pick(snapshot: &Snapshot, ray: &Ray, locks: &Locks, pickers: &HashMap<Str
         }
         for row in 0..placed.piece.len() {
             let id = placed.piece.ids[row];
-            if locks.kinds.contains(&id.kind) || !snapshot.is_first(slot as u32, row as u32, &id) {
+            if locks.kinds.contains(&id.kind) {
                 continue;
             }
-            if let Some(distance) = ray.hits_box(placed.piece.bounds[row]) {
-                let entity = EntityRef { snapshot, placed, row };
-                if !locks.holds(&entity) {
-                    boxes.push((distance, slot as u32, row));
-                }
+            // An entity the world as it runs shows is picked where it runs, by its listing of
+            // the live world alone; any other by its first listing.
+            let entity = EntityRef { snapshot, placed, row };
+            let live = entity.flags() & uniwow_api::scene::flags::LIVE != 0;
+            let picked_here = if live {
+                true
+            } else {
+                snapshot.is_first(slot as u32, row as u32, &id)
+                    && !(matches!(id.kind, Kind::Creature | Kind::GameObject) && snapshot.live(&id).is_some())
+            };
+            if !picked_here {
+                continue;
+            }
+            if let Some(distance) = ray.hits_box(placed.piece.bounds[row])
+                && !locks.holds(&entity)
+            {
+                boxes.push((distance, slot as u32, row));
             }
         }
     }

@@ -10523,6 +10523,19 @@ The panel *Commands* runs a command of the calling thread on a thread of its own
 once it comes: `world-db.query` waits for its rows, which the interface thread must not. Tests: the
 queries of each version, the creatures read by either; a command run off the interface thread.
 
+#### After 15.14: the creatures that walk picked, the spawns of game events
+
+Seen by the user on his server: a creature that walks could no longer be picked, its first listing
+(its place of the database, where nothing is drawn while it is live) the only one the picking took;
+an entity the world as it runs lists is now picked by that listing alone, where it runs, and by its
+first again once the world leaves it. The spawns of every game event (seasonal, world events) were
+shown at once: the module `spawns` reads `game_event_creature` and `game_event_gameobject` (a
+database without them leaving them out) and leaves out those spawned by an event (`eventEntry`
+above 0) unless the live world shows them, the server running their event, or *Show the spawns of
+game events* in its panel; their event in their raw fields. Tests: a live creature picked where it
+runs, not at its spawn's place, then there once the world leaves; the events given to the spawns of
+each table.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
