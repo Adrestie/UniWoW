@@ -397,6 +397,7 @@ pub fn made_of_doodad(
 impl Changes {
     /// `spawns` as the user changed them: those deleted left out, those created added, those moved
     /// at their places.
+    #[cfg(test)]
     pub fn laid_over(&self, spawns: &[Spawn]) -> Vec<Spawn> {
         let mut out: Vec<Spawn> = spawns
             .iter()

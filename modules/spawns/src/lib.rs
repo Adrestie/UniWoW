@@ -44,14 +44,12 @@ impl Command for SetChanges {
 
     fn apply(&mut self, module: &mut dyn std::any::Any) {
         let module: &mut SpawnsModule = module.downcast_mut().expect("the spawns");
-        module.changes = self.after.clone();
-        module.refresh();
+        module.set_changes(self.after.clone());
     }
 
     fn revert(&mut self, module: &mut dyn std::any::Any) {
         let module: &mut SpawnsModule = module.downcast_mut().expect("the spawns");
-        module.changes = self.before.clone();
-        module.refresh();
+        module.set_changes(self.before.clone());
     }
 }
 
@@ -63,8 +61,9 @@ struct SpawnsModule {
     reading: Option<JobId>,
     /// The spawns as the database has them, and the highest guid of each table.
     spawns: Arc<Vec<Spawn>>,
-    /// The place of each spawn in `spawns`, by its id.
+    /// The place of each spawn in `spawns`, by its id, and those of each tile, made once read.
     index: HashMap<EntityId, usize>,
+    by_tile: HashMap<TileId, Vec<usize>>,
     /// Whether the looks of the spawns are to be looked at again, once they or the changes did.
     looks_wanted: bool,
     highest: [u64; 3],
@@ -76,7 +75,7 @@ struct SpawnsModule {
     tiles: BTreeSet<TileId>,
     refused: Option<String>,
     /// The tiles around the camera whose spawns are given to the scene and drawn; none while no
-    /// view tells where the camera is, every tile then.
+    /// view tells where the camera is, no spawn then.
     around: Option<BTreeSet<TileId>>,
     /// Whether the spawns of game events are shown whether the events run or not.
     show_events: bool,
@@ -117,6 +116,17 @@ fn live_of(snapshot: &scene::Snapshot) -> BTreeSet<EntityId> {
 const DISTANCE: &str = "distance";
 const DEFAULT_DISTANCE: i64 = 3;
 
+/// The places in `spawns` of the spawns of each tile.
+fn by_tile(spawns: &[Spawn]) -> HashMap<TileId, Vec<usize>> {
+    let mut out: HashMap<TileId, Vec<usize>> = HashMap::new();
+    for (at, spawn) in spawns.iter().enumerate() {
+        if let Some(tile) = data::tile_of(spawn.position) {
+            out.entry(tile).or_default().push(at);
+        }
+    }
+    out
+}
+
 /// The tiles within `distance` of the tile `centre`, on each side.
 fn tiles_around(centre: TileId, distance: u32) -> BTreeSet<TileId> {
     let span = |at: u32| at.saturating_sub(distance)..=(at + distance).min(63);
@@ -136,60 +146,103 @@ impl SpawnsModule {
         self.refresh_tiles(None);
     }
 
-    /// The spawns of the tiles `only` (every tile when none) given to the scene again and placed.
+    /// The changes made `changes`: the tiles of the spawns they touch given and placed again alone.
+    fn set_changes(&mut self, changes: Changes) {
+        let before = std::mem::replace(&mut self.changes, changes);
+        let mut tiles = self.tiles_of_changes(&before);
+        let after = self.changes.clone();
+        tiles.extend(self.tiles_of_changes(&after));
+        self.looks_wanted = true;
+        self.refresh_tiles(Some(&tiles));
+    }
+
+    /// The tiles of the spawns `changes` names, where the database and `changes` have them.
+    fn tiles_of_changes(&self, changes: &Changes) -> BTreeSet<TileId> {
+        let mut out = BTreeSet::new();
+        let ids = changes
+            .moved
+            .keys()
+            .chain(changes.added.keys())
+            .chain(changes.deleted.iter());
+        for id in ids {
+            let read = self.index.get(id).and_then(|at| self.spawns.get(*at));
+            let moved = changes.moved.get(id).map(|(position, _)| *position);
+            let added = changes.added.get(id).map(|spawn| spawn.position);
+            for position in read.map(|spawn| spawn.position).into_iter().chain(moved).chain(added) {
+                out.extend(data::tile_of(position));
+            }
+        }
+        out
+    }
+
+    /// The spawns of the tiles `only` (every tile around the camera when none) given to the scene
+    /// again and placed, those of the tiles left behind taken away: each spawn found by the index
+    /// of its tile, the map never copied whole.
     fn refresh_tiles(&mut self, only: Option<&BTreeSet<TileId>>) {
         let Some(map) = self.map else {
             return;
         };
-        // The looks looked at again when every tile is: the spawns or the changes did change.
-        self.looks_wanted |= only.is_none();
-        let around = self.around.clone();
-        let within = |spawn: &Spawn| {
-            let tile = data::tile_of(spawn.position);
-            only.is_none_or(|only| tile.is_some_and(|tile| only.contains(&tile)))
-                && around
-                    .as_ref()
-                    .is_none_or(|around| tile.is_some_and(|tile| around.contains(&tile)))
+        if only.is_none() {
+            self.looks_wanted = true;
+        }
+        // The tiles looked at: those asked for, around the camera; none until it is known, which
+        // gives them as it comes.
+        let every: BTreeSet<TileId> = self.around.clone().unwrap_or_default();
+        let targets: BTreeSet<TileId> = match only {
+            Some(only) => only.intersection(&every).copied().collect(),
+            None => every,
         };
-        let laid: Vec<Spawn> = match only {
-            None => self.changes.laid_over(&self.spawns),
-            // Those of the tiles alone, without the whole map copied: the spawns there, those the
-            // user moved or created, as he changed them.
-            Some(_) => self
-                .spawns
-                .iter()
-                .filter(|spawn| within(spawn) || self.changes.moved.contains_key(&spawn.id()))
-                .map(Spawn::id)
-                .chain(self.changes.added.keys().copied())
-                .filter_map(|id| self.find(&id))
-                .collect(),
+        // Those held and no longer looked at, once every tile is: taken away.
+        let left: Vec<TileId> = match only {
+            None => self.tiles.difference(&targets).copied().collect(),
+            Some(_) => Vec::new(),
         };
-        // The spawns of game events left out unless the user shows them or the world as it runs
-        // has them: the server spawns those of the events running alone.
-        let spawns: Vec<Spawn> = laid
-            .into_iter()
-            .filter(|spawn| within(spawn))
-            .filter(|spawn| self.show_events || spawn.event <= 0 || self.live.contains(&spawn.id()))
-            .collect();
+        for tile in &left {
+            self.take_away(map, *tile);
+        }
+        // The spawns of the targets as the user changed them: those read there, and those he moved
+        // or created, wherever they come from; once each.
+        let mut found: BTreeMap<EntityId, Spawn> = BTreeMap::new();
+        let candidates = targets
+            .iter()
+            .filter_map(|tile| self.by_tile.get(tile))
+            .flatten()
+            .filter_map(|at| self.spawns.get(*at))
+            .map(Spawn::id)
+            .chain(self.changes.moved.keys().copied())
+            .chain(self.changes.added.keys().copied());
+        for id in candidates {
+            if found.contains_key(&id) {
+                continue;
+            }
+            if let Some(spawn) = self.find(&id)
+                && data::tile_of(spawn.position).is_some_and(|tile| targets.contains(&tile))
+                // The spawns of game events left out unless the user shows them or the world as it
+                // runs has them: the server spawns those of the events running alone.
+                && (self.show_events || spawn.event <= 0 || self.live.contains(&id))
+            {
+                found.insert(id, spawn);
+            }
+        }
+        let spawns: Vec<Spawn> = found.into_values().collect();
         let pieces = data::pieces(&spawns);
         let now: BTreeSet<TileId> = pieces.keys().copied().collect();
-        // The tiles looked at: those held before among them, and those that hold spawns now.
-        let before: BTreeSet<TileId> = match only {
-            Some(only) => self.tiles.intersection(only).copied().collect(),
-            None => self.tiles.clone(),
-        };
+        // The targets held before that hold nothing now: taken away.
+        let emptied: Vec<TileId> = self
+            .tiles
+            .intersection(&targets)
+            .filter(|tile| !now.contains(tile))
+            .copied()
+            .collect();
+        for tile in &emptied {
+            self.take_away(map, *tile);
+        }
         if let Some(scene) = &self.scene {
-            for tile in before.difference(&now) {
-                scene.withdraw(PieceKey::tile(MODULE, map, *tile));
-            }
             for (tile, piece) in pieces {
                 scene.publish(PieceKey::tile(MODULE, map, tile), Arc::new(piece));
             }
         }
         if let Some(models) = &self.models {
-            for tile in before.difference(&now) {
-                models.clear(&owner(map, *tile));
-            }
             let mut by_tile: BTreeMap<TileId, Vec<Instance>> = BTreeMap::new();
             for spawn in &spawns {
                 if self.live.contains(&spawn.id()) {
@@ -227,13 +280,22 @@ impl SpawnsModule {
                 );
             }
         }
-        match only {
-            Some(only) => {
-                self.tiles.retain(|tile| !only.contains(tile));
-                self.tiles.extend(now);
-            }
-            None => self.tiles = now,
+        self.tiles.extend(now);
+        // The looks of the tiles that came, which may be new.
+        if only.is_some() {
+            self.looks_wanted = true;
         }
+    }
+
+    /// The spawns of the tile `tile` taken out of the scene and of the view.
+    fn take_away(&mut self, map: u32, tile: TileId) {
+        if let Some(scene) = &self.scene {
+            scene.withdraw(PieceKey::tile(MODULE, map, tile));
+        }
+        if let Some(models) = &self.models {
+            models.clear(&owner(map, tile));
+        }
+        self.tiles.remove(&tile);
     }
 
     /// Takes the spawns of the map left away.
@@ -250,6 +312,7 @@ impl SpawnsModule {
         }
         self.spawns = Arc::default();
         self.index.clear();
+        self.by_tile.clear();
         self.read_for = None;
     }
 
@@ -363,11 +426,23 @@ impl SpawnsModule {
             return;
         };
         let around = tiles_around(centre, distance as u32);
-        if self.around.as_ref() != Some(&around) {
-            self.around = Some(around);
-            self.paths_for = None;
-            self.refresh();
+        if self.around.as_ref() == Some(&around) {
+            return;
         }
+        // The tiles that came near given, those left behind taken away; the others as they are.
+        let came: BTreeSet<TileId> = match &self.around {
+            Some(before) => around.difference(before).copied().collect(),
+            None => around.clone(),
+        };
+        let left: Vec<TileId> = self.tiles.difference(&around).copied().collect();
+        self.around = Some(around);
+        self.paths_for = None;
+        if let Some(map) = self.map {
+            for tile in left {
+                self.take_away(map, tile);
+            }
+        }
+        self.refresh_tiles(Some(&came));
     }
 
     /// The spawns the world as it runs shows live, again when the scene changed; placed again when
@@ -499,9 +574,13 @@ impl SpawnsModule {
             return;
         }
         self.looks_wanted = false;
+        // Those of the spawns of the tiles held alone, and of those the user created.
         let wanted: Vec<(Kind, u32)> = self
-            .spawns
+            .tiles
             .iter()
+            .filter_map(|tile| self.by_tile.get(tile))
+            .flatten()
+            .filter_map(|at| self.spawns.get(*at))
             .chain(self.changes.added.values())
             .map(|spawn| (spawn.kind, spawn.display))
             .filter(|display| display.1 != 0 && !self.looks.contains_key(display))
@@ -837,6 +916,7 @@ impl Module for SpawnsModule {
                         quests.links.len()
                     );
                     self.index = spawns.iter().enumerate().map(|(at, spawn)| (spawn.id(), at)).collect();
+                    self.by_tile = by_tile(&spawns);
                     self.spawns = Arc::new(spawns);
                     self.highest = highest;
                     self.quests = Arc::new(quests);

@@ -10549,6 +10549,12 @@ came or left placed again alone; the spawns given and drawn within a distance of
 keeps the materials it read, by model. Tests: the tiles around the camera, a spawn found by its
 index as the user changed it.
 
+Then, as the user asked, what is needed loaded once and updated after: an index of the spawns by
+tile made once read; the camera reaching another tile gives the tiles that came near and takes away
+those left behind, the others as they are; a change made or undone gives again the tiles of the
+spawns it touches alone; nothing given before the camera is known; the looks looked at for the
+tiles held alone. The map is never copied whole.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
