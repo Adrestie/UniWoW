@@ -10485,6 +10485,17 @@ public key asked for without TLS, the password XOR the scramble encrypted with i
 account one the client has. Tested against a server the tests run, which switches the client to the
 plugin and gives its key.
 
+#### After 15.14: the patrol paths
+
+Asked by the user once connected to his database: the module `spawns` reads with the spawns of a
+map the paths their creatures walk, the points of `waypoint_data` their `creature_addon` (else
+their template's `creature_template_addon`) names, and those of `waypoints` their SmartAI scripts
+start (`SMART_ACTION_WP_START`, of their template or of the spawn), a database without those tables
+leaving them out; drawn in red by a layer of its own, closed, a little above their points: those of
+the creatures selected, or all with *Show every patrol path* in its panel. Read only. Tests: the
+points of a path in order, a path read by both queries kept once, one point no path, the segments
+closed.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which

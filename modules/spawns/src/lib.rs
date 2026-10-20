@@ -6,6 +6,7 @@
 //! 15.11c). Nothing is written to the database.
 
 mod data;
+mod paths;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -24,7 +25,7 @@ use data::{Changes, Link, Quests, Spawn};
 const MODULE: &str = "spawns";
 
 /// What a reading job gives back: the spawns of a map, the highest guid of each table, the quests.
-type Read = Result<(Vec<Spawn>, [u64; 3], Quests), String>;
+type Read = Result<(Vec<Spawn>, [u64; 3], Quests, paths::Paths), String>;
 
 /// The looks of the displays, by kind and display: a look and its scale, none for none.
 type Looks = HashMap<(Kind, u32), Option<(LookId, f32)>>;
@@ -70,6 +71,11 @@ struct SpawnsModule {
     /// The tiles given to the scene and placed, for those to take away.
     tiles: BTreeSet<TileId>,
     refused: Option<String>,
+    /// The patrol paths of the spawns, those drawn, whether all are, and what they were drawn for.
+    paths: Arc<paths::Paths>,
+    drawn: Arc<std::sync::Mutex<paths::Drawn>>,
+    all_paths: bool,
+    paths_for: Option<(u64, bool, usize)>,
     /// The client's tables, for the displays of game objects.
     formats: Option<Arc<dyn uniwow_api::formats::Formats>>,
     /// The spawns the world as it runs shows live, not drawn again; the generation of the scene they
@@ -240,7 +246,15 @@ impl SpawnsModule {
                     .iter()
                     .map(|(_, _, query)| database.query(query, &[]))
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok((spawns, highest, Quests::of_rows(&titles, &links)))
+                // The patrol paths, which a database without those tables leaves out.
+                let mut paths = paths::Paths::new();
+                for query in [paths::ADDON_PATHS, paths::SMART_PATHS] {
+                    match database.query(query, &[json!(map)]) {
+                        Ok(rows) => paths::add_paths(&mut paths, &rows),
+                        Err(reason) => log::warn!("the patrol paths are not read: {reason}"),
+                    }
+                }
+                Ok((spawns, highest, Quests::of_rows(&titles, &links), paths))
             }),
         );
     }
@@ -261,6 +275,35 @@ impl SpawnsModule {
             self.live = live;
             self.refresh();
         }
+    }
+
+    /// The patrol paths drawn again when the selection, the choice of all or the paths read change:
+    /// of the spawns selected, or of all.
+    fn draw_paths(&mut self) {
+        let Some(scene) = &self.scene else {
+            return;
+        };
+        let selection = scene.selection();
+        let now = (selection.generation, self.all_paths, Arc::as_ptr(&self.paths) as usize);
+        if self.paths_for == Some(now) {
+            return;
+        }
+        self.paths_for = Some(now);
+        let segments = if self.all_paths {
+            paths::segments(&self.paths, self.paths.keys())
+        } else {
+            let guids: Vec<u64> = scene
+                .groups()
+                .expanded(&selection.ids)
+                .iter()
+                .filter(|id| id.kind == Kind::Creature)
+                .map(|id| id.key)
+                .collect();
+            paths::segments(&self.paths, &guids)
+        };
+        let mut drawn = paths::lock(&self.drawn);
+        drawn.segments = segments;
+        drawn.version += 1;
     }
 
     /// The doodad `arguments` describes made a game object (`spawns.from_doodad`).
@@ -573,6 +616,14 @@ impl Module for SpawnsModule {
     fn windows_ui(&mut self, _egui: &egui::Context, ctx: &mut Context) {
         self.steer(ctx);
         self.resolve(ctx);
+        self.draw_paths();
+    }
+
+    fn init(&mut self, ctx: &mut Context) {
+        if let Some(view) = ctx.service(uniwow_api::viewport::SERVICE) {
+            let layer = paths::PathsLayer::new(self.drawn.clone(), view.target());
+            view.add_layer(ctx.module_id(), Box::new(layer));
+        }
     }
 
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
@@ -591,7 +642,17 @@ impl Module for SpawnsModule {
                         self.changes.moved.len(),
                         self.changes.added.len(),
                         self.changes.deleted.len()
-                    ))
+                    ));
+                    ui.label(format!(
+                        "{} quests, {} givers and enders",
+                        self.quests.titles.len(),
+                        self.quests.links.len()
+                    ));
+                    ui.checkbox(
+                        &mut self.all_paths,
+                        format!("Show every patrol path ({} creatures walk one)", self.paths.len()),
+                    )
+                    .on_hover_text("Otherwise those of the creatures selected alone, in red")
                 }
             },
             Some(_) => ui.label("The world database is not connected: see the panel World database."),
@@ -611,11 +672,17 @@ impl Module for SpawnsModule {
         if self.reading == Some(job) {
             self.reading = None;
             match outcome.take::<Read>() {
-                Some(Ok((spawns, highest, quests))) => {
-                    log::info!("{} spawns of the map read from the world database", spawns.len());
+                Some(Ok((spawns, highest, quests, paths))) => {
+                    log::info!(
+                        "{} spawns of the map read from the world database; {} quests, {} givers and enders",
+                        spawns.len(),
+                        quests.titles.len(),
+                        quests.links.len()
+                    );
                     self.spawns = Arc::new(spawns);
                     self.highest = highest;
                     self.quests = Arc::new(quests);
+                    self.paths = Arc::new(paths);
                     self.refused = None;
                     self.refresh();
                 }

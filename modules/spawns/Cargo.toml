@@ -19,4 +19,4 @@ name = "Spawns"
 category = "World"
 # Services the module cannot work without, and services it uses when present.
 requires = []
-uses = ["world-db", "models", "scene"]
+uses = ["world-db", "models", "scene", "viewport"]
