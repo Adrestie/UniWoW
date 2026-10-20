@@ -445,3 +445,13 @@ impl Occlusion {
         }
     }
 }
+
+#[cfg(test)]
+mod wgsl_tests {
+
+    #[test]
+    fn its_shaders_parse_and_validate() {
+        uniwow_api::viewport::check_wgsl(include_str!("occlusion.wgsl"))
+            .unwrap_or_else(|error| panic!("occlusion: {error}"));
+    }
+}

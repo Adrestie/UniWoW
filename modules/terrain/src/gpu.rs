@@ -621,3 +621,16 @@ pub fn build_light(
         bytes,
     }))
 }
+
+#[cfg(test)]
+mod wgsl_tests {
+    use super::*;
+
+    #[test]
+    fn its_shaders_parse_and_validate() {
+        uniwow_api::viewport::check_wgsl(&source(include_str!("terrain.wgsl")))
+            .unwrap_or_else(|error| panic!("terrain: {error}"));
+        uniwow_api::viewport::check_wgsl(&source(include_str!("horizon.wgsl")))
+            .unwrap_or_else(|error| panic!("horizon: {error}"));
+    }
+}

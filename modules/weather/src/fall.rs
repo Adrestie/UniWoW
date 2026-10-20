@@ -321,3 +321,20 @@ impl Layer for FallLayer {
         self.stats.clone()
     }
 }
+
+#[cfg(test)]
+mod wgsl_tests {
+
+    #[test]
+    fn its_shaders_parse_and_validate() {
+        uniwow_api::viewport::check_wgsl(
+            &[
+                uniwow_api::viewport::FOG_WGSL,
+                uniwow_api::viewport::LIGHT_WGSL,
+                include_str!("fall.wgsl"),
+            ]
+            .concat(),
+        )
+        .unwrap_or_else(|error| panic!("weather: {error}"));
+    }
+}

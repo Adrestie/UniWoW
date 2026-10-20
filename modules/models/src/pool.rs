@@ -354,3 +354,15 @@ impl Pool {
             .fold((0, 0), |(held, used), (more, taken)| (held + more, used + taken))
     }
 }
+
+#[cfg(test)]
+mod wgsl_tests {
+    use super::*;
+
+    const SLOTS_TESTED: usize = 4;
+
+    #[test]
+    fn its_shaders_parse_and_validate() {
+        uniwow_api::viewport::check_wgsl(&shader(SLOTS_TESTED)).unwrap_or_else(|error| panic!("models pool: {error}"));
+    }
+}

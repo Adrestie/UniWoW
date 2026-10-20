@@ -817,3 +817,12 @@ impl Layer for GlareLayer {
         self.stats.clone()
     }
 }
+
+#[cfg(test)]
+mod wgsl_tests {
+
+    #[test]
+    fn its_shaders_parse_and_validate() {
+        uniwow_api::viewport::check_wgsl(include_str!("sky.wgsl")).unwrap_or_else(|error| panic!("sky: {error}"));
+    }
+}

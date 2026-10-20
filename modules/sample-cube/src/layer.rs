@@ -227,3 +227,13 @@ pub fn create(device: &wgpu::Device, target: &Target) -> Gpu {
         bind_group,
     }
 }
+
+#[cfg(test)]
+mod wgsl_tests {
+    use super::*;
+
+    #[test]
+    fn its_shaders_parse_and_validate() {
+        uniwow_api::viewport::check_wgsl(SHADER).unwrap_or_else(|error| panic!("cube: {error}"));
+    }
+}

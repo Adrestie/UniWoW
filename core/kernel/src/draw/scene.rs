@@ -907,3 +907,11 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod wgsl_tests {
+    #[test]
+    fn its_shader_parses_and_validates() {
+        uniwow_api::viewport::check_wgsl(super::SHADER).unwrap_or_else(|error| panic!("graphics scene: {error}"));
+    }
+}

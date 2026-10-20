@@ -158,3 +158,13 @@ impl Grid {
         pass.draw(0..self.vertex_count, 0..1);
     }
 }
+
+#[cfg(test)]
+mod wgsl_tests {
+    use super::*;
+
+    #[test]
+    fn its_shaders_parse_and_validate() {
+        uniwow_api::viewport::check_wgsl(SHADER).unwrap_or_else(|error| panic!("grid: {error}"));
+    }
+}

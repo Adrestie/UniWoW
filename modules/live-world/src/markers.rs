@@ -530,3 +530,13 @@ pub fn animate(
         drawing.placed(frame.placed.len(), now.elapsed());
     }
 }
+
+#[cfg(test)]
+mod wgsl_tests {
+    use super::*;
+
+    #[test]
+    fn its_shaders_parse_and_validate() {
+        uniwow_api::viewport::check_wgsl(SHADER).unwrap_or_else(|error| panic!("markers: {error}"));
+    }
+}

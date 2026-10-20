@@ -742,3 +742,13 @@ pub fn upload(shared: &Arc<Shared>, formats: &dyn Formats, mut wmo: Wmo) -> Resu
         lights,
     })
 }
+
+#[cfg(test)]
+mod wgsl_tests {
+    use super::*;
+
+    #[test]
+    fn its_shaders_parse_and_validate() {
+        uniwow_api::viewport::check_wgsl(&shader(SLOTS)).unwrap_or_else(|error| panic!("buildings: {error}"));
+    }
+}

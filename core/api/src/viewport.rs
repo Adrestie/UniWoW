@@ -867,3 +867,28 @@ mod tests {
         assert_eq!(Demand::default().held.len(), BANDS);
     }
 }
+
+/// Whether the WGSL `source` parses and validates as the device will take it, its error said
+/// otherwise: for the tests of the modules' shaders, which a device is not needed for.
+pub fn check_wgsl(source: &str) -> Result<(), String> {
+    use crate::wgpu::naga;
+    let module = naga::front::wgsl::parse_str(source).map_err(|error| error.emit_to_string(source))?;
+    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+        .validate(&module)
+        .map_err(|error| error.emit_to_string(source))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod wgsl_tests {
+    #[test]
+    fn a_shader_with_a_reserved_word_or_a_wrong_type_is_refused_with_its_error() {
+        let fine = "@vertex fn vs(@location(0) seg_start: vec3<f32>) -> @builtin(position) vec4<f32> { return vec4<f32>(seg_start, 1.0); }";
+        assert!(super::check_wgsl(fine).is_ok());
+        let reserved = fine.replace("seg_start", "from");
+        let error = super::check_wgsl(&reserved).unwrap_err();
+        assert!(error.contains("reserved"), "{error}");
+        let wrong = "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec3<f32>(1.0); }";
+        assert!(super::check_wgsl(wrong).is_err(), "a value of the wrong type");
+    }
+}

@@ -105,8 +105,8 @@ struct Globals { view_proj: mat4x4<f32>, colour: vec4<f32> };
 @group(0) @binding(0) var<uniform> globals: Globals;
 
 @vertex
-fn vs_main(@builtin(vertex_index) vertex: u32, @location(0) from: vec3<f32>, @location(1) to: vec3<f32>) -> @builtin(position) vec4<f32> {
-    return globals.view_proj * vec4<f32>(select(from, to, vertex == 1u), 1.0);
+fn vs_main(@builtin(vertex_index) vertex: u32, @location(0) seg_start: vec3<f32>, @location(1) seg_end: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return globals.view_proj * vec4<f32>(select(seg_start, seg_end, vertex == 1u), 1.0);
 }
 
 @fragment
@@ -356,5 +356,15 @@ mod tests {
         assert_eq!(drawn[0], [0.0, 0.0, 1.4, 10.0, 0.0, 1.4]);
         assert_eq!(drawn[2], [10.0, 10.0, 1.4, 0.0, 0.0, 1.4]);
         assert!(segments(&paths, &[]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod wgsl_tests {
+    use super::*;
+
+    #[test]
+    fn its_shaders_parse_and_validate() {
+        uniwow_api::viewport::check_wgsl(SHADER).unwrap_or_else(|error| panic!("patrol paths: {error}"));
     }
 }

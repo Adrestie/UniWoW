@@ -1009,3 +1009,12 @@ impl Choice {
         (args, counts[self.work_offsets[3] as usize..].to_vec())
     }
 }
+
+#[cfg(test)]
+mod wgsl_tests {
+
+    #[test]
+    fn its_shaders_parse_and_validate() {
+        uniwow_api::viewport::check_wgsl(include_str!("choice.wgsl")).unwrap_or_else(|error| panic!("choice: {error}"));
+    }
+}

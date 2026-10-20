@@ -224,3 +224,13 @@ impl Layer for BoxesLayer {
         bundle.draw(0..24, 0..self.count);
     }
 }
+
+#[cfg(test)]
+mod wgsl_tests {
+    use super::*;
+
+    #[test]
+    fn its_shaders_parse_and_validate() {
+        uniwow_api::viewport::check_wgsl(SHADER).unwrap_or_else(|error| panic!("selection boxes: {error}"));
+    }
+}
