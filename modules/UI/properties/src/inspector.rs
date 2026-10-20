@@ -127,19 +127,29 @@ pub fn read(editor: &uniwow_api::Editor, snapshot: &Snapshot, ids: &[EntityId], 
         }
     }
     // The materials of the models, each read once.
-    let mut materials: HashMap<String, Value> = HashMap::new();
+    // The materials of the models, each read once and kept: the files do not change, and the
+    // values are read again at each change of the registry, the live world's many a second.
     for (id, value) in out.values.iter_mut().take(MATERIALS_READ) {
         let Some(asked) = materials_asked(id, value) else {
             continue;
         };
         let key = asked.to_string();
-        if !materials.contains_key(&key) {
-            let read = editor
-                .call("models.materials", asked)
-                .unwrap_or_else(|reason| json!({ "refused": reason }));
-            materials.insert(key.clone(), read);
-        }
-        value["components"]["materials"] = materials[&key].clone();
+        let kept = lock_materials().get(&key).cloned();
+        let read = match kept {
+            Some(read) => read,
+            None => {
+                let read = editor
+                    .call("models.materials", asked)
+                    .unwrap_or_else(|reason| json!({ "refused": reason }));
+                let mut materials = lock_materials();
+                if materials.len() >= MATERIALS_KEPT {
+                    materials.clear();
+                }
+                materials.insert(key, read.clone());
+                read
+            }
+        };
+        value["components"]["materials"] = read;
     }
     let texts: Vec<String> = ids.iter().map(ToString::to_string).collect();
     for component in components
@@ -173,6 +183,15 @@ pub fn writes(provider: &str, field: &str) -> bool {
     WRITTEN
         .iter()
         .any(|(written, fields)| *written == provider && fields.contains(&field))
+}
+
+/// The materials read, by what `models.materials` was asked, and the most kept.
+static MATERIALS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Value>>> =
+    std::sync::LazyLock::new(Default::default);
+const MATERIALS_KEPT: usize = 256;
+
+fn lock_materials() -> std::sync::MutexGuard<'static, HashMap<String, Value>> {
+    MATERIALS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The most entities whose materials are read with their components.

@@ -10536,6 +10536,19 @@ game events* in its panel; their event in their raw fields. Tests: a live creatu
 runs, not at its spawn's place, then there once the world leaves; the events given to the spawns of
 each table.
 
+#### After 15.14: the cost of the spawns
+
+Found slow by the user on his server, the live world running: the module `spawns` copied every
+spawn of the map at each frame (the looks wanted) and at each change of the registry (the spawns
+live), placed the whole map again when a creature came or left the live world, and gave the scene
+and `models` the spawns of the whole map (a hundred thousand on a continent). Now: an index of the
+spawns by id, a spawn found without a copy; the looks looked at once the spawns or the changes
+changed; the spawns live taken from the pieces of the live world alone, the tiles of those that
+came or left placed again alone; the spawns given and drawn within a distance of the camera, *Spawns
+> Distance of the spawns*, 3 tiles by default, *Show every patrol path* within it. The Inspector
+keeps the materials it read, by model. Tests: the tiles around the camera, a spawn found by its
+index as the user changed it.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which

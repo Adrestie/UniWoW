@@ -412,16 +412,35 @@ impl Changes {
                 .cloned(),
         );
         for spawn in &mut out {
-            if let Some((position, orientation)) = self.moved.get(&spawn.id()) {
-                spawn.position = *position;
-                if spawn.orientation != *orientation && spawn.rotation.is_some() {
-                    // Turned about the vertical by the user: its rotation that turn alone.
-                    spawn.rotation = Some(yaw_quaternion(*orientation));
-                }
-                spawn.orientation = *orientation;
-            }
+            self.moved_as(spawn);
         }
         out
+    }
+
+    /// `spawn` at the place the user moved it to, if he did.
+    pub fn moved_as(&self, spawn: &mut Spawn) {
+        if let Some((position, orientation)) = self.moved.get(&spawn.id()) {
+            spawn.position = *position;
+            if spawn.orientation != *orientation && spawn.rotation.is_some() {
+                // Turned about the vertical by the user: its rotation that turn alone.
+                spawn.rotation = Some(yaw_quaternion(*orientation));
+            }
+            spawn.orientation = *orientation;
+        }
+    }
+
+    /// The spawn `id` of `spawns` (whose places by id `index` gives) as the user changed it: none
+    /// once deleted.
+    pub fn find(&self, spawns: &[Spawn], index: &HashMap<EntityId, usize>, id: &EntityId) -> Option<Spawn> {
+        if self.deleted.contains(id) {
+            return None;
+        }
+        let mut spawn = match self.added.get(id) {
+            Some(added) => added.clone(),
+            None => spawns.get(*index.get(id)?)?.clone(),
+        };
+        self.moved_as(&mut spawn);
+        Some(spawn)
     }
 
     /// The quests of the template of `kind` and `entry` as the user changed them, by quest.

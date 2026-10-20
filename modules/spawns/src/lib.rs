@@ -63,6 +63,10 @@ struct SpawnsModule {
     reading: Option<JobId>,
     /// The spawns as the database has them, and the highest guid of each table.
     spawns: Arc<Vec<Spawn>>,
+    /// The place of each spawn in `spawns`, by its id.
+    index: HashMap<EntityId, usize>,
+    /// Whether the looks of the spawns are to be looked at again, once they or the changes did.
+    looks_wanted: bool,
     highest: [u64; 3],
     quests: Arc<Quests>,
     changes: Changes,
@@ -71,6 +75,9 @@ struct SpawnsModule {
     /// The tiles given to the scene and placed, for those to take away.
     tiles: BTreeSet<TileId>,
     refused: Option<String>,
+    /// The tiles around the camera whose spawns are given to the scene and drawn; none while no
+    /// view tells where the camera is, every tile then.
+    around: Option<BTreeSet<TileId>>,
     /// Whether the spawns of game events are shown whether the events run or not.
     show_events: bool,
     /// The patrol paths of the spawns, those drawn, whether all are, and what they were drawn for.
@@ -88,13 +95,33 @@ struct SpawnsModule {
     scene: Option<scene::Handle>,
 }
 
-/// The spawns of `spawns` that the world as it runs lists in `snapshot`: a live creature or game
-/// object of a spawn is listed by its spawn's id.
-fn live_of(snapshot: &scene::Snapshot, spawns: &[Spawn]) -> BTreeSet<EntityId> {
-    spawns
-        .iter()
-        .map(Spawn::id)
-        .filter(|id| snapshot.live(id).is_some())
+/// The creatures and game objects the world as it runs lists in `snapshot`, by the pieces of the
+/// live world alone: a live creature or game object of a spawn is listed by its spawn's id.
+fn live_of(snapshot: &scene::Snapshot) -> BTreeSet<EntityId> {
+    let mut out = BTreeSet::new();
+    for placed in snapshot.slots.iter().flatten() {
+        let piece = &placed.piece;
+        if piece.flags.first().is_none_or(|flags| flags & scene::flags::LIVE == 0) {
+            continue;
+        }
+        for (row, id) in piece.ids.iter().enumerate() {
+            if piece.flags[row] & scene::flags::LIVE != 0 && matches!(id.kind, Kind::Creature | Kind::GameObject) {
+                out.insert(*id);
+            }
+        }
+    }
+    out
+}
+
+/// The setting of how far around the camera the spawns are given and drawn, in tiles.
+const DISTANCE: &str = "distance";
+const DEFAULT_DISTANCE: i64 = 3;
+
+/// The tiles within `distance` of the tile `centre`, on each side.
+fn tiles_around(centre: TileId, distance: u32) -> BTreeSet<TileId> {
+    let span = |at: u32| at.saturating_sub(distance)..=(at + distance).min(63);
+    span(centre.x)
+        .flat_map(|x| span(centre.y).map(move |y| TileId { x, y }))
         .collect()
 }
 
@@ -106,21 +133,53 @@ impl SpawnsModule {
     /// The spawns as the user changed them given to the scene again and placed, by tile; the looks
     /// not yet resolved asked of a job.
     fn refresh(&mut self) {
+        self.refresh_tiles(None);
+    }
+
+    /// The spawns of the tiles `only` (every tile when none) given to the scene again and placed.
+    fn refresh_tiles(&mut self, only: Option<&BTreeSet<TileId>>) {
         let Some(map) = self.map else {
             return;
         };
+        // The looks looked at again when every tile is: the spawns or the changes did change.
+        self.looks_wanted |= only.is_none();
+        let around = self.around.clone();
+        let within = |spawn: &Spawn| {
+            let tile = data::tile_of(spawn.position);
+            only.is_none_or(|only| tile.is_some_and(|tile| only.contains(&tile)))
+                && around
+                    .as_ref()
+                    .is_none_or(|around| tile.is_some_and(|tile| around.contains(&tile)))
+        };
+        let laid: Vec<Spawn> = match only {
+            None => self.changes.laid_over(&self.spawns),
+            // Those of the tiles alone, without the whole map copied: the spawns there, those the
+            // user moved or created, as he changed them.
+            Some(_) => self
+                .spawns
+                .iter()
+                .filter(|spawn| within(spawn) || self.changes.moved.contains_key(&spawn.id()))
+                .map(Spawn::id)
+                .chain(self.changes.added.keys().copied())
+                .filter_map(|id| self.find(&id))
+                .collect(),
+        };
         // The spawns of game events left out unless the user shows them or the world as it runs
         // has them: the server spawns those of the events running alone.
-        let spawns: Vec<Spawn> = self
-            .changes
-            .laid_over(&self.spawns)
+        let spawns: Vec<Spawn> = laid
             .into_iter()
+            .filter(|spawn| within(spawn))
             .filter(|spawn| self.show_events || spawn.event <= 0 || self.live.contains(&spawn.id()))
             .collect();
         let pieces = data::pieces(&spawns);
         let now: BTreeSet<TileId> = pieces.keys().copied().collect();
+        // The tiles looked at: those held before among them, and those that hold spawns now.
+        let before: BTreeSet<TileId> = match only {
+            Some(only) => self.tiles.intersection(only).copied().collect(),
+            None => self.tiles.clone(),
+        };
         if let Some(scene) = &self.scene {
-            for tile in self.tiles.difference(&now) {
+            for tile in before.difference(&now) {
                 scene.withdraw(PieceKey::tile(MODULE, map, *tile));
             }
             for (tile, piece) in pieces {
@@ -128,7 +187,7 @@ impl SpawnsModule {
             }
         }
         if let Some(models) = &self.models {
-            for tile in self.tiles.difference(&now) {
+            for tile in before.difference(&now) {
                 models.clear(&owner(map, *tile));
             }
             let mut by_tile: BTreeMap<TileId, Vec<Instance>> = BTreeMap::new();
@@ -168,7 +227,13 @@ impl SpawnsModule {
                 );
             }
         }
-        self.tiles = now;
+        match only {
+            Some(only) => {
+                self.tiles.retain(|tile| !only.contains(tile));
+                self.tiles.extend(now);
+            }
+            None => self.tiles = now,
+        }
     }
 
     /// Takes the spawns of the map left away.
@@ -184,15 +249,13 @@ impl SpawnsModule {
             scene.withdraw_provider(MODULE, None);
         }
         self.spawns = Arc::default();
+        self.index.clear();
         self.read_for = None;
     }
 
     /// The spawn `id` as the user changed it.
     fn find(&self, id: &EntityId) -> Option<Spawn> {
-        self.changes
-            .laid_over(&self.spawns)
-            .into_iter()
-            .find(|spawn| spawn.id() == *id)
+        self.changes.find(&self.spawns, &self.index, id)
     }
 
     fn ids(arguments: &Value) -> Result<Vec<EntityId>, String> {
@@ -229,6 +292,7 @@ impl SpawnsModule {
             self.map = map;
         }
         self.see_live();
+        self.follow_camera(ctx);
         let (Some(map), Some(database)) = (self.map, ctx.service(world_db::SERVICE)) else {
             return;
         };
@@ -280,6 +344,32 @@ impl SpawnsModule {
         );
     }
 
+    /// The tiles around the camera, within the distance of the setting: the spawns of the map given
+    /// again when the camera reaches another tile or the distance changes.
+    fn follow_camera(&mut self, ctx: &mut Context) {
+        let distance = ctx
+            .setting(DISTANCE)
+            .and_then(|value| value.as_i64())
+            .unwrap_or(DEFAULT_DISTANCE)
+            .clamp(1, 64);
+        let Some(eye) = ctx
+            .service(uniwow_api::viewport::SERVICE)
+            .and_then(|view| view.last_view())
+            .map(|seen| seen.eye)
+        else {
+            return;
+        };
+        let Some(centre) = data::tile_of([eye.x, eye.y, eye.z]) else {
+            return;
+        };
+        let around = tiles_around(centre, distance as u32);
+        if self.around.as_ref() != Some(&around) {
+            self.around = Some(around);
+            self.paths_for = None;
+            self.refresh();
+        }
+    }
+
     /// The spawns the world as it runs shows live, again when the scene changed; placed again when
     /// they are other ones.
     fn see_live(&mut self) {
@@ -291,10 +381,19 @@ impl SpawnsModule {
             return;
         }
         self.seen = snapshot.generation;
-        let live = live_of(&snapshot, &self.changes.laid_over(&self.spawns));
-        if live != self.live {
-            self.live = live;
-            self.refresh();
+        let live = live_of(&snapshot);
+        if live == self.live {
+            return;
+        }
+        // Placed again: the tiles of the spawns that came or left alone.
+        let tiles: BTreeSet<TileId> = live
+            .symmetric_difference(&self.live)
+            .filter_map(|id| self.find(id))
+            .filter_map(|spawn| data::tile_of(spawn.position))
+            .collect();
+        self.live = live;
+        if !tiles.is_empty() {
+            self.refresh_tiles(Some(&tiles));
         }
     }
 
@@ -311,7 +410,21 @@ impl SpawnsModule {
         }
         self.paths_for = Some(now);
         let segments = if self.all_paths {
-            paths::segments(&self.paths, self.paths.keys())
+            // Those of the spawns around the camera alone.
+            let around: Vec<u64> = self
+                .paths
+                .keys()
+                .copied()
+                .filter(|guid| {
+                    let Some(around) = &self.around else {
+                        return true;
+                    };
+                    self.find(&EntityId::creature(*guid))
+                        .and_then(|spawn| data::tile_of(spawn.position))
+                        .is_some_and(|tile| around.contains(&tile))
+                })
+                .collect();
+            paths::segments(&self.paths, &around)
         } else {
             let guids: Vec<u64> = scene
                 .groups()
@@ -382,13 +495,14 @@ impl SpawnsModule {
         let Some(models) = self.models.clone() else {
             return;
         };
-        if self.resolving.is_some() {
+        if self.resolving.is_some() || !self.looks_wanted {
             return;
         }
+        self.looks_wanted = false;
         let wanted: Vec<(Kind, u32)> = self
-            .changes
-            .laid_over(&self.spawns)
+            .spawns
             .iter()
+            .chain(self.changes.added.values())
             .map(|spawn| (spawn.kind, spawn.display))
             .filter(|display| display.1 != 0 && !self.looks.contains_key(display))
             .collect::<BTreeSet<_>>()
@@ -432,6 +546,15 @@ impl SpawnsModule {
 impl Module for SpawnsModule {
     fn register(&mut self, reg: &mut Registrar) {
         let ids = json!({ "type": "object", "properties": { "ids": { "type": "array" } }, "required": ["ids"] });
+        reg.settings(
+            "Spawns",
+            vec![uniwow_api::SettingSpec::integer(
+                DISTANCE,
+                "Distance of the spawns (tiles around the camera)",
+                [1, 64],
+                DEFAULT_DISTANCE,
+            )],
+        );
         reg.panel("spawns", "Spawns", DockArea::Right)
             .command(
                 "spawns.read",
@@ -713,6 +836,7 @@ impl Module for SpawnsModule {
                         quests.titles.len(),
                         quests.links.len()
                     );
+                    self.index = spawns.iter().enumerate().map(|(at, spawn)| (spawn.id(), at)).collect();
                     self.spawns = Arc::new(spawns);
                     self.highest = highest;
                     self.quests = Arc::new(quests);
@@ -743,3 +867,45 @@ impl Module for SpawnsModule {
 }
 
 uniwow_api::export_module!(SpawnsModule::default());
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_tiles_around_the_camera_stay_within_the_map() {
+        let around = tiles_around(TileId { x: 32, y: 48 }, 3);
+        assert_eq!(around.len(), 49);
+        assert!(around.contains(&TileId { x: 29, y: 51 }) && !around.contains(&TileId { x: 28, y: 48 }));
+        let corner = tiles_around(TileId { x: 0, y: 63 }, 2);
+        assert_eq!(corner.len(), 9, "cut by the edges of the map");
+    }
+
+    #[test]
+    fn a_spawn_is_found_by_its_index_as_the_user_changed_it() {
+        let spawn = Spawn {
+            kind: Kind::Creature,
+            guid: 79666,
+            entry: 68,
+            name: "Stormwind City Guard".to_owned(),
+            display: 3167,
+            position: [0.0; 3],
+            orientation: 0.0,
+            scale: 1.0,
+            rotation: None,
+            event: 0,
+        };
+        let spawns = vec![spawn.clone()];
+        let index = HashMap::from([(spawn.id(), 0)]);
+        let mut changes = Changes::default();
+        assert_eq!(changes.find(&spawns, &index, &spawn.id()), Some(spawn.clone()));
+        changes.moved.insert(spawn.id(), ([5.0, 0.0, 0.0], 1.0));
+        assert_eq!(
+            changes.find(&spawns, &index, &spawn.id()).unwrap().position,
+            [5.0, 0.0, 0.0]
+        );
+        changes.deleted.insert(spawn.id());
+        assert_eq!(changes.find(&spawns, &index, &spawn.id()), None);
+        assert_eq!(changes.find(&spawns, &index, &EntityId::creature(1)), None);
+    }
+}
