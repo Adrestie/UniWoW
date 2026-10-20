@@ -10,8 +10,9 @@ use uniwow_api::scene::{self, Entity, EntityId, Kind, Piece, PieceBuilder, flags
 use uniwow_api::serde_json::{Value, json};
 
 /// What the world database's version of AzerothCore names: the column of a creature's template
-/// (`id1` since spawns may take several templates, `id` before), and whether the looks of the
-/// templates are in `creature_template_model` (their `modelid1` and `scale` before).
+/// (`id` at first, `id1` while a spawn could take three templates, `id` again since the update
+/// `2026_06_16_00`), and whether the looks of the templates are in `creature_template_model` (the
+/// template's `modelid1` and `scale` before).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Schema {
     pub entry: &'static str,

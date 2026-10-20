@@ -10513,7 +10513,9 @@ start asking again.
 
 #### After 15.14: the versions of the world database
 
-The user's `acore_world` is older than his sources: `creature` names its template `id` (not `id1`).
+The user's `acore_world` is newer than the base files of his sources: the update
+`2026_06_16_00` of AzerothCore names a creature's template `id` again (not `id1`, `id2` and `id3`
+gone).
 The module `spawns` asks, before it reads, `SHOW COLUMNS FROM creature LIKE 'id1'` and `SHOW TABLES
 LIKE 'creature_template_model'`, and reads the creatures, their looks (`creature_template_model`, or
 the template's `modelid1` and `scale` before it) and their paths by the names the database has.
