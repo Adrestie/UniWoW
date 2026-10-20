@@ -72,6 +72,31 @@ pub fn read(formats: &dyn Formats, directory: &str, cancelled: impl Fn() -> bool
     out
 }
 
+/// The height of the ground of `tile`, the tile `x`, `y` of its map, at the point `at` of the
+/// world: that of the vertex of its chunk nearest to it; none where the tile has no chunk there.
+pub fn ground_at(tile: &uniwow_api::formats::Tile, x: u32, y: u32, at: [f32; 2]) -> Option<f32> {
+    // The chunk under the point, by the place of the tile and its index, as the client places it.
+    let across = (ORIGIN - TILE * x as f32 - at[1]) / CHUNK;
+    let down = (ORIGIN - TILE * y as f32 - at[0]) / CHUNK;
+    if !(0.0..16.0).contains(&across) || !(0.0..16.0).contains(&down) {
+        return None;
+    }
+    let index = [across as u32, down as u32];
+    let chunk = tile.chunks.iter().find(|chunk| chunk.index == index)?;
+    // Its outer vertices, 9 by 9, a row going down in Y, the rows down in X, 17 apart.
+    let step = CHUNK / 8.0;
+    let row = ((down - index[1] as f32) * CHUNK / step).round().clamp(0.0, 8.0) as usize;
+    let column = ((across - index[0] as f32) * CHUNK / step).round().clamp(0.0, 8.0) as usize;
+    Some(chunk.position[2] + chunk.heights.get(row * 17 + column).copied()?)
+}
+
+/// The tile of a point of the world, as its file names it.
+pub fn tile_of(at: [f32; 2]) -> Option<(u32, u32)> {
+    let x = ((ORIGIN - at[1]) / TILE).floor();
+    let y = ((ORIGIN - at[0]) / TILE).floor();
+    ((0.0..64.0).contains(&x) && (0.0..64.0).contains(&y)).then_some((x as u32, y as u32))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +137,45 @@ mod tests {
             assert!(elwynn[0][axis] <= goldshire[0][axis] && elwynn[1][axis] >= goldshire[1][axis]);
         }
         assert!(!extents.contains_key(&0), "no area, no extent");
+    }
+
+    #[test]
+    fn the_ground_is_read_at_the_vertex_nearest_to_a_point() {
+        use uniwow_api::formats::{Chunk, Tile};
+        let mut heights = vec![0.0; 145];
+        // The outer vertex of the row 4, column 2 of the chunk 3, 5.
+        heights[4 * 17 + 2] = 12.0;
+        let chunk = Chunk {
+            index: [3, 5],
+            flags: 0,
+            position: [0.0, 0.0, 40.0],
+            heights,
+            normals: vec![[0, 0, 127]; 145],
+            colours: Vec::new(),
+            area: 12,
+            holes: 0,
+            layers: Vec::new(),
+            alphas: Vec::new(),
+            shadow: Vec::new(),
+            doodad_refs: Vec::new(),
+            building_refs: Vec::new(),
+            sounds: Vec::new(),
+        };
+        let tile = Tile {
+            chunks: vec![chunk],
+            textures: Vec::new(),
+            doodads: Vec::new(),
+            buildings: Vec::new(),
+        };
+        let (x, y) = (32, 48);
+        let step = CHUNK / 8.0;
+        let at = [
+            ORIGIN - TILE * y as f32 - CHUNK * 5.0 - step * 4.0,
+            ORIGIN - TILE * x as f32 - CHUNK * 3.0 - step * 2.0,
+        ];
+        assert_eq!(tile_of(at), Some((x, y)));
+        assert_eq!(ground_at(&tile, x, y, at), Some(52.0));
+        let elsewhere = [at[0] - CHUNK * 3.0, at[1]];
+        assert_eq!(ground_at(&tile, x, y, elsewhere), None, "no chunk there");
     }
 }

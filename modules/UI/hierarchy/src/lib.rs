@@ -37,6 +37,9 @@ const KINDS: [(&str, &[Kind]); 7] = [
     ("Lights", &[Kind::Light, Kind::LightZone]),
 ];
 
+/// How high over the ground of the middle of a zone the camera is put to show it, in yards.
+const CAMERA_HEIGHT: f32 = 30.0;
+
 /// The least time between two trees made for changes of the registry alone.
 const REBUILD_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -56,6 +59,9 @@ struct Made {
 #[derive(Default)]
 struct HierarchyModule {
     scene: Option<scene::Handle>,
+    /// The job reading the ground of the middle of the zone framed, with that middle and the
+    /// height to fall back on.
+    grounding: Option<(JobId, [f32; 2], Option<f32>)>,
     /// Why the last zone could not be framed.
     said: Option<String>,
     /// The zone chosen in the tree, framed by F; the extents of the zones of the map, read once a
@@ -261,23 +267,53 @@ impl HierarchyModule {
             });
             return;
         };
+        // The camera at the middle of the zone, 30 yards over its ground, read from the tile
+        // there by a job; else over the lowest of what the zone holds.
+        let middle = [(low[0] + high[0]) / 2.0, (low[1] + high[1]) / 2.0];
         let inside = |at: &&[f32; 3]| (low[0]..=high[0]).contains(&at[0]) && (low[1]..=high[1]).contains(&at[1]);
-        let heights: Vec<f32> = places.iter().filter(inside).map(|at| at[2]).collect();
-        let (bottom, top) = if heights.is_empty() {
-            (0.0, 150.0)
-        } else {
-            (
-                heights.iter().copied().fold(f32::MAX, f32::min),
-                heights.iter().copied().fold(f32::MIN, f32::max) + 10.0,
-            )
+        let lowest = places.iter().filter(inside).map(|at| at[2]).reduce(f32::min);
+        let (Some(folder), Some(formats)) = (self.extents_for.clone(), ctx.service(uniwow_api::formats::SERVICE))
+        else {
+            self.place_camera(middle, lowest, ctx);
+            return;
         };
-        // A box of a few yards at least, for a zone of one entity.
-        let (low, high) = (
-            [low[0].min(high[0] - 10.0), low[1].min(high[1] - 10.0)],
-            [high[0].max(low[0] + 10.0), high[1].max(low[1] + 10.0)],
-        );
-        let (min, max) = ([low[0], low[1], bottom], [high[0], high[1], top]);
-        self.said = match ctx.editor().call("viewport.frame", json!({ "min": min, "max": max })) {
+        let job = ctx.spawn("Read the ground of the middle of a zone", move |_| -> Option<f32> {
+            let (x, y) = zones::tile_of(middle)?;
+            let tile = formats.tile(&folder, x, y).ok()??;
+            zones::ground_at(&tile, x, y, middle)
+        });
+        self.grounding = Some((job, middle, lowest));
+    }
+
+    /// The camera put `CAMERA_HEIGHT` yards over `ground` at `middle`, looking ahead as it looked,
+    /// a little down.
+    fn place_camera(&mut self, middle: [f32; 2], ground: Option<f32>, ctx: &mut Context) {
+        let ground = ground.unwrap_or(0.0);
+        let position = [middle[0], middle[1], ground + CAMERA_HEIGHT];
+        // The direction it looked, flat.
+        let heading = ctx
+            .editor()
+            .call("viewport.camera", json!({}))
+            .ok()
+            .and_then(|camera| {
+                let at = |key: &str, axis: usize| camera[key][axis].as_f64().map(|value| value as f32);
+                let (dx, dy) = (
+                    at("target", 0)? - at("position", 0)?,
+                    at("target", 1)? - at("position", 1)?,
+                );
+                let length = (dx * dx + dy * dy).sqrt();
+                (length > 1e-3).then(|| [dx / length, dy / length])
+            })
+            .unwrap_or([1.0, 0.0]);
+        let target = [
+            position[0] + heading[0] * 100.0,
+            position[1] + heading[1] * 100.0,
+            ground,
+        ];
+        self.said = match ctx
+            .editor()
+            .call("viewport.look_at", json!({ "position": position, "target": target }))
+        {
             Ok(_) => None,
             Err(reason) => Some(format!("The zone is not framed: {reason}")),
         };
@@ -411,7 +447,15 @@ impl Module for HierarchyModule {
         self.ui(ui, ctx);
     }
 
-    fn on_job(&mut self, job: JobId, outcome: JobOutcome, _ctx: &mut Context) {
+    fn on_job(&mut self, job: JobId, outcome: JobOutcome, ctx: &mut Context) {
+        if let Some((waited, middle, lowest)) = self.grounding
+            && waited == job
+        {
+            self.grounding = None;
+            let ground = outcome.take::<Option<f32>>().flatten().or(lowest);
+            self.place_camera(middle, ground, ctx);
+            return;
+        }
         if self.extents_job == Some(job) {
             self.extents_job = None;
             if let Some(extents) = outcome.take::<zones::Extents>() {

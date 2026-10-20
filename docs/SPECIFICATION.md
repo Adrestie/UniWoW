@@ -10587,8 +10587,11 @@ while one of them moves. Test: a box moved by where its entity stands now.
 Then, a zone framed: a click on a zone or subzone of the tree chooses it (its row shown chosen, the
 entities selected let go, its triangle alone folding it); F frames the camera on it. The extent of
 each area of the map, a zone holding its subzones, read once a map by a job from the areas of the
-chunks of every tile of its WDT; its height that of the spawns known there, or 0 to 150 yards. Test:
-a zone spanning its chunks and those of its subzones.
+chunks of every tile of its WDT, else that of the entities listed under it (a zone of the inside of
+buildings, which no chunk names). The camera is put at its middle, 30 yards over the ground there
+(the nearest vertex of its chunk, its tile read by a job, loaded or not; else over the lowest of what
+the zone holds), looking ahead as it looked, a little down. Tests: a zone spanning its chunks and
+those of its subzones; the ground read at the vertex nearest to a point.
 
 ### Milestone 10: Lua modules (outline)
 
