@@ -10593,6 +10593,17 @@ buildings, which no chunk names). The camera is put at its middle, 30 yards over
 the zone holds), looking ahead as it looked, a little down. Tests: a zone spanning its chunks and
 those of its subzones; the ground read at the vertex nearest to a point.
 
+#### After 15.14: the Inspector made quicker to use
+
+Found slow to use by the user. The header gives the name edited in place (Enter keeps it, empty gives
+the default back), the lock as an icon beside it, the kind and the id (selectable), a live sign, the
+chain of places, and folded where it is stored. The Transform of one entity: its axes lettered and
+coloured as the gizmos, each value dragged (one undo entry a drag, the value shown following the
+mouse) or typed; of several, a change typed (`+n`…) as before. Every component lays its fields out
+the same: their names in a column of the same width, weak, the values selectable. The raw data
+folded at the bottom in place of a mode. The components in their order: Transform, Model, Materials,
+Quests, those declared, the others, the offer of a game object, the raw data.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
