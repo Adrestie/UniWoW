@@ -105,6 +105,42 @@ pub trait Scene: Send + Sync {
     fn components(&self) -> Arc<Vec<components::Component>> {
         Arc::default()
     }
+
+    /// Gives what `provider` knows of the map shown beyond what it gave the scene, `known`, in
+    /// place of what it gave before: the Hierarchy lists it whole, an entry not loaded framed to be.
+    fn set_known(&self, provider: &str, known: Arc<Vec<Known>>) {
+        let _ = (provider, known);
+    }
+
+    /// What the providers know of the map shown; none by default.
+    fn known(&self) -> Arc<Catalogue> {
+        Arc::default()
+    }
+}
+
+/// An entity a provider knows of without having given it to the scene, being far from the camera:
+/// its id, its label and extra number as its piece would give them, its area and its place.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Known {
+    pub id: EntityId,
+    pub label: String,
+    pub extra: u32,
+    pub area: u32,
+    pub origin: [f32; 3],
+}
+
+impl Known {
+    /// Its name as the scene would give it.
+    pub fn name(&self) -> String {
+        default_name(&self.id, &self.label)
+    }
+}
+
+/// What the providers know of the map shown, by provider, with a number changed with it.
+#[derive(Clone, Debug, Default)]
+pub struct Catalogue {
+    pub generation: u64,
+    pub by_provider: BTreeMap<String, Arc<Vec<Known>>>,
 }
 
 /// A group of the editor, the empty object of Unity: its entities, moved as one; an instance of a

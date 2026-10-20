@@ -74,6 +74,11 @@ struct SpawnsModule {
     /// The tiles given to the scene and placed, for those to take away.
     tiles: BTreeSet<TileId>,
     refused: Option<String>,
+    /// The folder of the map shown, its spawns' areas read from its tiles by `placing`, and the
+    /// areas of each spawn, by its place in `spawns`, once read.
+    directory: Option<String>,
+    placing: Option<JobId>,
+    areas: Arc<Vec<u32>>,
     /// The tiles around the camera whose spawns are given to the scene and drawn; none while no
     /// view tells where the camera is, no spawn then.
     around: Option<BTreeSet<TileId>>,
@@ -146,6 +151,61 @@ impl SpawnsModule {
         self.refresh_tiles(None);
     }
 
+    /// The areas of the spawns of the map, read once from the areas of the chunks of their tiles
+    /// by a job, for the Hierarchy to list them all.
+    fn read_areas(&mut self, ctx: &mut Context) {
+        let (Some(formats), Some(directory)) = (self.formats.clone(), self.directory.clone()) else {
+            return;
+        };
+        let (spawns, by_tile) = (self.spawns.clone(), self.by_tile.clone());
+        self.placing = Some(
+            ctx.spawn("Read the areas of the spawns of the map", move |job| -> Vec<u32> {
+                let mut areas = vec![0; spawns.len()];
+                for (tile, ats) in &by_tile {
+                    if job.is_cancelled() {
+                        break;
+                    }
+                    let Ok(Some(chunks)) = formats.tile_areas(&directory, tile.x, tile.y) else {
+                        continue;
+                    };
+                    for at in ats {
+                        let [x, y, _] = spawns[*at].position;
+                        if let Some((_, [cx, cy])) = scene::chunk_at(x, y) {
+                            areas[*at] = chunks.get((cy * 16 + cx) as usize).copied().unwrap_or(0);
+                        }
+                    }
+                }
+                areas
+            }),
+        );
+    }
+
+    /// The spawns of the whole map given to the scene as known, for the Hierarchy: those the user
+    /// deleted and those of game events not shown left out.
+    fn give_known(&self) {
+        let Some(scene) = &self.scene else {
+            return;
+        };
+        if self.areas.len() != self.spawns.len() {
+            return;
+        }
+        let known: Vec<scene::Known> = self
+            .spawns
+            .iter()
+            .zip(self.areas.iter())
+            .filter(|(spawn, _)| !self.changes.deleted.contains(&spawn.id()))
+            .filter(|(spawn, _)| self.show_events || spawn.event <= 0)
+            .map(|(spawn, area)| scene::Known {
+                id: spawn.id(),
+                label: spawn.name.clone(),
+                extra: spawn.entry,
+                area: *area,
+                origin: spawn.position,
+            })
+            .collect();
+        scene.set_known(MODULE, Arc::new(known));
+    }
+
     /// The changes made `changes`: the tiles of the spawns they touch given and placed again alone.
     fn set_changes(&mut self, changes: Changes) {
         let before = std::mem::replace(&mut self.changes, changes);
@@ -154,6 +214,9 @@ impl SpawnsModule {
         tiles.extend(self.tiles_of_changes(&after));
         self.looks_wanted = true;
         self.refresh_tiles(Some(&tiles));
+        if before.deleted != self.changes.deleted {
+            self.give_known();
+        }
     }
 
     /// The tiles of the spawns `changes` names, where the database and `changes` have them.
@@ -313,6 +376,10 @@ impl SpawnsModule {
         self.spawns = Arc::default();
         self.index.clear();
         self.by_tile.clear();
+        self.areas = Arc::default();
+        if let Some(scene) = &self.scene {
+            scene.set_known(MODULE, Arc::default());
+        }
         self.read_for = None;
     }
 
@@ -344,15 +411,17 @@ impl SpawnsModule {
             self.formats = ctx.service(uniwow_api::formats::SERVICE);
             self.scene = ctx.service(scene::SERVICE);
         }
-        let map = ctx
-            .editor()
-            .call("terrain.map", json!({}))
-            .ok()
+        let shown = ctx.editor().call("terrain.map", json!({})).ok();
+        let map = shown
+            .as_ref()
             .and_then(|map| map.get("id")?.as_u64())
             .map(|id| id as u32);
         if map != self.map {
             self.clear();
             self.map = map;
+            self.directory = shown
+                .as_ref()
+                .and_then(|map| Some(map.get("directory")?.as_str()?.to_owned()));
         }
         self.see_live();
         self.follow_camera(ctx);
@@ -883,6 +952,7 @@ impl Module for SpawnsModule {
                         .changed()
                     {
                         self.refresh();
+                        self.give_known();
                     }
                     ui.checkbox(
                         &mut self.all_paths,
@@ -904,7 +974,7 @@ impl Module for SpawnsModule {
         self.refresh();
     }
 
-    fn on_job(&mut self, job: JobId, outcome: JobOutcome, _ctx: &mut Context) {
+    fn on_job(&mut self, job: JobId, outcome: JobOutcome, ctx: &mut Context) {
         if self.reading == Some(job) {
             self.reading = None;
             match outcome.take::<Read>() {
@@ -917,11 +987,13 @@ impl Module for SpawnsModule {
                     );
                     self.index = spawns.iter().enumerate().map(|(at, spawn)| (spawn.id(), at)).collect();
                     self.by_tile = by_tile(&spawns);
+                    self.areas = Arc::default();
                     self.spawns = Arc::new(spawns);
                     self.highest = highest;
                     self.quests = Arc::new(quests);
                     self.paths = Arc::new(paths);
                     self.refused = None;
+                    self.read_areas(ctx);
                     self.refresh();
                 }
                 Some(Err(reason)) => {
@@ -937,6 +1009,14 @@ impl Module for SpawnsModule {
             if let Some(looks) = outcome.take::<Looks>() {
                 self.looks.extend(looks);
                 self.refresh();
+            }
+            return;
+        }
+        if self.placing == Some(job) {
+            self.placing = None;
+            if let Some(areas) = outcome.take::<Vec<u32>>() {
+                self.areas = Arc::new(areas);
+                self.give_known();
             }
         }
     }

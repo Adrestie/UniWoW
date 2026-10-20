@@ -30,6 +30,9 @@ pub struct Tree {
     pub by_entity: HashMap<EntityId, u32>,
     /// The entities it lists.
     pub entities: usize,
+    /// The places of the entities it lists that the scene does not hold, known of their providers
+    /// far from the camera: framed to be loaded.
+    pub known: HashMap<EntityId, [f32; 3]>,
 }
 
 /// What the tree keeps.
@@ -140,6 +143,39 @@ impl Tree {
         }
         rows
     }
+}
+
+/// The node of the place `area` under `root`, its chain of zones made the first time; `No area`
+/// for none.
+fn place_of(tree: &mut Tree, folders: &mut HashMap<String, u32>, snapshot: &Snapshot, root: u32, area: u32) -> u32 {
+    let chain = snapshot.place(area);
+    if chain.is_empty() {
+        return tree.folder(folders, "area:0".to_owned(), "No area", Some(root), Some(0));
+    }
+    let mut place = root;
+    for (area, name) in chain {
+        place = tree.folder(folders, format!("area:{area}"), name, Some(place), Some(area));
+    }
+    place
+}
+
+/// The folder of the entities of `kind` of the place `place`: one a kind, in the order of `rank`.
+fn category(tree: &mut Tree, folders: &mut HashMap<String, u32>, place: u32, kind: Kind) -> u32 {
+    let area = tree.nodes[place as usize].area.unwrap_or(0);
+    // The rooms and the doodads of a building stay under it; the others by their kind.
+    let (label, order) = match kind {
+        Kind::Chunk => ("Terrain", 0),
+        Kind::Water => ("Water", 1),
+        Kind::Group | Kind::Instance => ("Groups", 2),
+        Kind::Building | Kind::Room => ("Buildings", 3),
+        Kind::Doodad | Kind::BuildingDoodad => ("Doodads", 4),
+        Kind::Creature => ("Creatures", 5),
+        Kind::GameObject => ("Game objects", 6),
+        Kind::Light | Kind::LightZone => ("Lights", 7),
+        Kind::Weather => ("Weather", 8),
+        _ => ("Others", 9),
+    };
+    tree.folder(folders, format!("kind:{area}:{order}"), label, Some(place), None)
 }
 
 /// The name of `entity` shown: the one the user gave, else its default.
@@ -323,6 +359,8 @@ pub fn build(
     names: &HashMap<EntityId, String>,
     map: &str,
     groups: &uniwow_api::scene::Groups,
+    known: &uniwow_api::scene::Catalogue,
+    map_id: Option<u32>,
 ) -> Tree {
     match filter.view {
         View::Files => return build_files(snapshot, filter, names),
@@ -408,21 +446,8 @@ pub fn build(
             Some(parent) => parent,
             None if id.kind == Kind::Live => tree.folder(&mut folders, "live".to_owned(), "Live", None, None),
             None => {
-                let chain = snapshot.place(entity.area());
-                let mut place = if chain.is_empty() {
-                    tree.folder(&mut folders, "area:0".to_owned(), "No area", Some(root), Some(0))
-                } else {
-                    root
-                };
-                for (area, name) in chain {
-                    place = tree.folder(&mut folders, format!("area:{area}"), name, Some(place), Some(area));
-                }
-                let area = tree.nodes[place as usize].area.unwrap_or(0);
-                match id.kind {
-                    Kind::Chunk => tree.folder(&mut folders, format!("terrain:{area}"), "Terrain", Some(place), None),
-                    Kind::Water => tree.folder(&mut folders, format!("water:{area}"), "Water", Some(place), None),
-                    _ => place,
-                }
+                let place = place_of(&mut tree, &mut folders, snapshot, root, entity.area());
+                category(&mut tree, &mut folders, place, id.kind)
             }
         };
         tree.add(Node {
@@ -435,17 +460,72 @@ pub fn build(
         });
         tree.entities += 1;
     }
-    // Each node's children: the terrain and the water, the places by name, then the entities by kind
-    // and name.
+    // The places of the whole map, those far from the camera too, so that the tree is that of the
+    // continent; and the entities its providers know there without having loaded them.
+    if let Some(map_id) = map_id {
+        let mut areas: Vec<u32> = snapshot
+            .areas
+            .iter()
+            .filter(|(_, area)| area.map == map_id)
+            .map(|(id, _)| *id)
+            .collect();
+        areas.sort_unstable();
+        for area in areas {
+            place_of(&mut tree, &mut folders, snapshot, root, area);
+        }
+    }
+    for listed in known.by_provider.values() {
+        for entry in listed.iter() {
+            let matches_known = (filter.kinds.is_empty() || filter.kinds.contains(&entry.id.kind))
+                && (filter.text.is_empty()
+                    || names
+                        .get(&entry.id)
+                        .is_some_and(|name| name.to_lowercase().contains(&filter.text))
+                    || entry.label.to_lowercase().contains(&filter.text));
+            if seen.contains(&entry.id) || tree.by_entity.contains_key(&entry.id) || !matches_known {
+                continue;
+            }
+            let place = place_of(&mut tree, &mut folders, snapshot, root, entry.area);
+            let parent = category(&mut tree, &mut folders, place, entry.id.kind);
+            let name = names.get(&entry.id).cloned().unwrap_or_else(|| entry.name());
+            tree.add(Node {
+                key: entry.id.to_string(),
+                label: format!("○ {name}"),
+                entity: Some(entry.id),
+                area: None,
+                parent: Some(parent),
+                children: Vec::new(),
+            });
+            tree.known.insert(entry.id, entry.origin);
+            tree.entities += 1;
+        }
+    }
+    // Each category tells how many it holds.
+    for at in 0..tree.nodes.len() {
+        if tree.nodes[at].key.starts_with("kind:") {
+            let count = tree.nodes[at].children.len();
+            let label = format!("{} ({count})", tree.nodes[at].label);
+            tree.nodes[at].label = label;
+        }
+    }
+    // Each node's children: the places by name, then the categories in their order, then the
+    // entities by kind and name.
     let order: Vec<(u8, String)> = tree
         .nodes
         .iter()
         .map(|node| {
             let rank = match node.entity {
-                None if node.key.starts_with("terrain:") => 0,
-                None if node.key.starts_with("water:") => 1,
-                None => 2,
-                Some(id) => 3 + rank(id.kind),
+                // A category after the places, in the order of its kind.
+                None if node.key.starts_with("kind:") => {
+                    10 + node
+                        .key
+                        .rsplit(':')
+                        .next()
+                        .and_then(|rank| rank.parse::<u8>().ok())
+                        .unwrap_or(0)
+                }
+                None => 0,
+                Some(id) => 30 + rank(id.kind),
             };
             (rank, node.label.to_lowercase())
         })

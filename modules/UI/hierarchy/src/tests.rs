@@ -117,6 +117,8 @@ fn the_main_view_lists_the_map_its_zones_and_subzones_and_what_lies_in_them_and_
         &HashMap::new(),
         "Eastern Kingdoms",
         &Default::default(),
+        &Default::default(),
+        None,
     );
     assert_eq!(
         shown(&tree),
@@ -124,15 +126,18 @@ fn the_main_view_lists_the_map_its_zones_and_subzones_and_what_lies_in_them_and_
             "Eastern Kingdoms",
             "  Elwynn Forest",
             "    Goldshire",
-            "      Terrain",
+            "      Terrain (1)",
             "        Chunk 3, 15",
-            "      Goldshire_Inn #9",
-            "        The Kitchen",
-            "          Chair01 #4",
-            "    ElwynnTree03 #4521",
-            "    FarTree #99",
+            "      Buildings (1)",
+            "        Goldshire_Inn #9",
+            "          The Kitchen",
+            "            Chair01 #4",
+            "    Doodads (2)",
+            "      ElwynnTree03 #4521",
+            "      FarTree #99",
             "  No area",
-            "    Rock #7",
+            "    Doodads (1)",
+            "      Rock #7",
             "Live",
             "  Marshal Dughan",
         ]
@@ -153,6 +158,8 @@ fn a_search_keeps_the_matches_with_their_parents_and_the_scope_leaves_the_far_on
         &HashMap::new(),
         "Eastern Kingdoms",
         &Default::default(),
+        &Default::default(),
+        None,
     );
     assert_eq!(
         shown(&tree),
@@ -160,9 +167,10 @@ fn a_search_keeps_the_matches_with_their_parents_and_the_scope_leaves_the_far_on
             "Eastern Kingdoms",
             "  Elwynn Forest",
             "    Goldshire",
-            "      Goldshire_Inn #9",
-            "        The Kitchen",
-            "          Chair01 #4",
+            "      Buildings (1)",
+            "        Goldshire_Inn #9",
+            "          The Kitchen",
+            "            Chair01 #4",
         ]
     );
     let scoped = Filter {
@@ -170,9 +178,17 @@ fn a_search_keeps_the_matches_with_their_parents_and_the_scope_leaves_the_far_on
         kinds: vec![Kind::Doodad],
         ..Filter::default()
     };
-    let tree = build(&snapshot, &scoped, &HashMap::new(), "", &Default::default());
+    let tree = build(
+        &snapshot,
+        &scoped,
+        &HashMap::new(),
+        "",
+        &Default::default(),
+        &Default::default(),
+        None,
+    );
     let labels = shown(&tree);
-    assert!(labels.contains(&"    ElwynnTree03 #4521".to_owned()));
+    assert!(labels.contains(&"      ElwynnTree03 #4521".to_owned()), "{labels:?}");
     assert!(!labels.iter().any(|label| label.contains("FarTree")), "8 tiles away");
     // A name given is shown and searched.
     let names = HashMap::from([(EntityId::doodad(0, 4521), "The old oak".to_owned())]);
@@ -180,8 +196,16 @@ fn a_search_keeps_the_matches_with_their_parents_and_the_scope_leaves_the_far_on
         text: "old oak".to_owned(),
         ..Filter::default()
     };
-    let tree = build(&snapshot, &named, &names, "", &Default::default());
-    assert!(shown(&tree).contains(&"    The old oak".to_owned()));
+    let tree = build(
+        &snapshot,
+        &named,
+        &names,
+        "",
+        &Default::default(),
+        &Default::default(),
+        None,
+    );
+    assert!(shown(&tree).contains(&"      The old oak".to_owned()));
 }
 
 #[test]
@@ -205,17 +229,27 @@ fn the_entities_of_a_group_are_listed_under_it_not_in_their_place() {
         }],
         prefabs: Vec::new(),
     };
-    let tree = build(&snapshot, &Filter::default(), &HashMap::new(), "Map", &groups);
+    let tree = build(
+        &snapshot,
+        &Filter::default(),
+        &HashMap::new(),
+        "Map",
+        &groups,
+        &Default::default(),
+        None,
+    );
     assert_eq!(
         shown(&tree),
         [
             "Map",
             "  Elwynn Forest",
             "    Goldshire",
-            "      Camp",
-            "        Fire #2",
-            "        Tent #1",
-            "      ElwynnTree03 #4521",
+            "      Groups (1)",
+            "        Camp",
+            "          Fire #2",
+            "          Tent #1",
+            "      Doodads (1)",
+            "        ElwynnTree03 #4521",
         ]
     );
 }
@@ -257,7 +291,15 @@ fn the_files_list_each_tile_with_what_it_stores_and_by_type_a_list_a_kind() {
         view: View::Files,
         ..Filter::default()
     };
-    let tree = build(&snapshot, &files, &HashMap::new(), "", &Default::default());
+    let tree = build(
+        &snapshot,
+        &files,
+        &HashMap::new(),
+        "",
+        &Default::default(),
+        &Default::default(),
+        None,
+    );
     let labels = shown(&tree);
     assert!(labels.contains(&"Tile 32_48".to_owned()));
     assert!(
@@ -273,7 +315,15 @@ fn the_files_list_each_tile_with_what_it_stores_and_by_type_a_list_a_kind() {
         view: View::ByType,
         ..Filter::default()
     };
-    let tree = build(&snapshot, &by_type, &HashMap::new(), "", &Default::default());
+    let tree = build(
+        &snapshot,
+        &by_type,
+        &HashMap::new(),
+        "",
+        &Default::default(),
+        &Default::default(),
+        None,
+    );
     assert_eq!(
         shown(&tree),
         [
@@ -311,7 +361,15 @@ fn the_server_lists_each_template_with_its_spawns() {
         view: View::Server,
         ..Filter::default()
     };
-    let tree = build(&snapshot, &server, &HashMap::new(), "", &Default::default());
+    let tree = build(
+        &snapshot,
+        &server,
+        &HashMap::new(),
+        "",
+        &Default::default(),
+        &Default::default(),
+        None,
+    );
     assert_eq!(
         shown(&tree),
         [
@@ -335,6 +393,8 @@ fn the_rows_follow_the_folds_and_the_path_of_a_node_unfolds_to_it() {
         &HashMap::new(),
         "Map",
         &Default::default(),
+        &Default::default(),
+        None,
     );
     let mut unfolded = HashSet::from(["map".to_owned()]);
     let rows = tree.rows(&unfolded);
@@ -346,7 +406,7 @@ fn the_rows_follow_the_folds_and_the_path_of_a_node_unfolds_to_it() {
         unfolded.insert(tree.nodes[*node as usize].key.clone());
     }
     let rows = tree.rows(&unfolded);
-    assert!(rows.iter().any(|(node, depth)| *node == chair && *depth == 5));
+    assert!(rows.iter().any(|(node, depth)| *node == chair && *depth == 6));
 }
 
 /// The benchmark of step 15.4: a tree of 500,000 entities made from nothing.
@@ -370,6 +430,8 @@ fn a_tree_of_500_000_entities_is_made_in_a_fraction_of_a_second() {
         &HashMap::new(),
         "Map",
         &Default::default(),
+        &Default::default(),
+        None,
     );
     let took = started.elapsed();
     assert_eq!(tree.entities, 500_000);
@@ -378,4 +440,69 @@ fn a_tree_of_500_000_entities_is_made_in_a_fraction_of_a_second() {
         took.as_secs_f64() * 1000.0
     );
     assert!(took.as_secs() < 10, "{took:?}");
+}
+
+#[test]
+fn the_whole_map_is_listed_its_zones_far_away_and_the_spawns_known_but_not_loaded() {
+    use uniwow_api::scene::{Catalogue, Known};
+    let mut snapshot = goldshire();
+    let area = |parent, map, name: &str| Area {
+        parent,
+        map,
+        name: name.to_owned(),
+    };
+    snapshot.areas = Arc::new(HashMap::from([
+        (12, area(0, 0, "Elwynn Forest")),
+        (87, area(12, 0, "Goldshire")),
+        (40, area(0, 0, "Westfall")),
+        (108, area(40, 0, "Sentinel Hill")),
+        (3537, area(0, 571, "Borean Tundra")),
+    ]));
+    let far_guard = Known {
+        id: EntityId::creature(79666),
+        label: "Stormwind City Guard".to_owned(),
+        extra: 68,
+        area: 108,
+        origin: [-10_500.0, 1_000.0, 40.0],
+    };
+    // A spawn the scene holds already is listed once, by the scene.
+    let held = Known {
+        id: EntityId::doodad(0, 4521),
+        ..far_guard.clone()
+    };
+    let known = Catalogue {
+        generation: 1,
+        by_provider: [("spawns".to_owned(), Arc::new(vec![far_guard, held]))]
+            .into_iter()
+            .collect(),
+    };
+    let tree = build(
+        &snapshot,
+        &Filter::default(),
+        &HashMap::new(),
+        "Eastern Kingdoms",
+        &Default::default(),
+        &known,
+        Some(0),
+    );
+    let labels = shown(&tree);
+    assert!(
+        labels.contains(&"  Westfall".to_owned()),
+        "a zone far from the camera: {labels:?}"
+    );
+    assert!(labels.contains(&"    Sentinel Hill".to_owned()));
+    assert!(labels.contains(&"      Creatures (1)".to_owned()));
+    assert!(labels.contains(&"        ○ Stormwind City Guard #79666".to_owned()));
+    assert!(
+        !labels.iter().any(|label| label.contains("Borean")),
+        "a zone of another map"
+    );
+    assert_eq!(labels.iter().filter(|label| label.contains("ElwynnTree03")).count(), 1);
+    assert_eq!(
+        tree.known.get(&EntityId::creature(79666)),
+        Some(&[-10_500.0, 1_000.0, 40.0])
+    );
+    // The places first, then the categories in their order.
+    let elwynn = labels.iter().position(|label| label == "  Elwynn Forest").unwrap();
+    assert_eq!(labels[elwynn + 1], "    Goldshire");
 }

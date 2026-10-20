@@ -36,6 +36,9 @@ const KINDS: [(&str, &[Kind]); 7] = [
     ("Lights", &[Kind::Light, Kind::LightZone]),
 ];
 
+/// The least time between two trees made for changes of the registry alone.
+const REBUILD_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// What a tree was made for: the generation of the registry, the filter, the names given and the
 /// name of the map.
 #[derive(Clone, Debug, PartialEq)]
@@ -45,11 +48,15 @@ struct Made {
     names: usize,
     groups: u64,
     map: String,
+    map_id: Option<u32>,
+    known: u64,
 }
 
 #[derive(Default)]
 struct HierarchyModule {
     scene: Option<scene::Handle>,
+    /// When the tree was asked last.
+    built: Option<std::time::Instant>,
     /// What the objects `HierarchyView` are drawn from.
     views: Arc<views::Shared>,
     /// The colours of the notes of the editor by entity, and their number as `notes` last gave them.
@@ -84,12 +91,16 @@ impl HierarchyModule {
         let snapshot = scene.snapshot();
         let selection = scene.selection();
         let names = scene.names();
-        let map = ctx
-            .editor()
-            .call("terrain.map", json!({}))
-            .ok()
+        let shown = ctx.editor().call("terrain.map", json!({})).ok();
+        let map = shown
+            .as_ref()
             .and_then(|map| Some(map.get("name")?.as_str()?.to_owned()))
             .unwrap_or_default();
+        let map_id = shown
+            .as_ref()
+            .and_then(|map| map.get("id")?.as_u64())
+            .map(|id| id as u32);
+        let known = scene.known();
         let kept: Vec<EntityId> = selection
             .ids
             .iter()
@@ -102,7 +113,12 @@ impl HierarchyModule {
                 view: self.view,
                 text: self.text.trim().to_lowercase(),
                 kinds: KINDS[self.kinds].1.to_vec(),
-                scope: scene.scope(),
+                // The places view whole, the map's every zone; the others about the camera.
+                scope: if self.view == tree::View::Main {
+                    None
+                } else {
+                    scene.scope()
+                },
                 kept: if kept.is_empty() {
                     self.made
                         .as_ref()
@@ -115,17 +131,31 @@ impl HierarchyModule {
             names: Arc::as_ptr(&names) as usize,
             groups: scene.groups().generation,
             map,
+            map_id,
+            known: known.generation,
         };
         if self.made.as_ref() == Some(&made) || self.job.as_ref().is_some_and(|(_, job)| *job == made) {
             return;
         }
+        // The registry alone changed, as the live world does many times a second: the tree made
+        // again a second after the last at most, not at each change.
+        let only_registry = self.made.as_ref().is_some_and(|before| {
+            Made {
+                generation: before.generation,
+                ..made.clone()
+            } == *before
+        });
+        if only_registry && self.built.is_some_and(|built| built.elapsed() < REBUILD_EVERY) {
+            return;
+        }
+        self.built = Some(std::time::Instant::now());
         if let Some((job, _)) = self.job.take() {
             ctx.cancel(job);
         }
         let (filter, map) = (made.filter.clone(), made.map.clone());
         let groups = scene.groups();
         let job = ctx.spawn("Make the tree of the Hierarchy", move |job| {
-            let tree = tree::build(&snapshot, &filter, &names, &map, &groups);
+            let tree = tree::build(&snapshot, &filter, &names, &map, &groups, &known, map_id);
             (!job.is_cancelled()).then_some(tree)
         });
         self.job = Some((job, made));
@@ -150,12 +180,22 @@ impl HierarchyModule {
         self.scroll_to = self.rows.iter().position(|(row, _)| *row == node);
     }
 
-    /// Frames the entity `id` in the 3D view.
+    /// Frames the entity `id` in the 3D view: one far from the camera by its known place, which
+    /// brings its tiles.
     fn frame(&self, id: EntityId, ctx: &mut Context) {
-        let Some(entity) = self.scene.as_ref().and_then(|scene| {
+        let held = self.scene.as_ref().and_then(|scene| {
             let snapshot = scene.snapshot();
             snapshot.get(&id).map(|entity| entity.bounds())
-        }) else {
+        });
+        let known = || {
+            self.tree.known.get(&id).map(|at| {
+                [
+                    [at[0] - 2.0, at[1] - 2.0, at[2]],
+                    [at[0] + 2.0, at[1] + 2.0, at[2] + 4.0],
+                ]
+            })
+        };
+        let Some(entity) = held.or_else(known) else {
             return;
         };
         let [low, high] = entity;
@@ -397,6 +437,10 @@ impl HierarchyModule {
                     let response = ui.selectable_label(selected, text);
                     if response.clicked() {
                         clicked = Some((index, ui.input(|i| i.modifiers)));
+                        // One far from the camera: gone to, so that its tiles are loaded.
+                        if let Some(id) = node.entity.filter(|id| tree.known.contains_key(id)) {
+                            framed = Some(id);
+                        }
                     }
                     if response.double_clicked() {
                         match node.entity {

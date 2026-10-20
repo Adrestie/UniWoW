@@ -64,6 +64,8 @@ struct Shared {
     groups: Mutex<Arc<Groups>>,
     /// The components the modules declared.
     components: Mutex<Arc<Vec<scene::components::Component>>>,
+    /// What the providers know of the map shown beyond what they gave.
+    known: Mutex<Arc<scene::Catalogue>>,
     /// The questions to the thread of `scene`, each with where its answer goes; none until it runs.
     questions: Mutex<Option<Sender<Asked>>>,
 }
@@ -199,6 +201,22 @@ impl scene::Scene for Service {
 
     fn components(&self) -> Arc<Vec<scene::components::Component>> {
         lock(&self.0.components).clone()
+    }
+
+    fn set_known(&self, provider: &str, known: Arc<Vec<scene::Known>>) {
+        let mut catalogue = lock(&self.0.known);
+        let mut changed = (**catalogue).clone();
+        changed.generation += 1;
+        if known.is_empty() {
+            changed.by_provider.remove(provider);
+        } else {
+            changed.by_provider.insert(provider.to_owned(), known);
+        }
+        *catalogue = Arc::new(changed);
+    }
+
+    fn known(&self) -> Arc<scene::Catalogue> {
+        lock(&self.0.known).clone()
     }
 
     fn groups(&self) -> Arc<Groups> {
@@ -1285,6 +1303,8 @@ impl Module for SceneModule {
             && let Some(id) = event.payload.get("id").and_then(Value::as_str)
         {
             journal::lock(&self.shared.pending, "scene pending").push(Change::WithdrawProvider(id.to_owned(), None));
+            use scene::Scene as _;
+            Service(self.shared.clone()).set_known(id, Arc::default());
             let left = declared::dropped(&lock(&self.shared.components), id);
             if let Some(left) = left {
                 *lock(&self.shared.components) = Arc::new(left);

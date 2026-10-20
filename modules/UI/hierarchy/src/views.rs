@@ -139,6 +139,7 @@ mod tests {
             roots: vec![0],
             by_entity: HashMap::from([(EntityId::doodad(0, 1), 1)]),
             entities: 1,
+            known: HashMap::new(),
         };
         let shared = Arc::new(Shared::default());
         *lock(&shared.tree) = Arc::new(tree);

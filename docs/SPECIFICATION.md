@@ -10555,6 +10555,19 @@ those left behind, the others as they are; a change made or undone gives again t
 spawns it touches alone; nothing given before the camera is known; the looks looked at for the
 tiles held alone. The map is never copied whole.
 
+#### After 15.14: the Hierarchy of the whole continent, in categories
+
+Asked by the user: the main view lists the whole map, not the scope around the camera, every zone
+and subzone of the map from `AreaTable` whether anything there is loaded or not; under each place,
+its subzones first, then its entities in categories with their counts (*Terrain*, *Water*,
+*Groups*, *Buildings* with their rooms, *Doodads*, *Creatures*, *Game objects*, *Lights*,
+*Weather*). The providers give the scene what they know of the map beyond what they loaded
+(`Scene::set_known`, `Known`, `Catalogue`): the module `spawns` the spawns of the whole map, their
+areas read once by a job from the chunks of their tiles. Those not loaded are listed `○ name`, a
+click frames them, which loads their tiles. The tree is made again for a change of the registry
+alone a second after the last at most. Tests: the zones far from the camera and the spawns known
+listed, a zone of another map left out, an entity known and held listed once; the categories.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
