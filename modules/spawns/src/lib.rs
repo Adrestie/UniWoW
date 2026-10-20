@@ -89,6 +89,8 @@ struct SpawnsModule {
     drawn: Arc<std::sync::Mutex<paths::Drawn>>,
     all_paths: bool,
     paths_for: Option<(u64, bool, usize, u64)>,
+    /// Counts the frames, the marks of the spawns that move drawn at each.
+    frames: u64,
     /// The client's tables, for the displays of game objects.
     formats: Option<Arc<dyn uniwow_api::formats::Formats>>,
     /// The spawns the world as it runs shows live, not drawn again; the generation of the scene they
@@ -555,9 +557,14 @@ impl SpawnsModule {
         let live: Vec<(EntityId, [f32; 3])> = selected
             .iter()
             .filter(|id| matches!(id.kind, Kind::Creature | Kind::GameObject))
-            .filter_map(|id| Some((*id, snapshot.live(id)?.origin())))
+            .filter_map(|id| {
+                snapshot.live(id)?;
+                Some((*id, scene.position_now(id)?))
+            })
             .collect();
-        let moving = if live.is_empty() { 0 } else { snapshot.generation };
+        // Drawn again at each frame while one of them moves.
+        let moving = if live.is_empty() { 0 } else { self.frames };
+        self.frames = self.frames.wrapping_add(1);
         let now = (
             selection.generation,
             self.all_paths,

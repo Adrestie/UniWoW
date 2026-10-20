@@ -10578,6 +10578,12 @@ of 0.8 yard), drawn again as it moves; in yellow, the patrol paths red, by the s
 segments now each of its colour. Tests: the circle on its place and the dashes along the line,
 none for a creature standing there; the shader validated.
 
+Then, the boxes jumping from place to place as the pieces of the live world came: the scene asks its
+providers' movers where a moving entity stands at this moment (`Scene::add_mover`,
+`Scene::position_now`, `Mover`); `live-world` gives the place along its spline its models are drawn
+at; the boxes of the selection and the line to the place of spawn are drawn again at each frame
+while one of them moves. Test: a box moved by where its entity stands now.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which

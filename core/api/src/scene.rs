@@ -116,6 +116,24 @@ pub trait Scene: Send + Sync {
     fn known(&self) -> Arc<Catalogue> {
         Arc::default()
     }
+
+    /// Adds what tells where the moving entities of `provider` stand at each moment, between the
+    /// pieces it publishes; in place of the one before.
+    fn add_mover(&self, provider: &str, mover: Arc<dyn Mover>) {
+        let _ = (provider, mover);
+    }
+
+    /// Where the entity `id` stands now, if it moves: its providers' movers asked; none otherwise.
+    fn position_now(&self, id: &EntityId) -> Option<[f32; 3]> {
+        let _ = id;
+        None
+    }
+}
+
+/// What tells where the moving entities of a provider stand now, as their models are drawn, at each
+/// frame: the live creatures along their splines.
+pub trait Mover: Send + Sync {
+    fn position(&self, id: &EntityId) -> Option<[f32; 3]>;
 }
 
 /// An entity a provider knows of without having given it to the scene, being far from the camera:

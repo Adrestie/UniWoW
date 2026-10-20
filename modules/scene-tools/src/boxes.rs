@@ -37,16 +37,40 @@ fn fs_main() -> @location(0) vec4<f32> {
 "#;
 
 /// The bounds of the entities `ids` the snapshot holds, the first `MOST`, each as six floats: of a
-/// creature the world as it runs shows, where it runs, not at its spawn's place.
-pub fn boxes(snapshot: &Snapshot, ids: &[scene::EntityId]) -> Vec<[f32; 6]> {
-    ids.iter()
-        .filter_map(|id| snapshot.live(id).or_else(|| snapshot.get(id)))
+/// creature the world as it runs shows, where it runs, not at its spawn's place, moved to where
+/// `now` says it stands at this moment; and whether one moves so.
+pub fn boxes(
+    snapshot: &Snapshot,
+    ids: &[scene::EntityId],
+    now: impl Fn(&scene::EntityId) -> Option<[f32; 3]>,
+) -> (Vec<[f32; 6]>, bool) {
+    let mut moving = false;
+    let boxes = ids
+        .iter()
+        .filter_map(|id| Some((id, snapshot.live(id).or_else(|| snapshot.get(id))?)))
         .take(MOST)
-        .map(|entity| {
+        .map(|(id, entity)| {
             let [low, high] = entity.bounds();
-            [low[0], low[1], low[2], high[0], high[1], high[2]]
+            // Moved by where it stands now from where the piece had it.
+            let shift = match now(id) {
+                Some(at) => {
+                    moving = true;
+                    let origin = entity.origin();
+                    [at[0] - origin[0], at[1] - origin[1], at[2] - origin[2]]
+                }
+                None => [0.0; 3],
+            };
+            [
+                low[0] + shift[0],
+                low[1] + shift[1],
+                low[2] + shift[2],
+                high[0] + shift[0],
+                high[1] + shift[1],
+                high[2] + shift[2],
+            ]
         })
-        .collect()
+        .collect();
+    (boxes, moving)
 }
 
 struct Gpu {
@@ -64,6 +88,8 @@ pub struct BoxesLayer {
     /// The generations of the selection and of the registry the boxes were written for, how many,
     /// and the version of the bundle.
     seen: Option<(u64, u64)>,
+    /// Whether a box drawn is of an entity that moves: made again at each frame.
+    moving: bool,
     count: u32,
     version: u64,
 }
@@ -75,6 +101,7 @@ impl BoxesLayer {
             target,
             gpu: None,
             seen: None,
+            moving: false,
             count: 0,
             version: 0,
         }
@@ -184,11 +211,14 @@ impl Layer for BoxesLayer {
             .write_buffer(&state.globals, 0, bytemuck::cast_slice(&globals));
         let (selection, snapshot) = (self.scene.selection(), self.scene.snapshot());
         let now = (selection.generation, snapshot.generation);
-        if self.seen == Some(now) {
+        // Again at each frame while one of them moves, as its model does.
+        if self.seen == Some(now) && !self.moving {
             return;
         }
         self.seen = Some(now);
-        let boxes = boxes(&snapshot, &selection.ids);
+        let scene = self.scene.clone();
+        let (boxes, moving) = boxes(&snapshot, &selection.ids, |id| scene.position_now(id));
+        self.moving = moving;
         if boxes.len() > state.capacity {
             state.capacity = boxes.len().next_power_of_two();
             state.instances = Self::instances(&gpu.device, state.capacity);

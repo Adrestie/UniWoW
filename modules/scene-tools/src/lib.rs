@@ -602,7 +602,7 @@ impl SceneTools {
             return;
         };
         let (selection, snapshot) = (scene.selection(), scene.snapshot());
-        let boxes = boxes::boxes(&snapshot, &selection.ids);
+        let (boxes, _) = boxes::boxes(&snapshot, &selection.ids, |id| scene.position_now(id));
         let Some(first) = boxes.first() else {
             return;
         };

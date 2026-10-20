@@ -468,6 +468,9 @@ impl Module for LiveWorld {
     }
 
     fn init(&mut self, ctx: &mut Context) {
+        if let Some(scene) = ctx.service(scene::SERVICE) {
+            scene.add_mover(ctx.module_id(), Arc::new(Movers(self.current.clone())));
+        }
         let defaults = Settings::default();
         let port = |key: &str, default: u16| {
             ctx.setting(key)
@@ -659,6 +662,29 @@ const SCENE_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// The live entities of `world` as entities of the scene, where they stand at `now`: read only,
 /// named as the observer names them, a player marked so; its extra number its template's entry.
+/// Where the live entities stand now, along their splines, by the ids the scene lists them by: a
+/// creature or a game object of a spawn by its spawn's.
+struct Movers(Arc<Mutex<Arc<Shared>>>);
+
+impl scene::Mover for Movers {
+    fn position(&self, id: &scene::EntityId) -> Option<[f32; 3]> {
+        let world = lock(&self.0).world();
+        let of_spawn = |kind: Kind| {
+            world
+                .entities
+                .values()
+                .find(|tracked| tracked.entity.kind == kind && u64::from(tracked.entity.spawn) == id.key)
+        };
+        let tracked = match id.kind {
+            scene::Kind::Live => world.entities.get(&id.key),
+            scene::Kind::Creature => of_spawn(Kind::Creature),
+            scene::Kind::GameObject => of_spawn(Kind::GameObject),
+            _ => None,
+        }?;
+        Some(tracked.position_at(Instant::now()))
+    }
+}
+
 pub fn scene_piece(world: &world::World, now: Instant) -> scene::Piece {
     use scene::{Entity, EntityId, PieceBuilder, flags};
     let mut builder = PieceBuilder::with_capacity(Vec::new(), world.entities.len());

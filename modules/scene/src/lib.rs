@@ -66,6 +66,8 @@ struct Shared {
     components: Mutex<Arc<Vec<scene::components::Component>>>,
     /// What the providers know of the map shown beyond what they gave.
     known: Mutex<Arc<scene::Catalogue>>,
+    /// What tells where the providers' moving entities stand now.
+    movers: Mutex<HashMap<String, Arc<dyn scene::Mover>>>,
     /// The questions to the thread of `scene`, each with where its answer goes; none until it runs.
     questions: Mutex<Option<Sender<Asked>>>,
 }
@@ -217,6 +219,15 @@ impl scene::Scene for Service {
 
     fn known(&self) -> Arc<scene::Catalogue> {
         lock(&self.0.known).clone()
+    }
+
+    fn add_mover(&self, provider: &str, mover: Arc<dyn scene::Mover>) {
+        lock(&self.0.movers).insert(provider.to_owned(), mover);
+    }
+
+    fn position_now(&self, id: &EntityId) -> Option<[f32; 3]> {
+        let movers: Vec<Arc<dyn scene::Mover>> = lock(&self.0.movers).values().cloned().collect();
+        movers.iter().find_map(|mover| mover.position(id))
     }
 
     fn groups(&self) -> Arc<Groups> {
@@ -1305,6 +1316,7 @@ impl Module for SceneModule {
             journal::lock(&self.shared.pending, "scene pending").push(Change::WithdrawProvider(id.to_owned(), None));
             use scene::Scene as _;
             Service(self.shared.clone()).set_known(id, Arc::default());
+            lock(&self.shared.movers).remove(id);
             let left = declared::dropped(&lock(&self.shared.components), id);
             if let Some(left) = left {
                 *lock(&self.shared.components) = Arc::new(left);

@@ -62,12 +62,20 @@ fn the_boxes_are_those_of_the_entities_selected_the_registry_holds() {
         entities: 1,
         ..Snapshot::default()
     };
-    let found = boxes(&snapshot, &[EntityId::doodad(0, 8), EntityId::doodad(0, 7)]);
+    let (found, moving) = boxes(&snapshot, &[EntityId::doodad(0, 8), EntityId::doodad(0, 7)], |_| None);
     assert_eq!(
         found,
         [[0.0, 1.0, 2.0, 2.0, 3.0, 4.0]],
         "an entity unloaded drawn without a box"
     );
+    assert!(!moving);
+    // One that moves: its box where it stands now, from where its piece had it.
+    let origin = snapshot.get(&EntityId::doodad(0, 7)).unwrap().origin();
+    let (moved, moving) = boxes(&snapshot, &[EntityId::doodad(0, 7)], |_| {
+        Some([origin[0] + 10.0, origin[1], origin[2] + 1.0])
+    });
+    assert!(moving);
+    assert_eq!(moved, [[10.0, 1.0, 3.0, 12.0, 3.0, 5.0]]);
 }
 
 mod gpu {
