@@ -10568,6 +10568,16 @@ click frames them, which loads their tiles. The tree is made again for a change 
 alone a second after the last at most. Tests: the zones far from the camera and the spawns known
 listed, a zone of another map left out, an entity known and held listed once; the categories.
 
+#### After 15.14: the creature and its place of spawn apart
+
+Seen by the user: the box of a creature selected was drawn at its place of spawn at times. The boxes
+of the selection take the listing of the live world where there is one, the creature where it
+runs; the module `spawns` marks the place of spawn of each creature or game object selected that
+the live world shows, a circle of a yard on it, and joins it to the creature by a dotted line (dashes
+of 0.8 yard), drawn again as it moves; in yellow, the patrol paths red, by the same layer, its
+segments now each of its colour. Tests: the circle on its place and the dashes along the line,
+none for a creature standing there; the shader validated.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which

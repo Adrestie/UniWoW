@@ -88,7 +88,7 @@ struct SpawnsModule {
     paths: Arc<paths::Paths>,
     drawn: Arc<std::sync::Mutex<paths::Drawn>>,
     all_paths: bool,
-    paths_for: Option<(u64, bool, usize)>,
+    paths_for: Option<(u64, bool, usize, u64)>,
     /// The client's tables, for the displays of game objects.
     formats: Option<Arc<dyn uniwow_api::formats::Formats>>,
     /// The spawns the world as it runs shows live, not drawn again; the generation of the scene they
@@ -548,12 +548,27 @@ impl SpawnsModule {
             return;
         };
         let selection = scene.selection();
-        let now = (selection.generation, self.all_paths, Arc::as_ptr(&self.paths) as usize);
+        let selected = scene.groups().expanded(&selection.ids);
+        let snapshot = scene.snapshot();
+        // The spawns selected that the live world shows: their places of spawn marked and joined to
+        // them, again as they move.
+        let live: Vec<(EntityId, [f32; 3])> = selected
+            .iter()
+            .filter(|id| matches!(id.kind, Kind::Creature | Kind::GameObject))
+            .filter_map(|id| Some((*id, snapshot.live(id)?.origin())))
+            .collect();
+        let moving = if live.is_empty() { 0 } else { snapshot.generation };
+        let now = (
+            selection.generation,
+            self.all_paths,
+            Arc::as_ptr(&self.paths) as usize,
+            moving,
+        );
         if self.paths_for == Some(now) {
             return;
         }
         self.paths_for = Some(now);
-        let segments = if self.all_paths {
+        let mut segments = if self.all_paths {
             // Those of the spawns around the camera alone.
             let around: Vec<u64> = self
                 .paths
@@ -570,15 +585,18 @@ impl SpawnsModule {
                 .collect();
             paths::segments(&self.paths, &around)
         } else {
-            let guids: Vec<u64> = scene
-                .groups()
-                .expanded(&selection.ids)
+            let guids: Vec<u64> = selected
                 .iter()
                 .filter(|id| id.kind == Kind::Creature)
                 .map(|id| id.key)
                 .collect();
             paths::segments(&self.paths, &guids)
         };
+        for (id, now) in live {
+            if let Some(spawn) = self.find(&id) {
+                segments.extend(paths::spawn_marks(spawn.position, now));
+            }
+        }
         let mut drawn = paths::lock(&self.drawn);
         drawn.segments = segments;
         drawn.version += 1;

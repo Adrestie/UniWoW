@@ -80,17 +80,75 @@ pub fn add_paths(paths: &mut Paths, rows: &Rows) {
 /// How high above its points a path is drawn, so that the ground hides it less.
 const LIFT: f32 = 0.4;
 
-/// The segments of the paths of the spawns `guids`, each six floats: the path closed, a creature
-/// walking it again from its start.
-pub fn segments<'a>(paths: &Paths, guids: impl IntoIterator<Item = &'a u64>) -> Vec<[f32; 6]> {
+/// A segment drawn: from, to, and its colour, red, green, blue and alpha in gamma.
+pub type Segment = [f32; 10];
+
+/// The colour of the paths.
+const PATH: [f32; 4] = [1.0, 0.12, 0.08, 1.0];
+/// The colour of the places of spawn and of the line to the creature.
+const SPAWN: [f32; 4] = [1.0, 0.85, 0.2, 1.0];
+
+fn segment(from: [f32; 3], to: [f32; 3], colour: [f32; 4]) -> Segment {
+    [
+        from[0], from[1], from[2], to[0], to[1], to[2], colour[0], colour[1], colour[2], colour[3],
+    ]
+}
+
+/// The segments of the paths of the spawns `guids`: the path closed, a creature walking it again
+/// from its start.
+pub fn segments<'a>(paths: &Paths, guids: impl IntoIterator<Item = &'a u64>) -> Vec<Segment> {
     let mut out = Vec::new();
     for guid in guids {
         for path in paths.get(guid).into_iter().flatten() {
             let closing = (path.len() > 2).then(|| (path[path.len() - 1], path[0]));
             for (from, to) in path.windows(2).map(|pair| (pair[0], pair[1])).chain(closing) {
-                out.push([from[0], from[1], from[2] + LIFT, to[0], to[1], to[2] + LIFT]);
+                let lifted = |at: [f32; 3]| [at[0], at[1], at[2] + LIFT];
+                out.push(segment(lifted(from), lifted(to), PATH));
             }
         }
+    }
+    out
+}
+
+/// The radius of the circle on a place of spawn, in yards, and the length of a dash and of a gap
+/// of the line from it to its creature.
+const RING: f32 = 1.0;
+const DASH: f32 = 0.8;
+
+/// The place of spawn `spawn` of a creature standing at `now`: a circle on it, and a dotted line
+/// from it to the creature, unless it stands there.
+pub fn spawn_marks(spawn: [f32; 3], now: [f32; 3]) -> Vec<Segment> {
+    let at = |angle: f32| {
+        [
+            spawn[0] + RING * angle.cos(),
+            spawn[1] + RING * angle.sin(),
+            spawn[2] + LIFT,
+        ]
+    };
+    let sides = 24;
+    let step = std::f32::consts::TAU / sides as f32;
+    let mut out: Vec<Segment> = (0..sides)
+        .map(|side| segment(at(side as f32 * step), at((side + 1) as f32 * step), SPAWN))
+        .collect();
+    let (from, to) = ([spawn[0], spawn[1], spawn[2] + LIFT], [now[0], now[1], now[2] + LIFT]);
+    let length = ((to[0] - from[0]).powi(2) + (to[1] - from[1]).powi(2) + (to[2] - from[2]).powi(2)).sqrt();
+    if length <= RING {
+        return out;
+    }
+    let along = |distance: f32| {
+        let share = distance / length;
+        [
+            from[0] + (to[0] - from[0]) * share,
+            from[1] + (to[1] - from[1]) * share,
+            from[2] + (to[2] - from[2]) * share,
+        ]
+    };
+    // Dashes from the edge of the circle, a gap of a dash between two.
+    let mut start = RING;
+    while start < length {
+        let end = (start + DASH).min(length);
+        out.push(segment(along(start), along(end), SPAWN));
+        start += 2.0 * DASH;
     }
     out
 }
@@ -98,7 +156,7 @@ pub fn segments<'a>(paths: &Paths, guids: impl IntoIterator<Item = &'a u64>) -> 
 /// The segments to draw, shared by the module and its layer, with a number changed with them.
 #[derive(Default)]
 pub struct Drawn {
-    pub segments: Vec<[f32; 6]>,
+    pub segments: Vec<Segment>,
     pub version: u64,
 }
 
@@ -106,21 +164,31 @@ pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The colour of the paths, in gamma as the target stores it.
-const COLOUR: [f32; 4] = [1.0, 0.12, 0.08, 1.0];
-
 const SHADER: &str = r#"
-struct Globals { view_proj: mat4x4<f32>, colour: vec4<f32> };
+struct Globals { view_proj: mat4x4<f32> };
 @group(0) @binding(0) var<uniform> globals: Globals;
 
+struct Out {
+    @builtin(position) position: vec4<f32>,
+    @location(0) colour: vec4<f32>,
+};
+
 @vertex
-fn vs_main(@builtin(vertex_index) vertex: u32, @location(0) seg_start: vec3<f32>, @location(1) seg_end: vec3<f32>) -> @builtin(position) vec4<f32> {
-    return globals.view_proj * vec4<f32>(select(seg_start, seg_end, vertex == 1u), 1.0);
+fn vs_main(
+    @builtin(vertex_index) vertex: u32,
+    @location(0) seg_start: vec3<f32>,
+    @location(1) seg_end: vec3<f32>,
+    @location(2) colour: vec4<f32>,
+) -> Out {
+    var out: Out;
+    out.position = globals.view_proj * vec4<f32>(select(seg_start, seg_end, vertex == 1u), 1.0);
+    out.colour = colour;
+    return out;
 }
 
 @fragment
-fn fs_main() -> @location(0) vec4<f32> {
-    return globals.colour;
+fn fs_main(in: Out) -> @location(0) vec4<f32> {
+    return in.colour;
 }
 "#;
 
@@ -132,7 +200,7 @@ struct Gpu {
     capacity: usize,
 }
 
-/// The layer drawing the paths: one draw of instanced lines, a segment 24 bytes.
+/// The layer drawing the paths: one draw of instanced lines, a segment 40 bytes with its colour.
 pub struct PathsLayer {
     drawn: Arc<Mutex<Drawn>>,
     target: Target,
@@ -157,7 +225,7 @@ impl PathsLayer {
     fn build(device: &wgpu::Device, target: &Target) -> Gpu {
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("patrol paths globals"),
-            size: 80,
+            size: 64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -199,9 +267,9 @@ impl PathsLayer {
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: 24,
+                    array_stride: 40,
                     step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4],
                 })],
             },
             primitive: wgpu::PrimitiveState {
@@ -240,7 +308,7 @@ impl PathsLayer {
     fn instances(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("patrol paths"),
-            size: (capacity * 24) as u64,
+            size: (capacity * 40) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
@@ -251,9 +319,7 @@ impl Layer for PathsLayer {
     fn prepare(&mut self, gpu: &egui_wgpu::RenderState, view: &View) {
         let target = self.target;
         let state = self.gpu.get_or_insert_with(|| Self::build(&gpu.device, &target));
-        let mut globals = [0.0f32; 20];
-        globals[..16].copy_from_slice(&view.view_proj.to_cols_array());
-        globals[16..].copy_from_slice(&COLOUR);
+        let globals = view.view_proj.to_cols_array();
         gpu.queue
             .write_buffer(&state.globals, 0, bytemuck::cast_slice(&globals));
         let drawn = lock(&self.drawn);
@@ -362,8 +428,9 @@ mod tests {
         assert!(!paths.contains_key(&5), "one point is no path");
         let drawn = segments(&paths, &[79753, 1]);
         assert_eq!(drawn.len(), 3, "two segments and the one back to its start");
-        assert_eq!(drawn[0], [0.0, 0.0, 1.4, 10.0, 0.0, 1.4]);
-        assert_eq!(drawn[2], [10.0, 10.0, 1.4, 0.0, 0.0, 1.4]);
+        assert_eq!(drawn[0][..6], [0.0, 0.0, 1.4, 10.0, 0.0, 1.4]);
+        assert_eq!(drawn[2][..6], [10.0, 10.0, 1.4, 0.0, 0.0, 1.4]);
+        assert_eq!(drawn[0][6..], PATH);
         assert!(segments(&paths, &[]).is_empty());
     }
 }
@@ -375,5 +442,25 @@ mod wgsl_tests {
     #[test]
     fn its_shaders_parse_and_validate() {
         uniwow_api::viewport::check_wgsl(SHADER).unwrap_or_else(|error| panic!("patrol paths: {error}"));
+    }
+
+    #[test]
+    fn a_place_of_spawn_is_a_circle_and_a_dotted_line_to_its_creature() {
+        let marks = spawn_marks([0.0, 0.0, 0.0], [10.0, 0.0, 0.0]);
+        let circle: Vec<&Segment> = marks.iter().take(24).collect();
+        for side in &circle {
+            let radius = (side[0].powi(2) + side[1].powi(2)).sqrt();
+            assert!((radius - RING).abs() < 1e-4, "on the circle");
+        }
+        let dashes = &marks[24..];
+        assert_eq!(dashes.len(), 6, "from 1 to 10 yards, 0.8 drawn then 0.8 left");
+        assert!((dashes[0][0] - RING).abs() < 1e-4 && (dashes[0][3] - (RING + DASH)).abs() < 1e-4);
+        assert!(dashes.iter().all(|dash| dash[3] <= 10.0 + 1e-4));
+        assert_eq!(marks[0][6..], SPAWN);
+        assert_eq!(
+            spawn_marks([0.0; 3], [0.5, 0.0, 0.0]).len(),
+            24,
+            "standing at its place: the circle alone"
+        );
     }
 }

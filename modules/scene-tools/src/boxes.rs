@@ -36,10 +36,11 @@ fn fs_main() -> @location(0) vec4<f32> {
 }
 "#;
 
-/// The bounds of the entities `ids` the snapshot holds, the first `MOST`, each as six floats.
+/// The bounds of the entities `ids` the snapshot holds, the first `MOST`, each as six floats: of a
+/// creature the world as it runs shows, where it runs, not at its spawn's place.
 pub fn boxes(snapshot: &Snapshot, ids: &[scene::EntityId]) -> Vec<[f32; 6]> {
     ids.iter()
-        .filter_map(|id| snapshot.get(id))
+        .filter_map(|id| snapshot.live(id).or_else(|| snapshot.get(id)))
         .take(MOST)
         .map(|entity| {
             let [low, high] = entity.bounds();
