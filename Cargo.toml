@@ -4,6 +4,8 @@ resolver = "3"
 # whose modules `modules/UI/*` takes.
 members = ["app", "core/*", "libs/*", "modules/[!U]*", "modules/UI/*", "xtask"]
 default-members = ["app", "core/*", "libs/*", "modules/[!U]*", "modules/UI/*"]
+# The crates of other authors changed for UniWoW (vendor/README.md): not members, given by [patch].
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -36,3 +38,7 @@ windows = "0.62"
 opt-level = 2
 # Line numbers only: full debug information makes the runtime's PDB weigh over 200 MB.
 debug = "line-tables-only"
+
+# The client of MySQL with sha256_password without TLS (vendor/README.md).
+[patch.crates-io]
+mysql = { path = "vendor/mysql" }

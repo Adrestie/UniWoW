@@ -63,12 +63,17 @@ pub fn allowed(sql: &str) -> Result<(), String> {
 
 /// `error` said without `password`, whatever the error is.
 fn said(error: impl std::fmt::Display, password: &str) -> String {
-    let text = error.to_string();
-    if password.is_empty() {
-        text
-    } else {
-        text.replace(password, "…")
+    let mut text = error.to_string();
+    if !password.is_empty() {
+        text = text.replace(password, "…");
     }
+    // A plugin of authentication this client has not: what the account can be given instead.
+    if text.contains("Unknown authentication protocol") {
+        text.push_str(
+            ". The account's plugin is not supported: caching_sha2_password, mysql_native_password and              sha256_password are (ALTER USER 'user'@'host' IDENTIFIED WITH caching_sha2_password BY '…')",
+        );
+    }
+    text
 }
 
 /// A connection to the database, its session read only.
@@ -164,6 +169,9 @@ fn from_mysql(value: mysql::Value) -> Value {
 }
 
 #[cfg(test)]
+mod fake_server;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -207,6 +215,33 @@ mod tests {
         assert_eq!(
             said(format!("Access denied for {password}"), password),
             "Access denied for …"
+        );
+        let unknown = said("Unknown authentication protocol: `authentication_ldap_sasl`", password);
+        assert!(unknown.contains("ALTER USER"), "{unknown}");
+    }
+
+    #[test]
+    fn an_account_of_sha256_password_connects_without_tls_its_password_encrypted() {
+        let (port, server) = fake_server::start();
+        let settings = Settings {
+            port,
+            ..Settings::default()
+        };
+        let password = "s3cr3t-of-the-test";
+        let connection = Connection::open(&settings, password, Duration::from_secs(5));
+        let failed = connection.as_ref().err().cloned();
+        drop(connection);
+        let seen = server.join().expect("the server").expect("served");
+        assert!(failed.is_none(), "{failed:?}");
+        assert_eq!(seen.asked_key, [0x01], "the public key asked for, without TLS");
+        assert_eq!(seen.encrypted.len(), 256, "encrypted with the key of 2048 bits");
+        let sent = String::from_utf8_lossy(&seen.encrypted);
+        assert!(!sent.contains(password), "never in clear");
+        assert!(
+            seen.commands
+                .iter()
+                .any(|command| command.ends_with(b"SET SESSION TRANSACTION READ ONLY")),
+            "the session read only"
         );
     }
 

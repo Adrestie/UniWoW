@@ -10476,6 +10476,15 @@ names its model found, a row prepared for a model none names and kept for the ne
 guids and entries given above the highest; the type 2 once it gives a quest; the whole kept in the
 project; turned by the user, its rotation that turn alone.
 
+#### After 15.14: `sha256_password`
+
+The user's account of MySQL 8.4 authenticates with `sha256_password`, which the crate `mysql` 28 has
+not: `libs/db` takes a copy of the crate with it (`vendor/mysql`, `[patch.crates-io]`; the server's
+public key asked for without TLS, the password XOR the scramble encrypted with it in RSA OAEP, as for
+`caching_sha2_password`). A plugin still unknown is said with the `ALTER USER` that gives the
+account one the client has. Tested against a server the tests run, which switches the client to the
+plugin and gives its key.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
