@@ -191,15 +191,18 @@ pub struct Number {
     pub column: &'static str,
     pub count: Option<&'static str>,
     pub names: Names,
+    /// What it is and what the player sees of it, for its tooltip.
+    pub hint: &'static str,
 }
 
-const fn number(label: &'static str, table: &'static str, column: &'static str) -> Number {
+const fn number(label: &'static str, table: &'static str, column: &'static str, hint: &'static str) -> Number {
     Number {
         label,
         table,
         column,
         count: None,
         names: Names::None,
+        hint,
     }
 }
 
@@ -209,6 +212,7 @@ const fn named(
     column: &'static str,
     count: Option<&'static str>,
     names: Names,
+    hint: &'static str,
 ) -> Number {
     Number {
         label,
@@ -216,6 +220,7 @@ const fn named(
         column,
         count,
         names,
+        hint,
     }
 }
 
@@ -228,25 +233,101 @@ pub const SECTIONS: [(&str, &[Number]); 2] = [
     (
         "Level and who takes it",
         &[
-            number("Level", T, "QuestLevel"),
-            number("Minimum level", T, "MinLevel"),
-            number("Maximum level", A, "MaxLevel"),
-            number("Zone or sort", T, "QuestSortID"),
-            number("Type", T, "QuestInfoID"),
-            number("Group of", T, "SuggestedGroupNum"),
-            number("Races (mask)", T, "AllowableRaces"),
-            number("Classes (mask)", A, "AllowableClasses"),
-            number("Flags", T, "Flags"),
-            number("Time allowed (s)", T, "TimeAllowed"),
+            number(
+                "Level",
+                T,
+                "QuestLevel",
+                "The level of the quest, shown before its title; its colour for the player and its experience follow it",
+            ),
+            number(
+                "Minimum level",
+                T,
+                "MinLevel",
+                "The level the player needs for it to be offered",
+            ),
+            number(
+                "Maximum level",
+                A,
+                "MaxLevel",
+                "Above this level the quest is no longer offered; 0 for none",
+            ),
+            number(
+                "Zone or sort",
+                T,
+                "QuestSortID",
+                "Where the quest is listed in the log: a zone of AreaTable.dbc above 0, a sort of QuestSort.dbc below 0 (as -1 Epic)",
+            ),
+            number(
+                "Type",
+                T,
+                "QuestInfoID",
+                "The type shown beside the title: 0 normal, 1 group, 41 PvP, 62 raid, 81 dungeon, 84 escort…",
+            ),
+            number(
+                "Group of",
+                T,
+                "SuggestedGroupNum",
+                "The players advised, shown as Suggested Players; 0 for none",
+            ),
+            number(
+                "Races (mask)",
+                T,
+                "AllowableRaces",
+                "The races that can take it, a mask: 1 human, 2 orc, 4 dwarf, 8 night elf, 16 undead, 32 tauren, 64 gnome, 128 troll, 512 blood elf, 1024 draenei; 0 every race",
+            ),
+            number(
+                "Classes (mask)",
+                A,
+                "AllowableClasses",
+                "The classes that can take it, a mask: 1 warrior, 2 paladin, 4 hunter, 8 rogue, 16 priest, 32 death knight, 64 shaman, 128 mage, 256 warlock, 1024 druid; 0 every class",
+            ),
+            number(
+                "Flags",
+                T,
+                "Flags",
+                "Flags of the quest, a mask: 8 sharable, 32 epic, 64 raid, 4096 daily, 32768 weekly…; 0 for none",
+            ),
+            number(
+                "Time allowed (s)",
+                T,
+                "TimeAllowed",
+                "The seconds the player has to finish it once taken, a timer in the log; 0 for none",
+            ),
         ],
     ),
     (
         "Chain",
         &[
-            named("After", A, "PrevQuestID", None, Names::Quest),
-            named("Before", A, "NextQuestID", None, Names::Quest),
-            named("Offered next", T, "RewardNextQuest", None, Names::Quest),
-            number("Exclusive group", A, "ExclusiveGroup"),
+            named(
+                "After",
+                A,
+                "PrevQuestID",
+                None,
+                Names::Quest,
+                "The quest to finish before this one is offered (below 0: to have taken, not finished); 0 for none",
+            ),
+            named(
+                "Before",
+                A,
+                "NextQuestID",
+                None,
+                Names::Quest,
+                "The quest this one opens once finished; 0 for none",
+            ),
+            named(
+                "Offered next",
+                T,
+                "RewardNextQuest",
+                None,
+                Names::Quest,
+                "The quest the ender offers at once when this one is handed in; 0 for none",
+            ),
+            number(
+                "Exclusive group",
+                A,
+                "ExclusiveGroup",
+                "The quests of one group above 0: one taken, the others no longer offered; below 0: all to finish before the next of the chain; 0 for none",
+            ),
         ],
     ),
 ];

@@ -291,12 +291,9 @@ impl QuestsModule {
     }
 
     /// The field `key` showing `current`: typed, written once left; the text written, if changed.
-    fn typed(&mut self, ui: &mut egui::Ui, key: String, current: &str, lines: bool, width: f32) -> Option<String> {
-        self.typed_with(ui, key, current, lines, width, "")
-    }
-
-    /// As `typed`, `hint` saying what the field is.
-    fn typed_with(
+    /// The field `key` showing `current`, `hint` saying what it is (its tooltip, required): typed,
+    /// written once left; the text written, if changed. Every field of the quests passes here.
+    fn typed(
         &mut self,
         ui: &mut egui::Ui,
         key: String,
@@ -427,6 +424,9 @@ impl QuestsModule {
                 egui::TextEdit::singleline(&mut self.search)
                     .hint_text("Search a title or an id")
                     .desired_width(ui.available_width() - 110.0),
+            )
+            .on_hover_text(
+                "Searches the quests of the database and those made here, by id or by a part of their English title",
             );
             if ui
                 .button("New quest")
@@ -611,7 +611,7 @@ impl QuestsModule {
                     }
                     let key = format!("{id}:{table}:{locale_key}:{column}");
                     let hint = format!("{} ({table}.{column})", text.label);
-                    if let Some(typed) = self.typed_with(ui, key, &current, text.lines, ui.available_width(), &hint) {
+                    if let Some(typed) = self.typed(ui, key, &current, text.lines, ui.available_width(), &hint) {
                         let mut after = self.edits.clone();
                         after.set(id, table, locale_key, column, json!(typed));
                         self.change(
@@ -639,18 +639,21 @@ impl QuestsModule {
                         .spacing([6.0, 4.0])
                         .show(ui, |ui| {
                             for number in numbers {
-                                ui.label(egui::RichText::new(number.label).weak());
+                                ui.label(egui::RichText::new(number.label).weak())
+                                    .on_hover_text(number.hint);
                                 let value = self.value(id, number.table, "", number.column);
                                 let current = shown(value.as_ref());
                                 let key = format!("{id}:{}::{}", number.table, number.column);
-                                if let Some(typed) = self.typed(ui, key, &current, false, width) {
+                                let hint = format!("{} ({}.{})", number.hint, number.table, number.column);
+                                if let Some(typed) = self.typed(ui, key, &current, false, width, &hint) {
                                     self.write_number(id, number.table, number.column, number.label, &typed, ctx);
                                 }
                                 match number.count {
                                     Some(count) => {
                                         let current = shown(self.value(id, number.table, "", count).as_ref());
                                         let key = format!("{id}:{}::{count}", number.table);
-                                        if let Some(typed) = self.typed(ui, key, &current, false, width * 0.6) {
+                                        let hint = format!("How many ({}.{count})", number.table);
+                                        if let Some(typed) = self.typed(ui, key, &current, false, width * 0.6, &hint) {
                                             self.write_number(id, number.table, count, number.label, &typed, ctx);
                                         }
                                     }
@@ -1031,3 +1034,50 @@ impl Module for QuestsModule {
 }
 
 uniwow_api::export_module!(QuestsModule::default());
+
+#[cfg(test)]
+mod tests {
+    /// The controls of the window of a quest and of the panel, as their code makes them.
+    const CONTROLS: [&str; 10] = [
+        ".button(",
+        "Button::new(",
+        "selectable_label(",
+        "selectable_value(",
+        "ComboBox::",
+        "small_button(",
+        ".link(",
+        "checkbox(",
+        "Sense::click",
+        "TextEdit::",
+    ];
+
+    /// egui keeps no tooltip to be asked back: each control of the quests is looked for in their
+    /// code, a tooltip within the lines that make it, else the test fails and names it.
+    #[test]
+    fn every_control_of_the_quests_says_what_it_is() {
+        for (file, code) in [("lib.rs", include_str!("lib.rs")), ("page.rs", include_str!("page.rs"))] {
+            let lines: Vec<&str> = code.lines().collect();
+            let end = lines
+                .iter()
+                .position(|line| line.starts_with("#[cfg(test)]"))
+                .unwrap_or(lines.len());
+            for (at, line) in lines[..end].iter().enumerate() {
+                if !CONTROLS.iter().any(|control| line.contains(control)) || line.trim_start().starts_with("//") {
+                    continue;
+                }
+                // The text fields pass through `typed`, whose tooltip is required.
+                if line.contains("TextEdit::")
+                    && lines[at.saturating_sub(12)..at]
+                        .iter()
+                        .any(|line| line.contains("fn typed("))
+                {
+                    continue;
+                }
+                let said = lines[at..(at + 25).min(end)]
+                    .iter()
+                    .any(|line| line.contains("on_hover_text") || line.contains("on_hover_ui"));
+                assert!(said, "{file}:{}: a control without a tooltip: {}", at + 1, line.trim());
+            }
+        }
+    }
+}

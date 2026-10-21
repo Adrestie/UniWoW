@@ -230,7 +230,7 @@ impl QuestsModule {
         let key = format!("{id}:{table}:{locale}:{column}");
         let width = ui.available_width();
         let said = format!("{hint} ({table}.{column})");
-        if let Some(typed) = self.typed_with(ui, key, &current, lines, width, &said) {
+        if let Some(typed) = self.typed(ui, key, &current, lines, width, &said) {
             let mut after = self.edits.clone();
             after.set(id, table, locale, column, json!(typed));
             self.change(format!("Write the {label} of the quest {id}"), after, ctx);
@@ -252,7 +252,7 @@ impl QuestsModule {
     ) {
         let current = shown(self.value(id, QUEST, "", column).as_ref());
         let key = format!("{id}:{QUEST}::{column}");
-        if let Some(typed) = self.typed_with(ui, key, &current, false, width, &format!("{hint} ({column})")) {
+        if let Some(typed) = self.typed(ui, key, &current, false, width, &format!("{hint} ({column})")) {
             self.write_number(id, QUEST, column, label, &typed, ctx);
         }
     }
@@ -358,7 +358,8 @@ impl QuestsModule {
                 ));
                 ui.label("×");
                 let key = format!("{id}:{QUEST}::{}", KILL.counts[at]);
-                if let Some(typed) = self.typed(ui, key, &count.to_string(), false, 50.0) {
+                let hint = format!("How many times to kill or use it ({})", KILL.counts[at]);
+                if let Some(typed) = self.typed(ui, key, &count.to_string(), false, 50.0, &hint) {
                     let mut changed = filled.clone();
                     changed[at].1 = typed.trim().parse().unwrap_or(1);
                     self.write_slots(id, &KILL, &changed, format!("Set the count of the quest {id}"), ctx);
@@ -421,7 +422,8 @@ impl QuestsModule {
                     self.item_slot(ui, *item as u32);
                     ui.horizontal(|ui| {
                         let key = format!("{id}:{QUEST}::{}", slots.counts[at]);
-                        if let Some(typed) = self.typed(ui, key, &count.to_string(), false, 28.0) {
+                        let hint = format!("How many of it ({})", slots.counts[at]);
+                        if let Some(typed) = self.typed(ui, key, &count.to_string(), false, 28.0, &hint) {
                             counted = Some((at, typed.trim().parse().unwrap_or(1)));
                         }
                         if ui.small_button("✖").on_hover_text("Takes it out").clicked() {
@@ -530,7 +532,9 @@ impl QuestsModule {
             );
             for (at, (colour, letter, name)) in COINS.iter().enumerate() {
                 let key = format!("{id}:money:{letter}");
-                if let Some(typed) = self.typed(ui, key, &parts[at].to_string(), false, 44.0) {
+                let hint =
+                    format!("The {name} of the money, shown to the player in the rewards (RewardMoney, in copper)");
+                if let Some(typed) = self.typed(ui, key, &parts[at].to_string(), false, 44.0, &hint) {
                     let mut changed = parts;
                     changed[at] = typed.trim().parse().unwrap_or(0).max(0);
                     let total = changed[0] * 10_000 + changed[1] * 100 + changed[2];
@@ -606,11 +610,13 @@ impl QuestsModule {
                             .on_hover_text("Among gameobject_template");
                     });
                 }
-                let field = ui.add(
-                    egui::TextEdit::singleline(&mut search.text)
-                        .hint_text("An id, or a name in any language")
-                        .desired_width(f32::INFINITY),
-                );
+                let field = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut search.text)
+                            .hint_text("An id, or a name in any language")
+                            .desired_width(f32::INFINITY),
+                    )
+                    .on_hover_text("Searches by id, or by a part of a name in any language of the client; read once from the database");
                 field.request_focus();
                 let Some(catalog) = self.catalog.clone() else {
                     ui.label("Reading the items, creatures and game objects of the database…");
@@ -687,7 +693,11 @@ mod tests {
         let light = |colour: Color32| {
             let channel = |value: u8| {
                 let value = f32::from(value) / 255.0;
-                if value <= 0.039_28 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
+                if value <= 0.039_28 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
             };
             0.2126 * channel(colour.r()) + 0.7152 * channel(colour.g()) + 0.0722 * channel(colour.b())
         };
@@ -701,8 +711,16 @@ mod tests {
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             parchment_style(ui);
             let visuals = ui.visuals();
-            assert_eq!(visuals.text_edit_bg_color, Some(FIELD), "the fields cream, not of the dark theme");
-            for widget in [&visuals.widgets.inactive, &visuals.widgets.hovered, &visuals.widgets.active] {
+            assert_eq!(
+                visuals.text_edit_bg_color,
+                Some(FIELD),
+                "the fields cream, not of the dark theme"
+            );
+            for widget in [
+                &visuals.widgets.inactive,
+                &visuals.widgets.hovered,
+                &visuals.widgets.active,
+            ] {
                 assert!(contrast(widget.fg_stroke.color, widget.bg_fill) >= 7.0);
             }
         });
