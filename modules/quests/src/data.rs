@@ -13,7 +13,16 @@ use uniwow_api::world_db::{self, Reload};
 
 /// The ids of the quests the editor creates: its block of `ID_RANGES.md`; none other is created or
 /// deleted.
-pub const RANGE: RangeInclusive<u32> = 97000..=97099;
+pub const RANGE: RangeInclusive<u32> = 82100..=82199;
+
+/// The block the editor took at first, the quests made there deleted still: it belongs to
+/// mod-transmog-retail now.
+pub const FORMER: RangeInclusive<u32> = 97000..=97099;
+
+/// Whether the quest `id` is the editor's, deleted here: of its block, or of its former one.
+pub fn ours(id: u32) -> bool {
+    RANGE.contains(&id) || FORMER.contains(&id)
+}
 
 /// The tables of a quest, its id their key `ID`.
 pub const TABLES: [&str; 4] = [
@@ -372,7 +381,7 @@ impl Edits {
             ..world_db::Pending::default()
         };
         for (id, edit) in &self.quests {
-            if (edit.created.is_some() || edit.deleted) && !RANGE.contains(id) {
+            if (edit.created.is_some() && !RANGE.contains(id)) || (edit.deleted && !ours(*id)) {
                 out.held.push(format!(
                     "the quest {id} is outside the block of the editor ({}-{}): not created nor deleted",
                     RANGE.start(),
@@ -618,8 +627,8 @@ mod tests {
         edits.set(783, "quest_template", "", "QuestLevel", json!(3));
         edits.set(783, "quest_template_locale", "deDE", "Title", json!("Eine Bedrohung"));
         // A copy of 783 in the editor's block, its title its own.
-        let id = free_id(&BTreeMap::from([(97000, "taken".to_owned())]), &edits).unwrap();
-        assert_eq!(id, 97001);
+        let id = free_id(&BTreeMap::from([(82100, "taken".to_owned())]), &edits).unwrap();
+        assert_eq!(id, 82101);
         edits.quests.insert(
             id,
             QuestEdit {
@@ -657,14 +666,14 @@ mod tests {
                 quests[1]["LogTitle"].clone(),
                 quests[1]["QuestLevel"].clone()
             ),
-            (json!(97001), json!("A Threat Without"), json!(3))
+            (json!(82101), json!("A Threat Without"), json!(3))
         );
         let locales = &memory.tables["quest_template_locale"];
         assert_eq!(locales.len(), 3, "deDE added; frFR copied");
         assert!(
             locales
                 .iter()
-                .any(|row| row["ID"] == json!(97001) && row["locale"] == json!("frFR"))
+                .any(|row| row["ID"] == json!(82101) && row["locale"] == json!("frFR"))
         );
         assert_eq!(memory.tables["quest_template_addon"].len(), 1, "made for the copy");
         assert_eq!(
@@ -675,16 +684,16 @@ mod tests {
         // Deleted: every row of it.
         let mut deleted = Edits::default();
         deleted.quests.insert(
-            97001,
+            82101,
             QuestEdit {
                 deleted: true,
                 ..QuestEdit::default()
             },
         );
-        let loaded_copy = BTreeMap::from([(97001, Loaded::default())]);
+        let loaded_copy = BTreeMap::from([(82101, Loaded::default())]);
         let pending = deleted.pending(&loaded_copy);
         assert!(
-            pending.reloads.contains(&Reload::ForgetQuest(97001)),
+            pending.reloads.contains(&Reload::ForgetQuest(82101)),
             "taken from the characters too"
         );
         apply(&mut memory, &pending.changes).unwrap();
@@ -692,7 +701,7 @@ mod tests {
         assert!(
             memory.tables["quest_template_locale"]
                 .iter()
-                .all(|row| row["ID"] != json!(97001))
+                .all(|row| row["ID"] != json!(82101))
         );
 
         // Kept in the project as they were.

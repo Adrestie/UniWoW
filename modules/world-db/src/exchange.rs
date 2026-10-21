@@ -183,7 +183,7 @@ impl WorldDbModule {
                 (Kind::Path, "SELECT MAX(id) AS top FROM waypoint_data"),
                 (
                     Kind::Quest,
-                    "SELECT MAX(ID) AS top FROM quest_template WHERE ID BETWEEN 97000 AND 97099",
+                    "SELECT MAX(ID) AS top FROM quest_template WHERE ID BETWEEN 82100 AND 82199",
                 ),
             ] {
                 let top = database
@@ -192,7 +192,7 @@ impl WorldDbModule {
                     .and_then(|rows| rows.rows.first()?.first().cloned())
                     .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()));
                 let next = match kind {
-                    Kind::Quest => top.map_or(97000, |top| top + 1),
+                    Kind::Quest => top.map_or(82100, |top| top + 1),
                     _ => top.unwrap_or(0) + 1,
                 };
                 fresh.insert(kind, next);
@@ -342,7 +342,7 @@ impl WorldDbModule {
         let mut next = fresh.clone();
         let made = package::resolved(package, problems, chosen, |kind| {
             let id = next.get_mut(&kind)?;
-            if kind == Kind::Quest && *id > 97099 {
+            if kind == Kind::Quest && *id > 82199 {
                 return None;
             }
             *id += 1;

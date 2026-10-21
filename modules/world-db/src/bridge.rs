@@ -159,9 +159,9 @@ mod tests {
                 Reload::Addons,
                 Reload::GameObject(5),
                 Reload::Creature(79),
-                Reload::ForgetQuest(97000),
+                Reload::ForgetQuest(82100),
             ]),
-            [(1, 0), (7, 97000), (3, 0), (2, 790), (4, 0), (5, 79), (6, 5)]
+            [(1, 0), (7, 82100), (3, 0), (2, 790), (4, 0), (5, 79), (6, 5)]
         );
     }
 

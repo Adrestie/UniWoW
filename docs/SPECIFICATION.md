@@ -10744,7 +10744,7 @@ shown as entities and written; the paths drawn where the user changed them.
   none. **Its numbers** by section: level and who takes it, chain, objectives (creatures or game
   objects to kill or use, items to bring, with their counts and names), rewards. A field written
   once left, one undo entry.
-- **Created in the editor's block, 97000-97099** (`ID_RANGES.md` of the mods), blank or a copy of a
+- **Created in the editor's block, 82100-82199** (`ID_RANGES.md` of the mods), blank or a copy of a
   quest as the user changed it; deleted there alone, with its texts and relations. A quest of the
   block taken outside it is said, not written.
 - **Its givers and enders**: those of the database listed; the spawns selected made to start or end

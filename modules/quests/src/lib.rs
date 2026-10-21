@@ -542,7 +542,7 @@ impl QuestsModule {
             {
                 self.create(Some(id), ctx);
             }
-            let ours = data::RANGE.contains(&id);
+            let ours = data::ours(id);
             if edit.deleted {
                 ui.colored_label(ui.visuals().warn_fg_color, "Deleted once applied");
                 if ui
@@ -559,7 +559,7 @@ impl QuestsModule {
             } else if ui
                 .add_enabled(ours, egui::Button::new("Delete"))
                 .on_hover_text("Deleted with its texts and givers once applied (in memory until then); it is also taken out of the quest logs and the quests done of every character of the server, by its bridge")
-                .on_disabled_hover_text("Only the quests of the editor's block (97000-97099) are deleted here")
+                .on_disabled_hover_text("Only the quests of the editor's block (82100-82199) are deleted here")
                 .clicked()
             {
                 let mut after = self.edits.clone();
