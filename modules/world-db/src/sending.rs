@@ -94,6 +94,7 @@ pub enum Sending {
     Writing {
         job: JobId,
         target: Server,
+        password: String,
         reloads: Vec<Reload>,
     },
 }
@@ -168,9 +169,11 @@ impl WorldDbModule {
         let settings = servers::settings(&target);
         let remember = self.remember;
         let vault = self.vault.clone();
+        let secret = password.clone();
         let job = ctx.spawn(
             "Write the changes into another server",
             move |_| -> Result<Vec<Entry>, String> {
+                let password = secret;
                 let made = Writer::open(&settings, &password, TIMEOUT)?.apply(&changes)?;
                 if remember && let Err(reason) = vault.set(&secret::target(&settings), &settings.user, &password) {
                     log::warn!("{reason}");
@@ -178,13 +181,24 @@ impl WorldDbModule {
                 Ok(made)
             },
         );
-        self.sending = Some(Sending::Writing { job, target, reloads });
+        self.sending = Some(Sending::Writing {
+            job,
+            target,
+            password,
+            reloads,
+        });
     }
 
     /// What was written on the target: kept as an application of that server, its script written,
     /// its bridge asked.
     pub(crate) fn target_written(&mut self, outcome: Option<Result<Vec<Entry>, String>>, ctx: &mut Context) {
-        let Some(Sending::Writing { target, reloads, .. }) = self.sending.take() else {
+        let Some(Sending::Writing {
+            target,
+            password,
+            reloads,
+            ..
+        }) = self.sending.take()
+        else {
             return;
         };
         let entries = match outcome {
@@ -206,7 +220,17 @@ impl WorldDbModule {
         };
         let rows = application.rows();
         let title = format!("Sent by UniWoW on {when} to {}: {rows} rows", target.name);
-        let failed = write_script_to(&target.sql_folder, &title, &when, false, &application.entries);
+        let (mark, failed) = write_script_to(&target.sql_folder, &title, &when, false, &application.entries);
+        // Told applied to the updater of that server.
+        if let Some(mark) = mark {
+            let settings = servers::settings(&target);
+            ctx.spawn("Tell another server's updater the script is applied", move |_| {
+                let told = Writer::open(&settings, &password, TIMEOUT).and_then(|mut writer| writer.apply(&[mark]));
+                if let Err(reason) = told {
+                    log::warn!("the script is not told applied to the updater: {reason}");
+                }
+            });
+        }
         self.applications.push(application);
         self.picked.clear();
         let message = format!("{rows} rows written to {}", target.name);

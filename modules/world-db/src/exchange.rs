@@ -396,7 +396,8 @@ impl WorldDbModule {
             "Imported by UniWoW on {when} into {}: {label}, {rows} rows",
             server.name
         );
-        let failed = write_script_to(&server.sql_folder, &title, &when, false, &application.entries);
+        let (mark, failed) = write_script_to(&server.sql_folder, &title, &when, false, &application.entries);
+        self.mark(mark, ctx);
         self.applications.push(application);
         let message = format!("{label}: {rows} rows imported into {}", server.name);
         log::info!("{message}");

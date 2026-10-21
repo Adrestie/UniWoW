@@ -29,6 +29,7 @@ pub const TABLES: &[&str] = &[
     "quest_template",
     "quest_template_addon",
     "quest_template_locale",
+    "updates",
     "waypoint_data",
 ];
 
@@ -355,6 +356,66 @@ pub fn script(title: &str, entries: &[Entry]) -> String {
     out
 }
 
+/// The SHA-1 of `bytes` in hexadecimal capitals, as AzerothCore's updater writes it in `updates`.
+pub fn sha1_hex(bytes: &[u8]) -> String {
+    let mut h: [u32; 5] = [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0];
+    let mut message = bytes.to_vec();
+    let length = (bytes.len() as u64).wrapping_mul(8);
+    message.push(0x80);
+    while message.len() % 64 != 56 {
+        message.push(0);
+    }
+    message.extend_from_slice(&length.to_be_bytes());
+    for block in message.as_chunks::<64>().0 {
+        let mut w = [0u32; 80];
+        for (at, word) in block.as_chunks::<4>().0.iter().enumerate() {
+            w[at] = u32::from_be_bytes(*word);
+        }
+        for at in 16..80 {
+            w[at] = (w[at - 3] ^ w[at - 8] ^ w[at - 14] ^ w[at - 16]).rotate_left(1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e] = h;
+        for (at, word) in w.iter().enumerate() {
+            let (f, k) = match at {
+                0..=19 => ((b & c) | (!b & d), 0x5A82_7999),
+                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
+                _ => (b ^ c ^ d, 0xCA62_C1D6),
+            };
+            let next = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(*word);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = next;
+        }
+        for (held, value) in h.iter_mut().zip([a, b, c, d, e]) {
+            *held = held.wrapping_add(value);
+        }
+    }
+    h.iter().map(|word| format!("{word:08X}")).collect()
+}
+
+/// The row of `updates` telling AzerothCore's updater that the script `name` of `content`, of a
+/// module, is applied already: it never plays it again, the rows changed in the game since kept.
+pub fn applied_script(name: &str, content: &str) -> RowChange {
+    RowChange::Put {
+        table: "updates".to_owned(),
+        key: row([("name", json!(name))]),
+        set: row([
+            ("hash", json!(sha1_hex(content.as_bytes()))),
+            ("state", json!("MODULE")),
+            ("speed", json!(0)),
+        ]),
+        from: None,
+    }
+}
+
 /// Rows in memory, by table, for the tests.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Memory {
@@ -541,6 +602,24 @@ mod tests {
         }
         assert_eq!(memory, base());
         assert!(apply(&mut memory, &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_script_is_told_applied_with_the_hash_azerothcore_gives_it() {
+        assert_eq!(sha1_hex(b""), "DA39A3EE5E6B4B0D3255BFEF95601890AFD80709");
+        assert_eq!(sha1_hex(b"abc"), "A9993E364706816ABA3E25717850C26C9CD0D89D");
+        assert_eq!(
+            sha1_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "84983E441C3BD26EBAAE4AA1F95129E5E54670F1"
+        );
+        let RowChange::Put { table, key, set, .. } = applied_script("uniwow_2026_10_21_120000.sql", "abc") else {
+            panic!("a put")
+        };
+        assert_eq!(
+            (table.as_str(), &key["name"]),
+            ("updates", &json!("uniwow_2026_10_21_120000.sql"))
+        );
+        assert_eq!(set["state"], json!("MODULE"));
     }
 
     #[test]

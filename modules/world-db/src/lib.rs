@@ -330,17 +330,28 @@ enum Confirming {
     Switch(String),
 }
 
-/// Writes the script of `entries` into `folder`, if one is given; what went wrong.
-fn write_script_to(folder: &str, title: &str, when: &str, undone: bool, entries: &[Entry]) -> Option<String> {
+/// Writes the script of `entries` into `folder`, if one is given: the row of `updates` telling the
+/// server's updater it is applied already, once written; what went wrong.
+fn write_script_to(
+    folder: &str,
+    title: &str,
+    when: &str,
+    undone: bool,
+    entries: &[Entry],
+) -> (Option<RowChange>, Option<String>) {
     if folder.trim().is_empty() {
-        return None;
+        return (None, None);
     }
-    let path = std::path::Path::new(folder.trim()).join(script_name(when, undone));
-    let written =
-        std::fs::create_dir_all(folder.trim()).and_then(|_| std::fs::write(&path, write::script(title, entries)));
-    written
-        .err()
-        .map(|error| format!("the script {} is not written: {error}", path.display()))
+    let name = script_name(when, undone);
+    let path = std::path::Path::new(folder.trim()).join(&name);
+    let content = write::script(title, entries);
+    match std::fs::create_dir_all(folder.trim()).and_then(|_| std::fs::write(&path, &content)) {
+        Ok(()) => (Some(write::applied_script(&name, &content)), None),
+        Err(error) => (
+            None,
+            Some(format!("the script {} is not written: {error}", path.display())),
+        ),
+    }
 }
 
 /// The setting of the connection made at the start of the editor with the password kept.
@@ -600,8 +611,32 @@ impl WorldDbModule {
 
     /// Writes the script of `entries` into the folder of SQL of the server, if it has one; what went
     /// wrong.
-    fn write_script(&self, ctx: &Context, title: &str, when: &str, undone: bool, entries: &[Entry]) -> Option<String> {
-        write_script_to(&server_of(ctx).sql_folder, title, when, undone, entries)
+    fn write_script(
+        &mut self,
+        ctx: &mut Context,
+        title: &str,
+        when: &str,
+        undone: bool,
+        entries: &[Entry],
+    ) -> Option<String> {
+        let (mark, failed) = write_script_to(&server_of(ctx).sql_folder, title, when, undone, entries);
+        self.mark(mark, ctx);
+        failed
+    }
+
+    /// The script written told applied to the updater of the server chosen, from a job: it never
+    /// plays it again over what was changed in the game since.
+    pub(crate) fn mark(&mut self, mark: Option<RowChange>, ctx: &mut Context) {
+        let Some(mark) = mark else {
+            return;
+        };
+        let shared = self.shared.clone();
+        ctx.spawn("Tell the server's updater the script is applied", move |_| {
+            use world_db::WorldDb as _;
+            if let Err(reason) = Service(shared).apply(&[mark]) {
+                log::warn!("the script is not told applied to the updater: {reason}");
+            }
+        });
     }
 
     /// The servers of the settings given to the service; the modules told once another is chosen.
