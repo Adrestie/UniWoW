@@ -17,6 +17,7 @@
 #include "StringFormat.h"
 #include "Transport.h"
 #include "WaypointMgr.h"
+#include "WorldPacket.h"
 #include "WorldSession.h"
 #include "WorldSessionMgr.h"
 
@@ -386,7 +387,10 @@ namespace UniwowBridge
                             // The marks of the game objects, and the "!" and "?" of the creatures
                             // each sees: the client asks them only as a giver comes into sight.
                             player->UpdateForQuestWorldObjects();
-                            player->SendQuestGiverStatusMultiple();
+                            // As the client asks them (`Player::SendQuestGiverStatusMultiple` being
+                            // for the session alone).
+                            WorldPacket ask;
+                            session->HandleQuestgiverStatusMultipleQuery(ask);
                         }
                 return { true, "the quests loaded again" };
             }
