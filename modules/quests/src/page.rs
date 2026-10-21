@@ -122,6 +122,46 @@ const COINS: [(Color32, &str, &str); 3] = [
     (Color32::from_rgb(184, 115, 51), "c", "copper"),
 ];
 
+/// The edge of the fields and slots on the parchment, and the ink of its hints.
+const EDGE: Color32 = Color32::from_rgb(120, 85, 45);
+const HINT: Color32 = Color32::from_rgb(92, 74, 52);
+
+/// The style of the page alone, the rest of the editor in its theme: the ink dark on the
+/// parchment, the fields cream with a thin brown edge, the cursor and the selection seen.
+fn parchment_style(ui: &mut egui::Ui) {
+    let visuals = ui.visuals_mut();
+    visuals.override_text_color = Some(INK);
+    visuals.weak_text_color = Some(HINT);
+    visuals.text_edit_bg_color = Some(FIELD);
+    visuals.extreme_bg_color = FIELD;
+    visuals.faint_bg_color = FIELD;
+    visuals.code_bg_color = FIELD;
+    visuals.hyperlink_color = HEADING;
+    visuals.selection.bg_fill = Color32::from_rgb(214, 180, 112);
+    visuals.selection.stroke = egui::Stroke::new(1.0, INK);
+    visuals.text_cursor.stroke = egui::Stroke::new(2.0, INK);
+    let fills = [
+        (&mut visuals.widgets.noninteractive, FIELD, 1.0),
+        (&mut visuals.widgets.inactive, FIELD, 1.0),
+        (&mut visuals.widgets.hovered, Color32::from_rgb(250, 244, 226), 1.5),
+        (&mut visuals.widgets.active, Color32::from_rgb(236, 224, 196), 1.5),
+        (&mut visuals.widgets.open, FIELD, 1.0),
+    ];
+    for (widget, fill, width) in fills {
+        widget.bg_fill = fill;
+        widget.weak_bg_fill = fill;
+        widget.bg_stroke = egui::Stroke::new(width, EDGE);
+        widget.fg_stroke = egui::Stroke::new(1.0, INK);
+    }
+    // The page itself: no edge drawn around its plain labels.
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, EDGE.gamma_multiply(0.5));
+}
+
+/// A label of the page, as its headings are: dark brown, strong.
+fn subheading(text: &str) -> RichText {
+    RichText::new(text).strong().color(HEADING)
+}
+
 /// The search opened by a slot "+": the slots it fills, what it searches, the text typed.
 pub struct Search {
     pub quest: u32,
@@ -196,7 +236,7 @@ impl QuestsModule {
             self.change(format!("Write the {label} of the quest {id}"), after, ctx);
         }
         if current.is_empty() {
-            ui.label(RichText::new(hint).italics().small().color(INK.gamma_multiply(0.6)));
+            ui.label(RichText::new(hint).italics().small().color(HINT));
         }
     }
 
@@ -234,12 +274,7 @@ impl QuestsModule {
             .inner_margin(egui::Margin::same(16));
         frame.show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let visuals = ui.visuals_mut();
-            visuals.override_text_color = Some(INK);
-            visuals.extreme_bg_color = FIELD;
-            visuals.widgets.inactive.bg_fill = FIELD;
-            visuals.widgets.inactive.weak_bg_fill = FIELD;
-            visuals.selection.bg_fill = Color32::from_rgb(200, 170, 110);
+            parchment_style(ui);
             let heading = |ui: &mut egui::Ui, text: &str, hint: &str| {
                 ui.add_space(6.0);
                 ui.label(RichText::new(text).size(17.0).strong().color(HEADING))
@@ -281,7 +316,7 @@ impl QuestsModule {
             heading(ui, "Rewards", "What the player is given once the quest is handed in");
             self.money_ui(ui, id, ctx);
             ui.horizontal(|ui| {
-                ui.label("Experience (difficulty)").on_hover_text(
+                ui.label(subheading("Experience (difficulty)")).on_hover_text(
                     "RewardXPDifficulty: 0 to 9, the experience given grows with it and with the level of the quest",
                 );
                 self.page_number(ui, id, "RewardXPDifficulty", 40.0, ("experience", "0 to 9"), ctx);
@@ -290,10 +325,10 @@ impl QuestsModule {
             self.items_ui(ui, id, &CHOOSE, ctx);
             self.reputations_ui(ui, id, ctx);
             ui.horizontal(|ui| {
-                ui.label("Spell cast")
+                ui.label(subheading("Spell cast"))
                     .on_hover_text("RewardSpell: the id of a spell cast on the player, 0 for none");
                 self.page_number(ui, id, "RewardSpell", 70.0, ("spell", "The id of a spell"), ctx);
-                ui.label("Title")
+                ui.label(subheading("Title"))
                     .on_hover_text("RewardTitle: the id of a title of CharTitles.dbc, 0 for none");
                 self.page_number(ui, id, "RewardTitle", 50.0, ("title", "The id of a title"), ctx);
             });
@@ -375,7 +410,7 @@ impl QuestsModule {
     /// A list of item slots: each its icon, count and ✖, then a "+" while one is free.
     fn items_ui(&mut self, ui: &mut egui::Ui, id: u32, slots: &'static Slots, ctx: &mut Context) {
         let filled = self.slots_of(id, slots);
-        ui.label(RichText::new(format!("{}:", slots.label)).strong())
+        ui.label(subheading(&format!("{}:", slots.label)))
             .on_hover_text(slots.hint);
         let mut removed = None;
         let mut counted = None;
@@ -401,8 +436,8 @@ impl QuestsModule {
                 ui.painter().rect(
                     rect,
                     egui::CornerRadius::same(4),
-                    if lit { FIELD } else { PARCHMENT },
-                    egui::Stroke::new(1.0, INK.gamma_multiply(0.5)),
+                    if lit { Color32::from_rgb(250, 244, 226) } else { FIELD },
+                    egui::Stroke::new(1.5, EDGE),
                     egui::StrokeKind::Inside,
                 );
                 ui.painter().text(
@@ -490,7 +525,7 @@ impl QuestsModule {
         let parts = coins(copper);
         let mut written = None;
         ui.horizontal(|ui| {
-            ui.label(if copper < 0 { "Money asked" } else { "Money" }).on_hover_text(
+            ui.label(subheading(if copper < 0 { "Money asked" } else { "Money" })).on_hover_text(
                 "RewardMoney, in copper: 1 gold is 100 silver, 1 silver 100 copper; below 0 the money the quest asks",
             );
             for (at, (colour, letter, name)) in COINS.iter().enumerate() {
@@ -515,7 +550,7 @@ impl QuestsModule {
 
     /// The reputations given: each its faction and value, one row empty to fill while one is free.
     fn reputations_ui(&mut self, ui: &mut egui::Ui, id: u32, ctx: &mut Context) {
-        ui.label(RichText::new("Reputation:").strong()).on_hover_text(
+        ui.label(subheading("Reputation:")).on_hover_text(
             "RewardFactionID and RewardFactionValue: a faction of Faction.dbc and what it is given; 5 at most",
         );
         let mut shown_empty = false;
@@ -528,7 +563,7 @@ impl QuestsModule {
                 shown_empty = true;
             }
             ui.horizontal(|ui| {
-                ui.label("faction");
+                ui.label(subheading("faction"));
                 self.page_number(
                     ui,
                     id,
@@ -537,7 +572,7 @@ impl QuestsModule {
                     ("faction", "The id of a faction of Faction.dbc"),
                     ctx,
                 );
-                ui.label("value");
+                ui.label(subheading("value"));
                 self.page_number(
                     ui,
                     id,
@@ -646,6 +681,39 @@ impl QuestsModule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The contrast of `a` on `b`, as WCAG 2 counts it: 4.5 at least for a text to read.
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let light = |colour: Color32| {
+            let channel = |value: u8| {
+                let value = f32::from(value) / 255.0;
+                if value <= 0.039_28 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * channel(colour.r()) + 0.7152 * channel(colour.g()) + 0.0722 * channel(colour.b())
+        };
+        let (a, b) = (light(a), light(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn every_text_of_the_page_reads_on_the_parchment_and_in_its_fields() {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            parchment_style(ui);
+            let visuals = ui.visuals();
+            assert_eq!(visuals.text_edit_bg_color, Some(FIELD), "the fields cream, not of the dark theme");
+            for widget in [&visuals.widgets.inactive, &visuals.widgets.hovered, &visuals.widgets.active] {
+                assert!(contrast(widget.fg_stroke.color, widget.bg_fill) >= 7.0);
+            }
+        });
+        output.textures_delta.clear();
+        for background in [PARCHMENT, FIELD] {
+            assert!(contrast(INK, background) >= 7.0, "the ink");
+            assert!(contrast(HEADING, background) >= 4.5, "the headings and labels");
+            assert!(contrast(HINT, background) >= 4.5, "the hints");
+        }
+        assert!(contrast(EDGE, FIELD) >= 3.0, "the edge of a field or a slot");
+    }
 
     #[test]
     fn the_money_is_shown_in_gold_silver_and_copper() {
