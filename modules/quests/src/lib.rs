@@ -23,6 +23,9 @@ const MODULE: &str = "quests";
 /// `{ "titles": { "<id>": "<title>" } }`, for the other modules to name them (the Inspector).
 const TITLES_TOPIC: &str = "quests.titles";
 
+/// The setting of the ids of quests the editor gave, each given once.
+const GIVEN: &str = "given_ids";
+
 /// The ids and titles of the quests of the database.
 type List = Arc<BTreeMap<u32, String>>;
 
@@ -376,10 +379,21 @@ impl QuestsModule {
 
     /// A quest made in the editor's block: blank, or a copy of `copied`; opened.
     fn create(&mut self, copied: Option<u32>, ctx: &mut Context) {
-        let Some(id) = data::free_id(&self.list, &self.edits) else {
+        let given: Vec<u32> = ctx
+            .setting(GIVEN)
+            .and_then(|value| value.as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|id| id.as_u64().map(|id| id as u32))
+            .collect();
+        let Some(id) = data::free_id(&self.list, &self.edits, &given) else {
             self.said = Some("The editor's block of quests is full".to_owned());
             return;
         };
+        // Kept in the settings of the editor, for every project and server: never given again.
+        let mut kept = given;
+        kept.push(id);
+        ctx.set_setting(GIVEN, json!(kept));
         let mut after = self.edits.clone();
         after.quests.insert(
             id,
@@ -444,7 +458,7 @@ impl QuestsModule {
                 }
             } else if ui
                 .add_enabled(ours, egui::Button::new("Delete"))
-                .on_hover_text("Deleted with its texts and givers once applied; in memory until then")
+                .on_hover_text("Deleted with its texts and givers once applied; in memory until then. Its id is never given again: \n                     the characters who took it keep it as begun or done.")
                 .on_disabled_hover_text("Only the quests of the editor's block (97000-97099) are deleted here")
                 .clicked()
             {

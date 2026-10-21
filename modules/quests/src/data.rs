@@ -628,10 +628,13 @@ impl Edits {
 }
 
 /// The first id of `RANGE` neither the database (`taken`) nor the user has.
-pub fn free_id(taken: &BTreeMap<u32, String>, edits: &Edits) -> Option<u32> {
+/// The first id of `RANGE` neither the database (`taken`), the user nor the editor before (`given`,
+/// even since deleted) has: a quest deleted stays done or begun for the characters who took it, and
+/// a new quest of its id would never be offered to them.
+pub fn free_id(taken: &BTreeMap<u32, String>, edits: &Edits, given: &[u32]) -> Option<u32> {
     RANGE
         .clone()
-        .find(|id| !taken.contains_key(id) && !edits.quests.contains_key(id))
+        .find(|id| !taken.contains_key(id) && !edits.quests.contains_key(id) && !given.contains(id))
 }
 
 #[cfg(test)]
@@ -714,8 +717,13 @@ mod tests {
         edits.set(783, "quest_template", "", "QuestLevel", json!(3));
         edits.set(783, "quest_template_locale", "deDE", "Title", json!("Eine Bedrohung"));
         // A copy of 783 in the editor's block, its title its own.
-        let id = free_id(&BTreeMap::from([(97000, "taken".to_owned())]), &edits).unwrap();
+        let id = free_id(&BTreeMap::from([(97000, "taken".to_owned())]), &edits, &[]).unwrap();
         assert_eq!(id, 97001);
+        assert_eq!(
+            free_id(&BTreeMap::new(), &Edits::default(), &[97000, 97001]),
+            Some(97002),
+            "an id given before, its quest deleted since, never given again"
+        );
         edits.quests.insert(
             id,
             QuestEdit {
