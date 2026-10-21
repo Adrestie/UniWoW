@@ -19,4 +19,4 @@ name = "Quests"
 category = "World"
 # Services the module cannot work without, and services it uses when present.
 requires = []
-uses = ["world-db", "scene"]
+uses = ["world-db", "scene", "vfs", "formats"]

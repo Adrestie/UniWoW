@@ -168,7 +168,6 @@ pub const TEXTS: [Text; 11] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Names {
     None,
-    Item,
     Creature,
     /// A creature, or a game object when below 0.
     CreatureOrObject,
@@ -214,8 +213,9 @@ const fn named(
 const T: &str = "quest_template";
 const A: &str = "quest_template_addon";
 
-/// The numbers of a quest, by section: its title, its numbers.
-pub const SECTIONS: [(&str, &[Number]); 4] = [
+/// The numbers of a quest drawn as a grid under its page, by section: its title, its numbers; the
+/// objectives and rewards are on the page.
+pub const SECTIONS: [(&str, &[Number]); 2] = [
     (
         "Level and who takes it",
         &[
@@ -238,106 +238,6 @@ pub const SECTIONS: [(&str, &[Number]); 4] = [
             named("Before", A, "NextQuestID", None, Names::Quest),
             named("Offered next", T, "RewardNextQuest", None, Names::Quest),
             number("Exclusive group", A, "ExclusiveGroup"),
-        ],
-    ),
-    (
-        "Objectives",
-        &[
-            named(
-                "Kill or use 1",
-                T,
-                "RequiredNpcOrGo1",
-                Some("RequiredNpcOrGoCount1"),
-                Names::CreatureOrObject,
-            ),
-            named(
-                "Kill or use 2",
-                T,
-                "RequiredNpcOrGo2",
-                Some("RequiredNpcOrGoCount2"),
-                Names::CreatureOrObject,
-            ),
-            named(
-                "Kill or use 3",
-                T,
-                "RequiredNpcOrGo3",
-                Some("RequiredNpcOrGoCount3"),
-                Names::CreatureOrObject,
-            ),
-            named(
-                "Kill or use 4",
-                T,
-                "RequiredNpcOrGo4",
-                Some("RequiredNpcOrGoCount4"),
-                Names::CreatureOrObject,
-            ),
-            named("Bring 1", T, "RequiredItemId1", Some("RequiredItemCount1"), Names::Item),
-            named("Bring 2", T, "RequiredItemId2", Some("RequiredItemCount2"), Names::Item),
-            named("Bring 3", T, "RequiredItemId3", Some("RequiredItemCount3"), Names::Item),
-            named("Bring 4", T, "RequiredItemId4", Some("RequiredItemCount4"), Names::Item),
-            named("Bring 5", T, "RequiredItemId5", Some("RequiredItemCount5"), Names::Item),
-            named("Bring 6", T, "RequiredItemId6", Some("RequiredItemCount6"), Names::Item),
-            named("Given at the start", T, "StartItem", None, Names::Item),
-        ],
-    ),
-    (
-        "Rewards",
-        &[
-            number("Experience (difficulty)", T, "RewardXPDifficulty"),
-            number("Money (copper)", T, "RewardMoney"),
-            number("Money at the maximum level", T, "RewardBonusMoney"),
-            named("Item 1", T, "RewardItem1", Some("RewardAmount1"), Names::Item),
-            named("Item 2", T, "RewardItem2", Some("RewardAmount2"), Names::Item),
-            named("Item 3", T, "RewardItem3", Some("RewardAmount3"), Names::Item),
-            named("Item 4", T, "RewardItem4", Some("RewardAmount4"), Names::Item),
-            named(
-                "Choice 1",
-                T,
-                "RewardChoiceItemID1",
-                Some("RewardChoiceItemQuantity1"),
-                Names::Item,
-            ),
-            named(
-                "Choice 2",
-                T,
-                "RewardChoiceItemID2",
-                Some("RewardChoiceItemQuantity2"),
-                Names::Item,
-            ),
-            named(
-                "Choice 3",
-                T,
-                "RewardChoiceItemID3",
-                Some("RewardChoiceItemQuantity3"),
-                Names::Item,
-            ),
-            named(
-                "Choice 4",
-                T,
-                "RewardChoiceItemID4",
-                Some("RewardChoiceItemQuantity4"),
-                Names::Item,
-            ),
-            named(
-                "Choice 5",
-                T,
-                "RewardChoiceItemID5",
-                Some("RewardChoiceItemQuantity5"),
-                Names::Item,
-            ),
-            named(
-                "Choice 6",
-                T,
-                "RewardChoiceItemID6",
-                Some("RewardChoiceItemQuantity6"),
-                Names::Item,
-            ),
-            number("Reputation 1 (faction)", T, "RewardFactionID1"),
-            number("Reputation 1 (value)", T, "RewardFactionValue1"),
-            number("Reputation 2 (faction)", T, "RewardFactionID2"),
-            number("Reputation 2 (value)", T, "RewardFactionValue2"),
-            number("Spell cast", T, "RewardSpell"),
-            number("Title", T, "RewardTitle"),
         ],
     ),
 ];

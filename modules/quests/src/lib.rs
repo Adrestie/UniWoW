@@ -5,7 +5,9 @@
 //! spawns selected, made givers of quests where they were not. Kept in the project, given to the
 //! server as rows with the module `world-db`.
 
+mod catalog;
 mod data;
+mod page;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -55,6 +57,12 @@ enum Asked {
     Quest(JobId, u32),
     Names(JobId),
     Flags(JobId),
+    /// The items, creatures and game objects to choose from, read once a server.
+    Catalog(JobId),
+    /// The icons of the displays of the items, of the client's ItemDisplayInfo.dbc.
+    IconNames(JobId),
+    /// The icon of a display, decoded.
+    Icon(JobId, u32),
 }
 
 #[derive(Default)]
@@ -83,12 +91,23 @@ struct QuestsModule {
     /// The names of what the numbers name, read by jobs; those asked.
     names: HashMap<(Names, i64), String>,
     named: BTreeSet<(Names, i64)>,
+    /// What a quest can name, read once a server, and for which; the icons of the items, by display,
+    /// none for a display that has none; those wanted; the names of the icons of the displays.
+    catalog: Option<Arc<catalog::Catalog>>,
+    catalog_for: Option<String>,
+    icons: HashMap<u32, Option<egui::TextureHandle>>,
+    icons_wanted: BTreeSet<u32>,
+    icon_names: Option<Arc<HashMap<u32, String>>>,
+    /// The search a "+" of the page opened.
+    searching: Option<page::Search>,
+    /// The interface of the editor, for the icons to be given to it.
+    egui: Option<egui::Context>,
     said: Option<String>,
     scene: Option<scene::Handle>,
 }
 
 /// A value as a field shows it.
-fn shown(value: Option<&Value>) -> String {
+pub(crate) fn shown(value: Option<&Value>) -> String {
     match value {
         None | Some(Value::Null) => String::new(),
         Some(Value::String(text)) => text.clone(),
@@ -212,7 +231,6 @@ impl QuestsModule {
                 let mut by_table: BTreeMap<&str, Vec<(Names, i64)>> = BTreeMap::new();
                 for (names, id) in wanted {
                     let table = match (names, id < 0) {
-                        (Names::Item, _) => "item_template",
                         (Names::CreatureOrObject, true) => "gameobject_template",
                         _ => "creature_template",
                     };
@@ -274,6 +292,19 @@ impl QuestsModule {
 
     /// The field `key` showing `current`: typed, written once left; the text written, if changed.
     fn typed(&mut self, ui: &mut egui::Ui, key: String, current: &str, lines: bool, width: f32) -> Option<String> {
+        self.typed_with(ui, key, current, lines, width, "")
+    }
+
+    /// As `typed`, `hint` saying what the field is.
+    fn typed_with(
+        &mut self,
+        ui: &mut egui::Ui,
+        key: String,
+        current: &str,
+        lines: bool,
+        width: f32,
+        hint: &str,
+    ) -> Option<String> {
         let mut text = match &self.typing {
             Some((typing, text)) if *typing == key => text.clone(),
             _ => current.to_owned(),
@@ -285,9 +316,15 @@ impl QuestsModule {
         } else {
             egui::TextEdit::singleline(&mut text).desired_width(width)
         };
-        let response = ui
-            .add(edit)
-            .on_hover_text("Written once you leave the field, one undo entry; to the database by Apply");
+        let written = "Written once you leave the field, one undo entry; to the database by Apply";
+        let response = ui.add(edit).on_hover_text(if hint.is_empty() {
+            written.to_owned()
+        } else {
+            format!(
+                "{hint}
+{written}"
+            )
+        });
         if response.changed() {
             self.typing = Some((key.clone(), text.clone()));
         }
@@ -298,6 +335,83 @@ impl QuestsModule {
             return Some(typed);
         }
         None
+    }
+
+    /// The quest opened, in a window of its own: its page and its cards. The catalog read once a
+    /// server, for its slots to be named and filled.
+    fn quest_window(&mut self, egui: &egui::Context, ctx: &mut Context) {
+        let Some(id) = self.open else {
+            return;
+        };
+        self.read_catalog(ctx);
+        let mut open = true;
+        egui::Window::new(format!("Quest {id}"))
+            .id(egui::Id::new("quests page"))
+            .open(&mut open)
+            .default_size([620.0, 760.0])
+            .show(egui, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.quest_ui(ui, id, ctx));
+            });
+        if !open {
+            self.open = None;
+            self.searching = None;
+        }
+    }
+
+    /// The items, creatures and game objects of the database read once a server, by a job; the
+    /// names of the icons of the displays of the client too.
+    fn read_catalog(&mut self, ctx: &mut Context) {
+        let (Some(database), Some(server)) = (ctx.service(world_db::SERVICE), self.listed_for.clone()) else {
+            return;
+        };
+        if self.catalog_for.as_ref() != Some(&server)
+            && !self.asked.iter().any(|asked| matches!(asked, Asked::Catalog(_)))
+        {
+            self.catalog_for = Some(server);
+            let job = ctx.spawn(
+                "Read the items, creatures and game objects of the world database",
+                move |_| catalog::Catalog::read(&database).map(Arc::new),
+            );
+            self.asked.push(Asked::Catalog(job));
+        }
+        if self.icon_names.is_none()
+            && !self.asked.iter().any(|asked| matches!(asked, Asked::IconNames(_)))
+            && let Some(vfs) = ctx.service(uniwow_api::vfs::SERVICE)
+        {
+            let job = ctx.spawn(
+                "Read the icons of the items of the client",
+                move |_| -> Result<HashMap<u32, String>, String> {
+                    let bytes = vfs
+                        .read("DBFilesClient\\ItemDisplayInfo.dbc")?
+                        .ok_or("the client has no ItemDisplayInfo.dbc")?;
+                    catalog::icons_of_dbc(&bytes)
+                },
+            );
+            self.asked.push(Asked::IconNames(job));
+        }
+    }
+
+    /// The icons wanted decoded, each by a job, once; those of displays without an icon none.
+    fn ask_icons(&mut self, ctx: &mut Context) {
+        let (Some(names), Some(formats)) = (self.icon_names.clone(), ctx.service(uniwow_api::formats::SERVICE)) else {
+            return;
+        };
+        for display in std::mem::take(&mut self.icons_wanted) {
+            if self.icons.contains_key(&display) {
+                continue;
+            }
+            let Some(name) = names.get(&display).cloned() else {
+                self.icons.insert(display, None);
+                continue;
+            };
+            // Asked: none until decoded, asked once.
+            self.icons.insert(display, None);
+            let formats = formats.clone();
+            let job = ctx.spawn("Decode the icon of an item", move |_| catalog::decode(&formats, &name));
+            self.asked.push(Asked::Icon(job, display));
+        }
     }
 
     /// The width of a field of numbers: 7 digits.
@@ -465,21 +579,23 @@ impl QuestsModule {
                 );
         });
         ui.add_space(4.0);
+        self.page_ui(ui, id, ctx);
+        ui.add_space(6.0);
         let locale = data::LOCALES[self.locale];
         theme::section(
             ui,
             egui::Id::new("quests texts"),
             theme::icon::LOG,
-            "Texts",
+            "Texts of the giver and the ender",
             Some(locale),
-            true,
+            false,
             |ui| {
                 ui.label(
                     egui::RichText::new("$B a new line, $N the player's name, $C his class, $R his race")
                         .weak()
                         .small(),
                 );
-                for text in &data::TEXTS {
+                for text in &data::TEXTS[3..7] {
                     let (table, column, locale_key) = if locale == "enUS" {
                         (text.table, text.column, "")
                     } else {
@@ -494,7 +610,8 @@ impl QuestsModule {
                         }
                     }
                     let key = format!("{id}:{table}:{locale_key}:{column}");
-                    if let Some(typed) = self.typed(ui, key, &current, text.lines, ui.available_width()) {
+                    let hint = format!("{} ({table}.{column})", text.label);
+                    if let Some(typed) = self.typed_with(ui, key, &current, text.lines, ui.available_width(), &hint) {
                         let mut after = self.edits.clone();
                         after.set(id, table, locale_key, column, json!(typed));
                         self.change(
@@ -739,10 +856,14 @@ impl Module for QuestsModule {
         );
     }
 
-    fn windows_ui(&mut self, _egui: &egui::Context, ctx: &mut Context) {
+    fn windows_ui(&mut self, egui: &egui::Context, ctx: &mut Context) {
+        self.egui = Some(egui.clone());
         self.steer(ctx);
         self.give_pending(ctx);
         self.tell_titles(ctx);
+        self.quest_window(egui, ctx);
+        self.search_ui(egui, ctx);
+        self.ask_icons(ctx);
     }
 
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
@@ -768,14 +889,15 @@ impl Module for QuestsModule {
         }
         self.list_ui(ui, ctx);
         ui.separator();
-        let Some(id) = self.open else {
-            ui.weak("Open a quest of the list, or make a new one.");
-            return;
-        };
-        egui::ScrollArea::vertical()
-            .id_salt("quests opened")
-            .auto_shrink([false, false])
-            .show(ui, |ui| self.quest_ui(ui, id, ctx));
+        match self.open {
+            Some(id) => {
+                ui.label(format!("{id}  {}", self.title(id)));
+                ui.weak("Opened in its window, its page.");
+            }
+            None => {
+                ui.weak("Open a quest of the list, or make a new one.");
+            }
+        }
     }
 
     fn on_event(&mut self, event: &uniwow_api::Event, ctx: &mut Context) {
@@ -804,7 +926,13 @@ impl Module for QuestsModule {
 
     fn on_job(&mut self, job: JobId, outcome: JobOutcome, ctx: &mut Context) {
         let Some(at) = self.asked.iter().position(|asked| match asked {
-            Asked::List(id) | Asked::Quest(id, _) | Asked::Names(id) | Asked::Flags(id) => *id == job,
+            Asked::List(id)
+            | Asked::Quest(id, _)
+            | Asked::Names(id)
+            | Asked::Flags(id)
+            | Asked::Catalog(id)
+            | Asked::IconNames(id)
+            | Asked::Icon(id, _) => *id == job,
         }) else {
             return;
         };
@@ -822,6 +950,39 @@ impl Module for QuestsModule {
                 if let Some(loaded) = outcome.take::<Loaded>() {
                     self.loaded.insert(id, loaded);
                     self.generation += 1;
+                }
+            }
+            Asked::Catalog(_) => match outcome.take::<Result<Arc<catalog::Catalog>, String>>() {
+                Some(Ok(read)) => {
+                    log::info!(
+                        "the catalog of the quests: {} items, {} creatures, {} game objects",
+                        read.entries.get(&catalog::Kind::Item).map_or(0, Vec::len),
+                        read.entries.get(&catalog::Kind::Creature).map_or(0, Vec::len),
+                        read.entries.get(&catalog::Kind::GameObject).map_or(0, Vec::len)
+                    );
+                    self.catalog = Some(read);
+                }
+                Some(Err(reason)) => {
+                    self.said = Some(format!("The items, creatures and game objects are not read: {reason}"))
+                }
+                None => {}
+            },
+            Asked::IconNames(_) => match outcome.take::<Result<HashMap<u32, String>, String>>() {
+                Some(Ok(names)) => self.icon_names = Some(Arc::new(names)),
+                Some(Err(reason)) => {
+                    log::warn!("the icons of the items are not read: {reason}");
+                    self.icon_names = Some(Arc::default());
+                }
+                None => {}
+            },
+            Asked::Icon(_, display) => {
+                if let (Some(Some((width, height, pixels))), Some(egui)) =
+                    (outcome.take::<Option<catalog::Icon>>(), self.egui.as_ref())
+                {
+                    let image = egui::ColorImage::from_rgba_unmultiplied([width, height], &pixels);
+                    let texture =
+                        egui.load_texture(format!("quests icon {display}"), image, egui::TextureOptions::LINEAR);
+                    self.icons.insert(display, Some(texture));
                 }
             }
             Asked::Names(_) => {

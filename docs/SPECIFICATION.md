@@ -10806,6 +10806,23 @@ demand 7 of `mod-uniwow-bridge`, takes it out of the quest log of those in the w
 seasonal). Without a bridge, the editor says the characters keep it. The tooltip of *Delete* says
 so. **Test**: a quest deleted asks the server to take it from the characters.
 
+#### After 16.9: the page of a quest
+
+Asked by the user: the quest edited as the page of the quest log, its fields where they stand. The
+quest opened in a window of its own: on parchment the title, the description, the objectives, the
+creatures or game objects to kill or use (each its count and its line of the log) and the items to
+bring, then the rewards: the money in gold, silver and copper (RewardMoney in copper, below 0 the
+money asked), the experience, the items received and those to choose from, the reputations, a spell
+and a title. Each list of slots ends with an empty "+" while the format has room (4 kills, 6 items
+to bring, 4 received, 6 to choose); it opens a search by id or by a name of any language among the
+items, creatures and game objects of the database, read once a server by a job (with their tables
+of locales) and searched in memory; a slot shows the item's icon (`ItemDisplayInfo.dbc` and
+`Interface\Icons`, each decoded once by a job) edged in the colour of its quality, its count, and a
+✖. Under the page, cards: the texts of the giver and ender, the level and who takes it, the chain,
+the givers and enders. Every field says what it is and where it is written. **Tests**: the catalog
+searched by id and by a name of another language, the icon of a display read from its DBC, the
+money in gold, silver and copper.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
