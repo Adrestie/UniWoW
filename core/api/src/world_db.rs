@@ -32,11 +32,14 @@ pub enum State {
 }
 
 /// What the server running is asked to load again once changes are applied, for them to be seen
-/// in the game without starting it again (step 16.2).
+/// in the game without starting it again (step 16.2); in the order it is made, what the creatures
+/// read first.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Reload {
     /// The quests, their givers and enders, their texts.
     Quests,
+    /// The addons of the creatures: their paths, mounts and auras.
+    Addons,
     /// The path of waypoints of this id, the creatures following it set on it again.
     Path(u32),
     /// The group of creatures led by the creature of this guid, its members gathered again.

@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# mod-uniwow-bridge: loads again what the UniWoW editor on the same machine wrote into the world
+# database, on its demand, without starting the server again. Read once, when the worldserver starts.
+
+[worldserver]
+
+#
+#    UniwowBridge.Enable
+#        Description: Whether the bridge listens for the editor.
+#        Default:     1 - (Enabled)
+#                     0 - (Disabled)
+
+UniwowBridge.Enable = 1
+
+#
+#    UniwowBridge.Port
+#        Description: The TCP port it listens on, on 127.0.0.1 only.
+#        Default:     8091
+
+UniwowBridge.Port = 8091
+
+#
+#    UniwowBridge.Token
+#        Description: The token the editor must give. Empty: every connection is refused.
+#        Default:     ""
+
+UniwowBridge.Token = ""

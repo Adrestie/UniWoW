@@ -10682,6 +10682,26 @@ script; the date and name of an application, kept in the project; the changes of
 replacing those it gave, an application refused while not connected; the changes of the spawns made
 in rows of memory as the server would have them.
 
+#### Step 16.2, as built: the changes seen in the game at once
+
+- **`server/mod-uniwow-bridge`**, a module of AzerothCore apart from the observer, which stays read
+  only: on 127.0.0.1 with a token, one editor at a time, its protocol in its `PROTOCOL.md` (HELLO,
+  RELOAD with demands, DONE with what each made and what the server says). Its thread queues the
+  demands; the world thread makes them after the maps were updated, where the commands of the console
+  are: the quests (as `.reload all quest`, their texts in every language, the marks over the givers
+  sent again to the players), a path's waypoints, the addons of the creatures, the groups of
+  creatures, a creature or a game object read again from its row, taken away where it runs and
+  spawned again (as `.npc load`), taken away once its row is gone, read alone when a pool or a game
+  event spawns it. The core of AzerothCore is not changed.
+- **`world_db::Reload`**, in the order the server makes them: the quests, the addons, a path, a group,
+  a creature, a game object. Once an application is written or undone, the module `world-db` asks the
+  bridge (its port, 8091 by default, and its token in the panel), from a job, and says what it made
+  after what was written; without a bridge, that the changes are seen once the server starts again.
+
+**Tests**: the demands in their order, the groups once; a bridge of the tests asked with its token,
+telling what each demand made; a token refused; no bridge said with how to have one. The module of
+the server is checked once built and installed on the server of the tests.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which

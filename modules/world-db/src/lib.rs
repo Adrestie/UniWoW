@@ -14,6 +14,7 @@
 //! application…* putting them back, and written as a script into the folder of SQL of a module of
 //! the server when one is set, for a server installed again to have them.
 
+mod bridge;
 #[cfg(test)]
 mod tests;
 
@@ -185,6 +186,7 @@ struct Application {
 fn reload_json(reload: &Reload) -> Value {
     match reload {
         Reload::Quests => json!({ "quests": true }),
+        Reload::Addons => json!({ "addons": true }),
         Reload::Path(id) => json!({ "path": id }),
         Reload::Formation(leader) => json!({ "formation": leader }),
         Reload::Creature(guid) => json!({ "creature": guid }),
@@ -195,6 +197,9 @@ fn reload_json(reload: &Reload) -> Value {
 fn reload_of(value: &Value) -> Option<Reload> {
     if value["quests"].as_bool() == Some(true) {
         return Some(Reload::Quests);
+    }
+    if value["addons"].as_bool() == Some(true) {
+        return Some(Reload::Addons);
     }
     if let Some(id) = value["path"].as_u64() {
         return Some(Reload::Path(id as u32));
@@ -282,6 +287,11 @@ fn script_name(when: &str, undone: bool) -> String {
 
 /// The setting of the folder of SQL of a module of the server, where each application is written.
 const SQL_FOLDER: &str = "sql_folder";
+
+/// The settings of the bridge of the server (`mod-uniwow-bridge`): its port and token.
+const BRIDGE_PORT: &str = "bridge_port";
+const BRIDGE_TOKEN: &str = "bridge_token";
+const DEFAULT_BRIDGE_PORT: u16 = 8091;
 
 /// An application asked, waiting for its job: the changes applied, or the last application undone.
 enum Applying {
@@ -373,6 +383,8 @@ struct WorldDbModule {
     applying: Option<Applying>,
     confirming: Option<Confirming>,
     said: Option<(bool, String)>,
+    /// The bridge of the server asked to load the changes again.
+    bridging: Option<JobId>,
 }
 
 impl Default for WorldDbModule {
@@ -391,6 +403,7 @@ impl Default for WorldDbModule {
             applying: None,
             confirming: None,
             said: None,
+            bridging: None,
         }
     }
 }
@@ -727,6 +740,11 @@ impl Module for WorldDbModule {
             Some(Applying::Apply { job: made, .. } | Applying::Undo { job: made }) => *made == job,
             None => false,
         };
+        if self.bridging == Some(job) {
+            self.bridging = None;
+            self.bridged(outcome.take::<Result<Vec<(bool, String)>, String>>());
+            return;
+        }
         if ours && let Some(applying) = self.applying.take() {
             self.applied(applying, outcome.take::<Result<Vec<Entry>, String>>(), ctx);
             return;
@@ -758,7 +776,7 @@ impl WorldDbModule {
             }
         };
         let when = now();
-        let (owners, message, failed) = match applying {
+        let (owners, message, failed, reloads) = match applying {
             Applying::Apply {
                 owners,
                 reloads,
@@ -775,14 +793,9 @@ impl WorldDbModule {
                 let rows = application.rows();
                 let title = format!("Applied by UniWoW on {when} to {database}: {rows} rows");
                 let failed = self.write_script(ctx, &title, &when, false, &application.entries);
-                if !application.reloads.is_empty() {
-                    log::info!(
-                        "{} loads to ask of the server, once its bridge is installed (step 16.2)",
-                        application.reloads.len()
-                    );
-                }
+                let reloads = application.reloads.clone();
                 self.applications.push(application);
-                (owners, format!("{rows} rows written to {database}"), failed)
+                (owners, format!("{rows} rows written to {database}"), failed, reloads)
             }
             Applying::Undo { .. } => {
                 let Some(undone) = self.applications.pop() else {
@@ -795,7 +808,7 @@ impl WorldDbModule {
                     undone.when,
                     undone.rows()
                 );
-                (undone.owners, message, failed)
+                (undone.owners, message, failed, undone.reloads)
             }
         };
         log::info!("{message}");
@@ -807,6 +820,63 @@ impl WorldDbModule {
             failed.map_or(message.clone(), |failed| format!("{message}; {failed}")),
         ));
         ctx.publish(world_db::APPLIED_TOPIC, json!({ "owners": owners }));
+        self.ask_bridge(&reloads, ctx);
+    }
+
+    /// Asks the bridge of the server to load again what `reloads` names, from a job.
+    fn ask_bridge(&mut self, reloads: &[Reload], ctx: &mut Context) {
+        let demands = bridge::demands(reloads);
+        if demands.is_empty() {
+            return;
+        }
+        let port = ctx
+            .setting(BRIDGE_PORT)
+            .and_then(|value| value.as_u64())
+            .map_or(DEFAULT_BRIDGE_PORT, |port| port as u16);
+        let token = ctx
+            .setting(BRIDGE_TOKEN)
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let count = demands.len();
+        self.bridging = Some(ctx.spawn("Ask the server to load the changes again", move |_| {
+            bridge::reload(port, &token, &demands)
+        }));
+        log::info!("{count} loads asked of the server's bridge on 127.0.0.1:{port}");
+    }
+
+    /// What the bridge made, told after what was written.
+    fn bridged(&mut self, outcome: Option<Result<Vec<(bool, String)>, String>>) {
+        let told = match outcome {
+            Some(Ok(made)) => {
+                let failed: Vec<&String> = made.iter().filter(|(done, _)| !done).map(|(_, said)| said).collect();
+                for (done, said) in &made {
+                    if *done {
+                        log::info!("the server: {said}");
+                    } else {
+                        log::warn!("the server: {said}");
+                    }
+                }
+                if failed.is_empty() {
+                    (
+                        true,
+                        format!("seen in the game: the server loaded the {} changes again", made.len()),
+                    )
+                } else {
+                    let failed: Vec<&str> = failed.iter().map(|said| said.as_str()).collect();
+                    (false, format!("in the game, not all: {}", failed.join("; ")))
+                }
+            }
+            Some(Err(reason)) => {
+                log::warn!("the server is not asked to load the changes again: {reason}");
+                (
+                    false,
+                    format!("not seen in the game until the server starts again: {reason}"),
+                )
+            }
+            None => (false, "the server's bridge stopped".to_owned()),
+        };
+        let (fine, said) = self.said.take().unwrap_or((true, String::new()));
+        self.said = Some((fine && told.0, format!("{said}; {}", told.1)));
     }
 
     /// The changes the modules hold for the server: what each holds, where they are written, the
@@ -909,6 +979,37 @@ impl WorldDbModule {
                 {
                     ctx.set_setting(SQL_FOLDER, json!(folder));
                 }
+                let mut port = ctx
+                    .setting(BRIDGE_PORT)
+                    .and_then(|value| value.as_u64())
+                    .map_or(DEFAULT_BRIDGE_PORT, |port| port as u16);
+                let mut token = ctx
+                    .setting(BRIDGE_TOKEN)
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_default();
+                ui.horizontal(|ui| {
+                    ui.label("Bridge of the server").on_hover_text(
+                        "mod-uniwow-bridge: the server loads again what was written, without starting again",
+                    );
+                    if ui.add(egui::DragValue::new(&mut port).prefix("port ")).changed() {
+                        ctx.set_setting(BRIDGE_PORT, json!(port));
+                    }
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut token)
+                                .password(true)
+                                .hint_text("token")
+                                .desired_width(120.0),
+                        )
+                        .on_hover_text("UniwowBridge.Token of the server's configuration")
+                        .changed()
+                    {
+                        ctx.set_setting(BRIDGE_TOKEN, json!(token));
+                    }
+                    if self.bridging.is_some() {
+                        ui.spinner();
+                    }
+                });
             },
         );
         self.confirm_ui(ui.ctx(), ctx, &pending, settings);
