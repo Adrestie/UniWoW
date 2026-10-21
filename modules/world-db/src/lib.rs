@@ -291,7 +291,7 @@ const SQL_FOLDER: &str = "sql_folder";
 /// The settings of the bridge of the server (`mod-uniwow-bridge`): its port and token.
 const BRIDGE_PORT: &str = "bridge_port";
 const BRIDGE_TOKEN: &str = "bridge_token";
-const DEFAULT_BRIDGE_PORT: u16 = 8091;
+const DEFAULT_BRIDGE_PORT: u16 = 8092;
 
 /// An application asked, waiting for its job: the changes applied, or the last application undone.
 enum Applying {

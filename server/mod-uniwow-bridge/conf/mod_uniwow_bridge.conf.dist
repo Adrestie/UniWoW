@@ -16,9 +16,9 @@ UniwowBridge.Enable = 1
 #
 #    UniwowBridge.Port
 #        Description: The TCP port it listens on, on 127.0.0.1 only.
-#        Default:     8091
+#        Default:     8092 (the server of the tests; 8093 for Nibelung)
 
-UniwowBridge.Port = 8091
+UniwowBridge.Port = 8092
 
 #
 #    UniwowBridge.Token

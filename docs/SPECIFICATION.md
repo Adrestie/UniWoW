@@ -10695,7 +10695,7 @@ in rows of memory as the server would have them.
   event spawns it. The core of AzerothCore is not changed.
 - **`world_db::Reload`**, in the order the server makes them: the quests, the addons, a path, a group,
   a creature, a game object. Once an application is written or undone, the module `world-db` asks the
-  bridge (its port, 8091 by default, and its token in the panel), from a job, and says what it made
+  bridge (its port, 8092 by default, the server of the tests, 8093 for Nibelung; its token in the panel), from a job, and says what it made
   after what was written; without a bridge, that the changes are seen once the server starts again.
 
 **Tests**: the demands in their order, the groups once; a bridge of the tests asked with its token,

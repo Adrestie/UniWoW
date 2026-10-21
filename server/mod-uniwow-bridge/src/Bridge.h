@@ -80,7 +80,7 @@ namespace UniwowBridge
 
         std::atomic<bool> _running{ false };
         std::thread _thread;
-        uint16 _port = 8091;
+        uint16 _port = 8092;
         std::string _token;
 
         std::mutex _lock;

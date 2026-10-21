@@ -205,7 +205,7 @@ namespace UniwowBridge
             LOG_INFO("module", "uniwow-bridge: disabled");
             return;
         }
-        _port = uint16(sConfigMgr->GetOption<uint32>("UniwowBridge.Port", 8091));
+        _port = uint16(sConfigMgr->GetOption<uint32>("UniwowBridge.Port", 8092));
         _token = sConfigMgr->GetOption<std::string>("UniwowBridge.Token", "");
         if (_token.empty())
             LOG_WARN("module", "uniwow-bridge: no UniwowBridge.Token, every connection is refused");
