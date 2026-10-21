@@ -10731,6 +10731,33 @@ the server is checked once built and installed on the server of the tests.
 memory as the server would have them, those unchanged giving none, kept in the project; the points
 shown as entities and written; the paths drawn where the user changed them.
 
+#### Step 16.3, as built: the quests
+
+- **The module `quests`** (category *World*), its panel *Quests*: the quests of the database (id and
+  title, read once a server) searched by title or id, those the user changed first and marked (✚
+  created, ● changed, ✖ deleted); a quest opened read by a job from its tables (`quest_template`,
+  `quest_template_addon`, `quest_offer_reward`, `quest_request_items`), its tables of locales, its
+  givers and enders.
+- **Its texts in every language of the client** (enUS in its own tables, frFR, deDE, esES, ruRU in
+  those of locales): the title, description, objectives, the texts while not done and of the reward,
+  in the log once done, where it ends, the four objectives; the English shown where a language has
+  none. **Its numbers** by section: level and who takes it, chain, objectives (creatures or game
+  objects to kill or use, items to bring, with their counts and names), rewards. A field written
+  once left, one undo entry.
+- **Created in the editor's block, 97000-97099** (`ID_RANGES.md` of the mods), blank or a copy of a
+  quest as the user changed it; deleted there alone, with its texts and relations. A quest of the
+  block taken outside it is said, not written.
+- **Its givers and enders**: those of the database listed; the spawns selected made to start or end
+  it through `spawns.quests` (kept with the changes of the spawns, taken back in their Inspector),
+  the templates of the creatures among them made givers of quests (`npcflag` | 2) where they were
+  not, their marks shown once they spawn again.
+- **Given to the server** with the module `world-db`: the rows changed, a copy's rows copied, the
+  server asked to load the quests again.
+
+**Tests**: a quest read by table and language with its givers; a quest changed, one copied as the
+user changed its source, one outside the block refused, a giver made, written in rows of memory as
+the server would have them; a quest of the block deleted with all its rows; kept in the project.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
