@@ -7,6 +7,8 @@
 
 mod data;
 mod paths;
+mod patrol_ui;
+mod patrols;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -21,11 +23,39 @@ use uniwow_api::{Command, Context, DockArea, JobId, JobOutcome, Module, Registra
 
 use data::{Changes, Link, Quests, Spawn};
 
+/// The component of the points of the paths the module declares for the Inspector (step 16.4).
+fn waypoint_component() -> Value {
+    json!({ "components": [{
+        "name": "waypoint",
+        "label": "Waypoint",
+        "kinds": ["waypoint"],
+        "fields": [
+            { "name": "path", "label": "Path", "kind": "number", "read_only": true },
+            { "name": "point", "label": "Point", "kind": "number", "read_only": true },
+            { "name": "wait", "label": "Wait (ms)", "kind": "number" },
+            { "name": "run", "label": "Runs to it", "kind": "boolean" },
+            { "name": "facing", "label": "Facing (°)", "kind": "number" },
+        ],
+        "read": "spawns.waypoint_read",
+        "write": "spawns.waypoint_write",
+    }] })
+}
+
 /// The id of the module, the provider of its pieces and the owner of its instances.
 const MODULE: &str = "spawns";
 
 /// What a reading job gives back: the spawns of a map, the highest guid of each table, the quests.
-type Read = Result<(Vec<Spawn>, [u64; 3], Quests, paths::Paths, &'static str), String>;
+type Read = Result<
+    (
+        Vec<Spawn>,
+        [u64; 3],
+        Quests,
+        paths::Paths,
+        &'static str,
+        patrols::Patrols,
+    ),
+    String,
+>;
 
 /// The looks of the displays, by kind and display: a look and its scale, none for none.
 type Looks = HashMap<(Kind, u32), Option<(LookId, f32)>>;
@@ -104,6 +134,18 @@ struct SpawnsModule {
     entry_column: Option<&'static str>,
     generation: u64,
     given: Option<u64>,
+    /// The patrols as the database has them and as the user changed them, the paths drawn with
+    /// those changes; the paths whose points are given to the scene, for what; the points being
+    /// added by clicks; the members of a group being dragged; the component of the points declared.
+    patrols: Arc<patrols::Patrols>,
+    patrols_now: Arc<patrols::Patrols>,
+    drawn_paths: Arc<paths::Paths>,
+    waypoints_shown: BTreeSet<u32>,
+    waypoints_for: Option<(u64, u64)>,
+    place_points: Arc<std::sync::Mutex<patrol_ui::Placing>>,
+    group_edit: Option<(u64, Vec<patrols::Member>, u16)>,
+    declaring: Option<uniwow_api::CallId>,
+    view: Option<uniwow_api::viewport::Handle>,
 }
 
 /// The creatures and game objects the world as it runs lists in `snapshot`, by the pieces of the
@@ -217,6 +259,9 @@ impl SpawnsModule {
     fn set_changes(&mut self, changes: Changes) {
         self.generation += 1;
         let before = std::mem::replace(&mut self.changes, changes);
+        if before.patrols != self.changes.patrols {
+            self.refresh_patrols();
+        }
         let mut tiles = self.tiles_of_changes(&before);
         let after = self.changes.clone();
         tiles.extend(self.tiles_of_changes(&after));
@@ -388,6 +433,8 @@ impl SpawnsModule {
         if let Some(scene) = &self.scene {
             scene.set_known(MODULE, Arc::default());
         }
+        self.patrols = Arc::default();
+        self.refresh_patrols();
         self.read_for = None;
     }
 
@@ -418,7 +465,10 @@ impl SpawnsModule {
             return;
         };
         self.given = Some(self.generation);
-        database.set_pending(self.changes.pending(&self.spawns, &self.index, entry_column));
+        database.set_pending(
+            self.changes
+                .pending(&self.spawns, &self.index, entry_column, &self.patrols),
+        );
     }
 
     /// Makes `after` the changes, one undo entry.
@@ -495,7 +545,28 @@ impl SpawnsModule {
                         Err(reason) => log::warn!("the patrol paths are not read: {reason}"),
                     }
                 }
-                Ok((spawns, highest, Quests::of_rows(&titles, &links), paths, schema.entry))
+                // The patrols that can be changed, which a database without those tables leaves out.
+                let patrols = match (
+                    database.query(patrols::WALKERS, &[json!(map)]),
+                    database.query(patrols::POINTS, &[json!(map)]),
+                    database.query(patrols::GROUPS, &[json!(map)]),
+                ) {
+                    (Ok(walkers), Ok(points), Ok(groups)) => patrols::Patrols::of_rows(&walkers, &points, &groups),
+                    (walkers, points, groups) => {
+                        for reason in [walkers.err(), points.err(), groups.err()].into_iter().flatten() {
+                            log::warn!("the patrols are not read: {reason}");
+                        }
+                        patrols::Patrols::default()
+                    }
+                };
+                Ok((
+                    spawns,
+                    highest,
+                    Quests::of_rows(&titles, &links),
+                    paths,
+                    schema.entry,
+                    patrols,
+                ))
             }),
         );
     }
@@ -590,7 +661,7 @@ impl SpawnsModule {
         let now = (
             selection.generation,
             self.all_paths,
-            Arc::as_ptr(&self.paths) as usize,
+            Arc::as_ptr(&self.drawn_paths) as usize,
             moving,
         );
         if self.paths_for == Some(now) {
@@ -600,7 +671,7 @@ impl SpawnsModule {
         let mut segments = if self.all_paths {
             // Those of the spawns around the camera alone.
             let around: Vec<u64> = self
-                .paths
+                .drawn_paths
                 .keys()
                 .copied()
                 .filter(|guid| {
@@ -612,14 +683,14 @@ impl SpawnsModule {
                         .is_some_and(|tile| around.contains(&tile))
                 })
                 .collect();
-            paths::segments(&self.paths, &around)
+            paths::segments(&self.drawn_paths, &around)
         } else {
             let guids: Vec<u64> = selected
                 .iter()
                 .filter(|id| id.kind == Kind::Creature)
                 .map(|id| id.key)
                 .collect();
-            paths::segments(&self.paths, &guids)
+            paths::segments(&self.drawn_paths, &guids)
         };
         for (id, now) in live {
             if let Some(spawn) = self.find(&id) {
@@ -760,6 +831,18 @@ impl Module for SpawnsModule {
                 json!({ "type": "object", "properties": { "entities": { "type": "array" } } }),
             )
             .command(
+                "spawns.waypoint_read",
+                "The fields of the waypoints 'ids' (waypoint:<path>:<point>): their path and point, how long the                  creature waits there (ms), whether it runs to it, the way it faces there (degrees, none for none).",
+                ids.clone(),
+                json!({ "type": "object", "properties": { "entities": { "type": "array" } } }),
+            )
+            .command(
+                "spawns.waypoint_write",
+                "Changes the 'field' (wait, run, facing) of the waypoints 'ids': 'change' a value, or +n, -=n, *n, /n;                  kept in memory, one undo entry.",
+                json!({ "type": "object", "properties": { "ids": { "type": "array" }, "field": { "type": "string" }, "change": { "type": "string" } }, "required": ["ids", "field", "change"] }),
+                json!({ "type": "object", "properties": { "changed": { "type": "integer" }, "refused": { "type": "array" } } }),
+            )
+            .command(
                 "spawns.write",
                 "Changes the 'field' (position, or rotation on the axis 1 for the orientation in degrees) of the spawns \
                  'ids': 'change' a value, or +n, -=n, *n, /n; kept in memory, one undo entry.",
@@ -814,6 +897,9 @@ impl Module for SpawnsModule {
             return Ok(json!({ "quests": quests }));
         }
         let ids = Self::ids(&arguments)?;
+        if name.starts_with("spawns.waypoint_") || (!ids.is_empty() && ids.iter().all(|id| id.kind == Kind::Waypoint)) {
+            return self.waypoint_command(name, &ids, &arguments, ctx);
+        }
         match name {
             "spawns.quests" => {
                 let quest = arguments["quest"].as_u64().ok_or("'quest' is the id of a quest")? as u32;
@@ -959,6 +1045,8 @@ impl Module for SpawnsModule {
     fn windows_ui(&mut self, _egui: &egui::Context, ctx: &mut Context) {
         self.steer(ctx);
         self.resolve(ctx);
+        self.take_clicks(ctx);
+        self.show_waypoints();
         self.draw_paths();
         self.give_pending(ctx);
     }
@@ -978,7 +1066,18 @@ impl Module for SpawnsModule {
         if let Some(view) = ctx.service(uniwow_api::viewport::SERVICE) {
             let layer = paths::PathsLayer::new(self.drawn.clone(), view.target());
             view.add_layer(ctx.module_id(), Box::new(layer));
+            self.view = Some(view.clone());
+            if let Some(scene) = ctx.service(scene::SERVICE) {
+                view.add_tool(
+                    ctx.module_id(),
+                    Box::new(patrol_ui::PlaceTool {
+                        placing: self.place_points.clone(),
+                        scene,
+                    }),
+                );
+            }
         }
+        self.declaring = Some(ctx.call("scene.declare", waypoint_component()));
     }
 
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
@@ -1019,9 +1118,12 @@ impl Module for SpawnsModule {
                     }
                     ui.checkbox(
                         &mut self.all_paths,
-                        format!("Show every patrol path ({} creatures walk one)", self.paths.len()),
+                        format!("Show every patrol path ({} creatures walk one)", self.drawn_paths.len()),
                     )
-                    .on_hover_text("Otherwise those of the creatures selected alone, in red")
+                    .on_hover_text("Otherwise those of the creatures selected alone, in red");
+                    ui.add_space(6.0);
+                    self.patrol_ui(ui, ctx);
+                    ui.label("")
                 }
             },
             Some(_) => ui.label("The world database is not connected: see the panel World database."),
@@ -1042,7 +1144,7 @@ impl Module for SpawnsModule {
         if self.reading == Some(job) {
             self.reading = None;
             match outcome.take::<Read>() {
-                Some(Ok((spawns, highest, quests, paths, entry_column))) => {
+                Some(Ok((spawns, highest, quests, paths, entry_column, patrols))) => {
                     log::info!(
                         "{} spawns of the map read from the world database; {} quests, {} givers and enders",
                         spawns.len(),
@@ -1057,7 +1159,9 @@ impl Module for SpawnsModule {
                     self.quests = Arc::new(quests);
                     self.paths = Arc::new(paths);
                     self.entry_column = Some(entry_column);
+                    self.patrols = Arc::new(patrols);
                     self.generation += 1;
+                    self.refresh_patrols();
                     self.refused = None;
                     self.read_areas(ctx);
                     self.refresh();
@@ -1089,6 +1193,9 @@ impl Module for SpawnsModule {
 
     fn shutdown(&mut self) {
         self.clear();
+        if let Some(view) = self.view.take() {
+            view.remove_tools(MODULE);
+        }
     }
 }
 

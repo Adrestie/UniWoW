@@ -197,6 +197,13 @@ pub trait Tool: Send {
     fn pointer(&mut self, input: &ToolInput<'_>, painter: &egui::Painter) {
         let _ = (input, painter);
     }
+
+    /// Whether it takes the pointer alone at this frame, the other tools given none: a mode that
+    /// places points by clicks (step 16.4). None by default.
+    fn claims(&mut self, input: &ToolInput<'_>) -> bool {
+        let _ = input;
+        false
+    }
 }
 
 /// What a tool receives at each frame.

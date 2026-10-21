@@ -10702,6 +10702,35 @@ in rows of memory as the server would have them.
 telling what each demand made; a token refused; no bridge said with how to have one. The module of
 the server is checked once built and installed on the server of the tests.
 
+#### Step 16.4, as built: the patrols
+
+- **Read with the spawns** (`spawns::patrols`): the creatures that move or whose addon names a path
+  (`creature.MovementType`, `creature_addon.path_id`), the points of those paths (`waypoint_data`:
+  place, facing, wait, run), the groups their leaders lead (`creature_formations`).
+- **A point of a path is an entity**, `waypoint:<path>:<point>` (`Kind::Waypoint`): those of the
+  paths of the creatures and points selected, and of the path being drawn, are given to the scene;
+  the gizmos move them, a turn about the vertical their facing; Ctrl+D a point halfway to the next,
+  Delete one taken away; the Inspector their place, and the component *Waypoint* the module declares
+  (its path and point, the wait, whether it runs to it, its facing).
+- **The panel *Spawns*, its section *Patrol*** for the creature selected: what it does (walks its
+  path, wanders, stands); *Make a patrol* (a path of its own, its guid × 10, the next of its ten when
+  taken, from its place) and points added by clicks on the ground (*Add points…*, a tool that takes
+  the pointer alone while it adds, the line from the last point to the pointer dashed, Esc or a right
+  click to stop); *Take the patrol away*. Its group: those it leads, their distance and angle behind
+  it dragged (one undo entry once let go), *Lay them out behind* (two by two, a few yards apart),
+  *Break the group*; the leader it follows, *Leave the group*; *Make a group of the selected, led by
+  it*, each member taken out of any other group and walking no path of its own.
+- **Each change one undo entry**, kept in the project with the other changes of the spawns; the paths
+  drawn as changed. **The rows**: a path's points written again, a creature's movement (its wander
+  distance 0 once it walks) and its addon's path, a group's rows written again, its members taken
+  out of any other first; the server asked to load the path, the addons, the groups and those
+  creatures again.
+- **`viewport::Tool::claims`**: a tool that takes the pointer alone at a frame, the others given none.
+
+**Tests**: the patrols read from their rows; a patrol made and a group changed written in rows of
+memory as the server would have them, those unchanged giving none, kept in the project; the points
+shown as entities and written; the paths drawn where the user changed them.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which

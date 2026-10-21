@@ -291,6 +291,8 @@ pub struct Changes {
     pub displays: BTreeMap<u32, String>,
     /// The spawn of the database each spawn duplicated was made of, its row copied once applied.
     pub sources: BTreeMap<EntityId, EntityId>,
+    /// The patrols as the user changed them (step 16.4).
+    pub patrols: crate::patrols::Edits,
 }
 
 /// A template of game objects created in memory: its entry, name, display and size. Its type is 2
@@ -526,6 +528,7 @@ impl Changes {
             "copied from": self.sources.iter().map(|(id, source)| json!({
                 "id": id.to_string(), "source": source.to_string(),
             })).collect::<Vec<_>>(),
+            "patrols": self.patrols.section(),
         })
     }
 
@@ -625,6 +628,7 @@ impl Changes {
                 .iter()
                 .filter_map(|entry| Some((id(entry)?, entry["source"].as_str()?.parse().ok()?)))
                 .collect(),
+            patrols: crate::patrols::Edits::of_section(&section["patrols"]),
         }
     }
 
@@ -632,7 +636,13 @@ impl Changes {
     /// and of the quests given and taken, the creatures' entry in their column `entry_column`; the
     /// spawns as the database has them `spawns`, their places by id `index`. What is not written
     /// yet said: the game objects made of doodads, their templates and displays to come.
-    pub fn pending(&self, spawns: &[Spawn], index: &HashMap<EntityId, usize>, entry_column: &str) -> world_db::Pending {
+    pub fn pending(
+        &self,
+        spawns: &[Spawn],
+        index: &HashMap<EntityId, usize>,
+        entry_column: &str,
+        patrols: &crate::patrols::Patrols,
+    ) -> world_db::Pending {
         let mut out = world_db::Pending {
             owner: "spawns".to_owned(),
             label: "Spawns".to_owned(),
@@ -771,6 +781,11 @@ impl Changes {
                 self.templates.len()
             ));
         }
+        let (changes, reloads) = self.patrols.rows(patrols);
+        out.changes.extend(changes);
+        out.reloads.extend(reloads);
+        out.reloads.sort();
+        out.reloads.dedup();
         out
     }
 }
@@ -956,16 +971,17 @@ mod tests {
         };
         changes.linked.insert(link(200));
         changes.unlinked.insert(link(100));
-        let pending = changes.pending(&spawns, &index, "id");
+        let pending = changes.pending(&spawns, &index, "id", &Default::default());
         assert!(pending.held.is_empty(), "{:?}", pending.held);
         assert_eq!(
             pending.reloads,
             [
-                world_db::Reload::Creature(spawns[0].guid),
-                world_db::Reload::Creature(900_000),
-                world_db::Reload::Creature(spawns[1].guid),
                 world_db::Reload::Quests,
-            ]
+                world_db::Reload::Creature(spawns[0].guid),
+                world_db::Reload::Creature(spawns[1].guid),
+                world_db::Reload::Creature(900_000),
+            ],
+            "in the order the server makes them"
         );
         apply(&mut memory, &pending.changes).unwrap();
 
@@ -999,7 +1015,7 @@ mod tests {
             [10, 10, 10],
             &[],
         );
-        let pending = made.pending(&spawns, &index, "id");
+        let pending = made.pending(&spawns, &index, "id", &Default::default());
         assert!(pending.changes.is_empty());
         assert_eq!(pending.held.len(), 2);
         // Kept in the project with the spawn each was copied from.

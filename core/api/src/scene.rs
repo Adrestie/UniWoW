@@ -397,10 +397,12 @@ pub enum Kind {
     Group,
     Prefab,
     Instance,
+    /// A point of the path of a patrol (step 16.4).
+    Waypoint,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 17] = [
+    pub const ALL: [Kind; 18] = [
         Kind::Map,
         Kind::Area,
         Kind::Chunk,
@@ -418,6 +420,7 @@ impl Kind {
         Kind::Group,
         Kind::Prefab,
         Kind::Instance,
+        Kind::Waypoint,
     ];
 
     /// Its name in an id written as text.
@@ -440,6 +443,7 @@ impl Kind {
             Kind::Group => "group",
             Kind::Prefab => "prefab",
             Kind::Instance => "instance",
+            Kind::Waypoint => "waypoint",
         }
     }
 
@@ -557,6 +561,11 @@ impl EntityId {
         Self::new(Kind::Group, 0, id as u64, 0)
     }
 
+    /// The point `point` (from 1) of the path `path` of `waypoint_data`: `waypoint:797530:3`.
+    pub const fn waypoint(path: u32, point: u32) -> Self {
+        Self::new(Kind::Waypoint, 0, path as u64, point)
+    }
+
     /// The tile and the chunk of a chunk or a water.
     pub fn chunk_place(&self) -> Option<(TileId, [u32; 2])> {
         matches!(self.kind, Kind::Chunk | Kind::Water).then(|| {
@@ -582,7 +591,7 @@ impl EntityId {
     /// The number its default name ends with, where it has one.
     pub fn number(&self) -> u64 {
         match self.kind {
-            Kind::Room | Kind::BuildingDoodad => u64::from(self.sub),
+            Kind::Room | Kind::BuildingDoodad | Kind::Waypoint => u64::from(self.sub),
             _ => self.key,
         }
     }
@@ -616,6 +625,7 @@ impl fmt::Display for EntityId {
             Kind::Room | Kind::BuildingDoodad => write!(f, "{kind}:{}:{}:{}", self.map, self.key, self.sub),
             Kind::Live => write!(f, "{kind}:{:x}", self.key),
             Kind::LightZone => write!(f, "{kind}:{}:{}", self.map, self.key),
+            Kind::Waypoint => write!(f, "{kind}:{}:{}", self.key, self.sub),
             _ => write!(f, "{kind}:{}", self.key),
         }
     }
@@ -693,6 +703,10 @@ impl std::str::FromStr for EntityId {
             Kind::LightZone => {
                 count(2)?;
                 EntityId::light_zone(small(number(0)?)?, small(number(1)?)?)
+            }
+            Kind::Waypoint => {
+                count(2)?;
+                EntityId::waypoint(small(number(0)?)?, small(number(1)?)?)
             }
             _ => {
                 count(1)?;
@@ -1311,6 +1325,7 @@ mod tests {
             (EntityId::live(0xf13000046b0012e3), "live:f13000046b0012e3"),
             (EntityId::light(1203), "light:1203"),
             (EntityId::light_zone(571, 4), "light-zone:571:4"),
+            (EntityId::waypoint(797_530, 3), "waypoint:797530:3"),
             (EntityId::weather(1519), "weather:1519"),
         ];
         for (id, text) in ids {

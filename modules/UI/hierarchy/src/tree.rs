@@ -203,6 +203,7 @@ fn kind_label(kind: Kind) -> &'static str {
         Kind::Group => "Groups",
         Kind::Prefab => "Prefabs",
         Kind::Instance => "Instances",
+        Kind::Waypoint => "Waypoints",
     }
 }
 

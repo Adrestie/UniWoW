@@ -839,10 +839,19 @@ impl ViewportModule {
                 .max_rect(strip)
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
+        // A tool that claims the pointer has it alone.
+        let claimed = tools
+            .iter_mut()
+            .position(|(_, tool)| catch_unwind(AssertUnwindSafe(|| tool.claims(&input))).unwrap_or(false));
+        let mut at = 0;
         tools.retain_mut(|(owner, tool)| {
+            let given = claimed.is_none_or(|claimed| claimed == at);
+            at += 1;
             let used = catch_unwind(AssertUnwindSafe(|| {
                 tool.toolbar(&mut bar);
-                tool.pointer(&input, &painter);
+                if given {
+                    tool.pointer(&input, &painter);
+                }
             }));
             match used {
                 Ok(()) => true,
