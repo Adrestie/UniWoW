@@ -19,6 +19,10 @@ use data::{Edits, Loaded, Names, QuestEdit};
 
 const MODULE: &str = "quests";
 
+/// Published with the titles of the quests the user created or renamed, not yet in the database:
+/// `{ "titles": { "<id>": "<title>" } }`, for the other modules to name them (the Inspector).
+const TITLES_TOPIC: &str = "quests.titles";
+
 /// The ids and titles of the quests of the database.
 type List = Arc<BTreeMap<u32, String>>;
 
@@ -72,6 +76,8 @@ struct QuestsModule {
     /// were given last.
     generation: u64,
     given: Option<u64>,
+    /// When the titles of the quests the user made were told last.
+    titled: Option<u64>,
     /// The field being typed: its key and its text, written once left.
     typing: Option<(String, String)>,
     /// The names of what the numbers name, read by jobs; those asked.
@@ -234,6 +240,25 @@ impl QuestsModule {
             },
         );
         self.asked.push(Asked::Names(job));
+    }
+
+    /// The titles of the quests the user created or renamed told the other modules, once changed.
+    fn tell_titles(&mut self, ctx: &mut Context) {
+        if self.titled == Some(self.generation) {
+            return;
+        }
+        self.titled = Some(self.generation);
+        let titles: BTreeMap<String, String> = self
+            .edits
+            .quests
+            .iter()
+            .filter(|(_, edit)| !edit.deleted)
+            .filter_map(|(id, _)| {
+                let title = shown(self.value(*id, "quest_template", "", "LogTitle").as_ref());
+                (!title.is_empty()).then(|| (id.to_string(), title))
+            })
+            .collect();
+        ctx.publish(TITLES_TOPIC, json!({ "titles": titles }));
     }
 
     fn give_pending(&mut self, ctx: &mut Context) {
@@ -717,6 +742,7 @@ impl Module for QuestsModule {
     fn windows_ui(&mut self, _egui: &egui::Context, ctx: &mut Context) {
         self.steer(ctx);
         self.give_pending(ctx);
+        self.tell_titles(ctx);
     }
 
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {

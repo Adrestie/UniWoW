@@ -41,6 +41,9 @@ fn waypoint_component() -> Value {
     }] })
 }
 
+/// The titles of the quests the module quests made, before they are in the database.
+const QUEST_TITLES_TOPIC: &str = "quests.titles";
+
 /// The id of the module, the provider of its pieces and the owner of its instances.
 const MODULE: &str = "spawns";
 
@@ -145,6 +148,8 @@ struct SpawnsModule {
     place_points: Arc<std::sync::Mutex<patrol_ui::Placing>>,
     group_edit: Option<(u64, Vec<patrols::Member>, u16)>,
     declaring: Option<uniwow_api::CallId>,
+    /// The titles of the quests the user made in the module quests, by id.
+    quest_titles: BTreeMap<u32, String>,
     view: Option<uniwow_api::viewport::Handle>,
 }
 
@@ -450,6 +455,18 @@ impl SpawnsModule {
             .iter()
             .map(|id| id.as_str().ok_or("'ids' is a list of ids as text")?.parse())
             .collect()
+    }
+
+    /// The quests of the database named, with those the user made in the module quests.
+    fn quests_named(&self) -> std::borrow::Cow<'_, Quests> {
+        if self.quest_titles.is_empty() {
+            return std::borrow::Cow::Borrowed(&self.quests);
+        }
+        let mut named = (*self.quests).clone();
+        named
+            .titles
+            .extend(self.quest_titles.iter().map(|(id, title)| (*id, title.clone())));
+        std::borrow::Cow::Owned(named)
     }
 
     /// Gives the changes for the server to the world database, once the spawns or the changes
@@ -822,6 +839,7 @@ impl Module for SpawnsModule {
             )],
         );
         reg.subscribe(world_db::APPLIED_TOPIC);
+        reg.subscribe(QUEST_TITLES_TOPIC);
         reg.panel("spawns", "Spawns", DockArea::Right)
             .command(
                 "spawns.read",
@@ -889,7 +907,7 @@ impl Module for SpawnsModule {
         if name == "spawns.quest_titles" {
             let search = arguments["search"].as_str().unwrap_or_default();
             let quests: Vec<Value> = self
-                .quests
+                .quests_named()
                 .search(search, 50)
                 .into_iter()
                 .map(|(id, title)| json!({ "quest": id, "title": title }))
@@ -941,7 +959,7 @@ impl Module for SpawnsModule {
                             &spawn,
                             self.changes.moved.contains_key(id) || self.changes.added.contains_key(id),
                             &quests,
-                            &self.quests.titles,
+                            &self.quests_named().titles,
                         );
                         if let Some(template) = self
                             .changes
@@ -1052,6 +1070,18 @@ impl Module for SpawnsModule {
     }
 
     fn on_event(&mut self, event: &uniwow_api::Event, _ctx: &mut Context) {
+        // The quests the user made in the module quests, named before they are in the database.
+        if event.topic == QUEST_TITLES_TOPIC {
+            self.quest_titles = event.payload["titles"]
+                .as_object()
+                .map(|titles| {
+                    titles
+                        .iter()
+                        .filter_map(|(id, title)| Some((id.parse().ok()?, title.as_str()?.to_owned())))
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
         // Applied to the database, or undone there: the changes are its rows now, read again.
         let ours = event.payload["owners"]
             .as_array()
