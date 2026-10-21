@@ -1060,6 +1060,13 @@ impl Module for SpawnsModule {
             self.set_changes(Changes::default());
             self.read_for = None;
         }
+        // Rows written by another (an import): read again, the changes kept.
+        let read = event.payload["read"]
+            .as_array()
+            .is_some_and(|read| read.iter().any(|module| module.as_str() == Some(MODULE)));
+        if event.topic == world_db::APPLIED_TOPIC && read {
+            self.read_for = None;
+        }
     }
 
     fn init(&mut self, ctx: &mut Context) {

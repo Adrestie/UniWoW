@@ -63,6 +63,29 @@ pub struct Pending {
     pub held: Vec<String>,
 }
 
+/// Published once the user chose another server (step 16.7), its name in `{ "server": .. }`: the
+/// modules that read it, or follow it, read it again through `WorldDb::server`.
+pub const SERVER_TOPIC: &str = "world-db.server";
+
+/// A server the user declared (step 16.7): its name, its world database, its observer (the port and
+/// token of `mod-uniwow-observer`, the port of its world), its bridge (`mod-uniwow-bridge`), the
+/// folder of SQL its applications are written to. The password of its database is kept apart, in
+/// the Credential Manager of Windows, never here.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Server {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub database: String,
+    pub observer_port: u16,
+    pub observer_token: String,
+    pub world_port: u16,
+    pub bridge_port: u16,
+    pub bridge_token: String,
+    pub sql_folder: String,
+}
+
 /// Shared between threads (rule T3).
 pub trait WorldDb: Send + Sync {
     fn state(&self) -> State;
@@ -81,4 +104,14 @@ pub trait WorldDb: Send + Sync {
     /// Makes `changes` in the database as one transaction, through a connection that writes opened
     /// for them: what each did, or nothing made. From a job: it waits for the database.
     fn apply(&self, changes: &[RowChange]) -> Result<Vec<Entry>, String>;
+
+    /// The server chosen, none before the module knows it.
+    fn server(&self) -> Option<Server> {
+        None
+    }
+
+    /// The servers declared, in their order.
+    fn servers(&self) -> Vec<Server> {
+        Vec::new()
+    }
 }

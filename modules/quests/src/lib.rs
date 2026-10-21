@@ -732,7 +732,7 @@ impl Module for QuestsModule {
             .show(ui, |ui| self.quest_ui(ui, id, ctx));
     }
 
-    fn on_event(&mut self, event: &uniwow_api::Event, _ctx: &mut Context) {
+    fn on_event(&mut self, event: &uniwow_api::Event, ctx: &mut Context) {
         let ours = event.payload["owners"]
             .as_array()
             .is_some_and(|owners| owners.iter().any(|owner| owner.as_str() == Some(MODULE)));
@@ -742,6 +742,17 @@ impl Module for QuestsModule {
             self.loaded.clear();
             self.listed_for = None;
             self.open = None;
+        }
+        // Rows written by another (an import): read again, the changes kept.
+        let read = event.payload["read"]
+            .as_array()
+            .is_some_and(|read| read.iter().any(|module| module.as_str() == Some(MODULE)));
+        if event.topic == world_db::APPLIED_TOPIC && read {
+            self.loaded.clear();
+            self.listed_for = None;
+            if let Some(id) = self.open {
+                self.open(id, ctx);
+            }
         }
     }
 

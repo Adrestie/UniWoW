@@ -15,6 +15,10 @@
 //! the server when one is set, for a server installed again to have them.
 
 mod bridge;
+mod exchange;
+mod package;
+mod sending;
+mod servers;
 #[cfg(test)]
 mod tests;
 
@@ -26,7 +30,7 @@ use uniwow_api::db::secret::{self, Vault};
 use uniwow_api::db::write::{self, Entry, RowChange};
 use uniwow_api::db::{Connection, Rows, Settings, Writer};
 use uniwow_api::serde_json::{Value, json};
-use uniwow_api::world_db::{self, Pending, Reload, State};
+use uniwow_api::world_db::{self, Pending, Reload, Server, State};
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, Registrar, egui, journal, log, theme};
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -50,6 +54,12 @@ struct Shared {
     asked: Mutex<Option<Sender<Asked>>>,
     /// The changes the modules hold for the server, by owner.
     pending: Mutex<std::collections::BTreeMap<String, Pending>>,
+    /// The servers declared and the one chosen (step 16.7); a server chosen from the toolbar of the
+    /// 3D view, and the window of the servers asked from there, for the module.
+    servers: Mutex<Vec<Server>>,
+    server: Mutex<Option<Server>>,
+    chose: Mutex<Option<String>>,
+    manage: std::sync::atomic::AtomicBool,
 }
 
 impl Shared {
@@ -94,6 +104,14 @@ impl world_db::WorldDb for Service {
         lock(&self.0.pending).values().cloned().collect()
     }
 
+    fn server(&self) -> Option<Server> {
+        lock(&self.0.server).clone()
+    }
+
+    fn servers(&self) -> Vec<Server> {
+        lock(&self.0.servers).clone()
+    }
+
     fn apply(&self, changes: &[RowChange]) -> Result<Vec<Entry>, String> {
         if journal::on_interface_thread() {
             return Err("an application waits for the database: make it from a job".to_owned());
@@ -128,8 +146,9 @@ fn serve(shared: Arc<Shared>, asked: Receiver<Asked>, cancelled: impl Fn() -> bo
                 connection = None;
                 match Connection::open(&settings, &password, TIMEOUT) {
                     Ok(mut opened) => {
+                        // Its database said: another of the same MySQL is another server.
                         let version = opened.version().unwrap_or_default();
-                        shared.set(State::Connected(version));
+                        shared.set(State::Connected(format!("{version} · {}", settings.database)));
                         connection = Some(opened);
                         account = Some((settings, password));
                     }
@@ -177,6 +196,8 @@ fn serve(shared: Arc<Shared>, asked: Receiver<Asked>, cancelled: impl Fn() -> bo
 #[derive(Clone, Debug, PartialEq)]
 struct Application {
     when: String,
+    /// The server it was made on, by its name; empty for one made before servers were.
+    server: String,
     database: String,
     owners: Vec<String>,
     entries: Vec<Entry>,
@@ -221,6 +242,7 @@ impl Application {
     fn to_json(&self) -> Value {
         json!({
             "when": self.when,
+            "server": self.server,
             "database": self.database,
             "owners": self.owners,
             "entries": self.entries.iter().map(Entry::to_json).collect::<Vec<_>>(),
@@ -232,6 +254,7 @@ impl Application {
         let list = |key: &str| value[key].as_array().cloned().unwrap_or_default();
         Some(Self {
             when: value["when"].as_str()?.to_owned(),
+            server: value["server"].as_str().unwrap_or_default().to_owned(),
             database: value["database"].as_str().unwrap_or_default().to_owned(),
             owners: list("owners")
                 .iter()
@@ -285,14 +308,6 @@ fn script_name(when: &str, undone: bool) -> String {
     )
 }
 
-/// The setting of the folder of SQL of a module of the server, where each application is written.
-const SQL_FOLDER: &str = "sql_folder";
-
-/// The settings of the bridge of the server (`mod-uniwow-bridge`): its port and token.
-const BRIDGE_PORT: &str = "bridge_port";
-const BRIDGE_TOKEN: &str = "bridge_token";
-const DEFAULT_BRIDGE_PORT: u16 = 8092;
-
 /// An application asked, waiting for its job: the changes applied, or the last application undone.
 enum Applying {
     Apply {
@@ -307,14 +322,26 @@ enum Applying {
 }
 
 /// What the user is asked to confirm.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Confirming {
     Apply,
     Undo,
+    /// Another server chosen while changes wait for this one.
+    Switch(String),
 }
 
-/// The keys of the settings, kept by the module: never the password.
-const KEYS: [&str; 4] = ["host", "port", "user", "database"];
+/// Writes the script of `entries` into `folder`, if one is given; what went wrong.
+fn write_script_to(folder: &str, title: &str, when: &str, undone: bool, entries: &[Entry]) -> Option<String> {
+    if folder.trim().is_empty() {
+        return None;
+    }
+    let path = std::path::Path::new(folder.trim()).join(script_name(when, undone));
+    let written =
+        std::fs::create_dir_all(folder.trim()).and_then(|_| std::fs::write(&path, write::script(title, entries)));
+    written
+        .err()
+        .map(|error| format!("the script {} is not written: {error}", path.display()))
+}
 
 /// The setting of the connection made at the start of the editor with the password kept.
 const AT_START: &str = "connect_at_start";
@@ -346,29 +373,68 @@ struct Asking {
     automatic: bool,
 }
 
+/// The servers declared in the settings, the module's settings of before made one at first.
+fn servers_of(ctx: &Context) -> Vec<Server> {
+    servers::read(ctx.setting(servers::SERVERS).as_ref(), |key| ctx.setting(key))
+}
+
+/// The server chosen: the one the settings name, else the first.
+fn server_of(ctx: &Context) -> Server {
+    let servers = servers_of(ctx);
+    let chosen = ctx
+        .setting(servers::CHOSEN)
+        .and_then(|value| value.as_str().map(str::to_owned));
+    servers
+        .iter()
+        .find(|server| Some(&server.name) == chosen.as_ref())
+        .or(servers.first())
+        .cloned()
+        .unwrap_or_default()
+}
+
 fn settings_of(ctx: &Context) -> Settings {
-    let defaults = Settings::default();
-    let text = |key: &str, default: &str| {
-        ctx.setting(key)
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .unwrap_or_else(|| default.to_owned())
-    };
-    Settings {
-        host: text("host", &defaults.host),
-        port: ctx
-            .setting("port")
-            .and_then(|value| value.as_u64())
-            .map_or(defaults.port, |port| port as u16),
-        user: text("user", &defaults.user),
-        database: text("database", &defaults.database),
+    servers::settings(&server_of(ctx))
+}
+
+/// The window of the servers: the list being edited, the one shown.
+struct Editing {
+    servers: Vec<Server>,
+    at: usize,
+}
+
+/// The tool of the 3D view whose toolbar chooses the server.
+struct ServersTool(Arc<Shared>);
+
+impl uniwow_api::viewport::Tool for ServersTool {
+    fn toolbar(&mut self, ui: &mut egui::Ui) {
+        let servers = lock(&self.0.servers).clone();
+        let chosen = lock(&self.0.server)
+            .as_ref()
+            .map(|server| server.name.clone())
+            .unwrap_or_default();
+        ui.separator();
+        egui::ComboBox::from_id_salt("world-db server")
+            .selected_text(format!("Server: {chosen}"))
+            .show_ui(ui, |ui| {
+                for server in &servers {
+                    if ui.selectable_label(server.name == chosen, &server.name).clicked() && server.name != chosen {
+                        *lock(&self.0.chose) = Some(server.name.clone());
+                    }
+                }
+                ui.separator();
+                if ui.button("Servers…").clicked() {
+                    self.0.manage.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            })
+            .response
+            .on_hover_text("The server the editor reads and writes: its world database, observer and bridge");
     }
 }
 
 struct WorldDbModule {
     shared: Arc<Shared>,
     thread: Option<JobId>,
-    /// The settings being edited in the panel; the password being typed, kept until *Connect*.
-    editing: Option<Settings>,
+    /// The password being typed, kept until *Connect*.
     password: String,
     asking: bool,
     /// Whether the password typed is kept once connected (*Remember password*).
@@ -382,6 +448,14 @@ struct WorldDbModule {
     applications: Vec<Application>,
     applying: Option<Applying>,
     confirming: Option<Confirming>,
+    /// The window of the servers, while open.
+    editing_servers: Option<Editing>,
+    /// The applications picked to be sent to another server, and the sending under way.
+    picked: std::collections::BTreeSet<usize>,
+    sending: Option<sending::Sending>,
+    /// The export to a file, and the import of one, under way.
+    exporting: Option<JobId>,
+    importing: Option<exchange::Importing>,
     said: Option<(bool, String)>,
     /// The bridge of the server asked to load the changes again.
     bridging: Option<JobId>,
@@ -392,7 +466,6 @@ impl Default for WorldDbModule {
         Self {
             shared: Arc::default(),
             thread: None,
-            editing: None,
             password: String::new(),
             asking: false,
             remember: true,
@@ -402,6 +475,11 @@ impl Default for WorldDbModule {
             applications: Vec::new(),
             applying: None,
             confirming: None,
+            editing_servers: None,
+            picked: std::collections::BTreeSet::new(),
+            sending: None,
+            exporting: None,
+            importing: None,
             said: None,
             bridging: None,
         }
@@ -487,9 +565,17 @@ impl WorldDbModule {
     }
 
     /// Undoes the last application, from a job.
+    /// The last application made on the server chosen, by its place.
+    fn last_here(&self, ctx: &Context) -> Option<usize> {
+        let here = server_of(ctx).name;
+        self.applications
+            .iter()
+            .rposition(|application| application.server.is_empty() || application.server == here)
+    }
+
     fn undo(&mut self, ctx: &mut Context) {
         use world_db::WorldDb as _;
-        let Some(last) = self.applications.last() else {
+        let Some(last) = self.last_here(ctx).map(|at| &self.applications[at]) else {
             return;
         };
         let changes = write::revert(&last.entries);
@@ -500,20 +586,181 @@ impl WorldDbModule {
         self.applying = Some(Applying::Undo { job });
     }
 
-    /// Writes the script of `entries` into the folder of SQL set, if one is; what went wrong.
+    /// Writes the script of `entries` into the folder of SQL of the server, if it has one; what went
+    /// wrong.
     fn write_script(&self, ctx: &Context, title: &str, when: &str, undone: bool, entries: &[Entry]) -> Option<String> {
-        let folder = ctx
-            .setting(SQL_FOLDER)
-            .and_then(|value| value.as_str().map(str::to_owned))?;
-        if folder.trim().is_empty() {
-            return None;
+        write_script_to(&server_of(ctx).sql_folder, title, when, undone, entries)
+    }
+
+    /// The servers of the settings given to the service; the modules told once another is chosen.
+    fn sync_servers(&mut self, ctx: &mut Context) {
+        let (servers, server) = (servers_of(ctx), server_of(ctx));
+        let before = lock(&self.shared.server).clone();
+        *lock(&self.shared.servers) = servers;
+        *lock(&self.shared.server) = Some(server.clone());
+        if before.as_ref().is_some_and(|before| *before != server) {
+            ctx.publish(world_db::SERVER_TOPIC, json!({ "server": server.name }));
         }
-        let path = std::path::Path::new(folder.trim()).join(script_name(when, undone));
-        let written =
-            std::fs::create_dir_all(folder.trim()).and_then(|_| std::fs::write(&path, write::script(title, entries)));
-        written
-            .err()
-            .map(|error| format!("the script {} is not written: {error}", path.display()))
+    }
+
+    /// Chooses the server `name`: once confirmed when changes wait for this one; connected with
+    /// its password kept, or the password asked.
+    fn choose(&mut self, name: &str, confirmed: bool, ctx: &mut Context) {
+        use world_db::WorldDb as _;
+        if !confirmed && !Service(self.shared.clone()).pending().is_empty() {
+            self.confirming = Some(Confirming::Switch(name.to_owned()));
+            return;
+        }
+        ctx.set_setting(servers::CHOSEN, json!(name));
+        self.kept = None;
+        self.sync_servers(ctx);
+        log::info!("the server chosen: {name}");
+        match start(true, self.vault.get(&secret::target(&settings_of(ctx)))) {
+            Start::Connect(password) => self.connect_with(ctx, password, true, true),
+            Start::Ask => {
+                self.shared.set(State::Waiting);
+                self.asking = true;
+            }
+        }
+    }
+
+    /// The window of the servers: each declared, its database, observer and bridge; added,
+    /// duplicated, removed; written to the settings once saved.
+    fn servers_ui(&mut self, egui: &egui::Context, ctx: &mut Context) {
+        if self.shared.manage.swap(false, std::sync::atomic::Ordering::Relaxed) && self.editing_servers.is_none() {
+            let servers = servers_of(ctx);
+            let chosen = server_of(ctx).name;
+            let at = servers.iter().position(|server| server.name == chosen).unwrap_or(0);
+            self.editing_servers = Some(Editing { servers, at });
+        }
+        let Some(editing) = &mut self.editing_servers else {
+            return;
+        };
+        let (mut open, mut save, mut close) = (true, false, false);
+        egui::Window::new("Servers")
+            .open(&mut open)
+            .default_size([560.0, 360.0])
+            .show(egui, |ui| {
+                ui.horizontal_top(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(150.0);
+                        for (at, server) in editing.servers.iter().enumerate() {
+                            if ui.selectable_label(editing.at == at, &server.name).clicked() {
+                                editing.at = at;
+                            }
+                        }
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Add").clicked() {
+                                let name = servers::new_name(&editing.servers, "Server");
+                                let mut server = servers::of_json(&json!({ "name": name })).unwrap_or_default();
+                                server.name = name;
+                                editing.servers.push(server);
+                                editing.at = editing.servers.len() - 1;
+                            }
+                            if ui.button("Duplicate").clicked()
+                                && let Some(server) = editing.servers.get(editing.at).cloned()
+                            {
+                                let name = servers::new_name(&editing.servers, &server.name);
+                                editing.servers.push(Server { name, ..server });
+                                editing.at = editing.servers.len() - 1;
+                            }
+                            if ui
+                                .add_enabled(editing.servers.len() > 1, egui::Button::new("Remove"))
+                                .clicked()
+                            {
+                                editing.servers.remove(editing.at);
+                                editing.at = editing.at.min(editing.servers.len() - 1);
+                            }
+                        });
+                    });
+                    ui.separator();
+                    let Some(server) = editing.servers.get_mut(editing.at) else {
+                        return;
+                    };
+                    egui::Grid::new("world-db server fields")
+                        .num_columns(2)
+                        .spacing([8.0, 4.0])
+                        .show(ui, |ui| {
+                            let text = |ui: &mut egui::Ui, label: &str, value: &mut String, secret: bool| {
+                                ui.label(egui::RichText::new(label).weak());
+                                ui.add(egui::TextEdit::singleline(value).password(secret).desired_width(240.0));
+                                ui.end_row();
+                            };
+                            text(ui, "Name", &mut server.name, false);
+                            ui.strong("World database");
+                            ui.end_row();
+                            text(ui, "Address", &mut server.host, false);
+                            ui.label(egui::RichText::new("Port").weak());
+                            ui.add(egui::DragValue::new(&mut server.port));
+                            ui.end_row();
+                            text(ui, "User", &mut server.user, false);
+                            text(ui, "Database", &mut server.database, false);
+                            ui.strong("Observer");
+                            ui.end_row();
+                            ui.label(egui::RichText::new("Port").weak());
+                            ui.add(egui::DragValue::new(&mut server.observer_port));
+                            ui.end_row();
+                            text(ui, "Token", &mut server.observer_token, true);
+                            ui.label(egui::RichText::new("Port of its world").weak());
+                            ui.add(egui::DragValue::new(&mut server.world_port));
+                            ui.end_row();
+                            ui.strong("Bridge");
+                            ui.end_row();
+                            ui.label(egui::RichText::new("Port").weak());
+                            ui.add(egui::DragValue::new(&mut server.bridge_port));
+                            ui.end_row();
+                            text(ui, "Token", &mut server.bridge_token, true);
+                            text(ui, "Scripts written to", &mut server.sql_folder, false);
+                        });
+                    ui.label(
+                        egui::RichText::new(
+                            "The password of each database is asked when it is chosen, and kept in the Credential \
+                             Manager of Windows.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    save = ui.button("Save").clicked();
+                    close = ui.button("Close").clicked();
+                });
+            });
+        if save {
+            let mut names = std::collections::BTreeSet::new();
+            let unique = editing
+                .servers
+                .iter()
+                .all(|server| !server.name.trim().is_empty() && names.insert(server.name.trim().to_owned()));
+            if unique {
+                let list: Vec<Value> = editing.servers.iter().map(servers::to_json).collect();
+                let chosen = server_of(ctx).name;
+                let kept = editing.servers.iter().any(|server| server.name == chosen);
+                let first = editing
+                    .servers
+                    .first()
+                    .map(|server| server.name.clone())
+                    .unwrap_or_default();
+                ctx.set_setting(servers::SERVERS, json!(list));
+                if !kept {
+                    ctx.set_setting(servers::CHOSEN, json!(first));
+                }
+                let before = lock(&self.shared.server).clone();
+                self.sync_servers(ctx);
+                // The server chosen changed: connected again.
+                if before != lock(&self.shared.server).clone() {
+                    let name = server_of(ctx).name;
+                    self.choose(&name, true, ctx);
+                }
+            } else {
+                self.said = Some((false, "Each server has a name of its own".to_owned()));
+            }
+        }
+        if close || !open {
+            self.editing_servers = None;
+        }
     }
 
     /// Whether a password is kept for the connection of the settings, asked of the vault once.
@@ -577,6 +824,12 @@ impl Module for WorldDbModule {
             serve(shared, receiver, || job.is_cancelled());
         }));
         self.shared.set(State::Waiting);
+        self.sync_servers(ctx);
+        // For the modules started before it, which follow the server chosen.
+        ctx.publish(world_db::SERVER_TOPIC, json!({ "server": server_of(ctx).name }));
+        if let Some(view) = ctx.service(uniwow_api::viewport::SERVICE) {
+            view.add_tool(ctx.module_id(), Box::new(ServersTool(self.shared.clone())));
+        }
         let at_start = ctx.setting(AT_START).and_then(|value| value.as_bool()).unwrap_or(true);
         match start(at_start, self.vault.get(&secret::target(&settings_of(ctx)))) {
             Start::Connect(password) => self.connect_with(ctx, password, true, true),
@@ -591,6 +844,21 @@ impl Module for WorldDbModule {
 
     fn windows_ui(&mut self, egui: &egui::Context, ctx: &mut Context) {
         self.settle();
+        let chose = lock(&self.shared.chose).take();
+        if let Some(name) = chose {
+            self.choose(&name, false, ctx);
+        }
+        self.servers_ui(egui, ctx);
+        self.sending_ui(egui, ctx);
+        self.importing_ui(egui, ctx);
+        if self.confirming.is_some() && !self.asking {
+            let pending = {
+                use world_db::WorldDb as _;
+                Service(self.shared.clone()).pending()
+            };
+            let settings = settings_of(ctx);
+            self.confirm_ui(egui, ctx, &pending, &settings);
+        }
         if !self.asking {
             return;
         }
@@ -630,9 +898,11 @@ impl Module for WorldDbModule {
                     later = ui.button("Not now").clicked();
                 });
                 ui.label(
-                    egui::RichText::new("The address, the user and the database: in the panel World database.")
-                        .weak()
-                        .small(),
+                    egui::RichText::new(
+                        "The address, the user and the database: in the servers of the panel World database.",
+                    )
+                    .weak()
+                    .small(),
                 );
             });
         if at_start != ctx.setting(AT_START).and_then(|value| value.as_bool()).unwrap_or(true) {
@@ -654,7 +924,7 @@ impl Module for WorldDbModule {
             State::Connecting => (theme::Theme::DARK.palette.warning, "Connecting…".to_owned()),
             State::Connected(version) => (
                 theme::Theme::DARK.palette.success,
-                format!("Connected, MySQL {version}, read only"),
+                format!("Connected, MySQL {version}"),
             ),
             State::Refused(reason) => (theme::Theme::DARK.palette.error, format!("Refused: {reason}")),
         };
@@ -664,34 +934,41 @@ impl Module for WorldDbModule {
         });
         ui.separator();
         let current = settings_of(ctx);
-        let editing = self.editing.get_or_insert_with(|| current.clone());
-        egui::Grid::new("world-db settings").num_columns(2).show(ui, |ui| {
-            ui.label("Address");
-            ui.text_edit_singleline(&mut editing.host);
-            ui.end_row();
-            ui.label("Port");
-            ui.add(egui::DragValue::new(&mut editing.port));
-            ui.end_row();
-            ui.label("User");
-            ui.text_edit_singleline(&mut editing.user);
-            ui.end_row();
-            ui.label("Database");
-            ui.text_edit_singleline(&mut editing.database);
-            ui.end_row();
-        });
-        let changed = *editing != current;
-        let edited = editing.clone();
+        let (servers, server) = (servers_of(ctx), server_of(ctx));
+        let mut chosen = None;
         ui.horizontal(|ui| {
-            if ui.add_enabled(changed, egui::Button::new("Apply")).clicked() {
-                for (key, value) in KEYS.into_iter().zip([
-                    json!(edited.host),
-                    json!(edited.port),
-                    json!(edited.user),
-                    json!(edited.database),
-                ]) {
-                    ctx.set_setting(key, value);
-                }
+            ui.label("Server");
+            egui::ComboBox::from_id_salt("world-db panel server")
+                .selected_text(&server.name)
+                .show_ui(ui, |ui| {
+                    for other in &servers {
+                        if ui.selectable_label(other.name == server.name, &other.name).clicked()
+                            && other.name != server.name
+                        {
+                            chosen = Some(other.name.clone());
+                        }
+                    }
+                });
+            if ui
+                .button("Servers…")
+                .on_hover_text("Declare the servers, their databases, observers and bridges")
+                .clicked()
+            {
+                self.shared.manage.store(true, std::sync::atomic::Ordering::Relaxed);
             }
+        });
+        if let Some(name) = chosen {
+            self.choose(&name, false, ctx);
+        }
+        ui.label(
+            egui::RichText::new(format!(
+                "{} on {}:{} as {}; observer {}, bridge {}",
+                server.database, server.host, server.port, server.user, server.observer_port, server.bridge_port
+            ))
+            .weak()
+            .small(),
+        );
+        ui.horizontal(|ui| {
             if ui
                 .button("Connect…")
                 .on_hover_text("Asks the password, then connects")
@@ -740,6 +1017,36 @@ impl Module for WorldDbModule {
             Some(Applying::Apply { job: made, .. } | Applying::Undo { job: made }) => *made == job,
             None => false,
         };
+        if self.exporting == Some(job) {
+            self.exporting = None;
+            self.exported(outcome.take::<Result<Option<std::path::PathBuf>, String>>());
+            return;
+        }
+        match &self.importing {
+            Some(exchange::Importing::Reading(reading)) if *reading == job => {
+                self.import_read(outcome.take::<exchange::Read>());
+                return;
+            }
+            Some(exchange::Importing::Writing { job: writing, .. }) if *writing == job => {
+                self.imported(outcome.take::<Result<Vec<Entry>, String>>(), ctx);
+                return;
+            }
+            _ => {}
+        }
+        match &self.sending {
+            Some(sending::Sending::Reading { job: reading, .. }) if *reading == job => {
+                self.target_read(
+                    outcome.take::<Result<Vec<Vec<uniwow_api::db::write::Row>>, String>>(),
+                    ctx,
+                );
+                return;
+            }
+            Some(sending::Sending::Writing { job: writing, .. }) if *writing == job => {
+                self.target_written(outcome.take::<Result<Vec<Entry>, String>>(), ctx);
+                return;
+            }
+            _ => {}
+        }
         if self.bridging == Some(job) {
             self.bridging = None;
             self.bridged(outcome.take::<Result<Vec<(bool, String)>, String>>());
@@ -785,6 +1092,7 @@ impl WorldDbModule {
             } => {
                 let application = Application {
                     when: when.clone(),
+                    server: server_of(ctx).name,
                     database: database.clone(),
                     owners: owners.clone(),
                     entries,
@@ -798,9 +1106,10 @@ impl WorldDbModule {
                 (owners, format!("{rows} rows written to {database}"), failed, reloads)
             }
             Applying::Undo { .. } => {
-                let Some(undone) = self.applications.pop() else {
+                let Some(undone) = self.last_here(ctx).map(|at| self.applications.remove(at)) else {
                     return;
                 };
+                self.picked.clear();
                 let title = format!("Undone by UniWoW on {when}: the application of {}", undone.when);
                 let failed = self.write_script(ctx, &title, &when, true, &entries);
                 let message = format!(
@@ -829,14 +1138,8 @@ impl WorldDbModule {
         if demands.is_empty() {
             return;
         }
-        let port = ctx
-            .setting(BRIDGE_PORT)
-            .and_then(|value| value.as_u64())
-            .map_or(DEFAULT_BRIDGE_PORT, |port| port as u16);
-        let token = ctx
-            .setting(BRIDGE_TOKEN)
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .unwrap_or_default();
+        let server = server_of(ctx);
+        let (port, token) = (server.bridge_port, server.bridge_token);
         let count = demands.len();
         self.bridging = Some(ctx.spawn("Ask the server to load the changes again", move |_| {
             bridge::reload(port, &token, &demands)
@@ -927,7 +1230,7 @@ impl WorldDbModule {
                     {
                         self.confirming = Some(Confirming::Apply);
                     }
-                    let last = self.applications.last().map(|last| last.when.clone());
+                    let last = self.last_here(ctx).map(|at| self.applications[at].when.clone());
                     if ui
                         .add_enabled(
                             connected && last.is_some() && !busy,
@@ -952,75 +1255,62 @@ impl WorldDbModule {
                     };
                     ui.colored_label(colour, said);
                 }
-                if let Some(last) = self.applications.last() {
-                    ui.weak(format!(
-                        "{} applications kept in the project; the last on {}, {} rows",
-                        self.applications.len(),
-                        last.when,
-                        last.rows()
-                    ));
-                }
-                let mut folder = ctx
-                    .setting(SQL_FOLDER)
-                    .and_then(|value| value.as_str().map(str::to_owned))
-                    .unwrap_or_default();
-                ui.label("Scripts written to");
-                if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut folder)
-                            .hint_text(r"…\modules\mod-uniwow-content\data\sql\db-world")
-                            .desired_width(f32::INFINITY),
-                    )
-                    .on_hover_text(
-                        "The folder of SQL of a module of the server: each application written there too, \
-                         for a server installed again to have it. None: not written.",
-                    )
-                    .changed()
-                {
-                    ctx.set_setting(SQL_FOLDER, json!(folder));
-                }
-                let mut port = ctx
-                    .setting(BRIDGE_PORT)
-                    .and_then(|value| value.as_u64())
-                    .map_or(DEFAULT_BRIDGE_PORT, |port| port as u16);
-                let mut token = ctx
-                    .setting(BRIDGE_TOKEN)
-                    .and_then(|value| value.as_str().map(str::to_owned))
-                    .unwrap_or_default();
+                self.applications_ui(ui, ctx);
                 ui.horizontal(|ui| {
-                    ui.label("Bridge of the server").on_hover_text(
-                        "mod-uniwow-bridge: the server loads again what was written, without starting again",
-                    );
-                    if ui.add(egui::DragValue::new(&mut port).prefix("port ")).changed() {
-                        ctx.set_setting(BRIDGE_PORT, json!(port));
+                    let label = if self.picked.is_empty() {
+                        "Export the changes waiting…"
+                    } else {
+                        "Export the applications picked…"
+                    };
+                    if ui
+                        .add_enabled(connected && self.exporting.is_none(), egui::Button::new(label))
+                        .on_hover_text("A .uniwow file: the rows, what they name, what belongs to what they make")
+                        .clicked()
+                    {
+                        self.export(ctx);
                     }
                     if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut token)
-                                .password(true)
-                                .hint_text("token")
-                                .desired_width(120.0),
-                        )
-                        .on_hover_text("UniwowBridge.Token of the server's configuration")
-                        .changed()
+                        .add_enabled(connected && self.importing.is_none(), egui::Button::new("Import…"))
+                        .on_hover_text("A .uniwow file into this server: its problems shown first")
+                        .clicked()
                     {
-                        ctx.set_setting(BRIDGE_TOKEN, json!(token));
+                        self.import(ctx);
                     }
+                });
+                let server = server_of(ctx);
+                ui.label(
+                    egui::RichText::new(if server.sql_folder.trim().is_empty() {
+                        "No folder of scripts for this server (Servers…)".to_owned()
+                    } else {
+                        format!("Each application also written to {}", server.sql_folder)
+                    })
+                    .weak()
+                    .small(),
+                );
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Loaded again in the game by the bridge on 127.0.0.1:{}",
+                            server.bridge_port
+                        ))
+                        .weak()
+                        .small(),
+                    );
                     if self.bridging.is_some() {
                         ui.spinner();
                     }
                 });
             },
         );
-        self.confirm_ui(ui.ctx(), ctx, &pending, settings);
     }
 
-    /// The window confirming an application or its undoing.
+    /// The window confirming an application, its undoing, or another server chosen while changes
+    /// wait.
     fn confirm_ui(&mut self, egui: &egui::Context, ctx: &mut Context, pending: &[Pending], settings: &Settings) {
-        let Some(confirming) = self.confirming else {
+        let Some(confirming) = self.confirming.clone() else {
             return;
         };
-        let (title, text) = match confirming {
+        let (title, text) = match &confirming {
             Confirming::Apply => {
                 let rows: usize = pending.iter().map(|held| held.changes.len()).sum();
                 let mut tables: Vec<&str> = pending
@@ -1043,7 +1333,7 @@ impl WorldDbModule {
             }
             Confirming::Undo => (
                 "Undo the last application",
-                match self.applications.last() {
+                match self.last_here(ctx).map(|at| &self.applications[at]) {
                     Some(last) => format!(
                         "Put back the {} rows the application of {} replaced in {}? Changes made to them since, \
                          in the game or elsewhere, are lost.",
@@ -1054,6 +1344,16 @@ impl WorldDbModule {
                     None => "Nothing applied.".to_owned(),
                 },
             ),
+            Confirming::Switch(name) => {
+                let rows: usize = pending.iter().map(|held| held.changes.len()).sum();
+                (
+                    "Choose another server",
+                    format!(
+                        "{rows} changes of rows wait for {}. Choose {name} all the same? They stay in the project and                          are written to the server chosen when applied: apply them first to write them here.",
+                        settings.database
+                    ),
+                )
+            }
         };
         let (mut yes, mut no) = (false, false);
         egui::Window::new(title)
@@ -1074,6 +1374,7 @@ impl WorldDbModule {
             match confirming {
                 Confirming::Apply => self.apply(ctx),
                 Confirming::Undo => self.undo(ctx),
+                Confirming::Switch(name) => self.choose(&name, true, ctx),
             }
         } else if no {
             self.confirming = None;

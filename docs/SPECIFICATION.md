@@ -10758,6 +10758,44 @@ shown as entities and written; the paths drawn where the user changed them.
 user changed its source, one outside the block refused, a giver made, written in rows of memory as
 the server would have them; a quest of the block deleted with all its rows; kept in the project.
 
+#### Steps 16.7 to 16.9, as built: the servers, a change sent to another, a change kept as a file
+
+Asked by the user: declare several servers and go from one to the other, send changes from one to
+another, keep a change and what it needs in a file to import it elsewhere, its clashes resolved in a
+window.
+
+- **16.7 The servers** (`world_db::Server`, the module's settings `servers` and `server`): each a
+  name, its world database (address, port, user, database), its observer (port, token, the port of
+  its world), its bridge (port, token), the folder its scripts go to; the password of each database
+  in the Credential Manager of Windows. The window *Servers* (the panel *World database*, or the
+  toolbar of the 3D view) adds, duplicates, removes and saves them; a list in the panel and in the
+  toolbar chooses one, confirmed when changes wait for the other. The module connects to the one
+  chosen with its password kept, or asks it; the topic `world-db.server` tells the others:
+  `live-world` follows its observer (when it declares one), `spawns` and `quests` read again (the
+  connection says its database). The settings of before make the first server.
+- **16.8 Applications sent to another server**: those of the project picked in the panel, *Send to
+  <server>…*: the rows of their keys there read with its password (kept, or asked) and compared with
+  what they replaced here; those that differ shown, overwritten or left as they are there; the rest
+  written as they are here (each key's rows taken away, those after put), one transaction; kept as an
+  application of that server with its script; its bridge asked. *Undo the last application* undoes
+  the last of the server chosen.
+- **16.9 A change kept as a file**, `.uniwow` (`package`), JSON to read: the rows (each key's rows
+  before and after), the references (the rows of what they name: a template, a quest of the chain,
+  the spawn of a path or a group; and of what belongs to what they make: a quest's texts, addon and
+  givers, a spawn's addon, events and group), each with why; what the server loads again. *Export*
+  the applications picked, or the changes waiting (made on a copy in memory of the rows read).
+  *Import…* into the server chosen: its rows there read; the problems shown in a window, each with
+  its choices: an id taken there by something else (renumber within a free id, the quests in the
+  editor's block, the references followed; overwrite; keep the target's), a row changed there
+  (overwrite; keep the target's), a reference missing (insert it; link to an id there; leave it
+  out), a reference otherwise (keep the target's; overwrite); then one transaction, kept as an
+  application, the modules reading their rows again with their changes kept, the bridge asked.
+
+**Tests**: the servers kept and made of the old settings; an application sent, the rows that differ
+there found, left or overwritten; a change keeping what it names and what belongs to what it makes,
+read back from its file; an import whose path is taken renumbered with its references followed, a
+missing spawn inserted, or linked to another there.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which

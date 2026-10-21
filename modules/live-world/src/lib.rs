@@ -325,6 +325,8 @@ struct LiveWorld {
     /// The settings in use, shared with the commands, and those being edited in the panel.
     settings: Arc<Mutex<Settings>>,
     editing: Settings,
+    /// The server of the module `world-db` whose observer is followed, when one is.
+    from_server: Option<String>,
     thread: Option<JobId>,
     /// What the thread placing the markers shares with their layer, and that thread.
     drawing: Arc<markers::Drawing>,
@@ -399,6 +401,35 @@ impl LiveWorld {
         );
     }
 
+    /// The observer of the server chosen in the module `world-db` (step 16.7), when it has one: its
+    /// port, token and world's port in place of the module's own; whether they changed.
+    fn follow_server(&mut self, ctx: &mut Context) -> bool {
+        // A server whose observer is not declared yet leaves the module's own.
+        let Some(server) = ctx
+            .service(uniwow_api::world_db::SERVICE)
+            .and_then(|database| database.server())
+            .filter(|server| !server.observer_token.is_empty())
+        else {
+            self.from_server = None;
+            return false;
+        };
+        let mut settings = lock(&self.settings).clone();
+        let before = settings.clone();
+        settings.port = server.observer_port;
+        settings.token = server.observer_token;
+        settings.world_port = server.world_port;
+        self.from_server = Some(server.name);
+        if settings == before {
+            return false;
+        }
+        ctx.set_setting(PORT, json!(settings.port));
+        ctx.set_setting(WORLD_PORT, json!(settings.world_port));
+        ctx.set_setting(TOKEN, json!(settings.token));
+        self.editing = settings.clone();
+        *lock(&self.settings) = settings;
+        true
+    }
+
     fn start(&mut self, ctx: &mut Context) {
         let change = self.shared().retire();
         if !change.is_empty() {
@@ -422,6 +453,7 @@ impl LiveWorld {
 impl Module for LiveWorld {
     fn register(&mut self, reg: &mut Registrar) {
         reg.panel("live-world", "Live world", DockArea::Right);
+        reg.subscribe(uniwow_api::world_db::SERVER_TOPIC);
         let (current, settings) = (self.current.clone(), self.settings.clone());
         reg.command_on_caller(
             "live-world.state",
@@ -492,6 +524,7 @@ impl Module for LiveWorld {
         };
         self.editing = settings.clone();
         *lock(&self.settings) = settings;
+        self.follow_server(ctx);
         self.start(ctx);
 
         // The markers, where there is a 3D view.
@@ -504,8 +537,24 @@ impl Module for LiveWorld {
         self.start_markers(ctx);
     }
 
+    fn on_event(&mut self, event: &uniwow_api::Event, ctx: &mut Context) {
+        // Another server chosen: its observer followed.
+        if event.topic == uniwow_api::world_db::SERVER_TOPIC && self.follow_server(ctx) {
+            self.start(ctx);
+        }
+    }
+
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
         let shared = self.shared();
+        if let Some(server) = &self.from_server {
+            ui.label(
+                egui::RichText::new(format!(
+                    "The observer of the server {server}, set in its servers (World database)"
+                ))
+                .weak()
+                .small(),
+            );
+        }
         let status = shared.status();
         let settings = lock(&self.settings).clone();
         let (message, fault) = connection_text(&status, &settings);

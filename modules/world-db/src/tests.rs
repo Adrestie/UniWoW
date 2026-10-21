@@ -132,6 +132,7 @@ fn an_application_is_dated_named_and_kept_in_the_project_as_it_was() {
     );
     let application = crate::Application {
         when: "2026-10-21 07:48:00".to_owned(),
+        server: "Test".to_owned(),
         database: "acore_world_test on 127.0.0.1:3306".to_owned(),
         owners: vec!["spawns".to_owned()],
         entries: vec![uniwow_api::db::write::Entry {

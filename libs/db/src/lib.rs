@@ -194,6 +194,27 @@ impl Writer {
         Ok(Self { conn })
     }
 
+    /// The rows of each key of `keys` (a table and a key), read in a transaction let go after.
+    pub fn read(&mut self, keys: &[(String, write::Row)]) -> Result<Vec<Vec<write::Row>>, String> {
+        use write::Store as _;
+        let mut transaction = self
+            .conn
+            .start_transaction(mysql::TxOpts::default())
+            .map_err(|e| e.to_string())?;
+        let mut store = Transaction(&mut transaction);
+        let read = keys
+            .iter()
+            .map(|(table, key)| {
+                if !write::TABLES.contains(&table.as_str()) {
+                    return Err(format!("the editor reads no table '{table}' here"));
+                }
+                store.select(table, key)
+            })
+            .collect();
+        let _ = transaction.rollback();
+        read
+    }
+
     /// Makes `changes` as one transaction (`write::apply`): what each did, or nothing made.
     pub fn apply(&mut self, changes: &[write::RowChange]) -> Result<Vec<write::Entry>, String> {
         let mut transaction = self
