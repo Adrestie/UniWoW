@@ -225,6 +225,141 @@ pub fn icons_of_dbc(bytes: &[u8]) -> Result<HashMap<u32, String>, String> {
     Ok(out)
 }
 
+/// The records of a DBC file of the client: each its fields as numbers, and its block of strings.
+pub struct Dbc {
+    pub records: Vec<Vec<u32>>,
+    strings: Vec<u8>,
+}
+
+impl Dbc {
+    pub fn read(bytes: &[u8]) -> Result<Self, String> {
+        let word = |at: usize| -> Option<u32> { Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?)) };
+        if bytes.get(0..4) != Some(b"WDBC") {
+            return Err("no DBC".to_owned());
+        }
+        let (count, fields, size, strings) = (
+            word(4).unwrap_or(0) as usize,
+            word(8).unwrap_or(0) as usize,
+            word(12).unwrap_or(0) as usize,
+            word(16).unwrap_or(0) as usize,
+        );
+        if size < fields * 4 {
+            return Err("a DBC whose records are smaller than their fields".to_owned());
+        }
+        let records = (0..count)
+            .map(|record| {
+                (0..fields)
+                    .filter_map(|field| word(20 + record * size + field * 4))
+                    .collect()
+            })
+            .collect();
+        let block = 20 + count * size;
+        let strings = bytes.get(block..block + strings).ok_or("a DBC cut short")?.to_vec();
+        Ok(Self { records, strings })
+    }
+
+    /// The string at `offset` of the block of strings.
+    pub fn string(&self, offset: u32) -> String {
+        let start = offset as usize;
+        if start == 0 || start >= self.strings.len() {
+            return String::new();
+        }
+        let end = self.strings[start..]
+            .iter()
+            .position(|byte| *byte == 0)
+            .map_or(self.strings.len(), |length| start + length);
+        String::from_utf8_lossy(&self.strings[start..end]).into_owned()
+    }
+
+    /// The name of `record` in the first language that has one, its 16 languages from `first`.
+    pub fn name(&self, record: &[u32], first: usize) -> String {
+        (first..first + 16)
+            .filter_map(|field| record.get(field))
+            .map(|offset| self.string(*offset))
+            .find(|name| !name.is_empty())
+            .unwrap_or_default()
+    }
+
+    /// Each record's id and name, its names from the field `first` (as AzerothCore's DBCfmt has
+    /// them), those without a name left out.
+    pub fn names(&self, first: usize) -> Vec<(u32, String)> {
+        self.records
+            .iter()
+            .filter_map(|record| {
+                let name = self.name(record, first);
+                (!name.is_empty()).then_some((*record.first()?, name))
+            })
+            .collect()
+    }
+}
+
+/// What the client tells of the quests: the icons of the items, by display; the races and classes
+/// (`ChrRaces.dbc`, `ChrClasses.dbc`, the custom ones of a patched client with them); the types of
+/// quests (`QuestInfo.dbc`) and their sorts (`QuestSort.dbc`); the skills (`SkillLine.dbc`, each
+/// its category); the zones (`AreaTable.dbc`, those of no parent).
+#[derive(Clone, Debug, Default)]
+pub struct Client {
+    pub icons: HashMap<u32, String>,
+    pub races: Vec<(u32, String)>,
+    pub classes: Vec<(u32, String)>,
+    pub infos: Vec<(u32, String)>,
+    pub sorts: Vec<(u32, String)>,
+    pub skills: Vec<(u32, u32, String)>,
+    pub zones: Vec<(u32, String)>,
+}
+
+impl Client {
+    /// Read from the client's files, from a job; a table missing left empty, said.
+    pub fn read(vfs: &Arc<dyn uniwow_api::vfs::Vfs>, formats: Option<&Arc<dyn uniwow_api::formats::Formats>>) -> Self {
+        let table = |name: &str| -> Option<Dbc> {
+            let bytes = vfs.read(&format!(r"DBFilesClient\{name}")).ok().flatten()?;
+            match Dbc::read(&bytes) {
+                Ok(dbc) => Some(dbc),
+                Err(reason) => {
+                    uniwow_api::log::warn!("{name} is not read: {reason}");
+                    None
+                }
+            }
+        };
+        let mut out = Client::default();
+        if let Some(bytes) = vfs.read(r"DBFilesClient\ItemDisplayInfo.dbc").ok().flatten() {
+            out.icons = icons_of_dbc(&bytes).unwrap_or_default();
+        }
+        // The fields of the names as AzerothCore's DBCfmt.h reads them.
+        if let Some(dbc) = table("ChrRaces.dbc") {
+            out.races = dbc.names(14);
+        }
+        if let Some(dbc) = table("ChrClasses.dbc") {
+            out.classes = dbc.names(4);
+        }
+        if let Some(dbc) = table("QuestInfo.dbc") {
+            out.infos = dbc.names(1);
+        }
+        if let Some(dbc) = table("QuestSort.dbc") {
+            out.sorts = dbc.names(1);
+        }
+        if let Some(dbc) = table("SkillLine.dbc") {
+            out.skills = dbc
+                .records
+                .iter()
+                .filter_map(|record| {
+                    let name = dbc.name(record, 3);
+                    (!name.is_empty()).then(|| (record[0], record.get(1).copied().unwrap_or(0), name))
+                })
+                .collect();
+        }
+        if let Some(areas) = formats.and_then(|formats| formats.areas().ok()) {
+            out.zones = areas
+                .iter()
+                .filter(|area| area.parent == 0 && !area.name.is_empty())
+                .map(|area| (area.id, area.name.clone()))
+                .collect();
+            out.zones.sort_by(|a, b| a.1.cmp(&b.1));
+        }
+        out
+    }
+}
+
 /// An icon decoded: its width, height and pixels, RGBA.
 pub type Icon = (usize, usize, Vec<u8>);
 
@@ -288,6 +423,26 @@ mod tests {
         );
         assert!(catalog.search(Kind::GameObject, "x", 10).is_empty());
         assert_eq!(catalog.get(Kind::Item, 2589).map(|entry| entry.quality), Some(1));
+    }
+
+    #[test]
+    fn a_name_of_a_dbc_is_the_first_language_that_has_one() {
+        // A record of ChrClasses: id, 3 fields, then 16 names; the French alone (the 3rd) filled.
+        let strings = b" Moine ".to_vec();
+        let mut bytes = b"WDBC".to_vec();
+        let fields = 4 + 16;
+        for value in [1u32, fields, fields * 4, strings.len() as u32] {
+            bytes.extend(value.to_le_bytes());
+        }
+        let mut record = vec![10u32, 0, 0, 0];
+        record.extend((0..16).map(|at| if at == 2 { 1 } else { 0 }));
+        for value in record {
+            bytes.extend(value.to_le_bytes());
+        }
+        bytes.extend(&strings);
+        let dbc = Dbc::read(&bytes).unwrap();
+        assert_eq!(dbc.names(4), [(10, "Moine".to_owned())]);
+        assert!(Dbc::read(b"nope").is_err());
     }
 
     #[test]

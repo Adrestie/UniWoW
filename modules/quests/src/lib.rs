@@ -7,6 +7,7 @@
 
 mod catalog;
 mod data;
+mod fields;
 mod page;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -97,7 +98,7 @@ struct QuestsModule {
     catalog_for: Option<String>,
     icons: HashMap<u32, Option<egui::TextureHandle>>,
     icons_wanted: BTreeSet<u32>,
-    icon_names: Option<Arc<HashMap<u32, String>>>,
+    client: Option<Arc<catalog::Client>>,
     /// The search a "+" of the page opened.
     searching: Option<page::Search>,
     /// The interface of the editor, for the icons to be given to it.
@@ -373,33 +374,28 @@ impl QuestsModule {
             );
             self.asked.push(Asked::Catalog(job));
         }
-        if self.icon_names.is_none()
+        if self.client.is_none()
             && !self.asked.iter().any(|asked| matches!(asked, Asked::IconNames(_)))
             && let Some(vfs) = ctx.service(uniwow_api::vfs::SERVICE)
         {
-            let job = ctx.spawn(
-                "Read the icons of the items of the client",
-                move |_| -> Result<HashMap<u32, String>, String> {
-                    let bytes = vfs
-                        .read("DBFilesClient\\ItemDisplayInfo.dbc")?
-                        .ok_or("the client has no ItemDisplayInfo.dbc")?;
-                    catalog::icons_of_dbc(&bytes)
-                },
-            );
+            let formats = ctx.service(uniwow_api::formats::SERVICE);
+            let job = ctx.spawn("Read the tables of the client for the quests", move |_| {
+                catalog::Client::read(&vfs, formats.as_ref())
+            });
             self.asked.push(Asked::IconNames(job));
         }
     }
 
     /// The icons wanted decoded, each by a job, once; those of displays without an icon none.
     fn ask_icons(&mut self, ctx: &mut Context) {
-        let (Some(names), Some(formats)) = (self.icon_names.clone(), ctx.service(uniwow_api::formats::SERVICE)) else {
+        let (Some(client), Some(formats)) = (self.client.clone(), ctx.service(uniwow_api::formats::SERVICE)) else {
             return;
         };
         for display in std::mem::take(&mut self.icons_wanted) {
             if self.icons.contains_key(&display) {
                 continue;
             }
-            let Some(name) = names.get(&display).cloned() else {
+            let Some(name) = client.icons.get(&display).cloned() else {
                 self.icons.insert(display, None);
                 continue;
             };
@@ -623,6 +619,7 @@ impl QuestsModule {
                 }
             },
         );
+        self.who_ui(ui, id, ctx);
         let width = Self::number_width(ui);
         let mut wanted = Vec::new();
         for (title, numbers) in data::SECTIONS {
@@ -683,6 +680,7 @@ impl QuestsModule {
             );
         }
         self.read_names(wanted, ctx);
+        self.flags_ui(ui, id, ctx);
         self.givers_ui(ui, id, ctx);
     }
 
@@ -970,14 +968,18 @@ impl Module for QuestsModule {
                 }
                 None => {}
             },
-            Asked::IconNames(_) => match outcome.take::<Result<HashMap<u32, String>, String>>() {
-                Some(Ok(names)) => self.icon_names = Some(Arc::new(names)),
-                Some(Err(reason)) => {
-                    log::warn!("the icons of the items are not read: {reason}");
-                    self.icon_names = Some(Arc::default());
+            Asked::IconNames(_) => {
+                if let Some(client) = outcome.take::<catalog::Client>() {
+                    log::info!(
+                        "the client's tables of the quests: {} icons, {} races, {} classes, {} zones",
+                        client.icons.len(),
+                        client.races.len(),
+                        client.classes.len(),
+                        client.zones.len()
+                    );
+                    self.client = Some(Arc::new(client));
                 }
-                None => {}
-            },
+            }
             Asked::Icon(_, display) => {
                 if let (Some(Some((width, height, pixels))), Some(egui)) =
                     (outcome.take::<Option<catalog::Icon>>(), self.egui.as_ref())
@@ -1055,7 +1057,11 @@ mod tests {
     /// code, a tooltip within the lines that make it, else the test fails and names it.
     #[test]
     fn every_control_of_the_quests_says_what_it_is() {
-        for (file, code) in [("lib.rs", include_str!("lib.rs")), ("page.rs", include_str!("page.rs"))] {
+        for (file, code) in [
+            ("lib.rs", include_str!("lib.rs")),
+            ("page.rs", include_str!("page.rs")),
+            ("fields.rs", include_str!("fields.rs")),
+        ] {
             let lines: Vec<&str> = code.lines().collect();
             let end = lines
                 .iter()

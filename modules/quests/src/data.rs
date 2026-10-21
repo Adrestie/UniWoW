@@ -252,40 +252,10 @@ pub const SECTIONS: [(&str, &[Number]); 2] = [
                 "Above this level the quest is no longer offered; 0 for none",
             ),
             number(
-                "Zone or sort",
-                T,
-                "QuestSortID",
-                "Where the quest is listed in the log: a zone of AreaTable.dbc above 0, a sort of QuestSort.dbc below 0 (as -1 Epic)",
-            ),
-            number(
-                "Type",
-                T,
-                "QuestInfoID",
-                "The type shown beside the title: 0 normal, 1 group, 41 PvP, 62 raid, 81 dungeon, 84 escort…",
-            ),
-            number(
                 "Group of",
                 T,
                 "SuggestedGroupNum",
                 "The players advised, shown as Suggested Players; 0 for none",
-            ),
-            number(
-                "Races (mask)",
-                T,
-                "AllowableRaces",
-                "The races that can take it, a mask: 1 human, 2 orc, 4 dwarf, 8 night elf, 16 undead, 32 tauren, 64 gnome, 128 troll, 512 blood elf, 1024 draenei; 0 every race",
-            ),
-            number(
-                "Classes (mask)",
-                A,
-                "AllowableClasses",
-                "The classes that can take it, a mask: 1 warrior, 2 paladin, 4 hunter, 8 rogue, 16 priest, 32 death knight, 64 shaman, 128 mage, 256 warlock, 1024 druid; 0 every class",
-            ),
-            number(
-                "Flags",
-                T,
-                "Flags",
-                "Flags of the quest, a mask: 8 sharable, 32 epic, 64 raid, 4096 daily, 32768 weekly…; 0 for none",
             ),
             number(
                 "Time allowed (s)",
@@ -330,6 +300,166 @@ pub const SECTIONS: [(&str, &[Number]); 2] = [
             ),
         ],
     ),
+];
+
+/// A flag of a mask: its bit, its name, what it does in the game (as AzerothCore's QuestDef.h
+/// says it).
+pub struct Flag {
+    pub bit: u32,
+    pub name: &'static str,
+    pub hint: &'static str,
+}
+
+const fn flag(bit: u32, name: &'static str, hint: &'static str) -> Flag {
+    Flag { bit, name, hint }
+}
+
+/// The flags of `quest_template.Flags` (`QuestFlags` of AzerothCore), sent to the client.
+pub const QUEST_FLAGS: [Flag; 20] = [
+    flag(
+        0x1,
+        "Fails on death",
+        "The quest fails when the player dies (QUEST_FLAGS_STAY_ALIVE)",
+    ),
+    flag(
+        0x2,
+        "Party accept",
+        "Meant to ask the party to accept it too; not used by the server (QUEST_FLAGS_PARTY_ACCEPT)",
+    ),
+    flag(0x4, "Exploration", "Not used by the server (QUEST_FLAGS_EXPLORATION)"),
+    flag(
+        0x8,
+        "Sharable",
+        "The player can share it with his party (QUEST_FLAGS_SHARABLE)",
+    ),
+    flag(
+        0x10,
+        "Has condition",
+        "Not used by the server (QUEST_FLAGS_HAS_CONDITION)",
+    ),
+    flag(
+        0x20,
+        "Hide reward POI",
+        "Not used by the server (QUEST_FLAGS_HIDE_REWARD_POI)",
+    ),
+    flag(0x40, "Raid", "A raid quest; not used by the server (QUEST_FLAGS_RAID)"),
+    flag(
+        0x80,
+        "The Burning Crusade",
+        "Meant for the expansion alone; not used by the server (QUEST_FLAGS_TBC)",
+    ),
+    flag(
+        0x100,
+        "No money from experience",
+        "Not used by the server: at the maximum level the experience is not given as money (QUEST_FLAGS_NO_MONEY_FROM_XP)",
+    ),
+    flag(
+        0x200,
+        "Hidden rewards",
+        "The items and money given are shown only when it is handed in, not in its details nor the log (QUEST_FLAGS_HIDDEN_REWARDS)",
+    ),
+    flag(
+        0x400,
+        "Tracking",
+        "Rewarded at once when completed, never shown in the quest log (QUEST_FLAGS_TRACKING)",
+    ),
+    flag(
+        0x800,
+        "Deprecate reputation",
+        "Not used by the server (QUEST_FLAGS_DEPRECATE_REPUTATION)",
+    ),
+    flag(
+        0x1000,
+        "Daily",
+        "A daily quest: taken again each day (QUEST_FLAGS_DAILY)",
+    ),
+    flag(
+        0x2000,
+        "PvP",
+        "Having it in the log flags the player for PvP (QUEST_FLAGS_FLAGS_PVP)",
+    ),
+    flag(
+        0x4000,
+        "Unavailable",
+        "Not offered by its givers the usual way (QUEST_FLAGS_UNAVAILABLE)",
+    ),
+    flag(
+        0x8000,
+        "Weekly",
+        "A weekly quest: taken again each week (QUEST_FLAGS_WEEKLY)",
+    ),
+    flag(
+        0x10000,
+        "Auto-complete",
+        "Completed as soon as it is taken (QUEST_FLAGS_AUTOCOMPLETE)",
+    ),
+    flag(
+        0x20000,
+        "Item in tracker",
+        "Its usable item is shown in the quest tracker (QUEST_FLAGS_DISPLAY_ITEM_IN_TRACKER)",
+    ),
+    flag(
+        0x40000,
+        "Objective text as completion",
+        "Its objective text is used as its completion text (QUEST_FLAGS_OBJ_TEXT)",
+    ),
+    flag(
+        0x80000,
+        "Auto-accept (client)",
+        "Accepted at once by the client; no quest of 3.3.5a has it (QUEST_FLAGS_AUTO_ACCEPT)",
+    ),
+];
+
+/// The flags of `quest_template_addon.SpecialFlags`, the server's alone (`QuestSpecialFlags`).
+pub const SPECIAL_FLAGS: [Flag; 9] = [
+    flag(
+        0x1,
+        "Repeatable",
+        "It can be done again and again (QUEST_SPECIAL_FLAGS_REPEATABLE)",
+    ),
+    flag(
+        0x2,
+        "Exploration or event",
+        "Completed by exploring an area, a spell or a script, not by its objectives (QUEST_SPECIAL_FLAGS_EXPLORATION_OR_EVENT)",
+    ),
+    flag(
+        0x4,
+        "Auto-accept",
+        "Accepted at once when offered (QUEST_SPECIAL_FLAGS_AUTO_ACCEPT)",
+    ),
+    flag(
+        0x8,
+        "Dungeon Finder",
+        "Used by the Dungeon Finder for its rewards (QUEST_SPECIAL_FLAGS_DF_QUEST)",
+    ),
+    flag(0x10, "Monthly", "Taken again each month (QUEST_SPECIAL_FLAGS_MONTHLY)"),
+    flag(
+        0x20,
+        "Credit by a spell",
+        "Its creatures or objects are counted by a spell cast on them, not by a kill (QUEST_SPECIAL_FLAGS_CAST)",
+    ),
+    flag(
+        0x40,
+        "No reputation spillover",
+        "Its reputation is not shared with the allied factions (QUEST_SPECIAL_FLAGS_NO_REP_SPILLOVER)",
+    ),
+    flag(
+        0x80,
+        "Can fail in any state",
+        "It can fail whatever its state (QUEST_SPECIAL_FLAGS_CAN_FAIL_IN_ANY_STATE)",
+    ),
+    flag(
+        0x100,
+        "Not for Loremaster",
+        "It does not count towards the Loremaster achievement (QUEST_SPECIAL_FLAGS_NO_LOREMASTER_COUNT)",
+    ),
+];
+
+/// The ways a quest is taken (`quest_template.QuestType`).
+pub const QUEST_TYPES: [(i64, &str, &str); 3] = [
+    (0, "Auto-complete", "Completed as soon as it is taken (QuestType 0)"),
+    (1, "Disabled", "Never offered (QuestType 1)"),
+    (2, "Enabled", "Offered and done the usual way (QuestType 2)"),
 ];
 
 /// The rows of a quest the module read: by table and locale (empty for the quest's own tables),
@@ -663,6 +793,19 @@ mod tests {
             ),
         ]);
         BTreeMap::from([(783, read)])
+    }
+
+    #[test]
+    fn each_flag_is_one_bit_of_its_own() {
+        for flags in [&QUEST_FLAGS[..], &SPECIAL_FLAGS[..]] {
+            let mut seen = 0u32;
+            for flag in flags {
+                assert_eq!(flag.bit.count_ones(), 1, "{}", flag.name);
+                assert_eq!(seen & flag.bit, 0, "{} twice", flag.name);
+                assert!(!flag.hint.is_empty());
+                seen |= flag.bit;
+            }
+        }
     }
 
     #[test]

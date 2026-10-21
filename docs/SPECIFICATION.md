@@ -10823,6 +10823,20 @@ the givers and enders. Every field says what it is and where it is written. **Te
 searched by id and by a name of another language, the icon of a display read from its DBC, the
 money in gold, silver and copper.
 
+#### After 16.9: the flags and masks of a quest
+
+Asked by the user: no flag nor mask shown as a number, each a box of elements to tick or a named
+list, each element saying what it does. The card *Who takes it*: the type (`QuestInfoID`, named by
+`QuestInfo.dbc`), the way it is taken (`QuestType`), where it is listed (`QuestSortID`: a sort of
+`QuestSort.dbc` below 0, a zone of `AreaTable.dbc` above), the races (`AllowableRaces`, a bit a race
+of `ChrRaces.dbc`) and classes (`AllowableClasses`, a bit a class of `ChrClasses.dbc`, a custom class
+of a patched client with them), none ticked saying every one can take it, the skill
+(`RequiredSkillID`, the professions and secondary skills of `SkillLine.dbc`) and its points. The
+card *Flags*, folded: `Flags` (the `QuestFlags` of AzerothCore's `QuestDef.h`) and `SpecialFlags`
+(`QuestSpecialFlags`), each named with what it does in the game. The client's tables read once by
+a job; under each box its raw value, folded and read only. **Tests**: a name of a DBC read from the
+first language that has one; each flag one bit of its own, each its hint.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
