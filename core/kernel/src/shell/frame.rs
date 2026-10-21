@@ -269,6 +269,14 @@ impl Shell {
             }
         }
         uniwow_api::journal::spent("kernel: windows of the modules", windows.elapsed());
+        // The panels the modules asked to show: opened, in front.
+        for (owner, panel) in std::mem::take(&mut self.host.shown) {
+            let tab = Tab::new(&owner, &panel);
+            self.set_panel_open(&tab, true);
+            if let Some(path) = self.dock.find_tab(&tab) {
+                let _ = self.dock.set_active_tab(path);
+            }
+        }
         self.hotkey_window(&ctx);
         self.settings_window(&ctx);
         // A modal window takes the keyboard from the editor: one the kernel draws, from the frame it

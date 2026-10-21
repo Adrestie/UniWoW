@@ -867,7 +867,13 @@ impl Inspector {
                     for quest in quests {
                         let (id, role) = (quest["quest"].as_u64().unwrap_or(0), plain(&quest["role"]));
                         ui.label(format!("{role} {id}"));
-                        ui.label(plain(&quest["title"]));
+                        if ui
+                            .link(plain(&quest["title"]))
+                            .on_hover_text("Opens it in the panel Quests")
+                            .clicked()
+                        {
+                            ctx.call("quests.open", json!({ "quest": id }));
+                        }
                         if ui.small_button("✖").on_hover_text("Take this quest away").clicked() {
                             changes.push((id, role, false));
                         }

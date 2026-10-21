@@ -42,6 +42,9 @@ pub trait Host {
     }
     /// Ends the gesture `gesture` of `owner`.
     fn end_gesture(&mut self, _owner: &str, _gesture: u64) {}
+    /// Opens the panel `panel` of `owner`, closed or not, and puts it in front of its part of the
+    /// dock.
+    fn show_panel(&mut self, _owner: &str, _panel: &str) {}
     /// Makes the gesture `gesture` of `owner`, opened at an earlier frame and not ended, the one its
     /// calls and changes join again, as `begin_gesture` made it; whether it still is open.
     fn resume_gesture(&mut self, _owner: &str, _gesture: u64) -> bool {
@@ -234,6 +237,12 @@ impl<'a> Context<'a> {
     /// after its last answer, or when its module fails.
     pub fn begin_gesture(&mut self, label: &str) -> Gesture {
         Gesture(self.host.begin_gesture(self.module, label))
+    }
+
+    /// Opens this module's panel `panel`, closed or not, and puts it in front of its part of the
+    /// dock, at the end of the frame: a quest clicked in the Inspector shown in the panel *Quests*.
+    pub fn show_panel(&mut self, panel: &str) {
+        self.host.show_panel(self.module, panel);
     }
 
     /// Ends the gesture `gesture`: its entry is made once its calls are answered.

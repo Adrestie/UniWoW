@@ -75,6 +75,8 @@ pub struct KernelHost {
     pub adopted: Vec<(String, Weak<std::sync::Mutex<ui::Ui>>)>,
     /// The notices the modules asked for this frame, by module, shown at the next one.
     pub notices: Vec<(String, Level, String)>,
+    /// The panels the modules asked to show this frame: the module and its panel.
+    pub shown: Vec<(String, String)>,
     next_call: u64,
 }
 
@@ -170,6 +172,7 @@ impl KernelHost {
             kernel_modals: HashSet::new(),
             adopted: Vec::new(),
             notices: Vec::new(),
+            shown: Vec::new(),
             services: HashMap::new(),
             gpu,
             gpu_memory,
@@ -232,6 +235,10 @@ impl Host for KernelHost {
         );
         self.opened.insert(owner.to_owned(), id);
         id
+    }
+
+    fn show_panel(&mut self, owner: &str, panel: &str) {
+        self.shown.push((owner.to_owned(), panel.to_owned()));
     }
 
     fn resume_gesture(&mut self, owner: &str, gesture: u64) -> bool {

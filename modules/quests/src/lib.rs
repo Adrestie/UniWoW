@@ -706,7 +706,12 @@ impl OrList for String {
 impl Module for QuestsModule {
     fn register(&mut self, reg: &mut Registrar) {
         reg.subscribe(world_db::APPLIED_TOPIC);
-        reg.panel("quests", "Quests", DockArea::Right);
+        reg.panel("quests", "Quests", DockArea::Right).command(
+            "quests.open",
+            "Opens the quest 'quest' in the panel Quests, read from the world database, and shows the panel.",
+            json!({ "type": "object", "properties": { "quest": { "type": "integer" } }, "required": ["quest"] }),
+            json!({ "type": "object" }),
+        );
     }
 
     fn windows_ui(&mut self, _egui: &egui::Context, ctx: &mut Context) {
@@ -811,6 +816,20 @@ impl Module for QuestsModule {
                 }
                 self.change("Make givers of quests".to_owned(), after, ctx);
             }
+        }
+    }
+
+    fn on_command(&mut self, name: &str, arguments: Value, ctx: &mut Context) -> Result<Value, String> {
+        match name {
+            "quests.open" => {
+                let id = arguments["quest"].as_u64().ok_or("'quest' is the id of a quest")? as u32;
+                self.search.clear();
+                self.searched = None;
+                self.open(id, ctx);
+                ctx.show_panel("quests");
+                Ok(json!({}))
+            }
+            other => Err(format!("'{other}' is not handled")),
         }
     }
 
