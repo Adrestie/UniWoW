@@ -234,6 +234,19 @@ impl Host for KernelHost {
         id
     }
 
+    fn resume_gesture(&mut self, owner: &str, gesture: u64) -> bool {
+        let Some(open) = self
+            .gestures
+            .get_mut(&gesture)
+            .filter(|open| open.owner == owner && !open.ended)
+        else {
+            return false;
+        };
+        open.idle = 0;
+        self.opened.insert(owner.to_owned(), gesture);
+        true
+    }
+
     fn end_gesture(&mut self, owner: &str, gesture: u64) {
         if self.opened.get(owner) == Some(&gesture) {
             self.opened.remove(owner);

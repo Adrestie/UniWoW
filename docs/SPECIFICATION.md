@@ -10604,6 +10604,17 @@ the same: their names in a column of the same width, weak, the values selectable
 folded at the bottom in place of a mode. The components in their order: Transform, Model, Materials,
 Quests, those declared, the others, the offer of a game object, the raw data.
 
+#### After 15.14: the gizmos act as they are dragged
+
+Asked by the user: a drag of a gizmo moves, turns or scales the selection as the pointer moves,
+not once let go, and is one undo entry, made once let go. The kernel lets a module take up a gesture
+it opened at an earlier frame and has not ended (`Context::resume_gesture`, `Host::resume_gesture`),
+called at each frame of the drag, still or not; a gesture taken up is not closed as left open. The
+tool `Selecting` writes at each frame what the drag adds to what it wrote already (`+n`, `*n`), the
+gizmo drawn where the selection stands now; the Inspector's values dragged take up their gesture the
+same way. Test: a gesture taken up at each frame of a drag held still, then moved twice, one entry
+once let go, undone at once.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which

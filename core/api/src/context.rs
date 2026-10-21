@@ -42,6 +42,11 @@ pub trait Host {
     }
     /// Ends the gesture `gesture` of `owner`.
     fn end_gesture(&mut self, _owner: &str, _gesture: u64) {}
+    /// Makes the gesture `gesture` of `owner`, opened at an earlier frame and not ended, the one its
+    /// calls and changes join again, as `begin_gesture` made it; whether it still is open.
+    fn resume_gesture(&mut self, _owner: &str, _gesture: u64) -> bool {
+        false
+    }
     /// Draws the object `handle` of the interface objects the module `module` handed the kernel
     /// (`adopt_objects`; a compiled module's own), a layout and what it holds, inside a window of
     /// `owner`; its signals go to `module`. Whether it was drawn: false by default.
@@ -234,6 +239,14 @@ impl<'a> Context<'a> {
     /// Ends the gesture `gesture`: its entry is made once its calls are answered.
     pub fn end_gesture(&mut self, gesture: Gesture) {
         self.host.end_gesture(self.module, gesture.0);
+    }
+
+    /// Takes up again the gesture `gesture` this module opened at an earlier frame and has not
+    /// ended: a drag held over many frames, its changes made as the pointer moves, one undo entry
+    /// once let go. Called at each frame of the drag, still or not, for the kernel not to take it
+    /// for one left open. Whether it still is open.
+    pub fn resume_gesture(&mut self, gesture: Gesture) -> bool {
+        self.host.resume_gesture(self.module, gesture.0)
     }
 
     /// Asks one of this module's jobs to stop (as the Jobs panel's Cancel button does).

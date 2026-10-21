@@ -95,14 +95,22 @@ enum Asked {
 /// The changes of a drag of a gizmo, as the providers take them: the field, the axis, the change.
 type Writes = Vec<(&'static str, Option<usize>, String)>;
 
+/// What a drag of a gizmo asks of the module, in order: a gesture opened as it is grabbed, the
+/// changes made as the pointer moves, the gesture ended once let go.
+enum Drag {
+    Grabbed(String),
+    Moved(Writes),
+    LetGo,
+}
+
 /// What the tool shares with its module.
 #[derive(Default)]
 struct Shared {
     /// Whether the pointer is over the view, where F, W, E and R act.
     hovered: AtomicBool,
-    /// The gizmo shown, and the changes of the drags let go, for the module to write.
+    /// The gizmo shown, and what its drags ask, for the module to write.
     mode: std::sync::Mutex<gizmo::Mode>,
-    writes: std::sync::Mutex<Vec<(String, Writes)>>,
+    writes: std::sync::Mutex<Vec<Drag>>,
     /// Whether the window creating a doodad is asked for.
     create: AtomicBool,
 }
@@ -145,9 +153,9 @@ struct Selecting {
     last: Option<(egui::Pos2, EntityId)>,
     /// The last refusal of a smart selection, shown in the toolbar.
     said: Option<String>,
-    /// The handle of a gizmo being dragged, where the drag started, and the middle of the selection
-    /// then.
-    grabbed: Option<(gizmo::Handle, egui::Pos2, Vec3)>,
+    /// The handle of a gizmo being dragged, where the drag started, the middle of the selection
+    /// then, and how much of the drag is written already.
+    grabbed: Option<(gizmo::Handle, egui::Pos2, Vec3, f32)>,
 }
 
 /// The middle of the origins of the entities `ids` the snapshot holds.
@@ -213,7 +221,7 @@ impl Selecting {
         let selection = self.scene.selection();
         let snapshot = self.scene.snapshot();
         let centre = match self.grabbed {
-            Some((_, _, centre)) => Some(centre),
+            Some((_, _, centre, _)) => Some(centre),
             None => middle(&snapshot, &selection.ids),
         };
         let Some(centre) = centre.filter(|_| mode != gizmo::Mode::Select) else {
@@ -222,21 +230,24 @@ impl Selecting {
         };
         let local = |at: egui::Pos2| egui::pos2(at.x - input.rect.left(), at.y - input.rect.top());
         let screen = |at: egui::Pos2| egui::pos2(at.x + input.rect.left(), at.y + input.rect.top());
-        let Some(origin) = input.project(centre) else {
+        // Drawn where the selection stands now, moving with it as it is dragged; the drag measured
+        // from where it was grabbed.
+        let drawn = middle(&snapshot, &selection.ids).unwrap_or(centre);
+        let Some(origin) = input.project(drawn) else {
             return false;
         };
         // Drawn.
         match mode {
             gizmo::Mode::Move => {
                 for axis in 0..3 {
-                    if let Some((_, direction)) = gizmo::along(&input.seen, centre, axis) {
+                    if let Some((_, direction)) = gizmo::along(&input.seen, drawn, axis) {
                         let tip = origin + direction * gizmo::LENGTH;
                         painter.arrow(origin, tip - origin, egui::Stroke::new(3.0, gizmo::colour(axis)));
                     }
                 }
             }
             gizmo::Mode::Rotate => {
-                let ring: Vec<egui::Pos2> = gizmo::ring(&input.seen, centre).into_iter().map(screen).collect();
+                let ring: Vec<egui::Pos2> = gizmo::ring(&input.seen, drawn).into_iter().map(screen).collect();
                 painter.add(egui::Shape::line(ring, egui::Stroke::new(2.5, gizmo::colour(2))));
             }
             gizmo::Mode::Scale => {
@@ -255,12 +266,23 @@ impl Selecting {
             && let Some(at) = response.interact_pointer_pos()
             && let Some(handle) = gizmo::grab(mode, &input.seen, centre, local(at))
         {
-            self.grabbed = Some((handle, at, centre));
+            let still = match handle {
+                gizmo::Handle::Scale => 1.0,
+                _ => 0.0,
+            };
+            self.grabbed = Some((handle, at, centre, still));
+            let label = match handle {
+                gizmo::Handle::Axis(_) => "Move",
+                gizmo::Handle::Ring => "Rotate",
+                gizmo::Handle::Scale => "Scale",
+            };
+            held(&self.shared.writes).push(Drag::Grabbed(label.to_owned()));
         }
-        let Some((handle, start, centre)) = self.grabbed else {
+        let Some((handle, start, centre, applied)) = self.grabbed else {
             return false;
         };
-        // Dragged: the change shown by the pointer, written once let go.
+        // Dragged: the change made as the pointer moves, what it adds to what is written already;
+        // one undo entry once let go.
         let now = response.interact_pointer_pos().unwrap_or(start);
         let snap = response.ctx.input(|i| i.modifiers.command);
         let amount = gizmo::dragged(handle, &input.seen, centre, local(start), local(now), snap);
@@ -277,20 +299,23 @@ impl Selecting {
             egui::FontId::proportional(13.0),
             egui::Color32::WHITE,
         );
-        if response.drag_stopped_by(egui::PointerButton::Primary) {
-            self.grabbed = None;
-            let still = match handle {
-                gizmo::Handle::Scale => (amount - 1.0).abs() < 1e-4,
-                _ => amount.abs() < 1e-4,
-            };
-            if !still {
-                let label = match handle {
-                    gizmo::Handle::Axis(_) => "Move",
-                    gizmo::Handle::Ring => "Rotate",
-                    gizmo::Handle::Scale => "Scale",
-                };
-                held(&self.shared.writes).push((label.to_owned(), gizmo::writes(handle, amount)));
+        let step = match handle {
+            gizmo::Handle::Scale => amount / applied,
+            _ => amount - applied,
+        };
+        let moves = match handle {
+            gizmo::Handle::Scale => (step - 1.0).abs() > 1e-5,
+            _ => step.abs() > 1e-5,
+        };
+        if moves {
+            held(&self.shared.writes).push(Drag::Moved(gizmo::writes(handle, step)));
+            if let Some(grabbed) = self.grabbed.as_mut() {
+                grabbed.3 = amount;
             }
+        }
+        if response.drag_stopped_by(egui::PointerButton::Primary) || !response.ctx.input(|i| i.pointer.primary_down()) {
+            self.grabbed = None;
+            held(&self.shared.writes).push(Drag::LetGo);
         }
         true
     }
@@ -415,6 +440,8 @@ struct SceneTools {
     creating: Creating,
     scene: Option<scene::Handle>,
     view: Option<viewport::Handle>,
+    /// The gesture of the drag of a gizmo under way, taken up at each frame until let go.
+    dragging: Option<uniwow_api::Gesture>,
 }
 
 impl SceneTools {
@@ -551,12 +578,18 @@ impl SceneTools {
         }
     }
 
-    /// Writes the changes of the drags let go into the selection, each one gesture over the
-    /// providers of its entities.
-    fn write(&self, ctx: &mut Context) {
-        let Some(scene) = &self.scene else {
+    /// Makes what the drags of the gizmos ask: a gesture opened when one is grabbed and taken up
+    /// at each frame it is held, the changes written into the selection as the pointer moves, over
+    /// the providers of its entities; the gesture ended once let go, one undo entry.
+    fn write(&mut self, ctx: &mut Context) {
+        let Some(scene) = self.scene.clone() else {
             return;
         };
+        if let Some(gesture) = self.dragging
+            && !ctx.resume_gesture(gesture)
+        {
+            self.dragging = None;
+        }
         let drags = std::mem::take(&mut *held(&self.shared.writes));
         if drags.is_empty() {
             return;
@@ -572,27 +605,40 @@ impl SceneTools {
                     .push(id.to_string());
             }
         }
-        for (label, writes) in drags {
-            let count = ids.len();
-            let gesture = ctx.begin_gesture(&if count == 1 {
-                label
-            } else {
-                format!("{label} {count} objects")
-            });
-            for (provider, ids) in &by_provider {
-                let Some((_, fields)) = WRITTEN.iter().find(|(written, _)| written == provider) else {
-                    continue;
-                };
-                for (field, axis, change) in &writes {
-                    if fields.contains(field) {
-                        ctx.call(
-                            &format!("{provider}.write"),
-                            json!({ "ids": ids, "field": field, "axis": axis, "change": change }),
-                        );
+        for drag in drags {
+            match drag {
+                Drag::Grabbed(label) => {
+                    if let Some(gesture) = self.dragging.take() {
+                        ctx.end_gesture(gesture);
+                    }
+                    let count = ids.len();
+                    self.dragging = Some(ctx.begin_gesture(&if count == 1 {
+                        label
+                    } else {
+                        format!("{label} {count} objects")
+                    }));
+                }
+                Drag::Moved(writes) => {
+                    for (provider, ids) in &by_provider {
+                        let Some((_, fields)) = WRITTEN.iter().find(|(written, _)| written == provider) else {
+                            continue;
+                        };
+                        for (field, axis, change) in &writes {
+                            if fields.contains(field) {
+                                ctx.call(
+                                    &format!("{provider}.write"),
+                                    json!({ "ids": ids, "field": field, "axis": axis, "change": change }),
+                                );
+                            }
+                        }
+                    }
+                }
+                Drag::LetGo => {
+                    if let Some(gesture) = self.dragging.take() {
+                        ctx.end_gesture(gesture);
                     }
                 }
             }
-            ctx.end_gesture(gesture);
         }
     }
 

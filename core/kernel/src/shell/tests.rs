@@ -2316,22 +2316,37 @@ struct Plan {
     end: bool,
     /// Panics once the gesture is open, as a module failing in the middle of one.
     panic: bool,
+    /// Keeps its gesture open, taken up again at each frame, as a drag held over frames.
+    hold: bool,
+    /// Takes up the gesture a plan before held.
+    resume: bool,
 }
 
 /// Opens a gesture at each frame a plan is waiting, as the Inspector does when a value is typed.
 struct Gesturer {
     plans: Arc<Mutex<std::collections::VecDeque<Plan>>>,
     value: Arc<Mutex<i64>>,
+    /// The gesture a plan left open, taken up again at each frame.
+    open: Option<uniwow_api::Gesture>,
 }
 
 impl Module for Gesturer {
     fn register(&mut self, _reg: &mut Registrar) {}
 
     fn windows_ui(&mut self, _egui: &egui::Context, ctx: &mut Context) {
+        // A drag held, still or moving: taken up again at each frame.
+        if let Some(open) = self.open
+            && !ctx.resume_gesture(open)
+        {
+            self.open = None;
+        }
         let Some(plan) = lock(&self.plans).pop_front() else {
             return;
         };
-        let gesture = ctx.begin_gesture(plan.label);
+        let gesture = match self.open {
+            Some(open) if plan.resume => open,
+            _ => ctx.begin_gesture(plan.label),
+        };
         if let Some(by) = plan.own {
             ctx.execute(Own(by));
         }
@@ -2343,6 +2358,9 @@ impl Module for Gesturer {
         }
         if plan.end {
             ctx.end_gesture(gesture);
+            self.open = None;
+        } else if plan.hold || plan.resume {
+            self.open = Some(gesture);
         }
     }
 }
@@ -2390,6 +2408,7 @@ fn gesturing() -> (Harness, Plans, [Arc<Mutex<i64>>; 3]) {
     let gesturer = Gesturer {
         plans: plans.clone(),
         value: own.clone(),
+        open: None,
     };
     let harness = Harness::new(vec![
         ("a", a),
@@ -2537,4 +2556,44 @@ fn the_modules_are_told_when_another_stops_so_that_what_they_hold_for_it_goes() 
     harness.shell.fail(index, "disabled from the Modules panel".to_owned());
     harness.frame(RawInput::default());
     assert_eq!(*lock(&seen), [json!({ "id": "a" })]);
+}
+
+#[test]
+fn a_gesture_taken_up_at_each_frame_of_a_drag_is_one_entry_once_let_go() {
+    let (mut harness, plans, counted) = gesturing();
+    lock(&plans).push_back(Plan {
+        label: "Drag",
+        calls: vec![("a.add", 1)],
+        hold: true,
+        ..Plan::default()
+    });
+    harness.until("the first change", |_| values(&counted)[0] == 1);
+    // The pointer held still: frames without changes, the gesture kept open by being taken up.
+    for _ in 0..10 {
+        harness.frame(RawInput::default());
+    }
+    assert!(
+        !harness.shell.host.gestures.is_empty(),
+        "not closed as left open while it is taken up"
+    );
+    assert_eq!(harness.shell.history.undo_label(), None, "no entry before it is let go");
+    lock(&plans).push_back(Plan {
+        calls: vec![("a.add", 2)],
+        resume: true,
+        ..Plan::default()
+    });
+    lock(&plans).push_back(Plan {
+        calls: vec![("a.add", 3)],
+        resume: true,
+        end: true,
+        ..Plan::default()
+    });
+    harness.until("the drag let go", |shell| {
+        shell.history.undo_label().is_some() && shell.host.gestures.is_empty()
+    });
+    assert_eq!(values(&counted)[0], 6);
+    assert_eq!(harness.shell.history.undo_label().as_deref(), Some("Drag"));
+    harness.shell.undo();
+    assert_eq!(values(&counted)[0], 0, "the whole drag undone at once");
+    assert_eq!(harness.shell.history.undo_label(), None, "one entry");
 }

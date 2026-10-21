@@ -445,6 +445,12 @@ impl Inspector {
         };
         let ids = self.ids(&scene);
         self.steer(&scene, &ids, ctx);
+        // A field being dragged: its gesture taken up at each frame until let go.
+        if let Some((_, gesture, _)) = &self.dragging
+            && !ctx.resume_gesture(*gesture)
+        {
+            self.dragging = None;
+        }
         let snapshot = scene.snapshot();
         if ids.is_empty() {
             ui.add_space(8.0);
