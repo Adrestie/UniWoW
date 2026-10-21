@@ -382,7 +382,12 @@ namespace UniwowBridge
                 for (auto const& [id, session] : sWorldSessionMgr->GetAllSessions())
                     if (Player* player = session ? session->GetPlayer() : nullptr)
                         if (player->IsInWorld())
+                        {
+                            // The marks of the game objects, and the "!" and "?" of the creatures
+                            // each sees: the client asks them only as a giver comes into sight.
                             player->UpdateForQuestWorldObjects();
+                            player->SendQuestGiverStatusMultiple();
+                        }
                 return { true, "the quests loaded again" };
             }
             case Action::Path:
