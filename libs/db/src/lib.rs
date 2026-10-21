@@ -1,7 +1,9 @@
 //! The client of MySQL of the editor (step 15.11a), on the crate `mysql` without TLS, for the world
 //! database of AzerothCore on this machine: a session set read only, one statement at a time
-//! beginning with `SELECT`, `SHOW`, `DESCRIBE` or `EXPLAIN`, its rows given as JSON. The password is
-//! given at each connection and never kept here, nor said in an error.
+//! beginning with `SELECT`, `SHOW`, `DESCRIBE` or `EXPLAIN`, its rows given as JSON; and, for the
+//! changes applied to the server (step 16.1), a `Writer` making rows changed by their keys, in the
+//! tables of `write::TABLES` alone, as one transaction. The password is given at each connection and
+//! never kept here, nor said in an error.
 
 use std::time::Duration;
 
@@ -168,7 +170,131 @@ fn from_mysql(value: mysql::Value) -> Value {
     }
 }
 
+/// A connection that writes (step 16.1): opened for an application of changes alone, its session
+/// as the server sets it, each application one transaction.
+pub struct Writer {
+    conn: mysql::Conn,
+}
+
+impl Writer {
+    /// Connects as `settings` say with `password`, within `timeout`. An error never holds the
+    /// password.
+    pub fn open(settings: &Settings, password: &str, timeout: Duration) -> Result<Self, String> {
+        let options = mysql::OptsBuilder::new()
+            .ip_or_hostname(Some(settings.host.clone()))
+            .tcp_port(settings.port)
+            .user(Some(settings.user.clone()))
+            .pass(Some(password.to_owned()))
+            .db_name(Some(settings.database.clone()))
+            .prefer_socket(false)
+            .tcp_connect_timeout(Some(timeout))
+            .read_timeout(Some(timeout * 3))
+            .write_timeout(Some(timeout));
+        let conn = mysql::Conn::new(options).map_err(|error| said(error, password))?;
+        Ok(Self { conn })
+    }
+
+    /// Makes `changes` as one transaction (`write::apply`): what each did, or nothing made.
+    pub fn apply(&mut self, changes: &[write::RowChange]) -> Result<Vec<write::Entry>, String> {
+        let mut transaction = self
+            .conn
+            .start_transaction(mysql::TxOpts::default())
+            .map_err(|e| e.to_string())?;
+        let made = write::apply(&mut Transaction(&mut transaction), changes);
+        match made {
+            Ok(entries) => {
+                transaction.commit().map_err(|e| e.to_string())?;
+                Ok(entries)
+            }
+            Err(reason) => {
+                let _ = transaction.rollback();
+                Err(reason)
+            }
+        }
+    }
+}
+
+/// A transaction of the database as a `write::Store`.
+struct Transaction<'a, 'b>(&'a mut mysql::Transaction<'b>);
+
+fn parameters_of<'a>(values: impl Iterator<Item = &'a Value>) -> mysql::Params {
+    let values: Vec<mysql::Value> = values.map(to_mysql).collect();
+    if values.is_empty() {
+        mysql::Params::Empty
+    } else {
+        mysql::Params::Positional(values)
+    }
+}
+
+impl write::Store for Transaction<'_, '_> {
+    fn select(&mut self, table: &str, key: &write::Row) -> Result<Vec<write::Row>, String> {
+        let sql = format!(
+            "SELECT * FROM `{}` WHERE {}",
+            write::identifier(table)?,
+            write::condition(key)
+        );
+        let result: Vec<mysql::Row> = self
+            .0
+            .exec(sql, parameters_of(key.values()))
+            .map_err(|e| e.to_string())?;
+        Ok(result
+            .into_iter()
+            .map(|row| {
+                let columns: Vec<String> = row.columns_ref().iter().map(|c| c.name_str().into_owned()).collect();
+                columns
+                    .into_iter()
+                    .zip(row.unwrap().into_iter().map(from_mysql))
+                    .collect()
+            })
+            .collect())
+    }
+
+    fn insert(&mut self, table: &str, row: &write::Row) -> Result<(), String> {
+        let columns = row
+            .keys()
+            .map(|column| format!("`{column}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let marks = vec!["?"; row.len()].join(", ");
+        let sql = format!(
+            "INSERT INTO `{}` ({columns}) VALUES ({marks})",
+            write::identifier(table)?
+        );
+        self.0
+            .exec_drop(sql, parameters_of(row.values()))
+            .map_err(|e| e.to_string())
+    }
+
+    fn update(&mut self, table: &str, key: &write::Row, set: &write::Row) -> Result<(), String> {
+        let assignments = set
+            .keys()
+            .map(|column| format!("`{column}` = ?"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "UPDATE `{}` SET {assignments} WHERE {} LIMIT 1",
+            write::identifier(table)?,
+            write::condition(key)
+        );
+        self.0
+            .exec_drop(sql, parameters_of(set.values().chain(key.values())))
+            .map_err(|e| e.to_string())
+    }
+
+    fn delete(&mut self, table: &str, key: &write::Row) -> Result<(), String> {
+        let sql = format!(
+            "DELETE FROM `{}` WHERE {}",
+            write::identifier(table)?,
+            write::condition(key)
+        );
+        self.0
+            .exec_drop(sql, parameters_of(key.values()))
+            .map_err(|e| e.to_string())
+    }
+}
+
 pub mod secret;
+pub mod write;
 
 #[cfg(test)]
 mod fake_server;

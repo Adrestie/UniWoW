@@ -5,9 +5,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use uniwow_api::db::Rows;
+use uniwow_api::db::write::{Row, RowChange, row};
 use uniwow_api::formats::TileId;
 use uniwow_api::scene::{self, Entity, EntityId, Kind, Piece, PieceBuilder, flags};
 use uniwow_api::serde_json::{Value, json};
+use uniwow_api::world_db;
 
 /// What the world database's version of AzerothCore names: the column of a creature's template
 /// (`id` at first, `id1` while a spawn could take three templates, `id` again since the update
@@ -287,6 +289,8 @@ pub struct Changes {
     pub templates: BTreeMap<u32, Template>,
     /// The rows of `GameObjectDisplayInfo` prepared for models no row names: their ids and models.
     pub displays: BTreeMap<u32, String>,
+    /// The spawn of the database each spawn duplicated was made of, its row copied once applied.
+    pub sources: BTreeMap<EntityId, EntityId>,
 }
 
 /// A template of game objects created in memory: its entry, name, display and size. Its type is 2
@@ -519,6 +523,9 @@ impl Changes {
             "guids given": given,
             "quests given": links(&self.linked),
             "quests taken": links(&self.unlinked),
+            "copied from": self.sources.iter().map(|(id, source)| json!({
+                "id": id.to_string(), "source": source.to_string(),
+            })).collect::<Vec<_>>(),
         })
     }
 
@@ -614,7 +621,157 @@ impl Changes {
                 .iter()
                 .filter_map(|display| Some((display["id"].as_u64()? as u32, display["model"].as_str()?.to_owned())))
                 .collect(),
+            sources: list("copied from")
+                .iter()
+                .filter_map(|entry| Some((id(entry)?, entry["source"].as_str()?.parse().ok()?)))
+                .collect(),
         }
+    }
+
+    /// The changes for the server (step 16.1): the rows of the spawns moved, duplicated and deleted
+    /// and of the quests given and taken, the creatures' entry in their column `entry_column`; the
+    /// spawns as the database has them `spawns`, their places by id `index`. What is not written
+    /// yet said: the game objects made of doodads, their templates and displays to come.
+    pub fn pending(&self, spawns: &[Spawn], index: &HashMap<EntityId, usize>, entry_column: &str) -> world_db::Pending {
+        let mut out = world_db::Pending {
+            owner: "spawns".to_owned(),
+            label: "Spawns".to_owned(),
+            ..world_db::Pending::default()
+        };
+        let table = |kind: Kind| {
+            if kind == Kind::GameObject {
+                "gameobject"
+            } else {
+                "creature"
+            }
+        };
+        let key = |spawn: &EntityId| row([("guid", json!(spawn.key))]);
+        // The columns of a spawn's place, its rotation a game object's.
+        let place = |spawn: &Spawn| {
+            let mut set = row([
+                ("position_x", json!(spawn.position[0])),
+                ("position_y", json!(spawn.position[1])),
+                ("position_z", json!(spawn.position[2])),
+                ("orientation", json!(spawn.orientation)),
+            ]);
+            if let Some(rotation) = spawn.rotation {
+                for (at, part) in rotation.iter().enumerate() {
+                    set.insert(format!("rotation{at}"), json!(part));
+                }
+            }
+            set
+        };
+        let reload = |id: &EntityId| match id.kind {
+            Kind::GameObject => world_db::Reload::GameObject(id.key),
+            _ => world_db::Reload::Creature(id.key),
+        };
+        let mut moved: Vec<&EntityId> = self.moved.keys().collect();
+        moved.sort();
+        for id in moved {
+            if self.added.contains_key(id) || self.deleted.contains(id) {
+                continue;
+            }
+            let Some(spawn) = self.find(spawns, index, id) else {
+                continue;
+            };
+            out.changes.push(RowChange::Put {
+                table: table(id.kind).to_owned(),
+                key: key(id),
+                set: place(&spawn),
+                from: None,
+            });
+            out.reloads.push(reload(id));
+        }
+        let mut added: Vec<&EntityId> = self.added.keys().collect();
+        added.sort();
+        let mut made = 0;
+        for id in added {
+            if self.deleted.contains(id) {
+                continue;
+            }
+            let Some(spawn) = self.find(spawns, index, id) else {
+                continue;
+            };
+            // A copy of a spawn of the database: its row copied, its guid, entry and place its own.
+            let Some(source) = self.sources.get(id).filter(|source| index.contains_key(source)) else {
+                made += 1;
+                continue;
+            };
+            let mut set = place(&spawn);
+            let entry = if id.kind == Kind::GameObject {
+                "id"
+            } else {
+                entry_column
+            };
+            set.insert(entry.to_owned(), json!(spawn.entry));
+            out.changes.push(RowChange::Put {
+                table: table(id.kind).to_owned(),
+                key: key(id),
+                set,
+                from: Some(key(source)),
+            });
+            out.reloads.push(reload(id));
+        }
+        if made > 0 {
+            out.held.push(format!(
+                "{made} game objects made of doodads: their templates and displays are written in a later step"
+            ));
+        }
+        let mut deleted: Vec<&EntityId> = self.deleted.iter().collect();
+        deleted.sort();
+        for id in deleted {
+            // Never in the database: nothing to take away.
+            if self.added.contains_key(id) || !index.contains_key(id) {
+                continue;
+            }
+            let tables: &[&str] = match id.kind {
+                Kind::GameObject => &["gameobject", "game_event_gameobject"],
+                _ => &["creature", "creature_addon", "game_event_creature"],
+            };
+            for table in tables {
+                out.changes.push(RowChange::Delete {
+                    table: (*table).to_owned(),
+                    key: key(id),
+                });
+            }
+            out.reloads.push(reload(id));
+        }
+        let link_table = |link: &Link| {
+            format!(
+                "{}_quest{}",
+                if link.kind == Kind::GameObject {
+                    "gameobject"
+                } else {
+                    "creature"
+                },
+                if link.ends { "ender" } else { "starter" }
+            )
+        };
+        let link_key = |link: &Link| row([("id", json!(link.entry)), ("quest", json!(link.quest))]);
+        for link in &self.linked {
+            out.changes.push(RowChange::Put {
+                table: link_table(link),
+                key: link_key(link),
+                set: Row::new(),
+                from: None,
+            });
+        }
+        for link in &self.unlinked {
+            out.changes.push(RowChange::Delete {
+                table: link_table(link),
+                key: link_key(link),
+            });
+        }
+        if !self.linked.is_empty() || !self.unlinked.is_empty() {
+            out.reloads.push(world_db::Reload::Quests);
+        }
+        if !self.templates.is_empty() {
+            out.held.push(format!(
+                "{} templates of game objects: written in a later step",
+                self.templates.len()
+            ));
+        }
+        out
     }
 }
 
@@ -749,6 +906,104 @@ mod tests {
             columns: columns.iter().map(|column| (*column).to_owned()).collect(),
             rows,
         }
+    }
+
+    #[test]
+    fn the_changes_of_the_spawns_are_the_rows_the_server_is_given() {
+        use uniwow_api::db::write::{Memory, apply};
+
+        let spawns = spawns(&guard(), Kind::Creature);
+        let index: HashMap<EntityId, usize> = spawns.iter().enumerate().map(|(at, spawn)| (spawn.id(), at)).collect();
+        let (first, second) = (spawns[0].id(), spawns[1].id());
+        let database_row = |spawn: &Spawn| {
+            row([
+                ("guid", json!(spawn.guid)),
+                ("id", json!(spawn.entry)),
+                ("map", json!(0)),
+                ("position_x", json!(spawn.position[0])),
+                ("position_y", json!(spawn.position[1])),
+                ("position_z", json!(spawn.position[2])),
+                ("orientation", json!(spawn.orientation)),
+                ("spawntimesecs", json!(120)),
+            ])
+        };
+        let mut memory = Memory::default();
+        memory
+            .tables
+            .insert("creature".to_owned(), spawns.iter().map(database_row).collect());
+        memory.tables.insert(
+            "creature_addon".to_owned(),
+            vec![row([("guid", json!(spawns[1].guid)), ("path_id", json!(0))])],
+        );
+        memory.tables.insert(
+            "creature_queststarter".to_owned(),
+            vec![row([("id", json!(68)), ("quest", json!(100))])],
+        );
+
+        let mut changes = Changes::default();
+        changes.moved.insert(first, ([1.0, 2.0, 3.0], 1.5));
+        let mut copy = spawns[0].clone();
+        copy.guid = 900_000;
+        copy.position = [5.0, 6.0, 7.0];
+        changes.sources.insert(copy.id(), first);
+        changes.added.insert(copy.id(), copy.clone());
+        changes.deleted.insert(second);
+        let link = |quest: u32| Link {
+            kind: Kind::Creature,
+            entry: 68,
+            quest,
+            ends: false,
+        };
+        changes.linked.insert(link(200));
+        changes.unlinked.insert(link(100));
+        let pending = changes.pending(&spawns, &index, "id");
+        assert!(pending.held.is_empty(), "{:?}", pending.held);
+        assert_eq!(
+            pending.reloads,
+            [
+                world_db::Reload::Creature(spawns[0].guid),
+                world_db::Reload::Creature(900_000),
+                world_db::Reload::Creature(spawns[1].guid),
+                world_db::Reload::Quests,
+            ]
+        );
+        apply(&mut memory, &pending.changes).unwrap();
+
+        let creatures = &memory.tables["creature"];
+        assert_eq!(creatures.len(), 2, "one deleted, one copied");
+        let moved = creatures
+            .iter()
+            .find(|row| row["guid"] == json!(spawns[0].guid))
+            .unwrap();
+        assert_eq!(
+            (moved["position_x"].as_f64(), moved["orientation"].as_f64()),
+            (Some(1.0), Some(1.5))
+        );
+        let copied = creatures.iter().find(|row| row["guid"] == json!(900_000)).unwrap();
+        assert_eq!(copied["spawntimesecs"], json!(120), "the row of its source copied");
+        assert_eq!(copied["position_z"].as_f64(), Some(7.0));
+        assert!(memory.tables["creature_addon"].is_empty());
+        assert_eq!(
+            memory.tables["creature_queststarter"],
+            [row([("id", json!(68)), ("quest", json!(200))])]
+        );
+
+        // A game object made of a doodad: said, not written.
+        let mut made = Changes::default();
+        made_of_doodad(
+            &mut made,
+            r"World\Barrel.m2",
+            [0.0; 3],
+            [0.0; 3],
+            1.0,
+            [10, 10, 10],
+            &[],
+        );
+        let pending = made.pending(&spawns, &index, "id");
+        assert!(pending.changes.is_empty());
+        assert_eq!(pending.held.len(), 2);
+        // Kept in the project with the spawn each was copied from.
+        assert_eq!(Changes::of_section(&changes.section()).sources, changes.sources);
     }
 
     /// A guard of Stormwind as `CREATURES` gives it.

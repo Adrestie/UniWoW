@@ -25,7 +25,7 @@ use data::{Changes, Link, Quests, Spawn};
 const MODULE: &str = "spawns";
 
 /// What a reading job gives back: the spawns of a map, the highest guid of each table, the quests.
-type Read = Result<(Vec<Spawn>, [u64; 3], Quests, paths::Paths), String>;
+type Read = Result<(Vec<Spawn>, [u64; 3], Quests, paths::Paths, &'static str), String>;
 
 /// The looks of the displays, by kind and display: a look and its scale, none for none.
 type Looks = HashMap<(Kind, u32), Option<(LookId, f32)>>;
@@ -99,6 +99,11 @@ struct SpawnsModule {
     seen: u64,
     models: Option<models::Handle>,
     scene: Option<scene::Handle>,
+    /// The column of a creature's template in this database, once read; how many times the spawns
+    /// or the changes changed, and when the changes for the server were given last.
+    entry_column: Option<&'static str>,
+    generation: u64,
+    given: Option<u64>,
 }
 
 /// The creatures and game objects the world as it runs lists in `snapshot`, by the pieces of the
@@ -210,6 +215,7 @@ impl SpawnsModule {
 
     /// The changes made `changes`: the tiles of the spawns they touch given and placed again alone.
     fn set_changes(&mut self, changes: Changes) {
+        self.generation += 1;
         let before = std::mem::replace(&mut self.changes, changes);
         let mut tiles = self.tiles_of_changes(&before);
         let after = self.changes.clone();
@@ -399,6 +405,22 @@ impl SpawnsModule {
             .collect()
     }
 
+    /// Gives the changes for the server to the world database, once the spawns or the changes
+    /// changed since.
+    fn give_pending(&mut self, ctx: &mut Context) {
+        let Some(entry_column) = self.entry_column else {
+            return;
+        };
+        if self.given == Some(self.generation) {
+            return;
+        }
+        let Some(database) = ctx.service(world_db::SERVICE) else {
+            return;
+        };
+        self.given = Some(self.generation);
+        database.set_pending(self.changes.pending(&self.spawns, &self.index, entry_column));
+    }
+
     /// Makes `after` the changes, one undo entry.
     fn change(&mut self, label: String, after: Changes, ctx: &mut Context) {
         let before = self.changes.clone();
@@ -473,7 +495,7 @@ impl SpawnsModule {
                         Err(reason) => log::warn!("the patrol paths are not read: {reason}"),
                     }
                 }
-                Ok((spawns, highest, Quests::of_rows(&titles, &links), paths))
+                Ok((spawns, highest, Quests::of_rows(&titles, &links), paths, schema.entry))
             }),
         );
     }
@@ -728,6 +750,7 @@ impl Module for SpawnsModule {
                 DEFAULT_DISTANCE,
             )],
         );
+        reg.subscribe(world_db::APPLIED_TOPIC);
         reg.panel("spawns", "Spawns", DockArea::Right)
             .command(
                 "spawns.read",
@@ -906,6 +929,9 @@ impl Module for SpawnsModule {
                     };
                     spawn.guid = after.give(spawn.kind, highest);
                     made.push(spawn.id().to_string());
+                    // Made of a spawn of the database, or of one made of it.
+                    let source = after.sources.get(id).copied().unwrap_or(*id);
+                    after.sources.insert(spawn.id(), source);
                     after.added.insert(spawn.id(), spawn);
                 }
                 self.change(format!("Duplicate {} spawns", made.len()), after, ctx);
@@ -934,6 +960,18 @@ impl Module for SpawnsModule {
         self.steer(ctx);
         self.resolve(ctx);
         self.draw_paths();
+        self.give_pending(ctx);
+    }
+
+    fn on_event(&mut self, event: &uniwow_api::Event, _ctx: &mut Context) {
+        // Applied to the database, or undone there: the changes are its rows now, read again.
+        let ours = event.payload["owners"]
+            .as_array()
+            .is_some_and(|owners| owners.iter().any(|owner| owner.as_str() == Some(MODULE)));
+        if event.topic == world_db::APPLIED_TOPIC && ours {
+            self.set_changes(Changes::default());
+            self.read_for = None;
+        }
     }
 
     fn init(&mut self, ctx: &mut Context) {
@@ -996,6 +1034,7 @@ impl Module for SpawnsModule {
 
     fn open_project(&mut self, section: Option<Value>, _ctx: &mut Context) {
         self.changes = Changes::of_section(&section.unwrap_or_default());
+        self.generation += 1;
         self.refresh();
     }
 
@@ -1003,7 +1042,7 @@ impl Module for SpawnsModule {
         if self.reading == Some(job) {
             self.reading = None;
             match outcome.take::<Read>() {
-                Some(Ok((spawns, highest, quests, paths))) => {
+                Some(Ok((spawns, highest, quests, paths, entry_column))) => {
                     log::info!(
                         "{} spawns of the map read from the world database; {} quests, {} givers and enders",
                         spawns.len(),
@@ -1017,6 +1056,8 @@ impl Module for SpawnsModule {
                     self.highest = highest;
                     self.quests = Arc::new(quests);
                     self.paths = Arc::new(paths);
+                    self.entry_column = Some(entry_column);
+                    self.generation += 1;
                     self.refused = None;
                     self.read_areas(ctx);
                     self.refresh();

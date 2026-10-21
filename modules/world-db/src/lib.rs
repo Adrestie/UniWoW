@@ -7,6 +7,12 @@
 //! lives on a thread of its own, its session read only; the service `world-db` and the command
 //! `world-db.query` run one statement at a time beginning with `SELECT`, `SHOW`, `DESCRIBE` or
 //! `EXPLAIN`.
+//!
+//! The changes for the server (step 16.1): the modules give those they hold; *Apply to the server…*
+//! writes them all, once confirmed, through a connection that writes opened for them alone, one
+//! transaction; each application is kept in the project with the rows it replaced, *Undo the last
+//! application…* putting them back, and written as a script into the folder of SQL of a module of
+//! the server when one is set, for a server installed again to have them.
 
 #[cfg(test)]
 mod tests;
@@ -16,9 +22,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use uniwow_api::db::secret::{self, Vault};
-use uniwow_api::db::{Connection, Rows, Settings};
+use uniwow_api::db::write::{self, Entry, RowChange};
+use uniwow_api::db::{Connection, Rows, Settings, Writer};
 use uniwow_api::serde_json::{Value, json};
-use uniwow_api::world_db::{self, State};
+use uniwow_api::world_db::{self, Pending, Reload, State};
 use uniwow_api::{Context, DockArea, JobId, JobOutcome, Module, Registrar, egui, journal, log, theme};
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -32,6 +39,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 enum Asked {
     Connect(Settings, String),
     Query(String, Vec<Value>, Sender<Result<Rows, String>>),
+    Apply(Vec<RowChange>, Sender<Result<Vec<Entry>, String>>),
 }
 
 /// What the service shares with the thread of the connection.
@@ -39,6 +47,8 @@ enum Asked {
 struct Shared {
     state: Mutex<Option<State>>,
     asked: Mutex<Option<Sender<Asked>>>,
+    /// The changes the modules hold for the server, by owner.
+    pending: Mutex<std::collections::BTreeMap<String, Pending>>,
 }
 
 impl Shared {
@@ -67,6 +77,37 @@ impl world_db::WorldDb for Service {
             .map_err(|_| "the world database is not connected".to_owned())?;
         answer
             .recv_timeout(TIMEOUT * 3)
+            .map_err(|_| "the world database did not answer".to_owned())?
+    }
+
+    fn set_pending(&self, pending: Pending) {
+        let mut held = lock(&self.0.pending);
+        if pending.changes.is_empty() && pending.held.is_empty() {
+            held.remove(&pending.owner);
+        } else {
+            held.insert(pending.owner.clone(), pending);
+        }
+    }
+
+    fn pending(&self) -> Vec<Pending> {
+        lock(&self.0.pending).values().cloned().collect()
+    }
+
+    fn apply(&self, changes: &[RowChange]) -> Result<Vec<Entry>, String> {
+        if journal::on_interface_thread() {
+            return Err("an application waits for the database: make it from a job".to_owned());
+        }
+        for change in changes {
+            write::check(change)?;
+        }
+        let (reply, answer) = mpsc::channel();
+        lock(&self.0.asked)
+            .as_ref()
+            .ok_or("the world database is not connected")?
+            .send(Asked::Apply(changes.to_vec(), reply))
+            .map_err(|_| "the world database is not connected".to_owned())?;
+        answer
+            .recv_timeout(TIMEOUT * 30)
             .map_err(|_| "the world database did not answer".to_owned())?
     }
 }
@@ -116,8 +157,150 @@ fn serve(shared: Arc<Shared>, asked: Receiver<Asked>, cancelled: impl Fn() -> bo
                 }
                 let _ = reply.send(result);
             }
+            Asked::Apply(changes, reply) => {
+                // A connection that writes, for these changes alone, with the account of the session.
+                let result = match &account {
+                    Some((settings, password)) => {
+                        Writer::open(settings, password, TIMEOUT).and_then(|mut writer| writer.apply(&changes))
+                    }
+                    None => Err("the world database is not connected".to_owned()),
+                };
+                let _ = reply.send(result);
+            }
         }
     }
+}
+
+/// Changes applied to the database: when, where, by whose changes, what each did and what the
+/// server loads again.
+#[derive(Clone, Debug, PartialEq)]
+struct Application {
+    when: String,
+    database: String,
+    owners: Vec<String>,
+    entries: Vec<Entry>,
+    reloads: Vec<Reload>,
+}
+
+fn reload_json(reload: &Reload) -> Value {
+    match reload {
+        Reload::Quests => json!({ "quests": true }),
+        Reload::Path(id) => json!({ "path": id }),
+        Reload::Formation(leader) => json!({ "formation": leader }),
+        Reload::Creature(guid) => json!({ "creature": guid }),
+        Reload::GameObject(guid) => json!({ "gameobject": guid }),
+    }
+}
+
+fn reload_of(value: &Value) -> Option<Reload> {
+    if value["quests"].as_bool() == Some(true) {
+        return Some(Reload::Quests);
+    }
+    if let Some(id) = value["path"].as_u64() {
+        return Some(Reload::Path(id as u32));
+    }
+    if let Some(leader) = value["formation"].as_u64() {
+        return Some(Reload::Formation(leader));
+    }
+    if let Some(guid) = value["creature"].as_u64() {
+        return Some(Reload::Creature(guid));
+    }
+    value["gameobject"].as_u64().map(Reload::GameObject)
+}
+
+impl Application {
+    fn rows(&self) -> usize {
+        self.entries.iter().filter(|entry| entry.before != entry.after).count()
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "when": self.when,
+            "database": self.database,
+            "owners": self.owners,
+            "entries": self.entries.iter().map(Entry::to_json).collect::<Vec<_>>(),
+            "reloads": self.reloads.iter().map(reload_json).collect::<Vec<_>>(),
+        })
+    }
+
+    fn of_json(value: &Value) -> Option<Self> {
+        let list = |key: &str| value[key].as_array().cloned().unwrap_or_default();
+        Some(Self {
+            when: value["when"].as_str()?.to_owned(),
+            database: value["database"].as_str().unwrap_or_default().to_owned(),
+            owners: list("owners")
+                .iter()
+                .filter_map(|owner| owner.as_str().map(str::to_owned))
+                .collect(),
+            entries: list("entries").iter().map(Entry::of_json).collect::<Option<_>>()?,
+            reloads: list("reloads").iter().filter_map(reload_of).collect(),
+        })
+    }
+}
+
+/// The date and time of the moment `since` seconds after 1970 in UTC, as `2026-10-21 07:48:00`.
+fn when(since: u64) -> String {
+    let (days, seconds) = (since / 86_400, since % 86_400);
+    // From the days since 1970 to the civil date (Howard Hinnant's algorithm).
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted + 2) / 5 + 1;
+    let month = if shifted < 10 { shifted + 3 } else { shifted - 9 };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+        seconds / 3600,
+        seconds / 60 % 60,
+        seconds % 60
+    )
+}
+
+fn now() -> String {
+    when(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs()),
+    )
+}
+
+/// The name of the script of an application made `when`: `uniwow_2026_10_21_074800.sql`, the
+/// scripts of a folder ordered as they were made.
+fn script_name(when: &str, undone: bool) -> String {
+    let digits: String = when.chars().filter(char::is_ascii_digit).collect();
+    let (date, time) = digits.split_at(digits.len().min(8));
+    let (year, rest) = date.split_at(date.len().min(4));
+    let (month, day) = rest.split_at(rest.len().min(2));
+    format!(
+        "uniwow_{year}_{month}_{day}_{time}{}.sql",
+        if undone { "_undone" } else { "" }
+    )
+}
+
+/// The setting of the folder of SQL of a module of the server, where each application is written.
+const SQL_FOLDER: &str = "sql_folder";
+
+/// An application asked, waiting for its job: the changes applied, or the last application undone.
+enum Applying {
+    Apply {
+        job: JobId,
+        owners: Vec<String>,
+        reloads: Vec<Reload>,
+        database: String,
+    },
+    Undo {
+        job: JobId,
+    },
+}
+
+/// What the user is asked to confirm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Confirming {
+    Apply,
+    Undo,
 }
 
 /// The keys of the settings, kept by the module: never the password.
@@ -148,7 +331,7 @@ fn start(at_start: bool, kept: Result<Option<String>, String>) -> Start {
 
 /// A connection asked, waiting for its outcome: the password to keep once connected (none when
 /// the user chose not to), and whether it was made at the start without the window.
-struct Pending {
+struct Asking {
     keep: Option<(String, String, String)>,
     automatic: bool,
 }
@@ -180,10 +363,16 @@ struct WorldDbModule {
     asking: bool,
     /// Whether the password typed is kept once connected (*Remember password*).
     remember: bool,
-    pending: Option<Pending>,
+    pending: Option<Asking>,
     /// Where passwords are kept, and whether one is for the connection of the settings.
     vault: Arc<dyn Vault>,
     kept: Option<bool>,
+    /// The applications made, the last last, kept in the project; the one being made; what is
+    /// asked to be confirmed; what the last one said.
+    applications: Vec<Application>,
+    applying: Option<Applying>,
+    confirming: Option<Confirming>,
+    said: Option<(bool, String)>,
 }
 
 impl Default for WorldDbModule {
@@ -198,6 +387,10 @@ impl Default for WorldDbModule {
             pending: None,
             vault: Arc::new(secret::System),
             kept: None,
+            applications: Vec::new(),
+            applying: None,
+            confirming: None,
+            said: None,
         }
     }
 }
@@ -207,7 +400,7 @@ impl WorldDbModule {
     /// `automatic`.
     fn connect_with(&mut self, ctx: &mut Context, password: String, keep: bool, automatic: bool) {
         let settings = settings_of(ctx);
-        self.pending = Some(Pending {
+        self.pending = Some(Asking {
             keep: keep.then(|| (secret::target(&settings), settings.user.clone(), password.clone())),
             automatic,
         });
@@ -252,6 +445,62 @@ impl WorldDbModule {
             }
             State::Waiting | State::Connecting => {}
         }
+    }
+
+    /// Applies the changes the modules hold, from a job.
+    fn apply(&mut self, ctx: &mut Context) {
+        use world_db::WorldDb as _;
+        let service = Service(self.shared.clone());
+        let pending = service.pending();
+        let changes: Vec<RowChange> = pending.iter().flat_map(|held| held.changes.clone()).collect();
+        if changes.is_empty() {
+            return;
+        }
+        let mut reloads: Vec<Reload> = pending.iter().flat_map(|held| held.reloads.clone()).collect();
+        reloads.sort();
+        reloads.dedup();
+        let owners = pending.iter().map(|held| held.owner.clone()).collect();
+        let settings = settings_of(ctx);
+        let shared = self.shared.clone();
+        let job = ctx.spawn("Apply the changes to the world database", move |_| {
+            Service(shared).apply(&changes)
+        });
+        self.applying = Some(Applying::Apply {
+            job,
+            owners,
+            reloads,
+            database: format!("{} on {}:{}", settings.database, settings.host, settings.port),
+        });
+    }
+
+    /// Undoes the last application, from a job.
+    fn undo(&mut self, ctx: &mut Context) {
+        use world_db::WorldDb as _;
+        let Some(last) = self.applications.last() else {
+            return;
+        };
+        let changes = write::revert(&last.entries);
+        let shared = self.shared.clone();
+        let job = ctx.spawn("Undo the last application to the world database", move |_| {
+            Service(shared).apply(&changes)
+        });
+        self.applying = Some(Applying::Undo { job });
+    }
+
+    /// Writes the script of `entries` into the folder of SQL set, if one is; what went wrong.
+    fn write_script(&self, ctx: &Context, title: &str, when: &str, undone: bool, entries: &[Entry]) -> Option<String> {
+        let folder = ctx
+            .setting(SQL_FOLDER)
+            .and_then(|value| value.as_str().map(str::to_owned))?;
+        if folder.trim().is_empty() {
+            return None;
+        }
+        let path = std::path::Path::new(folder.trim()).join(script_name(when, undone));
+        let written =
+            std::fs::create_dir_all(folder.trim()).and_then(|_| std::fs::write(&path, write::script(title, entries)));
+        written
+            .err()
+            .map(|error| format!("the script {} is not written: {error}", path.display()))
     }
 
     /// Whether a password is kept for the connection of the settings, asked of the vault once.
@@ -457,15 +706,276 @@ impl Module for WorldDbModule {
         {
             ctx.set_setting(AT_START, json!(at_start));
         }
+        ui.add_space(8.0);
+        self.changes_ui(ui, ctx, &state, &current);
     }
 
-    fn on_job(&mut self, job: JobId, outcome: JobOutcome, _ctx: &mut Context) {
+    fn project_section(&self) -> Option<Value> {
+        Some(json!({ "applications": self.applications.iter().map(Application::to_json).collect::<Vec<_>>() }))
+    }
+
+    fn open_project(&mut self, section: Option<Value>, _ctx: &mut Context) {
+        self.applications = section
+            .as_ref()
+            .and_then(|section| section["applications"].as_array())
+            .map(|applications| applications.iter().filter_map(Application::of_json).collect())
+            .unwrap_or_default();
+    }
+
+    fn on_job(&mut self, job: JobId, outcome: JobOutcome, ctx: &mut Context) {
+        let ours = match &self.applying {
+            Some(Applying::Apply { job: made, .. } | Applying::Undo { job: made }) => *made == job,
+            None => false,
+        };
+        if ours && let Some(applying) = self.applying.take() {
+            self.applied(applying, outcome.take::<Result<Vec<Entry>, String>>(), ctx);
+            return;
+        }
         if self.thread == Some(job) {
             self.thread = None;
             *lock(&self.shared.asked) = None;
             if let JobOutcome::Panicked(message) = outcome {
                 log::error!("the connection to the world database stopped: {message}");
             }
+        }
+    }
+}
+
+impl WorldDbModule {
+    /// The outcome of an application: kept, or taken off once undone; its script written; the
+    /// owners told.
+    fn applied(&mut self, applying: Applying, outcome: Option<Result<Vec<Entry>, String>>, ctx: &mut Context) {
+        let entries = match outcome {
+            Some(Ok(entries)) => entries,
+            Some(Err(reason)) => {
+                log::warn!("the changes are not applied: {reason}");
+                self.said = Some((false, format!("Nothing written: {reason}")));
+                return;
+            }
+            None => {
+                self.said = Some((false, "Nothing written: the application stopped".to_owned()));
+                return;
+            }
+        };
+        let when = now();
+        let (owners, message, failed) = match applying {
+            Applying::Apply {
+                owners,
+                reloads,
+                database,
+                ..
+            } => {
+                let application = Application {
+                    when: when.clone(),
+                    database: database.clone(),
+                    owners: owners.clone(),
+                    entries,
+                    reloads,
+                };
+                let rows = application.rows();
+                let title = format!("Applied by UniWoW on {when} to {database}: {rows} rows");
+                let failed = self.write_script(ctx, &title, &when, false, &application.entries);
+                if !application.reloads.is_empty() {
+                    log::info!(
+                        "{} loads to ask of the server, once its bridge is installed (step 16.2)",
+                        application.reloads.len()
+                    );
+                }
+                self.applications.push(application);
+                (owners, format!("{rows} rows written to {database}"), failed)
+            }
+            Applying::Undo { .. } => {
+                let Some(undone) = self.applications.pop() else {
+                    return;
+                };
+                let title = format!("Undone by UniWoW on {when}: the application of {}", undone.when);
+                let failed = self.write_script(ctx, &title, &when, true, &entries);
+                let message = format!(
+                    "The application of {} undone: {} rows put back",
+                    undone.when,
+                    undone.rows()
+                );
+                (undone.owners, message, failed)
+            }
+        };
+        log::info!("{message}");
+        if let Some(failed) = &failed {
+            log::warn!("{failed}");
+        }
+        self.said = Some((
+            failed.is_none(),
+            failed.map_or(message.clone(), |failed| format!("{message}; {failed}")),
+        ));
+        ctx.publish(world_db::APPLIED_TOPIC, json!({ "owners": owners }));
+    }
+
+    /// The changes the modules hold for the server: what each holds, where they are written, the
+    /// application and its undoing, each confirmed; the folder of SQL the scripts go to.
+    fn changes_ui(&mut self, ui: &mut egui::Ui, ctx: &mut Context, state: &State, settings: &Settings) {
+        use world_db::WorldDb as _;
+        let pending = Service(self.shared.clone()).pending();
+        let rows: usize = pending.iter().map(|held| held.changes.len()).sum();
+        let note = (rows > 0).then(|| format!("{rows} rows"));
+        theme::section(
+            ui,
+            egui::Id::new("world-db changes"),
+            theme::icon::CONNECTED,
+            "Changes for the server",
+            note.as_deref(),
+            true,
+            |ui| {
+                if pending.is_empty() {
+                    ui.weak("No change waits for the server.");
+                }
+                for held in &pending {
+                    ui.horizontal(|ui| {
+                        ui.strong(&held.label);
+                        ui.weak(format!("{} rows", held.changes.len()));
+                    });
+                    for note in &held.held {
+                        ui.label(egui::RichText::new(format!("Not written yet: {note}")).weak().small());
+                    }
+                }
+                let connected = matches!(state, State::Connected(_));
+                let busy = self.applying.is_some();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Written to {} on {}:{} by {}",
+                        settings.database, settings.host, settings.port, settings.user
+                    ))
+                    .weak()
+                    .small(),
+                );
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            connected && rows > 0 && !busy,
+                            egui::Button::new("Apply to the server…"),
+                        )
+                        .on_hover_text("Writes every change above, one transaction: all or none")
+                        .clicked()
+                    {
+                        self.confirming = Some(Confirming::Apply);
+                    }
+                    let last = self.applications.last().map(|last| last.when.clone());
+                    if ui
+                        .add_enabled(
+                            connected && last.is_some() && !busy,
+                            egui::Button::new("Undo the last application…"),
+                        )
+                        .on_hover_text(last.map_or("Nothing applied".to_owned(), |when| {
+                            format!("Puts back the rows the application of {when} replaced")
+                        }))
+                        .clicked()
+                    {
+                        self.confirming = Some(Confirming::Undo);
+                    }
+                    if busy {
+                        ui.spinner();
+                    }
+                });
+                if let Some((fine, said)) = &self.said {
+                    let colour = if *fine {
+                        theme::Theme::DARK.palette.success
+                    } else {
+                        theme::Theme::DARK.palette.error
+                    };
+                    ui.colored_label(colour, said);
+                }
+                if let Some(last) = self.applications.last() {
+                    ui.weak(format!(
+                        "{} applications kept in the project; the last on {}, {} rows",
+                        self.applications.len(),
+                        last.when,
+                        last.rows()
+                    ));
+                }
+                let mut folder = ctx
+                    .setting(SQL_FOLDER)
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_default();
+                ui.label("Scripts written to");
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut folder)
+                            .hint_text(r"…\modules\mod-uniwow-content\data\sql\db-world")
+                            .desired_width(f32::INFINITY),
+                    )
+                    .on_hover_text(
+                        "The folder of SQL of a module of the server: each application written there too, \
+                         for a server installed again to have it. None: not written.",
+                    )
+                    .changed()
+                {
+                    ctx.set_setting(SQL_FOLDER, json!(folder));
+                }
+            },
+        );
+        self.confirm_ui(ui.ctx(), ctx, &pending, settings);
+    }
+
+    /// The window confirming an application or its undoing.
+    fn confirm_ui(&mut self, egui: &egui::Context, ctx: &mut Context, pending: &[Pending], settings: &Settings) {
+        let Some(confirming) = self.confirming else {
+            return;
+        };
+        let (title, text) = match confirming {
+            Confirming::Apply => {
+                let rows: usize = pending.iter().map(|held| held.changes.len()).sum();
+                let mut tables: Vec<&str> = pending
+                    .iter()
+                    .flat_map(|held| held.changes.iter().map(RowChange::table))
+                    .collect();
+                tables.sort_unstable();
+                tables.dedup();
+                (
+                    "Apply to the server",
+                    format!(
+                        "Write {rows} changes of rows into {} on {}:{} ({})? One transaction: all or none. \
+                         Undone from the panel with Undo the last application.",
+                        settings.database,
+                        settings.host,
+                        settings.port,
+                        tables.join(", ")
+                    ),
+                )
+            }
+            Confirming::Undo => (
+                "Undo the last application",
+                match self.applications.last() {
+                    Some(last) => format!(
+                        "Put back the {} rows the application of {} replaced in {}? Changes made to them since, \
+                         in the game or elsewhere, are lost.",
+                        last.rows(),
+                        last.when,
+                        last.database
+                    ),
+                    None => "Nothing applied.".to_owned(),
+                },
+            ),
+        };
+        let (mut yes, mut no) = (false, false);
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(egui, |ui| {
+                ui.set_max_width(420.0);
+                ui.label(text);
+                ui.horizontal(|ui| {
+                    yes = ui.button(title).clicked();
+                    no = ui.button("Cancel").clicked();
+                });
+            });
+        if yes {
+            self.confirming = None;
+            self.said = None;
+            match confirming {
+                Confirming::Apply => self.apply(ctx),
+                Confirming::Undo => self.undo(ctx),
+            }
+        } else if no {
+            self.confirming = None;
         }
     }
 }

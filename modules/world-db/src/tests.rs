@@ -6,7 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use uniwow_api::db::Settings;
-use uniwow_api::world_db::{State, WorldDb};
+use uniwow_api::serde_json::json;
+use uniwow_api::world_db::{Pending, Reload, State, WorldDb};
 
 use crate::{Asked, Service, Shared, serve};
 
@@ -86,7 +87,7 @@ fn a_password_is_kept_once_connected_and_a_refusal_at_the_start_asks_again() {
     };
     let target = secret::target(&Settings::default());
     // Asked by the window with Remember password: kept once connected, not before.
-    module.pending = Some(crate::Pending {
+    module.pending = Some(crate::Asking {
         keep: Some((target.clone(), "acore".to_owned(), "typed".to_owned())),
         automatic: false,
     });
@@ -99,7 +100,7 @@ fn a_password_is_kept_once_connected_and_a_refusal_at_the_start_asks_again() {
     assert!(module.pending.is_none());
     // Refused, typed: nothing kept, the window not opened by itself.
     vault.forget(&target).unwrap();
-    module.pending = Some(crate::Pending {
+    module.pending = Some(crate::Asking {
         keep: Some((target.clone(), "acore".to_owned(), "wrong".to_owned())),
         automatic: false,
     });
@@ -108,10 +109,81 @@ fn a_password_is_kept_once_connected_and_a_refusal_at_the_start_asks_again() {
     assert_eq!(vault.get(&target).unwrap(), None);
     assert!(!module.asking);
     // Refused at the start, with the password kept: the window opened again.
-    module.pending = Some(crate::Pending {
+    module.pending = Some(crate::Asking {
         keep: None,
         automatic: true,
     });
     module.settle();
     assert!(module.asking);
+}
+
+#[test]
+fn an_application_is_dated_named_and_kept_in_the_project_as_it_was() {
+    assert_eq!(crate::when(0), "1970-01-01 00:00:00");
+    assert_eq!(crate::when(1_792_568_880), "2026-10-21 07:48:00");
+    assert_eq!(crate::when(951_782_400), "2000-02-29 00:00:00");
+    assert_eq!(
+        crate::script_name("2026-10-21 07:48:00", false),
+        "uniwow_2026_10_21_074800.sql"
+    );
+    assert_eq!(
+        crate::script_name("2026-10-21 07:48:00", true),
+        "uniwow_2026_10_21_074800_undone.sql"
+    );
+    let application = crate::Application {
+        when: "2026-10-21 07:48:00".to_owned(),
+        database: "acore_world_test on 127.0.0.1:3306".to_owned(),
+        owners: vec!["spawns".to_owned()],
+        entries: vec![uniwow_api::db::write::Entry {
+            table: "creature".to_owned(),
+            key: uniwow_api::db::write::row([("guid", json!(1))]),
+            before: vec![uniwow_api::db::write::row([("guid", json!(1)), ("map", json!(0))])],
+            after: vec![uniwow_api::db::write::row([("guid", json!(1)), ("map", json!(1))])],
+        }],
+        reloads: vec![
+            Reload::Quests,
+            Reload::Path(790),
+            Reload::Formation(79),
+            Reload::Creature(79),
+            Reload::GameObject(5),
+        ],
+    };
+    assert_eq!(application.rows(), 1);
+    assert_eq!(crate::Application::of_json(&application.to_json()), Some(application));
+}
+
+#[test]
+fn the_changes_of_each_module_replace_those_it_gave_before_and_go_once_it_holds_none() {
+    let service = Service(Arc::default());
+    let held = |owner: &str, rows: usize| Pending {
+        owner: owner.to_owned(),
+        label: owner.to_owned(),
+        changes: (0..rows)
+            .map(|guid| uniwow_api::db::write::RowChange::Delete {
+                table: "creature".to_owned(),
+                key: uniwow_api::db::write::row([("guid", json!(guid))]),
+            })
+            .collect(),
+        ..Pending::default()
+    };
+    service.set_pending(held("spawns", 2));
+    service.set_pending(held("paths", 1));
+    service.set_pending(held("spawns", 3));
+    let pending = service.pending();
+    assert_eq!(
+        pending
+            .iter()
+            .map(|held| (held.owner.as_str(), held.changes.len()))
+            .collect::<Vec<_>>(),
+        [("paths", 1), ("spawns", 3)]
+    );
+    service.set_pending(held("paths", 0));
+    assert_eq!(service.pending().len(), 1);
+    // Not connected: nothing written, and said.
+    assert!(service.apply(&pending[1].changes).is_err());
+    let outside = uniwow_api::db::write::RowChange::Delete {
+        table: "account".to_owned(),
+        key: uniwow_api::db::write::row([("id", json!(1))]),
+    };
+    assert!(service.apply(&[outside]).unwrap_err().contains("account"));
 }

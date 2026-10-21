@@ -10635,6 +10635,53 @@ grabbed where drawn, an axis facing the eye not grabbed, the moves along an axis
 ring's turn and its slice, the scales, a placement turned about an axis of the world, the writes of
 each provider.
 
+### Milestone 16: the server's data written, seen in the game at once (in progress)
+
+Asked by the user after 15: a module creating and changing quests, a module creating patrols (alone
+and in groups), both writing into the world database, their result seen in the game without starting
+the server again. The steps: **16.1** the database written safely; **16.2** `mod-uniwow-bridge`, a
+module of the server apart from the observer, loading again what was written; **16.4** the patrols;
+**16.3** the quests. Decided with the user: the ids of the quests the editor creates in a block of
+100 of its own, reserved in `ID_RANGES.md` of the mods; a path's id the guid of its creature × 10, as
+AzerothCore names them; each application written into the database at once, and as a script into the
+folder of SQL of a module of the server, for a server installed again; the texts in every language of
+the client (enUS, frFR, deDE, esES, ruRU).
+
+#### Step 16.1, as built: the database written safely
+
+- **`libs/db::write`**: a change of rows by their key, in the tables of `TABLES` alone (the spawns,
+  their addons and events, the givers and enders of quests, the templates of creatures, the paths,
+  the formations, the quests and their texts): `Put` (the one row of the key given values, inserted
+  when there is none, a row named copied first), `Delete` (every row of the key), `Insert` (rows where
+  the key has none). `apply` makes them in a `Store` in their order, each journaled as an `Entry` (the
+  rows of its key before and after); a change refused (another table, no key, a name that is no
+  identifier, a key naming several rows for a `Put`) stops them all. `revert` gives the changes
+  putting the rows back; `script` the SQL doing again what was done, each key's rows deleted and those
+  after inserted, as many times as it runs. `Writer`, a connection that writes opened for an
+  application alone, makes them as one transaction: all or none.
+- **`world_db`**: each module gives the changes it holds (`Pending`: its rows changed, what the
+  server loads again, `Reload`, and what is not written yet, said), `set_pending` and `pending`;
+  `apply` from a job, through the thread of the connection, with the account of the session; the
+  topic `world-db.applied` with the owners of what was applied.
+- **The panel *World database***, its section *Changes for the server*: what each module holds,
+  where it is written, *Apply to the server…* and *Undo the last application…*, each confirmed in a
+  window saying the rows, the tables and the database. Each application kept in the project with what
+  it replaced (when, where, whose, the entries, the loads); each written, if a folder is set, as
+  `uniwow_<date>_<time>.sql` (and `…_undone.sql`) into the folder of SQL of a module of the server.
+- **The spawns**: their changes as rows (`Changes::pending`): a spawn moved its place (a game
+  object's rotation too); a spawn duplicated the row of the spawn of the database it was made of
+  copied (`Changes::sources`, kept in the project), its guid, template and place its own; a spawn
+  deleted its row, its addon and its events taken away; a quest given or taken its row of the giver or
+  ender. A game object made of a doodad is said not written yet: its template and display come in a
+  later step. Once applied, the spawns take their changes as the database's rows and read them again;
+  Ctrl+Z no longer reaches what was applied, *Undo the last application…* does.
+
+**Tests**: rows put, copied, deleted, undone to what they were, the journal read back; a change
+outside the tables of the editor or without a key refused, stopping the others, nothing changed; the
+script; the date and name of an application, kept in the project; the changes of each module
+replacing those it gave, an application refused while not connected; the changes of the spawns made
+in rows of memory as the server would have them.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
