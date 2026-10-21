@@ -38,6 +38,10 @@ pub enum State {
 pub enum Reload {
     /// The quests, their givers and enders, their texts.
     Quests,
+    /// The quest of this id taken from every character of the server, deleted: out of the quest logs
+    /// and the quests done (daily, weekly, monthly, seasonal too), for a quest of its id made again
+    /// to be offered to them.
+    ForgetQuest(u32),
     /// The addons of the creatures: their paths, mounts and auras.
     Addons,
     /// The path of waypoints of this id, the creatures following it set on it again.

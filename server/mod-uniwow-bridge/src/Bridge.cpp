@@ -182,7 +182,7 @@ namespace UniwowBridge
 
         bool Known(uint8 action)
         {
-            return action >= uint8(Action::Quests) && action <= uint8(Action::GameObject);
+            return action >= uint8(Action::Quests) && action <= uint8(Action::ForgetQuest);
         }
 
         // Whether the spawn `spawnId` of `table` (`game_event_creature`, `game_event_gameobject`)
@@ -362,6 +362,8 @@ namespace UniwowBridge
         _made.notify_all();
     }
 
+    Outcome ForgetQuest(uint32 questId);
+
     Outcome Bridge::MakeOne(Demand const& demand)
     {
         switch (demand.action)
@@ -443,6 +445,8 @@ namespace UniwowBridge
                 sObjectMgr->AddCreatureToGrid(spawnId, data);
                 return { true, Acore::StringFormat("the creature {} spawned again", spawnId) };
             }
+            case Action::ForgetQuest:
+                return ForgetQuest(uint32(demand.value));
             case Action::GameObject:
             {
                 ObjectGuid::LowType const spawnId = ObjectGuid::LowType(demand.value);
@@ -485,5 +489,39 @@ namespace UniwowBridge
             }
         }
         return { false, "an unknown demand" };
+    }
+
+    // The quest `questId` taken from every character (`Action::ForgetQuest`).
+    Outcome ForgetQuest(uint32 questId)
+    {
+        uint32 online = 0;
+        for (auto const& [id, session] : sWorldSessionMgr->GetAllSessions())
+        {
+            Player* player = session ? session->GetPlayer() : nullptr;
+            if (!player)
+                continue;
+            bool held = false;
+            for (uint8 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+            {
+                if (player->GetQuestSlotQuestId(slot) == questId)
+                {
+                    player->SetQuestSlot(slot, 0);
+                    player->TakeQuestSourceItem(questId, false);
+                    held = true;
+                }
+            }
+            held |= player->GetQuestRewardStatus(questId) || player->GetQuestStatus(questId) != QUEST_STATUS_NONE;
+            player->RemoveRewardedQuest(questId);
+            player->RemoveActiveQuest(questId, false);
+            if (held)
+                ++online;
+        }
+        // Those not in the world, and what those in it save: their status in the database.
+        CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+        for (char const* table : { "character_queststatus", "character_queststatus_rewarded", "character_queststatus_daily",
+                 "character_queststatus_weekly", "character_queststatus_monthly", "character_queststatus_seasonal" })
+            trans->Append(Acore::StringFormat("DELETE FROM `{}` WHERE `quest` = {}", table, questId));
+        CharacterDatabase.CommitTransaction(trans);
+        return { true, Acore::StringFormat("the quest {} taken from every character ({} in the world held it)", questId, online) };
     }
 }

@@ -36,6 +36,10 @@ namespace UniwowBridge
         Creature = 5,
         // The game object of this guid, as a creature.
         GameObject = 6,
+        // The quest of this id, deleted, taken from every character: out of the quest logs of those
+        // in the world, as `.quest remove` does, and out of the quest status of all in the database,
+        // done, daily, weekly, monthly and seasonal too.
+        ForgetQuest = 7,
     };
 
     struct Demand

@@ -444,7 +444,7 @@ impl QuestsModule {
                 }
             } else if ui
                 .add_enabled(ours, egui::Button::new("Delete"))
-                .on_hover_text("Deleted with its texts and givers once applied; in memory until then")
+                .on_hover_text("Deleted with its texts and givers once applied (in memory until then); it is also taken out of the quest logs and the quests done of every character of the server, by its bridge")
                 .on_disabled_hover_text("Only the quests of the editor's block (97000-97099) are deleted here")
                 .clicked()
             {

@@ -13,7 +13,7 @@ use uniwow_api::{Context, JobId, egui, log, rfd};
 
 use crate::package::{self, Choice, Kind, Package, Problem, Reference};
 use crate::sending::entries_of;
-use crate::{Application, WorldDbModule, bridge, now, server_of, write_script_to};
+use crate::{Application, WorldDbModule, now, server_of, write_script_to};
 
 /// The rows of `table` of `key` on the server, through the service.
 fn rows_there(database: &world_db::Handle, table: &str, key: &Row) -> Result<Vec<Row>, String> {
@@ -410,12 +410,6 @@ impl WorldDbModule {
             world_db::APPLIED_TOPIC,
             json!({ "owners": [], "read": ["spawns", "quests"] }),
         );
-        let demands = bridge::demands(&reloads);
-        if !demands.is_empty() {
-            let (port, token) = (server.bridge_port, server.bridge_token.clone());
-            self.bridging = Some(ctx.spawn("Ask the server to load the changes again", move |_| {
-                bridge::reload(port, &token, &demands)
-            }));
-        }
+        self.ask_bridge_at(server.bridge_port, server.bridge_token.clone(), &reloads, ctx);
     }
 }

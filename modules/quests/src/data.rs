@@ -497,6 +497,8 @@ impl Edits {
                         key: row([("quest", json!(id))]),
                     });
                 }
+                // Taken from every character too, for a quest of its id made again to be offered.
+                out.reloads.push(Reload::ForgetQuest(*id));
                 continue;
             }
             // The tables of a quest created: each made, a copy of the quest it copies where it has it.
@@ -572,6 +574,8 @@ impl Edits {
         if !out.changes.is_empty() {
             out.reloads.push(Reload::Quests);
         }
+        out.reloads.sort();
+        out.reloads.dedup();
         out
     }
 
@@ -778,7 +782,12 @@ mod tests {
             },
         );
         let loaded_copy = BTreeMap::from([(97001, Loaded::default())]);
-        apply(&mut memory, &deleted.pending(&loaded_copy).changes).unwrap();
+        let pending = deleted.pending(&loaded_copy);
+        assert!(
+            pending.reloads.contains(&Reload::ForgetQuest(97001)),
+            "taken from the characters too"
+        );
+        apply(&mut memory, &pending.changes).unwrap();
         assert_eq!(memory.tables["quest_template"].len(), 1);
         assert!(
             memory.tables["quest_template_locale"]

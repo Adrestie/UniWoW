@@ -207,6 +207,7 @@ struct Application {
 fn reload_json(reload: &Reload) -> Value {
     match reload {
         Reload::Quests => json!({ "quests": true }),
+        Reload::ForgetQuest(id) => json!({ "forget_quest": id }),
         Reload::Addons => json!({ "addons": true }),
         Reload::Path(id) => json!({ "path": id }),
         Reload::Formation(leader) => json!({ "formation": leader }),
@@ -218,6 +219,9 @@ fn reload_json(reload: &Reload) -> Value {
 fn reload_of(value: &Value) -> Option<Reload> {
     if value["quests"].as_bool() == Some(true) {
         return Some(Reload::Quests);
+    }
+    if let Some(id) = value["forget_quest"].as_u64() {
+        return Some(Reload::ForgetQuest(id as u32));
     }
     if value["addons"].as_bool() == Some(true) {
         return Some(Reload::Addons);
@@ -480,8 +484,10 @@ struct WorldDbModule {
     exporting: Option<JobId>,
     importing: Option<exchange::Importing>,
     said: Option<(bool, String)>,
-    /// The bridge of the server asked to load the changes again.
+    /// The bridge of the server asked to load the changes again, and the quests it is asked to take
+    /// from the characters.
     bridging: Option<JobId>,
+    forgetting: Vec<u32>,
 }
 
 impl Default for WorldDbModule {
@@ -505,6 +511,7 @@ impl Default for WorldDbModule {
             importing: None,
             said: None,
             bridging: None,
+            forgetting: Vec::new(),
         }
     }
 }
@@ -1277,12 +1284,24 @@ impl WorldDbModule {
 
     /// Asks the bridge of the server to load again what `reloads` names, from a job.
     fn ask_bridge(&mut self, reloads: &[Reload], ctx: &mut Context) {
+        let server = server_of(ctx);
+        self.ask_bridge_at(server.bridge_port, server.bridge_token, reloads, ctx);
+    }
+
+    /// Asks the bridge on `port` with `token` to load again what `reloads` names, from a job; the
+    /// quests to take from the characters kept, to say they are not if it does not answer.
+    pub(crate) fn ask_bridge_at(&mut self, port: u16, token: String, reloads: &[Reload], ctx: &mut Context) {
         let demands = bridge::demands(reloads);
         if demands.is_empty() {
             return;
         }
-        let server = server_of(ctx);
-        let (port, token) = (server.bridge_port, server.bridge_token);
+        self.forgetting = reloads
+            .iter()
+            .filter_map(|reload| match reload {
+                Reload::ForgetQuest(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
         let count = demands.len();
         self.bridging = Some(ctx.spawn("Ask the server to load the changes again", move |_| {
             bridge::reload(port, &token, &demands)
@@ -1314,10 +1333,16 @@ impl WorldDbModule {
             }
             Some(Err(reason)) => {
                 log::warn!("the server is not asked to load the changes again: {reason}");
-                (
-                    false,
-                    format!("not seen in the game until the server starts again: {reason}"),
-                )
+                let mut said = format!("not seen in the game until the server starts again: {reason}");
+                // A restart does not take a deleted quest from the characters: the bridge alone.
+                if !self.forgetting.is_empty() {
+                    let ids: Vec<String> = self.forgetting.iter().map(u32::to_string).collect();
+                    said.push_str(&format!(
+                        ". The characters keep the deleted quests {} until the bridge takes them: its id made again                          would not be offered to those who took them",
+                        ids.join(", ")
+                    ));
+                }
+                (false, said)
             }
             None => (false, "the server's bridge stopped".to_owned()),
         };

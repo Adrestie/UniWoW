@@ -12,7 +12,7 @@ use uniwow_api::serde_json::json;
 use uniwow_api::world_db::{Reload, Server};
 use uniwow_api::{Context, JobId, egui, log};
 
-use crate::{Application, TIMEOUT, WorldDbModule, bridge, now, servers, write_script_to};
+use crate::{Application, TIMEOUT, WorldDbModule, now, servers, write_script_to};
 
 /// The entries of the applications `picked` of `applications`, in the order they were made.
 pub fn entries_of(applications: &[Application], picked: &BTreeSet<usize>) -> (Vec<Entry>, Vec<Reload>) {
@@ -239,13 +239,7 @@ impl WorldDbModule {
             failed.is_none(),
             failed.map_or(message.clone(), |failed| format!("{message}; {failed}")),
         ));
-        let demands = bridge::demands(&reloads);
-        if !demands.is_empty() {
-            let (port, token) = (target.bridge_port, target.bridge_token.clone());
-            self.bridging = Some(ctx.spawn("Ask another server to load the changes again", move |_| {
-                bridge::reload(port, &token, &demands)
-            }));
-        }
+        self.ask_bridge_at(target.bridge_port, target.bridge_token.clone(), &reloads, ctx);
     }
 
     /// The windows of a sending: the password of the target, the rows that differ there.

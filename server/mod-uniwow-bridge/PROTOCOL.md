@@ -29,6 +29,7 @@ A demand is a `u8` action and a `u64` value:
 | 4 | every group of creatures (`creature_formations`) | 0 |
 | 5 | a creature read again from its row: taken away where it runs, spawned again where its row places it on a continent; taken away alone once its row is gone; read alone when a pool or a game event spawns it | its guid |
 | 6 | a game object, as a creature | its guid |
+| 7 | a quest deleted, taken from every character: out of the quest log of those in the world (as `.quest remove`), and out of `character_queststatus`, `_rewarded`, `_daily`, `_weekly`, `_monthly` and `_seasonal` in the database, for a quest of its id made again to be offered to them | its id |
 
 The editor sends the demands in that order: what the creatures read, then the creatures spawned again.
 

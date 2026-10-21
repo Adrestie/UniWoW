@@ -30,6 +30,7 @@ pub fn demands(reloads: &[Reload]) -> Vec<(u8, u64)> {
     for reload in sorted {
         let demand = match reload {
             Reload::Quests => (1, 0),
+            Reload::ForgetQuest(id) => (7, u64::from(id)),
             Reload::Addons => (3, 0),
             Reload::Path(id) => (2, u64::from(id)),
             Reload::Formation(_) => (4, 0),
@@ -158,8 +159,9 @@ mod tests {
                 Reload::Addons,
                 Reload::GameObject(5),
                 Reload::Creature(79),
+                Reload::ForgetQuest(97000),
             ]),
-            [(1, 0), (3, 0), (2, 790), (4, 0), (5, 79), (6, 5)]
+            [(1, 0), (7, 97000), (3, 0), (2, 790), (4, 0), (5, 79), (6, 5)]
         );
     }
 

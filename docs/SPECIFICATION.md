@@ -10796,6 +10796,16 @@ there found, left or overwritten; a change keeping what it names and what belong
 read back from its file; an import whose path is taken renumbered with its references followed, a
 missing spawn inserted, or linked to another there.
 
+#### After 16.9: a quest deleted taken from the characters
+
+Found by the user: a quest of the editor's block deleted, then made again under the same id, was
+never offered to a character who had done the first. A quest deleted is now taken from every
+character of its server once applied (or sent, or imported): `world_db::Reload::ForgetQuest`, the
+demand 7 of `mod-uniwow-bridge`, takes it out of the quest log of those in the world as
+`.quest remove` does and out of their status in the database (done, daily, weekly, monthly,
+seasonal). Without a bridge, the editor says the characters keep it. The tooltip of *Delete* says
+so. **Test**: a quest deleted asks the server to take it from the characters.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
