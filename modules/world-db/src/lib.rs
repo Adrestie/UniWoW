@@ -637,9 +637,12 @@ impl WorldDbModule {
             return;
         };
         let (mut open, mut save, mut close) = (true, false, false);
+        // Of a size of its own: a window that fits its content grows with a vertical line or a text
+        // that wraps.
         egui::Window::new("Servers")
             .open(&mut open)
-            .default_size([560.0, 360.0])
+            .resizable(false)
+            .fixed_size([600.0, 430.0])
             .show(egui, |ui| {
                 ui.horizontal_top(|ui| {
                     ui.vertical(|ui| {
@@ -674,7 +677,7 @@ impl WorldDbModule {
                             }
                         });
                     });
-                    ui.separator();
+                    ui.add_space(12.0);
                     let Some(server) = editing.servers.get_mut(editing.at) else {
                         return;
                     };
@@ -713,15 +716,15 @@ impl WorldDbModule {
                             text(ui, "Token", &mut server.bridge_token, true);
                             text(ui, "Scripts written to", &mut server.sql_folder, false);
                         });
-                    ui.label(
-                        egui::RichText::new(
-                            "The password of each database is asked when it is chosen, and kept in the Credential \
-                             Manager of Windows.",
-                        )
-                        .weak()
-                        .small(),
-                    );
                 });
+                ui.label(
+                    egui::RichText::new(
+                        "The password of each database is asked when it is chosen, and kept in the Credential \
+                         Manager of Windows.",
+                    )
+                    .weak()
+                    .small(),
+                );
                 ui.separator();
                 ui.horizontal(|ui| {
                     save = ui.button("Save").clicked();
