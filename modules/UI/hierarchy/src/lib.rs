@@ -552,10 +552,10 @@ impl HierarchyModule {
                     ui.set_height(ROW);
                     ui.add_space(f32::from(depth) * INDENT);
                     if node.children.is_empty() {
-                        ui.add_space(18.0);
+                        ui.add_space(ui.spacing().interact_size.y * 0.8 + ui.spacing().item_spacing.x);
                     } else {
                         let open = self.unfolded.contains(&node.key);
-                        if ui.small_button(if open { "▼" } else { "▶" }).clicked() {
+                        if uniwow_api::theme::fold_button(ui, open).clicked() {
                             toggled = Some(node_index);
                         }
                     }

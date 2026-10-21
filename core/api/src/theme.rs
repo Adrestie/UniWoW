@@ -684,10 +684,43 @@ pub fn card<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
     shown.inner
 }
 
-/// A section of a panel: a card a little raised over it, rounded and edged, its header the icon
-/// in the accent, the title strong and a note weak, folded and unfolded by a click on it, its body
-/// under a line; the cards of a panel a few points apart. Whether it is open kept by `id`. What the
-/// body gave, while open.
+/// The triangle of something folded or unfolded, as Unity draws it: pointing right while folded,
+/// down while open, painted in `rect`, of `colour`.
+pub fn paint_fold(painter: &egui::Painter, rect: Rect, open: bool, colour: Color32) {
+    let centre = rect.center();
+    let size = rect.width().min(rect.height()) * 0.32;
+    let points = if open {
+        vec![
+            centre + vec2(-size, -size * 0.6),
+            centre + vec2(size, -size * 0.6),
+            centre + vec2(0.0, size * 0.75),
+        ]
+    } else {
+        vec![
+            centre + vec2(-size * 0.6, -size),
+            centre + vec2(size * 0.75, 0.0),
+            centre + vec2(-size * 0.6, size),
+        ]
+    };
+    painter.add(Shape::convex_polygon(points, colour, Stroke::NONE));
+}
+
+/// A triangle that folds or unfolds something, clicked: the Hierarchy's rows, the sections.
+pub fn fold_button(ui: &mut egui::Ui, open: bool) -> egui::Response {
+    let side = ui.spacing().interact_size.y * 0.8;
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(side), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let p = palette();
+        let lit = hovered(ui, &response);
+        paint_fold(ui.painter(), rect, open, Palette::mix(p.text_weak, p.text_strong, lit));
+    }
+    response
+}
+
+/// A section of a panel: a card a little raised over it, rounded and edged, its header the
+/// triangle that folds it, the icon in the accent, the title strong and a note weak, folded and
+/// unfolded by a click anywhere on it, lit under the pointer; its body under a line; the cards of a
+/// panel a few points apart. Whether it is open kept by `id`. What the body gave, while open.
 pub fn section<R>(
     ui: &mut egui::Ui,
     id: egui::Id,
@@ -705,32 +738,60 @@ pub fn section<R>(
         .inner_margin(egui::Margin::symmetric(8, 6))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, open);
-            let header = ui
-                .horizontal(|ui| {
-                    let arrow = if state.is_open() { "\u{25BE}" } else { "\u{25B8}" };
-                    ui.label(egui::RichText::new(arrow).color(p.text_weak));
-                    ui.label(egui::RichText::new(icon).color(p.accent));
-                    ui.label(egui::RichText::new(title).strong().color(p.text_strong));
-                    if let Some(note) = note {
-                        ui.label(egui::RichText::new(note).small().color(p.text_weak));
-                    }
-                    ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
-                })
-                .response
-                .interact(Sense::click());
+            let mut is_open = ui.data_mut(|data| *data.get_persisted_mut_or(id, open));
+            // The header: one row the width of the card, clicked anywhere.
+            let height = ui.spacing().interact_size.y;
+            let (rect, header) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
             if header.clicked() {
-                state.toggle(ui);
+                is_open = !is_open;
+                ui.data_mut(|data| data.insert_persisted(id, is_open));
             }
-            let out = state.is_open().then(|| {
+            if ui.is_rect_visible(rect) {
+                let lit = hovered(ui, &header);
+                let painter = ui.painter();
+                if lit > 0.0 {
+                    painter.rect_filled(
+                        rect.expand2(vec2(4.0, 1.0)),
+                        CornerRadius::same(m.radius_small),
+                        Palette::alpha(p.hovered(), lit),
+                    );
+                }
+                let fold = Rect::from_min_size(rect.min, Vec2::splat(height));
+                paint_fold(painter, fold, is_open, Palette::mix(p.text_weak, p.text_strong, lit));
+                let mut x = fold.right() + 2.0;
+                let font = FontId::proportional(m.body_size);
+                let icon_at = painter.text(
+                    Pos2::new(x, rect.center().y),
+                    Align2::LEFT_CENTER,
+                    icon,
+                    font.clone(),
+                    p.accent,
+                );
+                x = icon_at.right() + 6.0;
+                painter.text(
+                    Pos2::new(x, rect.center().y),
+                    Align2::LEFT_CENTER,
+                    title,
+                    FontId::new(m.body_size, FontFamily::Name(HEADING.into())),
+                    p.text_strong,
+                );
+                if let Some(note) = note {
+                    painter.text(
+                        Pos2::new(rect.right(), rect.center().y),
+                        Align2::RIGHT_CENTER,
+                        note,
+                        FontId::proportional(m.small_size),
+                        p.text_weak,
+                    );
+                }
+            }
+            is_open.then(|| {
                 let line = ui.available_rect_before_wrap();
                 ui.painter()
                     .hline(line.x_range(), line.top() + 2.0, Stroke::new(1.0, p.border));
                 ui.add_space(6.0);
                 body(ui)
-            });
-            state.store(ui.ctx());
-            out
+            })
         });
     ui.add_space(6.0);
     shown.inner

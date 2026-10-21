@@ -74,11 +74,8 @@ impl SceneView for Views {
                     ui.horizontal(|ui| {
                         ui.add_space(f32::from(*depth) * 12.0);
                         if at.children.is_empty() {
-                            ui.add_space(18.0);
-                        } else if ui
-                            .small_button(if unfolded.contains(&at.key) { "▼" } else { "▶" })
-                            .clicked()
-                        {
+                            ui.add_space(ui.spacing().interact_size.y * 0.8 + ui.spacing().item_spacing.x);
+                        } else if uniwow_api::theme::fold_button(ui, unfolded.contains(&at.key)).clicked() {
                             toggled = Some(at.key.clone());
                         }
                         let mut text = egui::RichText::new(&at.label);
