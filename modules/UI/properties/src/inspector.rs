@@ -16,7 +16,7 @@ use uniwow_api::egui;
 use uniwow_api::scene::components::{Component, FieldKind};
 use uniwow_api::scene::{self, EntityId, Kind, Snapshot};
 use uniwow_api::serde_json::{Value, json};
-use uniwow_api::{CallId, Context, JobId, JobOutcome, log};
+use uniwow_api::{CallId, Context, JobId, JobOutcome, log, theme};
 
 /// The providers whose entities are written through `<provider>.write`, and the fields of each.
 const WRITTEN: [(&str, &[&str]); 3] = [
@@ -451,12 +451,11 @@ impl Inspector {
             ui.vertical_centered(|ui| ui.weak("Nothing selected: click an object in the view or the Hierarchy."));
             return;
         }
-        self.header(ui, &snapshot, &scene, &ids);
+        theme::card(ui, |ui| self.header(ui, &snapshot, &scene, &ids));
         let read = self.read.clone();
         for refused in read.refused.iter().chain(&self.said) {
             ui.colored_label(ui.visuals().warn_fg_color, refused);
         }
-        ui.separator();
         let values: Vec<(EntityId, Value)> = read.values.iter().filter(|(id, _)| ids.contains(id)).cloned().collect();
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
@@ -618,18 +617,25 @@ impl Inspector {
         snapshot: &Snapshot,
         ctx: &mut Context,
     ) {
-        egui::CollapsingHeader::new("Transform").default_open(true).show(ui, |ui| {
-            if values.is_empty() {
-                // Shown from the registry, read only: the live world, the rooms, the doodads of the
-                // buildings, the terrain.
-                if let [id] = ids
-                    && let Some(entity) = snapshot.get(id)
-                {
-                    let [x, y, z] = entity.origin();
-                    ui.label(format!("Position {x:.2}, {y:.2}, {z:.2}"));
-                }
-                let doodad_of_building = ids.iter().any(|id| id.kind == Kind::BuildingDoodad);
-                ui.label(
+        theme::section(
+            ui,
+            egui::Id::new("inspector transform"),
+            theme::icon::SLIDERS,
+            "Transform",
+            None,
+            true,
+            |ui| {
+                if values.is_empty() {
+                    // Shown from the registry, read only: the live world, the rooms, the doodads of the
+                    // buildings, the terrain.
+                    if let [id] = ids
+                        && let Some(entity) = snapshot.get(id)
+                    {
+                        let [x, y, z] = entity.origin();
+                        ui.label(format!("Position {x:.2}, {y:.2}, {z:.2}"));
+                    }
+                    let doodad_of_building = ids.iter().any(|id| id.kind == Kind::BuildingDoodad);
+                    ui.label(
                     egui::RichText::new(if doodad_of_building {
                         "Read only: a doodad of a building belongs to the building's file, changed for every placement of it in a later step."
                     } else {
@@ -637,128 +643,154 @@ impl Inspector {
                     })
                     .weak(),
                 );
-                return;
-            }
-            if unread > 0 {
-                ui.label(egui::RichText::new(format!("{unread} of the selection read only, left as they are")).weak());
-            }
-            let mut writes = Vec::new();
-            let single = values.len() == 1;
-            let mut drag: Option<DragEvent> = None;
-            egui::Grid::new("inspector transform")
-                .num_columns(4)
-                .min_col_width(LABEL_WIDTH / 2.0)
-                .spacing([6.0, 4.0])
-                .show(ui, |ui| {
-                    for (field, label, vector) in TRANSFORM {
-                        if shown(values, "transform", field, if vector { Some(0) } else { None }) == Shown::Missing {
-                            continue;
-                        }
-                        ui.label(label);
-                        let axes: Vec<Option<usize>> = if vector { vec![Some(0), Some(1), Some(2)] } else { vec![None] };
-                        for axis in axes {
-                            let key = format!("{field}:{axis:?}");
-                            let value = shown(values, "transform", field, axis);
-                            ui.horizontal(|ui| {
-                                if let Some(axis) = axis {
-                                    let (letter, colour) = AXES[axis];
-                                    ui.label(egui::RichText::new(letter).color(colour).strong());
-                                }
-                                match value {
-                                    // One value: dragged or typed, as Unity does.
-                                    Shown::Same(number) if single => {
-                                        let held = match &self.dragging {
-                                            Some((dragged, _, at)) if *dragged == key => *at,
-                                            _ => number,
-                                        };
-                                        let mut edited = held;
-                                        let speed = if field == "scale" { 0.01 } else if field == "rotation" { 0.5 } else { 0.1 };
-                                        let response = ui.add(
-                                            egui::DragValue::new(&mut edited)
-                                                .speed(speed)
-                                                .max_decimals(3)
-                                                .min_decimals(1),
-                                        );
-                                        if response.drag_started() {
-                                            drag = Some(DragEvent::Started(key.clone(), field, edited));
-                                        } else if response.drag_stopped() {
-                                            drag = Some(DragEvent::Stopped(field, axis, edited));
-                                        } else if response.changed() {
-                                            drag = Some(if response.dragged() {
-                                                DragEvent::Moved(key.clone(), field, axis, edited)
-                                            } else {
-                                                DragEvent::Typed(field, axis, edited)
-                                            });
-                                        }
-                                    }
-                                    // Several: a change typed, +n, -=n, *n, /n from each one's own.
-                                    value => {
-                                        let value = text(&value);
-                                        let typed = self.typed.entry(key.clone()).or_insert_with(|| value.clone());
-                                        let response = ui.add(egui::TextEdit::singleline(typed).desired_width(56.0));
-                                        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                                            if *typed != value && !typed.trim().is_empty() && typed.trim() != "—" {
-                                                writes.push((field, axis, typed.trim().to_owned()));
-                                            }
-                                        } else if !response.has_focus() && *typed != value {
-                                            *typed = value;
-                                        }
-                                    }
-                                }
-                            });
-                        }
-                        ui.end_row();
-                    }
-                });
-            let writable: Vec<EntityId> = values.iter().map(|(id, _)| *id).collect();
-            match drag {
-                Some(DragEvent::Started(key, field, at)) => {
-                    let gesture = ctx.begin_gesture(&format!("Drag the {field}"));
-                    self.dragging = Some((key, gesture, at));
+                    return;
                 }
-                Some(DragEvent::Moved(key, field, axis, at)) => {
-                    if let Some((_, _, held)) = self.dragging.as_mut().filter(|(dragged, _, _)| *dragged == key) {
-                        *held = at;
-                    }
-                    self.write_in(&[(field, axis, format!("{at}"))], &writable, snapshot, ctx, false);
+                if unread > 0 {
+                    ui.label(
+                        egui::RichText::new(format!("{unread} of the selection read only, left as they are")).weak(),
+                    );
                 }
-                Some(DragEvent::Stopped(field, axis, at)) => {
-                    self.write_in(&[(field, axis, format!("{at}"))], &writable, snapshot, ctx, false);
-                    if let Some((_, gesture, _)) = self.dragging.take() {
-                        ctx.end_gesture(gesture);
-                    }
-                }
-                Some(DragEvent::Typed(field, axis, at)) => writes.push((field, axis, format!("{at}"))),
-                None => {}
-            }
-            if !single {
-                ui.label(egui::RichText::new("Type a value, or +n, -=n, *n, /n to change each from its own.").weak().small());
-            }
-            ui.horizontal(|ui| {
-                if ui.button("Copy").clicked() {
-                    self.copied = values.last().map(|(_, value)| value["components"]["transform"].clone());
-                }
-                if ui.add_enabled(self.copied.is_some(), egui::Button::new("Paste")).clicked()
-                    && let Some(copied) = &self.copied
-                {
-                    for (field, _, vector) in TRANSFORM {
-                        let axes: Vec<Option<usize>> = if vector { vec![Some(0), Some(1), Some(2)] } else { vec![None] };
-                        for axis in axes {
-                            let value = match axis {
-                                Some(axis) => copied[field].get(axis).and_then(Value::as_f64),
-                                None => copied[field].as_f64(),
+                let mut writes = Vec::new();
+                let single = values.len() == 1;
+                let mut drag: Option<DragEvent> = None;
+                egui::Grid::new("inspector transform")
+                    .num_columns(4)
+                    .min_col_width(LABEL_WIDTH / 2.0)
+                    .spacing([6.0, 4.0])
+                    .show(ui, |ui| {
+                        for (field, label, vector) in TRANSFORM {
+                            if shown(values, "transform", field, if vector { Some(0) } else { None }) == Shown::Missing
+                            {
+                                continue;
+                            }
+                            ui.label(label);
+                            let axes: Vec<Option<usize>> = if vector {
+                                vec![Some(0), Some(1), Some(2)]
+                            } else {
+                                vec![None]
                             };
-                            if let Some(value) = value {
-                                writes.push((field, axis, format!("{value}")));
+                            for axis in axes {
+                                let key = format!("{field}:{axis:?}");
+                                let value = shown(values, "transform", field, axis);
+                                ui.horizontal(|ui| {
+                                    if let Some(axis) = axis {
+                                        let (letter, colour) = AXES[axis];
+                                        ui.label(egui::RichText::new(letter).color(colour).strong());
+                                    }
+                                    match value {
+                                        // One value: dragged or typed, as Unity does.
+                                        Shown::Same(number) if single => {
+                                            let held = match &self.dragging {
+                                                Some((dragged, _, at)) if *dragged == key => *at,
+                                                _ => number,
+                                            };
+                                            let mut edited = held;
+                                            let speed = if field == "scale" {
+                                                0.01
+                                            } else if field == "rotation" {
+                                                0.5
+                                            } else {
+                                                0.1
+                                            };
+                                            let response = ui.add(
+                                                egui::DragValue::new(&mut edited)
+                                                    .speed(speed)
+                                                    .max_decimals(3)
+                                                    .min_decimals(1),
+                                            );
+                                            if response.drag_started() {
+                                                drag = Some(DragEvent::Started(key.clone(), field, edited));
+                                            } else if response.drag_stopped() {
+                                                drag = Some(DragEvent::Stopped(field, axis, edited));
+                                            } else if response.changed() {
+                                                drag = Some(if response.dragged() {
+                                                    DragEvent::Moved(key.clone(), field, axis, edited)
+                                                } else {
+                                                    DragEvent::Typed(field, axis, edited)
+                                                });
+                                            }
+                                        }
+                                        // Several: a change typed, +n, -=n, *n, /n from each one's own.
+                                        value => {
+                                            let value = text(&value);
+                                            let typed = self.typed.entry(key.clone()).or_insert_with(|| value.clone());
+                                            let response =
+                                                ui.add(egui::TextEdit::singleline(typed).desired_width(56.0));
+                                            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                                if *typed != value && !typed.trim().is_empty() && typed.trim() != "—"
+                                                {
+                                                    writes.push((field, axis, typed.trim().to_owned()));
+                                                }
+                                            } else if !response.has_focus() && *typed != value {
+                                                *typed = value;
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                            ui.end_row();
+                        }
+                    });
+                let writable: Vec<EntityId> = values.iter().map(|(id, _)| *id).collect();
+                match drag {
+                    Some(DragEvent::Started(key, field, at)) => {
+                        let gesture = ctx.begin_gesture(&format!("Drag the {field}"));
+                        self.dragging = Some((key, gesture, at));
+                    }
+                    Some(DragEvent::Moved(key, field, axis, at)) => {
+                        if let Some((_, _, held)) = self.dragging.as_mut().filter(|(dragged, _, _)| *dragged == key) {
+                            *held = at;
+                        }
+                        self.write_in(&[(field, axis, format!("{at}"))], &writable, snapshot, ctx, false);
+                    }
+                    Some(DragEvent::Stopped(field, axis, at)) => {
+                        self.write_in(&[(field, axis, format!("{at}"))], &writable, snapshot, ctx, false);
+                        if let Some((_, gesture, _)) = self.dragging.take() {
+                            ctx.end_gesture(gesture);
+                        }
+                    }
+                    Some(DragEvent::Typed(field, axis, at)) => writes.push((field, axis, format!("{at}"))),
+                    None => {}
+                }
+                if !single {
+                    ui.label(
+                        egui::RichText::new("Type a value, or +n, -=n, *n, /n to change each from its own.")
+                            .weak()
+                            .small(),
+                    );
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Copy").clicked() {
+                        self.copied = values.last().map(|(_, value)| value["components"]["transform"].clone());
+                    }
+                    if ui
+                        .add_enabled(self.copied.is_some(), egui::Button::new("Paste"))
+                        .clicked()
+                        && let Some(copied) = &self.copied
+                    {
+                        for (field, _, vector) in TRANSFORM {
+                            let axes: Vec<Option<usize>> = if vector {
+                                vec![Some(0), Some(1), Some(2)]
+                            } else {
+                                vec![None]
+                            };
+                            for axis in axes {
+                                let value = match axis {
+                                    Some(axis) => copied[field].get(axis).and_then(Value::as_f64),
+                                    None => copied[field].as_f64(),
+                                };
+                                if let Some(value) = value {
+                                    writes.push((field, axis, format!("{value}")));
+                                }
                             }
                         }
                     }
+                });
+                if !writes.is_empty() {
+                    self.write(&writes, &writable, snapshot, ctx);
                 }
-            });
-            if !writes.is_empty() {
-                self.write(&writes, &writable, snapshot, ctx);
-            }
-        });
+            },
+        );
     }
 
     fn model_ui(&self, ui: &mut egui::Ui, values: &[(EntityId, Value)]) {
@@ -766,17 +798,25 @@ impl Inspector {
         let Some(first) = models.first() else {
             return;
         };
-        egui::CollapsingHeader::new("Model").default_open(true).show(ui, |ui| {
-            let Some(fields) = first.as_object() else {
-                return;
-            };
-            property_grid(ui, "inspector model", |ui| {
-                for (name, value) in fields {
-                    let same = models.iter().all(|model| model[name] == *value);
-                    property(ui, name, &if same { plain(value) } else { "—".to_owned() });
-                }
-            });
-        });
+        theme::section(
+            ui,
+            egui::Id::new("inspector model"),
+            theme::icon::CUBE,
+            "Model",
+            None,
+            true,
+            |ui| {
+                let Some(fields) = first.as_object() else {
+                    return;
+                };
+                property_grid(ui, "inspector model", |ui| {
+                    for (name, value) in fields {
+                        let same = models.iter().all(|model| model[name] == *value);
+                        property(ui, name, &if same { plain(value) } else { "—".to_owned() });
+                    }
+                });
+            },
+        );
     }
 
     /// The quests the template of the spawns shown starts and ends, one template at a time: each
@@ -788,64 +828,73 @@ impl Inspector {
         let Some(quests) = first["components"]["quests"].as_array() else {
             return;
         };
-        egui::CollapsingHeader::new("Quests").default_open(true).show(ui, |ui| {
-            let template = &first["components"]["model"]["template"];
-            if values
-                .iter()
-                .any(|(_, value)| value["components"]["model"]["template"] != *template)
-            {
-                ui.label(egui::RichText::new("The quests of one template at a time.").weak());
-                return;
-            }
-            let ids: Vec<String> = values.iter().map(|(id, _)| id.to_string()).collect();
-            let mut changes = Vec::new();
-            if quests.is_empty() {
-                ui.label(egui::RichText::new("No quest.").weak());
-            }
-            egui::Grid::new("inspector quests").num_columns(3).show(ui, |ui| {
-                for quest in quests {
-                    let (id, role) = (quest["quest"].as_u64().unwrap_or(0), plain(&quest["role"]));
-                    ui.label(format!("{role} {id}"));
-                    ui.label(plain(&quest["title"]));
-                    if ui.small_button("✖").on_hover_text("Take this quest away").clicked() {
-                        changes.push((id, role, false));
-                    }
-                    ui.end_row();
+        let count = format!("{}", quests.len());
+        theme::section(
+            ui,
+            egui::Id::new("inspector quests"),
+            theme::icon::QUESTION,
+            "Quests",
+            Some(&count),
+            true,
+            |ui| {
+                let template = &first["components"]["model"]["template"];
+                if values
+                    .iter()
+                    .any(|(_, value)| value["components"]["model"]["template"] != *template)
+                {
+                    ui.label(egui::RichText::new("The quests of one template at a time.").weak());
+                    return;
                 }
-            });
-            ui.horizontal(|ui| {
-                ui.label("🔍");
-                ui.text_edit_singleline(&mut self.quest_search)
-                    .on_hover_text("A quest by its title or its id");
-            });
-            let search = self.quest_search.trim().to_owned();
-            if !search.is_empty() && self.searched != search {
-                let call = ctx.call("spawns.quest_titles", json!({ "search": search }));
-                self.searching = Some((call, search.clone()));
-                self.searched = search.clone();
-            }
-            if search.is_empty() {
-                self.found.clear();
-                self.searched.clear();
-            }
-            for (id, title) in &self.found {
-                ui.horizontal(|ui| {
-                    ui.label(format!("{id} {title}"));
-                    for role in ["starts", "ends"] {
-                        if ui.small_button(format!("+ {role}")).clicked() {
-                            changes.push((*id, role.to_owned(), true));
+                let ids: Vec<String> = values.iter().map(|(id, _)| id.to_string()).collect();
+                let mut changes = Vec::new();
+                if quests.is_empty() {
+                    ui.label(egui::RichText::new("No quest.").weak());
+                }
+                egui::Grid::new("inspector quests").num_columns(3).show(ui, |ui| {
+                    for quest in quests {
+                        let (id, role) = (quest["quest"].as_u64().unwrap_or(0), plain(&quest["role"]));
+                        ui.label(format!("{role} {id}"));
+                        ui.label(plain(&quest["title"]));
+                        if ui.small_button("✖").on_hover_text("Take this quest away").clicked() {
+                            changes.push((id, role, false));
                         }
+                        ui.end_row();
                     }
                 });
-            }
-            for (quest, role, given) in changes {
-                let call = ctx.call(
-                    "spawns.quests",
-                    json!({ "ids": ids, "quest": quest, "role": role, "given": given }),
-                );
-                self.waiting.push(call);
-            }
-        });
+                ui.horizontal(|ui| {
+                    ui.label("🔍");
+                    ui.text_edit_singleline(&mut self.quest_search)
+                        .on_hover_text("A quest by its title or its id");
+                });
+                let search = self.quest_search.trim().to_owned();
+                if !search.is_empty() && self.searched != search {
+                    let call = ctx.call("spawns.quest_titles", json!({ "search": search }));
+                    self.searching = Some((call, search.clone()));
+                    self.searched = search.clone();
+                }
+                if search.is_empty() {
+                    self.found.clear();
+                    self.searched.clear();
+                }
+                for (id, title) in &self.found {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{id} {title}"));
+                        for role in ["starts", "ends"] {
+                            if ui.small_button(format!("+ {role}")).clicked() {
+                                changes.push((*id, role.to_owned(), true));
+                            }
+                        }
+                    });
+                }
+                for (quest, role, given) in changes {
+                    let call = ctx.call(
+                        "spawns.quests",
+                        json!({ "ids": ids, "quest": quest, "role": role, "given": given }),
+                    );
+                    self.waiting.push(call);
+                }
+            },
+        );
     }
 
     /// The components the modules declared that fit the entities shown, each field drawn by its
@@ -854,10 +903,15 @@ impl Inspector {
         for (component, values) in &read.declared {
             let values: Vec<(EntityId, Value)> = values.iter().filter(|(id, _)| ids.contains(id)).cloned().collect();
             let mut writes: Vec<(String, Option<usize>, String)> = Vec::new();
-            egui::CollapsingHeader::new(&component.label)
-                .id_salt(("declared", &component.module, &component.name))
-                .default_open(true)
-                .show(ui, |ui| {
+            let id = egui::Id::new(("declared", &component.module, &component.name));
+            theme::section(
+                ui,
+                id,
+                theme::icon::MODULE,
+                &component.label,
+                Some(&component.module),
+                true,
+                |ui| {
                     if values.is_empty() {
                         ui.label(egui::RichText::new("Nothing read.").weak());
                         return;
@@ -930,7 +984,8 @@ impl Inspector {
                     {
                         ui.label(egui::RichText::new("Its drawing is not at hand.").weak());
                     }
-                });
+                },
+            );
             if let (Some(command), false) = (&component.write, writes.is_empty()) {
                 let written: Vec<String> = values.iter().map(|(id, _)| id.to_string()).collect();
                 let gesture = ctx.begin_gesture(&format!("Set the {}", writes[0].0));
@@ -965,9 +1020,14 @@ impl Inspector {
             .map(|(id, _)| id.to_string())
             .collect();
         let mut calls: Vec<(&str, Value, &str)> = Vec::new();
-        egui::CollapsingHeader::new("Materials")
-            .default_open(true)
-            .show(ui, |ui| {
+        theme::section(
+            ui,
+            egui::Id::new("inspector materials"),
+            theme::icon::STACK,
+            "Materials",
+            None,
+            true,
+            |ui| {
                 if let Some(refused) = materials["refused"].as_str() {
                     ui.colored_label(ui.visuals().warn_fg_color, refused);
                     return;
@@ -1041,7 +1101,8 @@ impl Inspector {
                         }
                     }
                 }
-            });
+            },
+        );
         for (command, arguments, label) in calls {
             let gesture = ctx.begin_gesture(label);
             let call = ctx.call(command, arguments);
@@ -1125,22 +1186,27 @@ impl Inspector {
 
     /// The data as the files and the database store them, folded at the bottom: of one entity.
     fn raw_ui(&self, ui: &mut egui::Ui, values: &[(EntityId, Value)]) {
-        let [(id, value)] = values else {
+        let [(_, value)] = values else {
             return;
         };
         let Some(fields) = value["components"]["raw"].as_object() else {
             return;
         };
-        egui::CollapsingHeader::new("Raw data")
-            .id_salt(("inspector raw", id))
-            .default_open(false)
-            .show(ui, |ui| {
+        theme::section(
+            ui,
+            egui::Id::new("inspector raw"),
+            theme::icon::INFO,
+            "Raw data",
+            Some("as stored"),
+            false,
+            |ui| {
                 property_grid(ui, "inspector raw", |ui| {
                     for (name, value) in fields {
                         property(ui, name, &plain(value));
                     }
                 });
-            });
+            },
+        );
     }
 }
 
@@ -1174,10 +1240,15 @@ fn components_ui(ui: &mut egui::Ui, values: &[(EntityId, Value)]) {
         if values.len() > 1 {
             label = format!("{label} (of {first})");
         }
-        egui::CollapsingHeader::new(label)
-            .id_salt(("inspector component", name))
-            .default_open(true)
-            .show(ui, |ui| fields_ui(ui, name, component));
+        theme::section(
+            ui,
+            egui::Id::new(("inspector component", name)),
+            theme::icon::LOG,
+            &label,
+            None,
+            true,
+            |ui| fields_ui(ui, name, component),
+        );
     }
 }
 

@@ -667,6 +667,75 @@ pub fn progress_bar(ui: &mut egui::Ui, fraction: Option<f32>, width: f32) -> egu
     response
 }
 
+/// A card of a panel without a header, as `section` draws its body: what leads a panel, such as
+/// the name of what an inspector shows.
+pub fn card<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let (p, m) = (palette(), current().metrics);
+    let shown = egui::Frame::new()
+        .fill(Palette::mix(p.panel, p.raised, 0.6))
+        .stroke(Stroke::new(1.0, p.border))
+        .corner_radius(CornerRadius::same(m.radius))
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            body(ui)
+        });
+    ui.add_space(6.0);
+    shown.inner
+}
+
+/// A section of a panel: a card a little raised over it, rounded and edged, its header the icon
+/// in the accent, the title strong and a note weak, folded and unfolded by a click on it, its body
+/// under a line; the cards of a panel a few points apart. Whether it is open kept by `id`. What the
+/// body gave, while open.
+pub fn section<R>(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    icon: &str,
+    title: &str,
+    note: Option<&str>,
+    open: bool,
+    body: impl FnOnce(&mut egui::Ui) -> R,
+) -> Option<R> {
+    let (p, m) = (palette(), current().metrics);
+    let shown = egui::Frame::new()
+        .fill(Palette::mix(p.panel, p.raised, 0.35))
+        .stroke(Stroke::new(1.0, p.border))
+        .corner_radius(CornerRadius::same(m.radius))
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, open);
+            let header = ui
+                .horizontal(|ui| {
+                    let arrow = if state.is_open() { "\u{25BE}" } else { "\u{25B8}" };
+                    ui.label(egui::RichText::new(arrow).color(p.text_weak));
+                    ui.label(egui::RichText::new(icon).color(p.accent));
+                    ui.label(egui::RichText::new(title).strong().color(p.text_strong));
+                    if let Some(note) = note {
+                        ui.label(egui::RichText::new(note).small().color(p.text_weak));
+                    }
+                    ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
+                })
+                .response
+                .interact(Sense::click());
+            if header.clicked() {
+                state.toggle(ui);
+            }
+            let out = state.is_open().then(|| {
+                let line = ui.available_rect_before_wrap();
+                ui.painter()
+                    .hline(line.x_range(), line.top() + 2.0, Stroke::new(1.0, p.border));
+                ui.add_space(6.0);
+                body(ui)
+            });
+            state.store(ui.ctx());
+            out
+        });
+    ui.add_space(6.0);
+    shown.inner
+}
+
 /// A square button showing `icon`, lit by the pointer in `time::HOVER`, tinted by the accent while
 /// pressed, `tooltip` told on hover.
 pub fn icon_button(ui: &mut egui::Ui, icon: &str, tooltip: &str) -> egui::Response {
