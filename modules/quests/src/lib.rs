@@ -260,7 +260,9 @@ impl QuestsModule {
         } else {
             egui::TextEdit::singleline(&mut text).desired_width(width)
         };
-        let response = ui.add(edit);
+        let response = ui
+            .add(edit)
+            .on_hover_text("Written once you leave the field, one undo entry; to the database by Apply");
         if response.changed() {
             self.typing = Some((key.clone(), text.clone()));
         }
@@ -333,7 +335,11 @@ impl QuestsModule {
                         None => "",
                     };
                     let label = format!("{mark}{id}  {}", self.title(id));
-                    if ui.selectable_label(self.open == Some(id), label).clicked() {
+                    if ui
+                        .selectable_label(self.open == Some(id), label)
+                        .on_hover_text("Opens the quest, read from the database of the server chosen")
+                        .clicked()
+                    {
                         opened = Some(id);
                     }
                 }
@@ -400,7 +406,11 @@ impl QuestsModule {
             let ours = data::RANGE.contains(&id);
             if edit.deleted {
                 ui.colored_label(ui.visuals().warn_fg_color, "Deleted once applied");
-                if ui.button("Keep it").clicked() {
+                if ui
+                    .button("Keep it")
+                    .on_hover_text("It is no longer deleted when applied")
+                    .clicked()
+                {
                     let mut after = self.edits.clone();
                     if let Some(edit) = after.quests.get_mut(&id) {
                         edit.deleted = false;
@@ -409,7 +419,8 @@ impl QuestsModule {
                 }
             } else if ui
                 .add_enabled(ours, egui::Button::new("Delete"))
-                .on_disabled_hover_text("Only the quests of the editor's block are deleted here")
+                .on_hover_text("Deleted with its texts and givers once applied; in memory until then")
+                .on_disabled_hover_text("Only the quests of the editor's block (97000-97099) are deleted here")
                 .clicked()
             {
                 let mut after = self.edits.clone();
@@ -618,7 +629,11 @@ impl QuestsModule {
                     .unwrap_or_default();
                 ui.horizontal(|ui| {
                     for (role, label) in [("starts", "The selected start it"), ("ends", "The selected end it")] {
-                        if ui.add_enabled(!selected.is_empty(), egui::Button::new(label)).clicked() {
+                        if ui
+                            .add_enabled(!selected.is_empty(), egui::Button::new(label))
+                            .on_hover_text("The creatures and game objects selected in the scene give or take it; in memory with the spawns, written by Apply")
+                            .clicked()
+                        {
                             self.give(id, role, &selected, ctx);
                         }
                     }

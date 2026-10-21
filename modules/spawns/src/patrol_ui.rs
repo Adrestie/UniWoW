@@ -399,7 +399,11 @@ impl SpawnsModule {
                             drop(placing);
                             self.waypoints_for = None;
                         }
-                        if ui.button("Take the patrol away").clicked() {
+                        if ui
+                            .button("Take the patrol away")
+                            .on_hover_text("It stands still and its path is taken away; in memory, written by Apply")
+                            .clicked()
+                        {
                             self.unmake_patrol(guid, ctx);
                         }
                     }
@@ -499,12 +503,16 @@ impl SpawnsModule {
                                     .speed(0.1)
                                     .range(0.0..=50.0)
                                     .suffix(" yd"),
-                            );
+                            )
+                            .on_hover_text("How far behind the leader it walks, in yards; written by Apply");
                             ui.add(
                                 egui::DragValue::new(&mut member.angle)
                                     .speed(1.0)
                                     .range(0.0..=360.0)
                                     .suffix("°"),
+                            )
+                            .on_hover_text(
+                                "The angle from the leader it walks at, in degrees, 180 right behind; written by Apply",
                             );
                             ui.end_row();
                         }
@@ -522,7 +530,13 @@ impl SpawnsModule {
                     self.change("Place the members of a group".to_owned(), after, ctx);
                 }
                 ui.horizontal(|ui| {
-                    if ui.button("Lay them out behind").clicked() {
+                    if ui
+                        .button("Lay them out behind")
+                        .on_hover_text(
+                            "Its members two by two behind it, a few yards apart; in memory, written by Apply",
+                        )
+                        .clicked()
+                    {
                         let guids: Vec<u64> = members.iter().map(|member| member.guid).collect();
                         let mut after = self.changes.clone();
                         after
@@ -531,7 +545,11 @@ impl SpawnsModule {
                             .insert(leader, Some((patrols::laid_out(&guids), ai)));
                         self.change("Lay a group out".to_owned(), after, ctx);
                     }
-                    if ui.button("Break the group").clicked() {
+                    if ui
+                        .button("Break the group")
+                        .on_hover_text("Its members follow it no longer; in memory, written by Apply")
+                        .clicked()
+                    {
                         let mut after = self.changes.clone();
                         after.patrols.groups.insert(leader, None);
                         self.change("Break a group".to_owned(), after, ctx);
@@ -543,7 +561,11 @@ impl SpawnsModule {
                     .find(&EntityId::creature(leader))
                     .map_or(format!("#{leader}"), |spawn| format!("{} #{leader}", spawn.name));
                 ui.label(format!("Follows {name}"));
-                if ui.button("Leave the group").clicked() {
+                if ui
+                    .button("Leave the group")
+                    .on_hover_text("It follows its leader no longer; in memory, written by Apply")
+                    .clicked()
+                {
                     let (members, ai) = now.groups[&leader].clone();
                     let left: Vec<Member> = members.into_iter().filter(|member| member.guid != guid).collect();
                     let mut after = self.changes.clone();

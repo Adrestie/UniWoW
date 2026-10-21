@@ -417,12 +417,24 @@ impl uniwow_api::viewport::Tool for ServersTool {
             .selected_text(format!("Server: {chosen}"))
             .show_ui(ui, |ui| {
                 for server in &servers {
-                    if ui.selectable_label(server.name == chosen, &server.name).clicked() && server.name != chosen {
+                    if ui
+                        .selectable_label(server.name == chosen, &server.name)
+                        .on_hover_text(format!(
+                            "Read and write {}: its world database, its observer, its bridge. Writes nothing.",
+                            server.name
+                        ))
+                        .clicked()
+                        && server.name != chosen
+                    {
                         *lock(&self.0.chose) = Some(server.name.clone());
                     }
                 }
                 ui.separator();
-                if ui.button("Servers…").clicked() {
+                if ui
+                    .button("Servers…")
+                    .on_hover_text("Declare the servers: their databases, observers and bridges")
+                    .clicked()
+                {
                     self.0.manage.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             })
@@ -648,20 +660,31 @@ impl WorldDbModule {
                     ui.vertical(|ui| {
                         ui.set_width(150.0);
                         for (at, server) in editing.servers.iter().enumerate() {
-                            if ui.selectable_label(editing.at == at, &server.name).clicked() {
+                            if ui
+                                .selectable_label(editing.at == at, &server.name)
+                                .on_hover_text("Shows its settings on the right")
+                                .clicked()
+                            {
                                 editing.at = at;
                             }
                         }
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
-                            if ui.button("Add").clicked() {
+                            if ui
+                                .button("Add")
+                                .on_hover_text("A new server to fill in; saved with Save")
+                                .clicked()
+                            {
                                 let name = servers::new_name(&editing.servers, "Server");
                                 let mut server = servers::of_json(&json!({ "name": name })).unwrap_or_default();
                                 server.name = name;
                                 editing.servers.push(server);
                                 editing.at = editing.servers.len() - 1;
                             }
-                            if ui.button("Duplicate").clicked()
+                            if ui
+                                .button("Duplicate")
+                                .on_hover_text("A copy of the server shown, to change; saved with Save")
+                                .clicked()
                                 && let Some(server) = editing.servers.get(editing.at).cloned()
                             {
                                 let name = servers::new_name(&editing.servers, &server.name);
@@ -670,6 +693,7 @@ impl WorldDbModule {
                             }
                             if ui
                                 .add_enabled(editing.servers.len() > 1, egui::Button::new("Remove"))
+                                .on_hover_text("Takes the server shown out of the list once saved; its database is not touched")
                                 .clicked()
                             {
                                 editing.servers.remove(editing.at);
@@ -685,36 +709,98 @@ impl WorldDbModule {
                         .num_columns(2)
                         .spacing([8.0, 4.0])
                         .show(ui, |ui| {
-                            let text = |ui: &mut egui::Ui, label: &str, value: &mut String, secret: bool| {
-                                ui.label(egui::RichText::new(label).weak());
-                                ui.add(egui::TextEdit::singleline(value).password(secret).desired_width(240.0));
+                            let text = |ui: &mut egui::Ui, label: &str, value: &mut String, secret: bool, hint: &str| {
+                                ui.label(egui::RichText::new(label).weak()).on_hover_text(hint);
+                                ui.add(egui::TextEdit::singleline(value).password(secret).desired_width(240.0))
+                                    .on_hover_text(hint);
                                 ui.end_row();
                             };
-                            text(ui, "Name", &mut server.name, false);
-                            ui.strong("World database");
-                            ui.end_row();
-                            text(ui, "Address", &mut server.host, false);
-                            ui.label(egui::RichText::new("Port").weak());
-                            ui.add(egui::DragValue::new(&mut server.port));
-                            ui.end_row();
-                            text(ui, "User", &mut server.user, false);
-                            text(ui, "Database", &mut server.database, false);
-                            ui.strong("Observer");
-                            ui.end_row();
-                            ui.label(egui::RichText::new("Port").weak());
-                            ui.add(egui::DragValue::new(&mut server.observer_port));
-                            ui.end_row();
-                            text(ui, "Token", &mut server.observer_token, true);
-                            ui.label(egui::RichText::new("Port of its world").weak());
-                            ui.add(egui::DragValue::new(&mut server.world_port));
-                            ui.end_row();
-                            ui.strong("Bridge");
-                            ui.end_row();
-                            ui.label(egui::RichText::new("Port").weak());
-                            ui.add(egui::DragValue::new(&mut server.bridge_port));
-                            ui.end_row();
-                            text(ui, "Token", &mut server.bridge_token, true);
-                            text(ui, "Scripts written to", &mut server.sql_folder, false);
+                            let port = |ui: &mut egui::Ui, label: &str, value: &mut u16, hint: &str| {
+                                ui.label(egui::RichText::new(label).weak()).on_hover_text(hint);
+                                ui.add(egui::DragValue::new(value)).on_hover_text(hint);
+                                ui.end_row();
+                            };
+                            let heading = |ui: &mut egui::Ui, label: &str, hint: &str| {
+                                ui.strong(label).on_hover_text(hint);
+                                ui.end_row();
+                            };
+                            text(
+                                ui,
+                                "Name",
+                                &mut server.name,
+                                false,
+                                "The name shown in the lists of servers (the toolbar of the 3D view, the panel World database)",
+                            );
+                            heading(
+                                ui,
+                                "World database",
+                                "The MySQL database of the world of this server (acore_world…): its spawns, quests and patrols are read from it, and every Apply writes into it",
+                            );
+                            text(ui, "Address", &mut server.host, false, "The machine of MySQL: 127.0.0.1 for this one");
+                            port(ui, "Port", &mut server.port, "The port of MySQL, 3306 by default");
+                            text(
+                                ui,
+                                "User",
+                                &mut server.user,
+                                false,
+                                "The account of MySQL; its password is asked once, then kept in the Credential Manager",
+                            );
+                            text(
+                                ui,
+                                "Database",
+                                &mut server.database,
+                                false,
+                                "The name of the world database: acore_world, acore_world_test…",
+                            );
+                            heading(
+                                ui,
+                                "Observer",
+                                "mod-uniwow-observer, the module of the server that shows the world as it runs (the panel Live world): its creatures, players, hour and weather",
+                            );
+                            port(
+                                ui,
+                                "Port",
+                                &mut server.observer_port,
+                                "UniwowObserver.Port of mod_uniwow_observer.conf: 8087 for Nibelung, 8088 for the tests",
+                            );
+                            text(
+                                ui,
+                                "Token",
+                                &mut server.observer_token,
+                                true,
+                                "UniwowObserver.Token of mod_uniwow_observer.conf: the observer refuses any other",
+                            );
+                            port(
+                                ui,
+                                "Port of its world",
+                                &mut server.world_port,
+                                "WorldServerPort of worldserver.conf: the port the game connects to, to know the server runs",
+                            );
+                            heading(
+                                ui,
+                                "Bridge",
+                                "mod-uniwow-bridge, the module of the server that loads again what an Apply wrote, for it to be seen in the game at once, without starting the server again",
+                            );
+                            port(
+                                ui,
+                                "Port",
+                                &mut server.bridge_port,
+                                "UniwowBridge.Port of mod_uniwow_bridge.conf: 8092 for the tests, 8093 for Nibelung",
+                            );
+                            text(
+                                ui,
+                                "Token",
+                                &mut server.bridge_token,
+                                true,
+                                "UniwowBridge.Token of mod_uniwow_bridge.conf: the bridge refuses any other",
+                            );
+                            text(
+                                ui,
+                                "Scripts written to",
+                                &mut server.sql_folder,
+                                false,
+                                r"Optional. A folder each Apply is also written to as an SQL file (uniwow_<date>_<time>.sql), which can be played again as many times as wanted: the folder data\sql\db-world of a module of the server, which the server plays again when installed. Empty: the database alone.",
+                            );
                         });
                 });
                 ui.label(
@@ -727,8 +813,14 @@ impl WorldDbModule {
                 );
                 ui.separator();
                 ui.horizontal(|ui| {
-                    save = ui.button("Save").clicked();
-                    close = ui.button("Close").clicked();
+                    save = ui
+                        .button("Save")
+                        .on_hover_text("Keeps these servers in the settings of the editor; the server chosen connected again if it changed")
+                        .clicked();
+                    close = ui
+                        .button("Close")
+                        .on_hover_text("Closes the window; what was not saved is lost")
+                        .clicked();
                 });
             });
         if save {
@@ -895,10 +987,17 @@ impl Module for WorldDbModule {
                 }
                 ui.checkbox(&mut self.remember, "Remember password")
                     .on_hover_text("Kept in the Credential Manager of Windows once connected, for your account alone");
-                ui.checkbox(&mut at_start, "Connect automatically at startup");
+                ui.checkbox(&mut at_start, "Connect automatically at startup")
+                    .on_hover_text("At each start of the editor, with the password kept, without this window");
                 ui.horizontal(|ui| {
-                    connect |= ui.button("Connect").clicked();
-                    later = ui.button("Not now").clicked();
+                    connect |= ui
+                        .button("Connect")
+                        .on_hover_text("Connects to the world database of the server chosen, read only; writes nothing")
+                        .clicked();
+                    later = ui
+                        .button("Not now")
+                        .on_hover_text("Leaves the editor without the database: no spawns, quests nor patrols")
+                        .clicked();
                 });
                 ui.label(
                     egui::RichText::new(
@@ -945,7 +1044,13 @@ impl Module for WorldDbModule {
                 .selected_text(&server.name)
                 .show_ui(ui, |ui| {
                     for other in &servers {
-                        if ui.selectable_label(other.name == server.name, &other.name).clicked()
+                        if ui
+                            .selectable_label(other.name == server.name, &other.name)
+                            .on_hover_text(format!(
+                                "Read and write {}: its world database, its observer, its bridge. Writes nothing.",
+                                other.name
+                            ))
+                            .clicked()
                             && other.name != server.name
                         {
                             chosen = Some(other.name.clone());
@@ -1228,7 +1333,10 @@ impl WorldDbModule {
                             connected && rows > 0 && !busy,
                             egui::Button::new("Apply to the server…"),
                         )
-                        .on_hover_text("Writes every change above, one transaction: all or none")
+                        .on_hover_text(
+                            "Writes every change above into the world database of the server chosen, one transaction: \
+                             all or none; then its bridge loads them again in the game. Asks first.",
+                        )
                         .clicked()
                     {
                         self.confirming = Some(Confirming::Apply);
@@ -1352,7 +1460,7 @@ impl WorldDbModule {
                 (
                     "Choose another server",
                     format!(
-                        "{rows} changes of rows wait for {}. Choose {name} all the same? They stay in the project and                          are written to the server chosen when applied: apply them first to write them here.",
+                        "{rows} changes of rows wait for {}. Choose {name} all the same? They stay in the project and are written to the server chosen when applied: apply them first to write them here.",
                         settings.database
                     ),
                 )
@@ -1367,8 +1475,11 @@ impl WorldDbModule {
                 ui.set_max_width(420.0);
                 ui.label(text);
                 ui.horizontal(|ui| {
-                    yes = ui.button(title).clicked();
-                    no = ui.button("Cancel").clicked();
+                    yes = ui.button(title).on_hover_text("Goes on, as said above").clicked();
+                    no = ui
+                        .button("Cancel")
+                        .on_hover_text("Nothing done, nothing written")
+                        .clicked();
                 });
             });
         if yes {

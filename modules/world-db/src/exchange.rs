@@ -303,12 +303,21 @@ impl WorldDbModule {
                                     Choice::Ignore => "Leave it out".to_owned(),
                                 };
                                 let same = std::mem::discriminant(&chosen[at]) == std::mem::discriminant(&choice);
-                                if ui.selectable_label(same, label).clicked() && !same {
+                                let hint = match &choice {
+                                    Choice::Renumber => "Gives it the next free id on this server; what names it follows",
+                                    Choice::Overwrite => "The file's rows written over this server's",
+                                    Choice::Keep => "This server's rows kept, the file's left out",
+                                    Choice::Insert => "The rows of the file inserted on this server",
+                                    Choice::Link(_) => "Named by the id typed, of an entity of this server, in place of the file's",
+                                    Choice::Ignore => "Left out of the import",
+                                };
+                                if ui.selectable_label(same, label).on_hover_text(hint).clicked() && !same {
                                     chosen[at] = choice;
                                 }
                             }
                             if let Choice::Link(id) = &mut chosen[at] {
-                                ui.add(egui::TextEdit::singleline(id).hint_text("id").desired_width(80.0));
+                                ui.add(egui::TextEdit::singleline(id).hint_text("id").desired_width(80.0))
+                                    .on_hover_text("The id on this server of the entity to name in its place");
                             }
                         });
                         ui.add_space(4.0);
@@ -316,8 +325,11 @@ impl WorldDbModule {
                 });
                 ui.separator();
                 ui.horizontal(|ui| {
-                    import = ui.button(format!("Import into {}", server.name)).clicked();
-                    cancel = ui.button("Cancel").clicked();
+                    import = ui
+                        .button(format!("Import into {}", server.name))
+                        .on_hover_text("Writes the rows as chosen into the world database of this server, one transaction; then its bridge loads them again")
+                        .clicked();
+                    cancel = ui.button("Cancel").on_hover_text("Nothing written").clicked();
                 });
             });
         if cancel {

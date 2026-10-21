@@ -244,10 +244,17 @@ impl WorldDbModule {
                                 .hint_text("Password"),
                         );
                         go = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        ui.checkbox(&mut self.remember, "Remember password");
+                        ui.checkbox(&mut self.remember, "Remember password")
+                            .on_hover_text("Kept in the Credential Manager of Windows once the changes are written");
                         ui.horizontal(|ui| {
-                            go |= ui.button("Send").clicked();
-                            cancel = ui.button("Cancel").clicked();
+                            go |= ui
+                                .button("Send")
+                                .on_hover_text("Reads the rows there first; writes nothing before you choose")
+                                .clicked();
+                            cancel = ui
+                                .button("Cancel")
+                                .on_hover_text("Nothing read, nothing written")
+                                .clicked();
                         });
                     });
                 if go {
@@ -286,9 +293,15 @@ impl WorldDbModule {
                             }
                         });
                         ui.horizontal(|ui| {
-                            overwrite = ui.button("Overwrite them").clicked();
-                            leave = ui.button("Leave them as they are there").clicked();
-                            cancel = ui.button("Cancel").clicked();
+                            overwrite = ui
+                                .button("Overwrite them")
+                                .on_hover_text("Writes every row there as it is here, these ones too; one transaction")
+                                .clicked();
+                            leave = ui
+                                .button("Leave them as they are there")
+                                .on_hover_text("Writes the others alone; these keep what the other server has")
+                                .clicked();
+                            cancel = ui.button("Cancel").on_hover_text("Nothing written").clicked();
                         });
                     });
                 if overwrite {
@@ -333,6 +346,7 @@ impl WorldDbModule {
                             &mut picked,
                             format!("{} · {server} · {} rows", application.when, application.rows()),
                         )
+                        .on_hover_text("Picked to be sent to another server or exported to a file; writes nothing")
                         .changed()
                     {
                         if picked {
