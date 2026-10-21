@@ -659,6 +659,7 @@ impl Inspector {
                 let mut writes = Vec::new();
                 let single = values.len() == 1;
                 let mut drag: Option<DragEvent> = None;
+                let (width, letter) = (field_width(ui), letter_width(ui));
                 egui::Grid::new("inspector transform")
                     .num_columns(4)
                     .min_col_width(LABEL_WIDTH / 2.0)
@@ -680,8 +681,11 @@ impl Inspector {
                                 let value = shown(values, "transform", field, axis);
                                 ui.horizontal(|ui| {
                                     if let Some(axis) = axis {
-                                        let (letter, colour) = AXES[axis];
-                                        ui.label(egui::RichText::new(letter).color(colour).strong());
+                                        let (name, colour) = AXES[axis];
+                                        ui.add_sized(
+                                            [letter, ui.spacing().interact_size.y],
+                                            egui::Label::new(egui::RichText::new(name).color(colour).strong()),
+                                        );
                                     }
                                     match value {
                                         // One value: dragged or typed, as Unity does.
@@ -698,7 +702,8 @@ impl Inspector {
                                             } else {
                                                 0.1
                                             };
-                                            let response = ui.add(
+                                            let response = ui.add_sized(
+                                                [width, ui.spacing().interact_size.y],
                                                 egui::DragValue::new(&mut edited)
                                                     .speed(speed)
                                                     .max_decimals(3)
@@ -720,8 +725,10 @@ impl Inspector {
                                         value => {
                                             let value = text(&value);
                                             let typed = self.typed.entry(key.clone()).or_insert_with(|| value.clone());
-                                            let response =
-                                                ui.add(egui::TextEdit::singleline(typed).desired_width(56.0));
+                                            let response = ui.add_sized(
+                                                [width, ui.spacing().interact_size.y],
+                                                egui::TextEdit::singleline(typed),
+                                            );
                                             if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                                                 if *typed != value && !typed.trim().is_empty() && typed.trim() != "—"
                                                 {
@@ -1317,6 +1324,27 @@ pub fn shown_value(value: &Value) -> String {
 
 /// The width of the column of the names of the fields.
 const LABEL_WIDTH: f32 = 110.0;
+
+/// The characters a field of the Transform holds, all of them the same width.
+const FIELD_CHARACTERS: usize = 7;
+
+/// The width of a field of the Transform: `FIELD_CHARACTERS` digits and its margins.
+fn field_width(ui: &egui::Ui) -> f32 {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let digit = ui.fonts_mut(|fonts| fonts.glyph_width(&font, '0'));
+    digit * FIELD_CHARACTERS as f32 + ui.spacing().button_padding.x * 2.0 + 2.0
+}
+
+/// The width of the letter of an axis, the widest of them, for the fields to stand in columns.
+fn letter_width(ui: &egui::Ui) -> f32 {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    ui.fonts_mut(|fonts| {
+        fonts
+            .glyph_width(&font, 'X')
+            .max(fonts.glyph_width(&font, 'Y'))
+            .max(fonts.glyph_width(&font, 'Z'))
+    }) + 2.0
+}
 
 /// The letters and colours of the axes, as the gizmos draw them.
 const AXES: [(&str, egui::Color32); 3] = [

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 
-use uniwow_api::glam::Vec3;
+use uniwow_api::glam::{Quat, Vec3};
 use uniwow_api::hotkey::{Hotkey, HotkeyKind, Keys};
 use uniwow_api::scene::{self, Answer, EntityId, Kind, Question, Select};
 use uniwow_api::serde_json::json;
@@ -92,15 +92,35 @@ enum Asked {
     },
 }
 
-/// The changes of a drag of a gizmo, as the providers take them: the field, the axis, the change.
-type Writes = Vec<(&'static str, Option<usize>, String)>;
+/// A change a drag of a gizmo makes to the selection, from the frame before.
+#[derive(Clone, Debug, PartialEq)]
+enum Change {
+    /// Each one moved by so much in the world.
+    Shift(Vec3),
+    /// Each one turned about its own origin, by degrees about an axis of the world.
+    Turn(Vec3, f32),
+    /// Each one scaled by the factor.
+    Scale(f32),
+    /// The ones turned or scaled about the middle of the selection, where they stand now.
+    Place(Vec<(EntityId, Vec3)>),
+}
 
 /// What a drag of a gizmo asks of the module, in order: a gesture opened as it is grabbed, the
 /// changes made as the pointer moves, the gesture ended once let go.
 enum Drag {
     Grabbed(String),
-    Moved(Writes),
+    Moved(Vec<Change>),
     LetGo,
+}
+
+/// A handle of a gizmo held: the grab, what it made so far, where the entities of the selection
+/// stood, and about what and in which axes it acts.
+struct Held {
+    grab: gizmo::Grab,
+    applied: gizmo::Amount,
+    starts: Vec<(EntityId, Vec3)>,
+    pivot: gizmo::Pivot,
+    space: gizmo::Space,
 }
 
 /// What the tool shares with its module.
@@ -108,9 +128,16 @@ enum Drag {
 struct Shared {
     /// Whether the pointer is over the view, where F, W, E and R act.
     hovered: AtomicBool,
-    /// The gizmo shown, and what its drags ask, for the module to write.
+    /// The gizmo shown, about what and in which axes, and what its drags ask, for the module to
+    /// write.
     mode: std::sync::Mutex<gizmo::Mode>,
+    pivot: std::sync::Mutex<gizmo::Pivot>,
+    space: std::sync::Mutex<gizmo::Space>,
     writes: std::sync::Mutex<Vec<Drag>>,
+    /// The turn of the active entity, read from its provider for the axes of `Space::Local`; and
+    /// whether to read it again, once a drag changed it.
+    local: std::sync::Mutex<Option<(EntityId, Quat)>>,
+    reread: AtomicBool,
     /// Whether the window creating a doodad is asked for.
     create: AtomicBool,
 }
@@ -137,6 +164,87 @@ const WRITTEN: [(&str, &[&str]); 3] = [
     ("spawns", &["position", "rotation"]),
 ];
 
+/// The turn of an entity of `provider` whose Transform reads `rotation`: a spawn's about the
+/// vertical alone, facing along its X; the others' as their files place them.
+fn local_turn(provider: &str, rotation: [f32; 3]) -> Quat {
+    if provider == "spawns" {
+        Quat::from_rotation_z(rotation[1].to_radians())
+    } else {
+        uniwow_api::formats::turning(rotation)
+    }
+}
+
+/// Whether a turn about `axis` is about the vertical, the only one a spawn takes.
+fn vertical(axis: Vec3) -> bool {
+    axis.z.abs() > 1.0 - 1e-4
+}
+
+/// A write of a provider: the provider, the field, the ids, the axis, the change.
+type Write = (String, &'static str, Vec<String>, Option<usize>, String);
+
+/// The writes of `change` to the entities of `by_provider`, as their providers take them.
+fn written(
+    change: &Change,
+    by_provider: &std::collections::BTreeMap<String, Vec<String>>,
+    snapshot: &scene::Snapshot,
+) -> Vec<Write> {
+    let takes = |provider: &str, field: &str| {
+        WRITTEN
+            .iter()
+            .any(|(written, fields)| *written == provider && fields.contains(&field))
+    };
+    let mut writes = Vec::new();
+    match change {
+        Change::Shift(by) => {
+            for (provider, ids) in by_provider.iter().filter(|(provider, _)| takes(provider, "position")) {
+                for axis in (0..3).filter(|axis| by[*axis].abs() > 1e-6) {
+                    writes.push((
+                        provider.clone(),
+                        "position",
+                        ids.clone(),
+                        Some(axis),
+                        format!("+{}", by[axis]),
+                    ));
+                }
+            }
+        }
+        Change::Turn(axis, degrees) => {
+            let turn = scene::turn_change(axis.to_array(), *degrees);
+            for (provider, ids) in by_provider.iter().filter(|(provider, _)| takes(provider, "rotation")) {
+                if provider == "spawns" && !vertical(*axis) {
+                    continue;
+                }
+                writes.push((provider.clone(), "rotation", ids.clone(), None, turn.clone()));
+            }
+        }
+        Change::Scale(factor) => {
+            for (provider, ids) in by_provider.iter().filter(|(provider, _)| takes(provider, "scale")) {
+                writes.push((provider.clone(), "scale", ids.clone(), None, format!("*{factor}")));
+            }
+        }
+        Change::Place(placed) => {
+            for (id, at) in placed {
+                let Some(provider) = snapshot.editable(id).map(|entity| entity.provider().to_owned()) else {
+                    continue;
+                };
+                if !takes(&provider, "position") {
+                    continue;
+                }
+                for axis in 0..3 {
+                    writes.push((
+                        provider.clone(),
+                        "position",
+                        vec![id.to_string()],
+                        Some(axis),
+                        format!("{}", at[axis]),
+                    ));
+                }
+            }
+        }
+    }
+    writes
+}
+
 /// The providers whose entities are duplicated and deleted from the view.
 const MADE: [&str; 2] = ["doodads", "spawns"];
 
@@ -153,9 +261,8 @@ struct Selecting {
     last: Option<(egui::Pos2, EntityId)>,
     /// The last refusal of a smart selection, shown in the toolbar.
     said: Option<String>,
-    /// The handle of a gizmo being dragged, where the drag started, the middle of the selection
-    /// then, and how much of the drag is written already.
-    grabbed: Option<(gizmo::Handle, egui::Pos2, Vec3, f32)>,
+    /// The handle of a gizmo being dragged.
+    grabbed: Option<Held>,
 }
 
 /// The middle of the origins of the entities `ids` the snapshot holds.
@@ -213,109 +320,162 @@ impl Selecting {
         self.said = self.editor.call("scene.select_like", json!({ "by": by })).err();
     }
 
-    /// The gizmo of the mode shown about the selection: drawn, grabbed, dragged; its change given
-    /// to the module once let go. Whether it holds the pointer.
+    /// The gizmo about the selection as it stands: about the middle of its bounds or the pivot of
+    /// the active one, in the axes of the world or of the active one.
+    fn frame(&self, seen: &viewport::Seen, ids: &[EntityId]) -> Option<gizmo::Frame> {
+        let snapshot = self.scene.snapshot();
+        let active = self.scene.selection().active();
+        let pivot = *held(&self.shared.pivot);
+        let at = |id: &EntityId| {
+            self.scene
+                .position_now(id)
+                .or_else(|| snapshot.get(id).map(|entity| entity.origin()))
+                .map(Vec3::from)
+        };
+        let centre = match (pivot, active) {
+            (gizmo::Pivot::Pivot, Some(active)) => at(&active),
+            _ => {
+                let (boxes, _) = boxes::boxes(&snapshot, ids, |id| self.scene.position_now(id));
+                let all = boxes.iter().copied().reduce(|mut all, b| {
+                    for axis in 0..3 {
+                        all[axis] = all[axis].min(b[axis]);
+                        all[axis + 3] = all[axis + 3].max(b[axis + 3]);
+                    }
+                    all
+                });
+                all.map(|all| Vec3::new(all[0] + all[3], all[1] + all[4], all[2] + all[5]) / 2.0)
+                    .or_else(|| middle(&snapshot, ids))
+            }
+        }?;
+        let turn = match (*held(&self.shared.space), *held(&self.shared.local)) {
+            (gizmo::Space::Local, Some((id, turn))) if Some(id) == active => turn,
+            _ => Quat::IDENTITY,
+        };
+        gizmo::Frame::new(seen, centre, turn)
+    }
+
+    /// The gizmo of the mode shown about the selection, as Unity's: drawn, the handle under the
+    /// pointer lit, grabbed, dragged; its changes given to the module as the pointer moves.
+    /// Whether it holds the pointer.
     fn gizmo(&mut self, input: &ToolInput<'_>, painter: &egui::Painter) -> bool {
         let mode = *held(&self.shared.mode);
         let response = input.response;
-        let selection = self.scene.selection();
-        let snapshot = self.scene.snapshot();
-        let centre = match self.grabbed {
-            Some((_, _, centre, _)) => Some(centre),
-            None => middle(&snapshot, &selection.ids),
-        };
-        let Some(centre) = centre.filter(|_| mode != gizmo::Mode::Select) else {
+        if mode == gizmo::Mode::Select {
             self.grabbed = None;
             return false;
-        };
-        let local = |at: egui::Pos2| egui::pos2(at.x - input.rect.left(), at.y - input.rect.top());
-        let screen = |at: egui::Pos2| egui::pos2(at.x + input.rect.left(), at.y + input.rect.top());
-        // Drawn where the selection stands now, moving with it as it is dragged; the drag measured
-        // from where it was grabbed.
-        let drawn = middle(&snapshot, &selection.ids).unwrap_or(centre);
-        let Some(origin) = input.project(drawn) else {
+        }
+        let offset = input.rect.min.to_vec2();
+        let (pointer, origin, shift, snap, down) = response.ctx.input(|i| {
+            (
+                i.pointer.hover_pos(),
+                i.pointer.press_origin(),
+                i.modifiers.shift,
+                i.modifiers.command,
+                i.pointer.primary_down(),
+            )
+        });
+        let ids = self.scene.groups().expanded(&self.scene.selection().ids);
+        // Grabbed.
+        if self.grabbed.is_none() {
+            let Some(frame) = self.frame(&input.seen, &ids) else {
+                return false;
+            };
+            let parts = gizmo::parts(mode, &input.seen, &frame, shift, 1.0);
+            let hovered = pointer.and_then(|at| gizmo::grab(&parts, at - offset));
+            if response.drag_started_by(egui::PointerButton::Primary)
+                && let Some(handle) = origin.and_then(|at| gizmo::grab(&parts, at - offset))
+            {
+                let snapshot = self.scene.snapshot();
+                let starts = ids
+                    .iter()
+                    .filter_map(|id| Some((*id, Vec3::from(snapshot.editable(id)?.origin()))))
+                    .collect();
+                let start = origin.unwrap_or_default() - offset;
+                self.grabbed = Some(Held {
+                    grab: gizmo::Grab::new(handle, frame, &input.seen, start),
+                    applied: gizmo::Amount::none(handle),
+                    starts,
+                    pivot: *held(&self.shared.pivot),
+                    space: *held(&self.shared.space),
+                });
+                let label = match mode {
+                    gizmo::Mode::Rotate => "Rotate",
+                    gizmo::Mode::Scale => "Scale",
+                    _ => "Move",
+                };
+                held(&self.shared.writes).push(Drag::Grabbed(label.to_owned()));
+            } else {
+                gizmo::draw(painter, &parts, offset, hovered, None);
+                // A click on a handle is no choice; inside the rings, it is.
+                return hovered.is_some_and(|handle| handle != gizmo::Handle::Free);
+            }
+        }
+        let Some(holding) = self.grabbed.as_mut() else {
             return false;
         };
-        // Drawn.
-        match mode {
-            gizmo::Mode::Move => {
-                for axis in 0..3 {
-                    if let Some((_, direction)) = gizmo::along(&input.seen, drawn, axis) {
-                        let tip = origin + direction * gizmo::LENGTH;
-                        painter.arrow(origin, tip - origin, egui::Stroke::new(3.0, gizmo::colour(axis)));
+        // Dragged: what the pointer makes now, less what is written already; one undo entry once
+        // let go.
+        let now = response
+            .interact_pointer_pos()
+            .or(pointer)
+            .unwrap_or(origin.unwrap_or_default())
+            - offset;
+        let amount = holding.grab.amount(&input.seen, now, snap);
+        let centre = holding.grab.frame.centre;
+        let orbit = holding.pivot == gizmo::Pivot::Center && holding.starts.len() > 1;
+        let mut changes = Vec::new();
+        match (amount, holding.applied) {
+            (gizmo::Amount::Shift(to), gizmo::Amount::Shift(from)) if (to - from).length() > 1e-5 => {
+                changes.push(Change::Shift(to - from));
+            }
+            (gizmo::Amount::Turn(to), gizmo::Amount::Turn(from)) => {
+                let (axis, angle) = (to * from.inverse()).to_axis_angle();
+                if angle.abs() > 1e-5 && angle.is_finite() {
+                    changes.push(Change::Turn(axis, angle.to_degrees()));
+                    if orbit {
+                        let placed = holding
+                            .starts
+                            .iter()
+                            .map(|(id, at)| (*id, centre + to * (*at - centre)));
+                        changes.push(Change::Place(placed.collect()));
                     }
                 }
             }
-            gizmo::Mode::Rotate => {
-                let ring: Vec<egui::Pos2> = gizmo::ring(&input.seen, drawn).into_iter().map(screen).collect();
-                painter.add(egui::Shape::line(ring, egui::Stroke::new(2.5, gizmo::colour(2))));
+            (gizmo::Amount::Scale(to), gizmo::Amount::Scale(from)) if (to / from - 1.0).abs() > 1e-5 => {
+                changes.push(Change::Scale(to / from));
+                if orbit {
+                    let placed = holding
+                        .starts
+                        .iter()
+                        .map(|(id, at)| (*id, centre + (*at - centre) * to));
+                    changes.push(Change::Place(placed.collect()));
+                }
             }
-            gizmo::Mode::Scale => {
-                let corner = origin + egui::vec2(gizmo::LENGTH, -gizmo::LENGTH) * std::f32::consts::FRAC_1_SQRT_2;
-                painter.line_segment([origin, corner], egui::Stroke::new(2.0, egui::Color32::WHITE));
-                painter.rect_filled(
-                    egui::Rect::from_center_size(corner, egui::vec2(12.0, 12.0)),
-                    2.0,
-                    egui::Color32::WHITE,
-                );
+            _ => {}
+        }
+        if !changes.is_empty() {
+            holding.applied = amount;
+            held(&self.shared.writes).push(Drag::Moved(changes));
+        }
+        // Drawn as it follows what it drags: moved with it, its axes turned with the entity in its
+        // own, its axes of scale stretched.
+        let (frame, stretch) = match holding.applied {
+            gizmo::Amount::Shift(by) => (holding.grab.frame.moved(by, Quat::IDENTITY), 1.0),
+            gizmo::Amount::Turn(turn) if holding.space == gizmo::Space::Local => {
+                (holding.grab.frame.moved(Vec3::ZERO, turn), 1.0)
             }
-            gizmo::Mode::Select => {}
+            gizmo::Amount::Turn(_) => (holding.grab.frame, 1.0),
+            gizmo::Amount::Scale(factor) => (holding.grab.frame, factor),
+        };
+        if let Some(slice) = holding.grab.slice(holding.applied) {
+            gizmo::draw_slice(painter, &input.seen, &holding.grab.frame, offset, slice);
         }
-        // Grabbed.
-        if response.drag_started_by(egui::PointerButton::Primary)
-            && let Some(at) = response.interact_pointer_pos()
-            && let Some(handle) = gizmo::grab(mode, &input.seen, centre, local(at))
-        {
-            let still = match handle {
-                gizmo::Handle::Scale => 1.0,
-                _ => 0.0,
-            };
-            self.grabbed = Some((handle, at, centre, still));
-            let label = match handle {
-                gizmo::Handle::Axis(_) => "Move",
-                gizmo::Handle::Ring => "Rotate",
-                gizmo::Handle::Scale => "Scale",
-            };
-            held(&self.shared.writes).push(Drag::Grabbed(label.to_owned()));
-        }
-        let Some((handle, start, centre, applied)) = self.grabbed else {
-            return false;
-        };
-        // Dragged: the change made as the pointer moves, what it adds to what is written already;
-        // one undo entry once let go.
-        let now = response.interact_pointer_pos().unwrap_or(start);
-        let snap = response.ctx.input(|i| i.modifiers.command);
-        let amount = gizmo::dragged(handle, &input.seen, centre, local(start), local(now), snap);
-        let text = match handle {
-            gizmo::Handle::Axis(axis) => format!("{} {amount:+.2} yd", ["X", "Y", "Z"][axis]),
-            gizmo::Handle::Ring => format!("{amount:+.1}°"),
-            gizmo::Handle::Scale => format!("×{amount:.2}"),
-        };
-        painter.line_segment([start, now], egui::Stroke::new(1.0, egui::Color32::WHITE));
-        painter.text(
-            now + egui::vec2(12.0, -12.0),
-            egui::Align2::LEFT_BOTTOM,
-            text,
-            egui::FontId::proportional(13.0),
-            egui::Color32::WHITE,
-        );
-        let step = match handle {
-            gizmo::Handle::Scale => amount / applied,
-            _ => amount - applied,
-        };
-        let moves = match handle {
-            gizmo::Handle::Scale => (step - 1.0).abs() > 1e-5,
-            _ => step.abs() > 1e-5,
-        };
-        if moves {
-            held(&self.shared.writes).push(Drag::Moved(gizmo::writes(handle, step)));
-            if let Some(grabbed) = self.grabbed.as_mut() {
-                grabbed.3 = amount;
-            }
-        }
-        if response.drag_stopped_by(egui::PointerButton::Primary) || !response.ctx.input(|i| i.pointer.primary_down()) {
+        let parts = gizmo::parts(mode, &input.seen, &frame, shift, stretch);
+        gizmo::draw(painter, &parts, offset, None, Some(holding.grab.handle));
+        if response.drag_stopped_by(egui::PointerButton::Primary) || !down {
             self.grabbed = None;
             held(&self.shared.writes).push(Drag::LetGo);
+            self.shared.reread.store(true, Ordering::Relaxed);
         }
         true
     }
@@ -329,18 +489,53 @@ impl Tool for Selecting {
             (
                 gizmo::Mode::Move,
                 "Move",
-                "Move along the axes of the world (W); Ctrl: by the yard",
+                "Move (W): along an arrow, in the plane of a square, in the view's with Shift; Ctrl: by the yard",
             ),
             (
                 gizmo::Mode::Rotate,
                 "Rotate",
-                "Turn about the vertical (E); Ctrl: by 15 degrees",
+                "Rotate (E): about a ring, the view's outside, freely inside; Ctrl: by 15 degrees",
             ),
-            (gizmo::Mode::Scale, "Scale", "Scale each one (R); Ctrl: by tenths"),
+            (
+                gizmo::Mode::Scale,
+                "Scale",
+                "Scale (R): by an axis or the cube of the middle, alike on every axis as the files keep one scale; Ctrl: by tenths",
+            ),
         ] {
             ui.selectable_value(&mut mode, shown, label).on_hover_text(hint);
         }
         *held(&self.shared.mode) = mode;
+        ui.separator();
+        let mut pivot = held(&self.shared.pivot);
+        let (text, hint) = match *pivot {
+            gizmo::Pivot::Center => (
+                "Center",
+                "About the middle of the selection, each one turned and scaled about it",
+            ),
+            gizmo::Pivot::Pivot => (
+                "Pivot",
+                "About the pivot of the active one, each one turned and scaled about its own",
+            ),
+        };
+        if ui.button(text).on_hover_text(hint).clicked() {
+            *pivot = match *pivot {
+                gizmo::Pivot::Center => gizmo::Pivot::Pivot,
+                gizmo::Pivot::Pivot => gizmo::Pivot::Center,
+            };
+        }
+        drop(pivot);
+        let mut space = held(&self.shared.space);
+        let (text, hint) = match *space {
+            gizmo::Space::Global => ("Global", "In the axes of the world (X)"),
+            gizmo::Space::Local => ("Local", "In the axes of the active one (X)"),
+        };
+        if ui.button(text).on_hover_text(hint).clicked() {
+            *space = match *space {
+                gizmo::Space::Global => gizmo::Space::Local,
+                gizmo::Space::Local => gizmo::Space::Global,
+            };
+        }
+        drop(space);
         if ui
             .button("Create…")
             .on_hover_text("A doodad of a model of the archives, on the ground in the middle of the view")
@@ -442,6 +637,12 @@ struct SceneTools {
     view: Option<viewport::Handle>,
     /// The gesture of the drag of a gizmo under way, taken up at each frame until let go.
     dragging: Option<uniwow_api::Gesture>,
+    /// The hotkey of Global and Local.
+    space: Option<Hotkey>,
+    /// The reading of the turn of the active entity for the axes of Local: the call, the entity,
+    /// its provider; and when it was read last.
+    reading: Option<(uniwow_api::CallId, EntityId, String)>,
+    read_at: Option<std::time::Instant>,
 }
 
 impl SceneTools {
@@ -618,18 +819,13 @@ impl SceneTools {
                         format!("{label} {count} objects")
                     }));
                 }
-                Drag::Moved(writes) => {
-                    for (provider, ids) in &by_provider {
-                        let Some((_, fields)) = WRITTEN.iter().find(|(written, _)| written == provider) else {
-                            continue;
-                        };
-                        for (field, axis, change) in &writes {
-                            if fields.contains(field) {
-                                ctx.call(
-                                    &format!("{provider}.write"),
-                                    json!({ "ids": ids, "field": field, "axis": axis, "change": change }),
-                                );
-                            }
+                Drag::Moved(changes) => {
+                    for change in changes {
+                        for (provider, field, ids, axis, change) in written(&change, &by_provider, &snapshot) {
+                            ctx.call(
+                                &format!("{provider}.write"),
+                                json!({ "ids": ids, "field": field, "axis": axis, "change": change }),
+                            );
                         }
                     }
                 }
@@ -640,6 +836,39 @@ impl SceneTools {
                 }
             }
         }
+    }
+
+    /// Reads the turn of the active entity from its provider, for the axes of Local: once it is
+    /// chosen, once a drag changed it, and every second, its Inspector changing it too.
+    fn read_local(&mut self, ctx: &mut Context) {
+        let Some(scene) = &self.scene else {
+            return;
+        };
+        if *held(&self.shared.space) != gizmo::Space::Local || self.reading.is_some() {
+            return;
+        }
+        let Some(active) = scene.selection().active() else {
+            return;
+        };
+        let known = held(&self.shared.local).is_some_and(|(id, _)| id == active);
+        let again = self.shared.reread.swap(false, Ordering::Relaxed)
+            || self
+                .read_at
+                .is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(1));
+        if known && !again {
+            return;
+        }
+        let snapshot = scene.snapshot();
+        let Some(provider) = snapshot
+            .editable(&active)
+            .map(|entity| entity.provider().to_owned())
+            .filter(|provider| WRITTEN.iter().any(|(written, _)| written == provider))
+        else {
+            return;
+        };
+        let call = ctx.call(&format!("{provider}.read"), json!({ "ids": [active.to_string()] }));
+        self.reading = Some((call, active, provider));
+        self.read_at = Some(std::time::Instant::now());
     }
 
     /// Frames the selection in the view: the bounds of all its entities the scene holds.
@@ -703,6 +932,12 @@ impl Module for SceneTools {
                 gizmo::Mode::Scale,
             ),
         ];
+        self.space = Some(reg.hotkey(
+            "space",
+            "Gizmos in the axes of the world or of the active one",
+            HotkeyKind::Press,
+            Keys::key(egui::Key::X),
+        ));
     }
 
     fn on_job(&mut self, job: uniwow_api::JobId, outcome: uniwow_api::JobOutcome, _ctx: &mut Context) {
@@ -718,6 +953,16 @@ impl Module for SceneTools {
         result: Result<uniwow_api::serde_json::Value, String>,
         _ctx: &mut Context,
     ) {
+        if let Some((_, id, provider)) = self.reading.take_if(|(reading, _, _)| *reading == call) {
+            let rotation = result.ok().and_then(|read| {
+                let values = read["entities"][0]["components"]["transform"]["rotation"]
+                    .as_array()?
+                    .clone();
+                Some([0, 1, 2].map(|at| values.get(at).and_then(|value| value.as_f64()).unwrap_or(0.0) as f32))
+            });
+            *held(&self.shared.local) = rotation.map(|rotation| (id, local_turn(&provider, rotation)));
+            return;
+        }
         if let Some(at) = self.creating_calls.iter().position(|waiting| *waiting == call) {
             self.creating_calls.remove(at);
             if let (Ok(answer), Some(scene)) = (&result, &self.scene) {
@@ -779,6 +1024,13 @@ impl Module for SceneTools {
                     *shown = if *shown == *mode { gizmo::Mode::Select } else { *mode };
                 }
             }
+            if self.space.as_ref().is_some_and(|key| key.pressed(egui)) {
+                let mut space = held(&self.shared.space);
+                *space = match *space {
+                    gizmo::Space::Global => gizmo::Space::Local,
+                    gizmo::Space::Local => gizmo::Space::Global,
+                };
+            }
             if self.delete.as_ref().is_some_and(|key| key.pressed(egui)) {
                 self.on_selection("delete", "Delete", ctx);
             }
@@ -787,6 +1039,7 @@ impl Module for SceneTools {
             }
         }
         self.write(ctx);
+        self.read_local(ctx);
         self.creating_ui(egui, ctx);
     }
 

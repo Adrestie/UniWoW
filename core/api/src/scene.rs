@@ -922,6 +922,28 @@ impl PieceBuilder {
     }
 }
 
+/// The change of a rotation that turns it by `degrees` about the axis `about` of the world, as the
+/// gizmos write it: `turn x y z degrees`, read by `turn_of`.
+pub fn turn_change(about: [f32; 3], degrees: f32) -> String {
+    let [x, y, z] = about;
+    format!("turn {x} {y} {z} {degrees}")
+}
+
+/// The axis of the world and the degrees of a change `turn x y z degrees`; none for another.
+pub fn turn_of(change: &str) -> Option<([f32; 3], f32)> {
+    let numbers: Vec<f32> = change
+        .trim()
+        .strip_prefix("turn ")?
+        .split_whitespace()
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    match numbers[..] {
+        [x, y, z, degrees] if numbers.iter().all(|value| value.is_finite()) => Some(([x, y, z], degrees)),
+        _ => None,
+    }
+}
+
 /// The value `value` changed as the Inspector's `change` says: `+n`, `-=n`, `*n` and `/n` change
 /// it from its own value, any other number is the value (`-n` the value −n, not a change).
 pub fn changed_value(value: f32, change: &str) -> Result<f32, String> {

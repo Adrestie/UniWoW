@@ -67,6 +67,10 @@ pub fn written(building: &Building, field: &str, axis: Option<usize>, change: &s
             }
         }
         "rotation" => {
+            if let Some((about, degrees)) = scene::turn_of(change) {
+                changed.rotation = uniwow_api::formats::turned(building.rotation, about.into(), degrees);
+                return Ok(changed);
+            }
             for axis in axes {
                 changed.rotation[axis] = scene::changed_value(building.rotation[axis], change)?;
             }

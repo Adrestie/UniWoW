@@ -94,12 +94,44 @@ pub fn tiles_around(tiles: &[bool], eye: [f32; 2], distance: u32, held: &HashSet
 /// less its Z, after the quarter turn back about Z that the model takes.
 pub fn placement(position: [f32; 3], rotation: [f32; 3], scale: f32) -> Mat4 {
     let [x, y, z] = position;
+    Mat4::from_scale_rotation_translation(
+        Vec3::splat(scale),
+        turning(rotation),
+        Vec3::new(ORIGIN - z, ORIGIN - x, y),
+    )
+}
+
+/// The turn in the world of the rotation `rotation` of a placement of a tile, as `placement`
+/// applies it.
+pub fn turning(rotation: [f32; 3]) -> Quat {
     let [a, b, c] = rotation.map(f32::to_radians);
-    let turned = Quat::from_rotation_z(b - FRAC_PI_2)
+    Quat::from_rotation_z(b - FRAC_PI_2)
         * Quat::from_rotation_x(a)
         * Quat::from_rotation_y(-c)
-        * Quat::from_rotation_z(-FRAC_PI_2);
-    Mat4::from_scale_rotation_translation(Vec3::splat(scale), turned, Vec3::new(ORIGIN - z, ORIGIN - x, y))
+        * Quat::from_rotation_z(-FRAC_PI_2)
+}
+
+/// The rotation of a placement of a tile `rotation` turned by `degrees` about the axis `about` of
+/// the world, counterclockwise looking down it, as a gizmo turns it; its angles in degrees from
+/// -180 to 180, the one about the vertical kept as it was where the turn is about the vertical.
+pub fn turned(rotation: [f32; 3], about: Vec3, degrees: f32) -> [f32; 3] {
+    let about = about.normalize_or_zero();
+    if about == Vec3::ZERO {
+        return rotation;
+    }
+    if about.z.abs() > 1.0 - 1e-6 {
+        let [a, b, c] = rotation;
+        return [a, b + degrees * about.z.signum(), c];
+    }
+    let turn = Quat::from_axis_angle(about, degrees.to_radians()) * turning(rotation);
+    // Undone in the order `turning` makes it: about Z, X, then Y.
+    let (z, x, y) = (turn * Quat::from_rotation_z(FRAC_PI_2)).to_euler(crate::glam::EulerRot::ZXY);
+    let wrapped = |degrees: f32| (degrees + 180.0).rem_euclid(360.0) - 180.0;
+    [
+        wrapped(x.to_degrees()),
+        wrapped(z.to_degrees() + 90.0),
+        wrapped(-y.to_degrees()),
+    ]
 }
 
 /// A map of `Map.dbc`.
@@ -1116,6 +1148,32 @@ pub const SERVICE: ServiceKey<Arc<dyn Formats>> = ServiceKey::new("formats");
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_placement_turned_about_an_axis_of_the_world_is_the_turn_after_its_own() {
+        for rotation in [[0.0, 0.0, 0.0], [10.0, 75.0, -20.0], [-35.0, 200.0, 60.0]] {
+            for (about, degrees) in [
+                (Vec3::X, 30.0),
+                (Vec3::Y, -50.0),
+                (Vec3::new(1.0, 2.0, -0.5), 77.0),
+                (Vec3::Z, 12.0),
+            ] {
+                let wanted = Quat::from_axis_angle(about.normalize(), f32::to_radians(degrees)) * turning(rotation);
+                let got = turning(turned(rotation, about, degrees));
+                assert!(
+                    wanted.dot(got).abs() > 1.0 - 1e-5,
+                    "{rotation:?} about {about} by {degrees}: {wanted} {got}"
+                );
+            }
+        }
+        assert_eq!(
+            turned([10.0, 75.0, -20.0], Vec3::Z, 12.0),
+            [10.0, 87.0, -20.0],
+            "about the vertical, as it was"
+        );
+        assert_eq!(turned([10.0, 75.0, -20.0], -Vec3::Z, 12.0), [10.0, 63.0, -20.0]);
+    }
+
     use super::*;
     use crate::glam::Mat3;
 

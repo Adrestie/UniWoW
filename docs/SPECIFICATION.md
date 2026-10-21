@@ -10615,6 +10615,26 @@ gizmo drawn where the selection stands now; the Inspector's values dragged take 
 same way. Test: a gesture taken up at each frame of a drag held still, then moved twice, one entry
 once let go, undone at once.
 
+#### After 15.14: the gizmos as Unity's
+
+Asked by the user: the gizmos drawn and handled as Unity's, the same size on the screen wherever
+they stand. *Move*: three arrows ended by cones, the squares of the planes on the side of the eye,
+the view's plane in the middle with Shift; the move follows the ray of the pointer along the axis or
+in the plane. *Rotate*: the three rings about the axes, their halves towards the eye alone, the ring
+of the view around them, a free turn inside; a ring turns as the pointer goes along it, the slice
+swept filled. *Scale*: three axes ended by cubes and the cube of the middle; the files keep one
+scale, so each scales alike on every axis, the axes drawn stretched. The handle under the pointer is
+lit, the one dragged yellow, the others faint; an arrow pointing at the eye and a square seen edge on
+fade out and are not grabbed; a click on a handle chooses nothing. The toolbar's *Center*/*Pivot*
+(about the middle of the bounds, each one turned and scaled about it, or about the active one's
+pivot, each one about its own) and *Global*/*Local* (X; the axes of the active one, its turn read
+from its provider). A turn about any axis is written `turn x y z degrees` (`scene::turn_change`),
+which doodads and buildings compose after their own (`formats::turned`) and spawns take about the
+vertical alone. The fields of the Transform are of one width, for 7 characters. Tests: the handles
+grabbed where drawn, an axis facing the eye not grabbed, the moves along an axis and in a plane, a
+ring's turn and its slice, the scales, a placement turned about an axis of the world, the writes of
+each provider.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which

@@ -708,13 +708,20 @@ pub fn written(spawn: &Spawn, field: &str, axis: Option<usize>, change: &str) ->
                 position[axis] = scene::changed_value(position[axis], change)?;
             }
         }
-        "rotation" => match axis {
-            Some(1) | None => {
-                let degrees = scene::changed_value(orientation.to_degrees(), change)?;
-                orientation = degrees.to_radians().rem_euclid(std::f32::consts::TAU);
-            }
-            Some(_) => return Err("a spawn turns about the vertical alone".to_owned()),
-        },
+        "rotation" => {
+            let degrees = match (scene::turn_of(change), axis) {
+                // Turned by a gizmo about an axis of the world: the vertical alone.
+                (Some(([x, y, z], degrees)), _) => {
+                    if x.abs() > 1e-4 || y.abs() > 1e-4 || z == 0.0 {
+                        return Err("a spawn turns about the vertical alone".to_owned());
+                    }
+                    orientation.to_degrees() + degrees * z.signum()
+                }
+                (None, Some(1) | None) => scene::changed_value(orientation.to_degrees(), change)?,
+                (None, Some(_)) => return Err("a spawn turns about the vertical alone".to_owned()),
+            };
+            orientation = degrees.to_radians().rem_euclid(std::f32::consts::TAU);
+        }
         "scale" => return Err("a spawn takes the size of its template".to_owned()),
         other => return Err(format!("a spawn has no field '{other}'")),
     }
@@ -723,6 +730,18 @@ pub fn written(spawn: &Spawn, field: &str, axis: Option<usize>, change: &str) ->
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_spawn_is_turned_by_a_gizmo_about_the_vertical_alone() {
+        let mut spawn = spawns(&guard(), Kind::Creature).remove(0);
+        spawn.orientation = 0.5;
+        let (_, turned) = written(&spawn, "rotation", None, &scene::turn_change([0.0, 0.0, 1.0], 90.0)).unwrap();
+        assert!((turned - (0.5 + std::f32::consts::FRAC_PI_2)).abs() < 1e-5);
+        let (_, back) = written(&spawn, "rotation", None, &scene::turn_change([0.0, 0.0, -1.0], 90.0)).unwrap();
+        assert!((back - (0.5 - std::f32::consts::FRAC_PI_2).rem_euclid(std::f32::consts::TAU)).abs() < 1e-5);
+        assert!(written(&spawn, "rotation", None, &scene::turn_change([1.0, 0.0, 0.0], 90.0)).is_err());
+    }
+
     use super::*;
 
     fn rows(columns: &[&str], rows: Vec<Vec<Value>>) -> Rows {

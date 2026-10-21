@@ -336,3 +336,45 @@ mod gpu {
         assert!(edges > 40, "{edges} pixels of the edges");
     }
 }
+
+#[test]
+fn the_changes_of_a_gizmo_are_written_as_each_provider_takes_them() {
+    use std::collections::BTreeMap;
+    use uniwow_api::glam::Vec3;
+
+    use crate::{Change, written};
+
+    let by_provider: BTreeMap<String, Vec<String>> = [
+        ("doodads".to_owned(), vec!["doodad:0:1".to_owned()]),
+        ("spawns".to_owned(), vec!["creature:5".to_owned()]),
+    ]
+    .into_iter()
+    .collect();
+    let snapshot = Snapshot::default();
+    let fields = |change: &Change| -> Vec<(String, &'static str, Option<usize>, String)> {
+        written(change, &by_provider, &snapshot)
+            .into_iter()
+            .map(|(provider, field, _, axis, change)| (provider, field, axis, change))
+            .collect()
+    };
+    assert_eq!(
+        fields(&Change::Shift(Vec3::new(1.5, 0.0, -2.0))),
+        [
+            ("doodads".to_owned(), "position", Some(0), "+1.5".to_owned()),
+            ("doodads".to_owned(), "position", Some(2), "+-2".to_owned()),
+            ("spawns".to_owned(), "position", Some(0), "+1.5".to_owned()),
+            ("spawns".to_owned(), "position", Some(2), "+-2".to_owned()),
+        ]
+    );
+    // About the vertical, every one turns; about another axis, a spawn does not.
+    assert_eq!(fields(&Change::Turn(Vec3::Z, 30.0)).len(), 2);
+    assert_eq!(
+        fields(&Change::Turn(Vec3::X, 30.0)),
+        [("doodads".to_owned(), "rotation", None, "turn 1 0 0 30".to_owned())]
+    );
+    assert_eq!(
+        fields(&Change::Scale(1.25)),
+        [("doodads".to_owned(), "scale", None, "*1.25".to_owned())],
+        "a spawn is not scaled"
+    );
+}

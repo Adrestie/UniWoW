@@ -420,6 +420,10 @@ pub fn written(spot: Spot, field: &str, axis: Option<usize>, change: &str) -> Re
             spot.position = scene::file_of_world(world);
         }
         "rotation" => {
+            if let Some((about, degrees)) = scene::turn_of(change) {
+                spot.rotation = uniwow_api::formats::turned(spot.rotation, about.into(), degrees);
+                return Ok(spot);
+            }
             for axis in axes {
                 spot.rotation[axis] = scene::changed_value(spot.rotation[axis], change)?;
             }
@@ -551,6 +555,11 @@ mod tests {
             written(spot, "rotation", Some(1), "*2").unwrap().rotation,
             [0.0, 180.0, 0.0]
         );
+        // Turned by a gizmo about the axis X of the world: that turn after its own.
+        let tilted = written(spot, "rotation", None, &scene::turn_change([1.0, 0.0, 0.0], 30.0)).unwrap();
+        let wanted =
+            uniwow_api::glam::Quat::from_rotation_x(30f32.to_radians()) * uniwow_api::formats::turning(spot.rotation);
+        assert!(uniwow_api::formats::turning(tilted.rotation).dot(wanted).abs() > 1.0 - 1e-5);
         assert_eq!(written(spot, "scale", None, "*2").unwrap().scale, 2.0);
         assert!(written(spot, "scale", None, "100").is_err(), "beyond 63.99");
         assert!(written(spot, "colour", None, "1").is_err());
