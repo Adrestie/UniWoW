@@ -27,6 +27,7 @@
 #include <boost/asio/write.hpp>
 
 #include <array>
+#include <cmath>
 #include <chrono>
 #include <cstring>
 #include <exception>
@@ -37,10 +38,14 @@ namespace UniwowBridge
     {
         using boost::asio::ip::tcp;
 
-        constexpr uint16 VERSION = 1;
-        // The longest message from the editor: 256 demands.
+        // Its version: 2 adds MOVE and the demand 8; an editor of the version 1 is welcome still.
+        constexpr uint16 VERSION = 2;
+        // The longest message from the editor: 256 demands, or 64 moves.
         constexpr uint32 MAX_IN = 4096;
         constexpr uint16 MAX_DEMANDS = 256;
+        constexpr uint16 MAX_MOVES = 64;
+        // How long a creature held waits for its editor before it is given its movement back.
+        constexpr auto FORGOTTEN = std::chrono::seconds(5);
         // How long a connection may say nothing, and a request wait for the world.
         constexpr auto SILENCE = std::chrono::seconds(10);
         constexpr uint32 WAIT_SECONDS = 30;
@@ -49,6 +54,7 @@ namespace UniwowBridge
         {
             HELLO = 1,
             RELOAD = 2,
+            MOVE = 3,
             WELCOME = 101,
             REFUSED = 102,
             DONE = 103,
@@ -104,6 +110,15 @@ namespace UniwowBridge
             bool U32(uint32& value) { return Little(value, 4); }
             bool U64(uint64& value) { return Little(value, 8); }
 
+            bool F32(float& value)
+            {
+                uint32 bits = 0;
+                if (!U32(bits))
+                    return false;
+                std::memcpy(&value, &bits, sizeof(value));
+                return std::isfinite(value);
+            }
+
             bool String(std::string& value, size_t most)
             {
                 uint16 length = 0;
@@ -149,6 +164,18 @@ namespace UniwowBridge
                         return false;
                     if (ready >= count)
                         return true;
+                    // Closed by the editor: nothing more comes, the next connection is taken at once.
+                    if (ready == 0)
+                    {
+                        uint8 probe = 0;
+                        boost::system::error_code peeked;
+                        socket.non_blocking(true, peeked);
+                        size_t const seen = socket.receive(boost::asio::buffer(&probe, 1), tcp::socket::message_peek, peeked);
+                        boost::system::error_code ignored;
+                        socket.non_blocking(false, ignored);
+                        if (peeked == boost::asio::error::eof || (!peeked && seen == 0))
+                            return false;
+                    }
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
                 return false;
@@ -182,7 +209,7 @@ namespace UniwowBridge
 
         bool Known(uint8 action)
         {
-            return action >= uint8(Action::Quests) && action <= uint8(Action::ForgetQuest);
+            return action >= uint8(Action::Quests) && action <= uint8(Action::Home);
         }
 
         // Whether the spawn `spawnId` of `table` (`game_event_creature`, `game_event_gameobject`)
@@ -266,9 +293,9 @@ namespace UniwowBridge
                 std::string token;
                 if (kind != HELLO || !hello.U16(version) || !hello.String(token, 256) || !hello.Done())
                     continue;
-                if (version != VERSION)
+                if (version < 1 || version > VERSION)
                 {
-                    Refuse(socket, "this bridge speaks the version 1 of its protocol");
+                    Refuse(socket, "this bridge speaks the versions 1 and 2 of its protocol");
                     continue;
                 }
                 if (_token.empty() || token != _token)
@@ -287,24 +314,39 @@ namespace UniwowBridge
                     Reader reader(body);
                     uint32 id = 0;
                     uint16 count = 0;
-                    if (kind != RELOAD || !reader.U32(id) || !reader.U16(count) || count > MAX_DEMANDS)
+                    bool const moving = kind == MOVE && version >= 2;
+                    if ((kind != RELOAD && !moving) || !reader.U32(id) || !reader.U16(count)
+                        || count > (moving ? MAX_MOVES : MAX_DEMANDS))
                         break;
                     auto request = std::make_shared<Request>();
                     bool read = true;
                     for (uint16 index = 0; index < count && read; ++index)
                     {
+                        if (moving)
+                        {
+                            Move move{};
+                            uint8 letGo = 0;
+                            read = reader.U32(move.map) && reader.U32(move.instance) && reader.U64(move.guid)
+                                && reader.U8(letGo) && letGo <= 1 && reader.F32(move.x) && reader.F32(move.y)
+                                && reader.F32(move.z) && reader.F32(move.orientation);
+                            move.letGo = letGo == 1;
+                            request->moves.push_back(move);
+                            continue;
+                        }
                         uint8 action = 0;
                         uint64 value = 0;
-                        read = reader.U8(action) && reader.U64(value) && Known(action);
+                        read = reader.U8(action) && reader.U64(value) && Known(action)
+                            && (version >= 2 || action < uint8(Action::Home));
                         request->demands.push_back({ Action(action), value });
                     }
                     if (!read || !reader.Done())
                         break;
                     bool const made = Make(request, WAIT_SECONDS);
+                    size_t const asked = request->demands.size() + request->moves.size();
                     Writer done(DONE);
                     done.U32(id);
-                    done.U16(uint16(request->demands.size()));
-                    for (size_t index = 0; index < request->demands.size(); ++index)
+                    done.U16(uint16(asked));
+                    for (size_t index = 0; index < asked; ++index)
                     {
                         Outcome const outcome = made && index < request->outcomes.size()
                             ? request->outcomes[index]
@@ -332,6 +374,7 @@ namespace UniwowBridge
 
     void Bridge::Update()
     {
+        LetGoForgotten();
         std::deque<std::shared_ptr<Request>> queued;
         {
             std::lock_guard<std::mutex> lock(_lock);
@@ -352,7 +395,20 @@ namespace UniwowBridge
                     request->outcomes.push_back({ false, error.what() });
                 }
             }
-            LOG_INFO("module", "uniwow-bridge: {} demands of the editor made", request->demands.size());
+            for (Move const& move : request->moves)
+            {
+                try
+                {
+                    request->outcomes.push_back(MakeMove(move));
+                }
+                catch (std::exception const& error)
+                {
+                    request->outcomes.push_back({ false, error.what() });
+                }
+            }
+            // A drag sends ten moves a second: they are not told one by one.
+            if (!request->demands.empty())
+                LOG_INFO("module", "uniwow-bridge: {} demands of the editor made", request->demands.size());
         }
         {
             std::lock_guard<std::mutex> lock(_lock);
@@ -397,8 +453,9 @@ namespace UniwowBridge
                 return { true, "the quests loaded again" };
             }
             case Action::Path:
-                sWaypointMgr->ReloadPath(uint32(demand.value));
-                return { true, Acore::StringFormat("the path {} loaded again", demand.value) };
+                return ReloadPath(uint32(demand.value));
+            case Action::Home:
+                return MoveHome(demand.value);
             case Action::Addons:
                 sObjectMgr->LoadCreatureAddons();
                 return { true, "the addons of the creatures loaded again" };
@@ -489,6 +546,121 @@ namespace UniwowBridge
             }
         }
         return { false, "an unknown demand" };
+    }
+
+    // The path `pathId` loaded again (`Action::Path`), the creatures walking it set on it again. A
+    // creature's movement holds the points of its path: it is let go of them before they are
+    // replaced, and walks the new ones from their first.
+    Outcome Bridge::ReloadPath(uint32 pathId)
+    {
+        std::vector<Creature*> walkers;
+        sMapMgr->DoForAllMaps([&](Map* map)
+        {
+            for (auto const& [spawnId, creature] : map->GetCreatureBySpawnIdStore())
+                if (creature->IsInWorld() && creature->GetWaypointPath() == pathId)
+                    walkers.push_back(creature);
+        });
+        for (Creature* creature : walkers)
+        {
+            creature->GetMotionMaster()->Clear(false);
+            creature->GetMotionMaster()->MoveIdle();
+        }
+        sWaypointMgr->ReloadPath(pathId);
+        uint32 walking = 0;
+        for (Creature* creature : walkers)
+        {
+            // One the editor holds is given its movement once let go.
+            if (!creature->IsAlive() || _held.count(creature->GetGUID().GetRawValue()))
+                continue;
+            creature->GetMotionMaster()->Initialize();
+            ++walking;
+        }
+        return { true, Acore::StringFormat("the path {} loaded again, {} creatures walking it again", pathId, walking) };
+    }
+
+    // The spawn point of the creature `spawnId` read again from its row (`Action::Home`): the
+    // creatures of it running keep their place and take it as their home; read again whole, as
+    // `Action::Creature` does, when its row is gone or on another map.
+    Outcome Bridge::MoveHome(uint64 spawnId)
+    {
+        ObjectGuid::LowType const id = ObjectGuid::LowType(spawnId);
+        CreatureData const* before = sObjectMgr->GetCreatureData(id);
+        QueryResult row = WorldDatabase.Query(
+            "SELECT map, position_x, position_y, position_z, orientation FROM creature WHERE guid = {}", id);
+        if (!before || !row || row->Fetch()[0].Get<uint16>() != before->mapid)
+            return MakeOne({ Action::Creature, spawnId });
+        Field* fields = row->Fetch();
+        float const x = fields[1].Get<float>();
+        float const y = fields[2].Get<float>();
+        float const z = fields[3].Get<float>();
+        float const orientation = fields[4].Get<float>();
+        // Its place in the grids of the spawns follows it.
+        sObjectMgr->RemoveCreatureFromGrid(id, before);
+        CreatureData& data = sObjectMgr->NewOrExistCreatureData(id);
+        data.posX = x;
+        data.posY = y;
+        data.posZ = z;
+        data.orientation = orientation;
+        sObjectMgr->AddCreatureToGrid(id, &data);
+        uint32 running = 0;
+        if (Map* map = sMapMgr->FindBaseNonInstanceMap(data.mapid))
+        {
+            auto const bounds = map->GetCreatureBySpawnIdStore().equal_range(id);
+            for (auto itr = bounds.first; itr != bounds.second; ++itr)
+            {
+                itr->second->SetHomePosition(x, y, z, orientation);
+                ++running;
+            }
+        }
+        return { true, Acore::StringFormat("the spawn point of the creature {} moved; {} running go home there", id, running) };
+    }
+
+    // The creature of `move` put where the editor drags it, live, nothing written: held still while
+    // it is dragged, given its movement back once let go.
+    Outcome Bridge::MakeMove(Move const& move)
+    {
+        Map* map = sMapMgr->FindMap(move.map, move.instance);
+        Creature* creature = map ? map->GetCreature(ObjectGuid(move.guid)) : nullptr;
+        if (!creature || !creature->IsInWorld())
+        {
+            _held.erase(move.guid);
+            return { false, "the creature is no longer in the world" };
+        }
+        if (!_held.count(move.guid))
+        {
+            creature->StopMoving();
+            creature->GetMotionMaster()->Clear(false);
+            creature->GetMotionMaster()->MoveIdle();
+        }
+        creature->NearTeleportTo(move.x, move.y, move.z, move.orientation);
+        if (move.letGo)
+        {
+            _held.erase(move.guid);
+            creature->GetMotionMaster()->Initialize();
+            return { true, Acore::StringFormat("{} put down, moving again", creature->GetName()) };
+        }
+        _held[move.guid] = { move.map, move.instance, std::chrono::steady_clock::now() };
+        return { true, Acore::StringFormat("{} held", creature->GetName()) };
+    }
+
+    // The creatures held that their editor has not moved for `FORGOTTEN` given their movement back:
+    // an editor closed while it dragged one leaves none standing still.
+    void Bridge::LetGoForgotten()
+    {
+        auto const now = std::chrono::steady_clock::now();
+        for (auto itr = _held.begin(); itr != _held.end();)
+        {
+            if (now - itr->second.last < FORGOTTEN)
+            {
+                ++itr;
+                continue;
+            }
+            if (Map* map = sMapMgr->FindMap(itr->second.map, itr->second.instance))
+                if (Creature* creature = map->GetCreature(ObjectGuid(itr->first)))
+                    if (creature->IsInWorld())
+                        creature->GetMotionMaster()->Initialize();
+            itr = _held.erase(itr);
+        }
     }
 
     // The quest `questId` taken from every character (`Action::ForgetQuest`).

@@ -1,6 +1,7 @@
 //! The client of `mod-uniwow-bridge` (step 16.2): once changes are applied, the server running asked
 //! to load again what they touched, over TCP on 127.0.0.1, its protocol in the module's
-//! `PROTOCOL.md`: HELLO with the token, RELOAD with the demands, DONE with what each made.
+//! `PROTOCOL.md`: HELLO with the token, RELOAD with the demands, DONE with what each made; and the
+//! creatures dragged in the world moved live, MOVE, through a connection kept while they are.
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
@@ -8,9 +9,11 @@ use std::time::Duration;
 
 use uniwow_api::world_db::Reload;
 
-const VERSION: u16 = 1;
+/// The version spoken: 2, a bridge of the version 1 spoken to in its own.
+const VERSION: u16 = 2;
 const HELLO: u8 = 1;
 const RELOAD: u8 = 2;
+const MOVE: u8 = 3;
 const WELCOME: u8 = 101;
 const REFUSED: u8 = 102;
 const DONE: u8 = 103;
@@ -35,6 +38,7 @@ pub fn demands(reloads: &[Reload]) -> Vec<(u8, u64)> {
             Reload::Path(id) => (2, u64::from(id)),
             Reload::Formation(_) => (4, 0),
             Reload::Creature(guid) => (5, guid),
+            Reload::Home(guid) => (HOME, guid),
             Reload::GameObject(guid) => (6, guid),
         };
         if !out.contains(&demand) {
@@ -105,42 +109,151 @@ impl Body<'_> {
     }
 }
 
-/// Asks the bridge on `port` with `token` to make `demands`: what each made, and what the server
-/// said of it.
-pub fn reload(port: u16, token: &str, demands: &[(u8, u64)]) -> Result<Vec<(bool, String)>, String> {
+/// The demand of a spawn point moved, of the version 2; a bridge of the version 1 asked to spawn the
+/// creature again in its place.
+const HOME: u8 = 8;
+
+/// A connection to the bridge on `port` with `token`, and the version it speaks: the version 2
+/// asked, the version 1 once a bridge of the version 1 refused it.
+fn connect(port: u16, token: &str, timeout: Duration) -> Result<(TcpStream, u16), String> {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let mut stream = TcpStream::connect_timeout(&address, CONNECT)
-        .map_err(|error| format!("no bridge on 127.0.0.1:{port} ({error}): is mod-uniwow-bridge installed?"))?;
-    stream
-        .set_read_timeout(Some(ANSWER))
-        .and_then(|_| stream.set_write_timeout(Some(CONNECT)))
-        .map_err(|error| error.to_string())?;
-    let mut hello = VERSION.to_le_bytes().to_vec();
-    string(&mut hello, token);
-    stream
-        .write_all(&message(HELLO, &hello))
-        .map_err(|error| error.to_string())?;
-    match read_message(&mut stream)? {
-        (WELCOME, _) => {}
-        (REFUSED, body) => return Err(format!("the bridge refused: {}", Body(&body).string()?)),
-        _ => return Err("the bridge answered something else".to_owned()),
+    let mut asked = VERSION;
+    loop {
+        let mut stream = TcpStream::connect_timeout(&address, CONNECT)
+            .map_err(|error| format!("no bridge on 127.0.0.1:{port} ({error}): is mod-uniwow-bridge installed?"))?;
+        stream
+            .set_read_timeout(Some(timeout))
+            .and_then(|_| stream.set_write_timeout(Some(CONNECT)))
+            .and_then(|_| stream.set_nodelay(true))
+            .map_err(|error| error.to_string())?;
+        let mut hello = asked.to_le_bytes().to_vec();
+        string(&mut hello, token);
+        stream
+            .write_all(&message(HELLO, &hello))
+            .map_err(|error| error.to_string())?;
+        match read_message(&mut stream)? {
+            (WELCOME, body) => {
+                let spoken = Body(&body).u16()?;
+                return Ok((stream, spoken.min(asked)));
+            }
+            (REFUSED, body) => {
+                let reason = Body(&body).string()?;
+                if asked > 1 && reason.contains("version 1") {
+                    asked = 1;
+                    continue;
+                }
+                return Err(format!("the bridge refused: {reason}"));
+            }
+            _ => return Err("the bridge answered something else".to_owned()),
+        }
     }
-    let mut body = 1u32.to_le_bytes().to_vec();
-    body.extend_from_slice(&(demands.len() as u16).to_le_bytes());
-    for (action, value) in demands {
-        body.push(*action);
-        body.extend_from_slice(&value.to_le_bytes());
-    }
+}
+
+/// Sends `kind` of `id` with `count` items of `items`, and reads what each made.
+fn ask(stream: &mut TcpStream, kind: u8, id: u32, count: usize, items: &[u8]) -> Result<Vec<(bool, String)>, String> {
+    let mut body = id.to_le_bytes().to_vec();
+    body.extend_from_slice(&(count as u16).to_le_bytes());
+    body.extend_from_slice(items);
     stream
-        .write_all(&message(RELOAD, &body))
+        .write_all(&message(kind, &body))
         .map_err(|error| error.to_string())?;
-    let (kind, answer) = read_message(&mut stream)?;
-    if kind != DONE {
+    let (answered, answer) = read_message(stream)?;
+    if answered != DONE {
         return Err("the bridge answered something else".to_owned());
     }
     let mut answer = Body(&answer);
     let (_, count) = (answer.u32()?, answer.u16()?);
     (0..count).map(|_| Ok((answer.u8()? == 1, answer.string()?))).collect()
+}
+
+/// Asks the bridge on `port` with `token` to make `demands`: what each made, and what the server
+/// said of it.
+pub fn reload(port: u16, token: &str, demands: &[(u8, u64)]) -> Result<Vec<(bool, String)>, String> {
+    let (mut stream, version) = connect(port, token, ANSWER)?;
+    let mut items = Vec::new();
+    let mut asked: Vec<(u8, u64)> = Vec::new();
+    for (action, value) in demands {
+        let demand = if *action == HOME && version < 2 {
+            (5, *value)
+        } else {
+            (*action, *value)
+        };
+        if !asked.contains(&demand) {
+            asked.push(demand);
+            items.push(demand.0);
+            items.extend_from_slice(&demand.1.to_le_bytes());
+        }
+    }
+    ask(&mut stream, RELOAD, 1, asked.len(), &items)
+}
+
+/// A creature in the world moved live where it is dragged: its map and instance, its GUID at run
+/// time, whether it is let go, where it is put and how it faces.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Move {
+    pub map: u32,
+    pub instance: u32,
+    pub guid: u64,
+    pub let_go: bool,
+    pub position: [f32; 3],
+    pub orientation: f32,
+}
+
+/// How long a move is waited for: the world thread makes it at its next update.
+const MOVED: Duration = Duration::from_secs(5);
+
+/// The connection the moves go through, kept while they come, made again once broken.
+#[derive(Default)]
+pub struct Moving {
+    stream: Option<TcpStream>,
+    next: u32,
+}
+
+impl Moving {
+    /// Moves the creatures of `moves` through the bridge on `port` with `token`: what each made.
+    pub fn send(&mut self, port: u16, token: &str, moves: &[Move]) -> Result<Vec<(bool, String)>, String> {
+        let mut items = Vec::with_capacity(moves.len() * 33);
+        for moved in moves.iter().take(64) {
+            items.extend_from_slice(&moved.map.to_le_bytes());
+            items.extend_from_slice(&moved.instance.to_le_bytes());
+            items.extend_from_slice(&moved.guid.to_le_bytes());
+            items.push(u8::from(moved.let_go));
+            for value in moved.position.iter().chain([&moved.orientation]) {
+                items.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        let count = moves.len().min(64);
+        // A connection kept may have been closed by the bridge's silence: made again once.
+        for again in [false, true] {
+            if self.stream.is_none() {
+                let (stream, version) = connect(port, token, MOVED)?;
+                if version < 2 {
+                    return Err(
+                        "the server's bridge is older and moves nothing live: build the worldserver again with this mod-uniwow-bridge"
+                            .to_owned(),
+                    );
+                }
+                self.stream = Some(stream);
+            }
+            self.next = self.next.wrapping_add(1);
+            let stream = self.stream.as_mut().expect("connected");
+            match ask(stream, MOVE, self.next, count, &items) {
+                Ok(made) => return Ok(made),
+                Err(reason) => {
+                    self.stream = None;
+                    if again {
+                        return Err(reason);
+                    }
+                }
+            }
+        }
+        unreachable!("tried twice")
+    }
+
+    /// The connection closed: no move for a while.
+    pub fn close(&mut self) {
+        self.stream = None;
+    }
 }
 
 #[cfg(test)]
@@ -200,6 +313,49 @@ mod tests {
             stream.write_all(&message(DONE, &done)).unwrap();
         });
         port
+    }
+
+    #[test]
+    fn a_bridge_of_the_version_1_is_asked_to_spawn_a_creature_again_for_its_spawn_point() {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let asked = std::thread::spawn(move || {
+            // The version 2 refused, as a bridge of the version 1 does.
+            let (mut stream, _) = listener.accept().unwrap();
+            let (_, body) = read_message(&mut stream).unwrap();
+            assert_eq!(Body(&body).u16().unwrap(), 2);
+            let mut reason = Vec::new();
+            string(&mut reason, "this bridge speaks the version 1 of its protocol");
+            stream.write_all(&message(REFUSED, &reason)).unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            let (_, body) = read_message(&mut stream).unwrap();
+            assert_eq!(Body(&body).u16().unwrap(), 1);
+            let mut welcome = 1u16.to_le_bytes().to_vec();
+            string(&mut welcome, "AzerothCore");
+            stream.write_all(&message(WELCOME, &welcome)).unwrap();
+            let (_, body) = read_message(&mut stream).unwrap();
+            let mut body = Body(&body);
+            let (id, count) = (body.u32().unwrap(), body.u16().unwrap());
+            let demands: Vec<(u8, u64)> = (0..count)
+                .map(|_| {
+                    (
+                        body.u8().unwrap(),
+                        u64::from_le_bytes(body.take(8).unwrap().try_into().unwrap()),
+                    )
+                })
+                .collect();
+            let mut done = id.to_le_bytes().to_vec();
+            done.extend_from_slice(&count.to_le_bytes());
+            for _ in 0..count {
+                done.push(1);
+                string(&mut done, "made");
+            }
+            stream.write_all(&message(DONE, &done)).unwrap();
+            demands
+        });
+        let made = reload(port, "secret", &demands(&[Reload::Home(79), Reload::Creature(79)])).unwrap();
+        assert_eq!(made.len(), 1, "the same demand once");
+        assert_eq!(asked.join().unwrap(), [(5, 79)]);
     }
 
     #[test]

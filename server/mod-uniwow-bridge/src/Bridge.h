@@ -10,12 +10,14 @@
 #include "Define.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace UniwowBridge
@@ -40,12 +42,29 @@ namespace UniwowBridge
         // in the world, as `.quest remove` does, and out of the quest status of all in the database,
         // done, daily, weekly, monthly and seasonal too.
         ForgetQuest = 7,
+        // The spawn point of the creature of this guid read again from its row: the creatures of it
+        // running keep their place and go home there, as they come back to it.
+        Home = 8,
     };
 
     struct Demand
     {
         Action action;
         uint64 value;
+    };
+
+    // A creature in the world moved by the editor while it drags it, live, nothing written: held
+    // still where it is put, its movement given back once let go.
+    struct Move
+    {
+        uint32 map;
+        uint32 instance;
+        uint64 guid;
+        bool letGo;
+        float x;
+        float y;
+        float z;
+        float orientation;
     };
 
     // What a demand made: whether it was, and what the server says of it.
@@ -59,6 +78,7 @@ namespace UniwowBridge
     struct Request
     {
         std::vector<Demand> demands;
+        std::vector<Move> moves;
         std::vector<Outcome> outcomes;
         bool made = false;
     };
@@ -81,6 +101,11 @@ namespace UniwowBridge
     private:
         void Listen();
         Outcome MakeOne(Demand const& demand);
+        Outcome MakeMove(Move const& move);
+        Outcome ReloadPath(uint32 pathId);
+        Outcome MoveHome(uint64 spawnId);
+        // The creatures held whose editor said nothing for a while given their movement back.
+        void LetGoForgotten();
 
         std::atomic<bool> _running{ false };
         std::thread _thread;
@@ -90,6 +115,16 @@ namespace UniwowBridge
         std::mutex _lock;
         std::condition_variable _made;
         std::deque<std::shared_ptr<Request>> _queue;
+
+        // On the world thread alone: the creatures held, by their GUID, their map and instance, and
+        // when the editor moved them last.
+        struct Held
+        {
+            uint32 map;
+            uint32 instance;
+            std::chrono::steady_clock::time_point last;
+        };
+        std::unordered_map<uint64, Held> _held;
     };
 }
 

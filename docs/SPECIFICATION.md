@@ -10837,6 +10837,32 @@ card *Flags*, folded: `Flags` (the `QuestFlags` of AzerothCore's `QuestDef.h`) a
 a job; under each box its raw value, folded and read only. **Tests**: a name of a DBC read from the
 first language that has one; each flag one bit of its own, each its hint.
 
+#### After 16.9: the creatures edited live
+
+Asked by the user: a creature of the world as it runs moved by its gizmo, its spawn point by
+another, its patrol changed, each seen in the game at once. A creature selected alone shows two
+gizmos, the handle nearest the pointer taken:
+
+- **Its spawn point's**, smaller and of the colour of the circle drawn there, with *Move* and
+  *Rotate*: once let go, its `creature.position_*` and `orientation` written at once by
+  `world-db.apply_live`, one transaction kept as an application with its script, one undo entry
+  with the drag, Ctrl+Z writing back the rows it replaced. The bridge's demand 8 (version 2) moves
+  its spawn point in the server's memory and the home of the creatures running: they keep their
+  place and go home there. A creature moved and applied from the panel goes home the same way.
+- **The creature's in the world**, with *Move*, at its place now: dragged, it is moved live through
+  the bridge (MOVE, version 2), ten times a second at most, held still while dragged, moving again
+  once let go, nothing written nor in the history. One its editor stops moving for five seconds is
+  let go.
+
+The patrols are applied at once in the same way, their points moved, added, duplicated and deleted,
+a patrol made: the bridge loads the path again, its walkers let go of it first and set on it again
+where they stand. What is applied at once: the creatures of the database moved, and the patrols
+naming creatures of the database; the rest waits for *Apply to the server*. A bridge of the version
+1 is asked to spawn the creature again in place of the demand 8, and moves nothing live.
+**Tests**: the changes split in those applied at once and the others; a bridge of the version 1
+asked the demand 5; a move read with its GUID, the last of a creature replacing the one waiting; the
+nearer of two gizmos grabbed.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which

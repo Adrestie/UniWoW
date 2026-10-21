@@ -182,6 +182,21 @@ impl Edits {
         self.paths.is_empty() && self.walkers.is_empty() && self.groups.is_empty()
     }
 
+    /// The creatures these changes name: those whose movement changed, the leaders and members of
+    /// the groups changed.
+    pub fn creatures(&self) -> BTreeSet<u64> {
+        let mut out: BTreeSet<u64> = self.walkers.keys().copied().collect();
+        for (leader, group) in &self.groups {
+            out.insert(*leader);
+            out.extend(
+                group
+                    .iter()
+                    .flat_map(|(members, _)| members.iter().map(|member| member.guid)),
+            );
+        }
+        out
+    }
+
     /// `base` as the user changed it.
     pub fn laid_over(&self, base: &Patrols) -> Patrols {
         let mut out = base.clone();
@@ -215,7 +230,6 @@ impl Edits {
     /// changed its points written again; a creature its movement and its addon's path; a group its
     /// rows written again, its members taken out of any other first.
     pub fn rows(&self, base: &Patrols) -> (Vec<RowChange>, Vec<Reload>) {
-        let now = self.laid_over(base);
         let (mut changes, mut reloads) = (Vec::new(), BTreeSet::new());
         for (id, path) in &self.paths {
             if base.paths.get(id) == path.as_ref() {
@@ -252,10 +266,8 @@ impl Edits {
                     rows,
                 });
             }
+            // The creatures walking it set on it again by the bridge, where they stand.
             reloads.insert(Reload::Path(*id));
-            for guid in now.walkers_of(*id).into_iter().chain(base.walkers_of(*id)) {
-                reloads.insert(Reload::Creature(guid));
-            }
         }
         for (guid, walker) in &self.walkers {
             let before = base.walkers.get(guid).copied().unwrap_or_default();

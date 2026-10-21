@@ -3,9 +3,11 @@
 //! with their templates' names and looks; given to the scene by tile, drawn through `models` by
 //! their looks; their places changed, created and deleted in memory, each one undo entry, kept in the
 //! project. The quests their templates start and end read with them and changed in memory (step
-//! 15.11c). Nothing is written to the database.
+//! 15.11c). The spawn points of the creatures moved and the patrols changed are applied to the server
+//! at once (`live`); the rest waits for *Apply to the server* of the panel *World database*.
 
 mod data;
+mod live;
 mod paths;
 mod patrol_ui;
 mod patrols;
@@ -151,6 +153,10 @@ struct SpawnsModule {
     /// The titles of the quests the user made in the module quests, by id.
     quest_titles: BTreeMap<u32, String>,
     view: Option<uniwow_api::viewport::Handle>,
+    /// The changes applied to the server at once, and how many times the spawns were read, for a
+    /// change undone to know whether its base is still theirs.
+    at_once: live::Live,
+    readings: u64,
 }
 
 /// The creatures and game objects the world as it runs lists in `snapshot`, by the pieces of the
@@ -486,14 +492,6 @@ impl SpawnsModule {
             self.changes
                 .pending(&self.spawns, &self.index, entry_column, &self.patrols),
         );
-    }
-
-    /// Makes `after` the changes, one undo entry.
-    fn change(&mut self, label: String, after: Changes, ctx: &mut Context) {
-        let before = self.changes.clone();
-        if before != after {
-            ctx.execute(SetChanges { label, before, after });
-        }
     }
 
     fn steer(&mut self, ctx: &mut Context) {
@@ -839,6 +837,7 @@ impl Module for SpawnsModule {
             )],
         );
         reg.subscribe(world_db::APPLIED_TOPIC);
+        reg.subscribe(live::TOLD);
         reg.subscribe(QUEST_TITLES_TOPIC);
         reg.panel("spawns", "Spawns", DockArea::Right)
             .command(
@@ -866,6 +865,14 @@ impl Module for SpawnsModule {
                  'ids': 'change' a value, or +n, -=n, *n, /n; kept in memory, one undo entry.",
                 json!({ "type": "object", "properties": { "ids": { "type": "array" }, "field": { "type": "string" }, "axis": { "type": "integer" }, "change": { "type": "string" } }, "required": ["ids", "field", "change"] }),
                 json!({ "type": "object", "properties": { "changed": { "type": "integer" }, "refused": { "type": "array" } } }),
+            )
+            .command(
+                "spawns.commit",
+                "Applies to the server at once what a gizmo changed while dragged, once let go: the spawn points of \
+                 the creatures moved, the patrols changed ('label' naming it); one undo entry with the drag. The \
+                 writes of the drag say 'held': true.",
+                json!({ "type": "object", "properties": { "label": { "type": "string" } } }),
+                json!({ "type": "object", "properties": { "applied": { "type": "boolean" } } }),
             )
             .command(
                 "spawns.duplicate",
@@ -903,6 +910,13 @@ impl Module for SpawnsModule {
     fn on_command(&mut self, name: &str, arguments: Value, ctx: &mut Context) -> Result<Value, String> {
         if name == "spawns.from_doodad" {
             return self.make_game_object(&arguments, ctx);
+        }
+        if name == "spawns.commit" {
+            return Ok(self.commit(arguments["label"].as_str().unwrap_or("Move"), ctx));
+        }
+        // A write of a gizmo being dragged: applied to the server once let go.
+        if arguments["held"].as_bool() == Some(true) {
+            self.at_once.held = true;
         }
         if name == "spawns.quest_titles" {
             let search = arguments["search"].as_str().unwrap_or_default();
@@ -1067,9 +1081,18 @@ impl Module for SpawnsModule {
         self.show_waypoints();
         self.draw_paths();
         self.give_pending(ctx);
+        self.send_live(ctx);
     }
 
-    fn on_event(&mut self, event: &uniwow_api::Event, _ctx: &mut Context) {
+    fn on_reply(&mut self, call: uniwow_api::CallId, result: Result<Value, String>, ctx: &mut Context) {
+        self.live_answered(call, &result, ctx);
+    }
+
+    fn on_event(&mut self, event: &uniwow_api::Event, ctx: &mut Context) {
+        if event.topic == live::TOLD {
+            self.told_live(&event.payload, ctx);
+            return;
+        }
         // The quests the user made in the module quests, named before they are in the database.
         if event.topic == QUEST_TITLES_TOPIC {
             self.quest_titles = event.payload["titles"]
@@ -1188,6 +1211,7 @@ impl Module for SpawnsModule {
                         quests.titles.len(),
                         quests.links.len()
                     );
+                    self.readings += 1;
                     self.index = spawns.iter().enumerate().map(|(at, spawn)| (spawn.id(), at)).collect();
                     self.by_tile = by_tile(&spawns);
                     self.areas = Arc::default();

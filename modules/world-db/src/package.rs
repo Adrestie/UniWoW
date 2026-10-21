@@ -512,6 +512,7 @@ pub fn resolved(
         .iter()
         .map(|reload| match reload {
             Reload::Creature(guid) => Reload::Creature(renamed_id(Kind::Creature, *guid)),
+            Reload::Home(guid) => Reload::Home(renamed_id(Kind::Creature, *guid)),
             Reload::GameObject(guid) => Reload::GameObject(renamed_id(Kind::GameObject, *guid)),
             Reload::Formation(leader) => Reload::Formation(renamed_id(Kind::Creature, *leader)),
             Reload::Path(id) => Reload::Path(renamed_id(Kind::Path, u64::from(*id)) as u32),

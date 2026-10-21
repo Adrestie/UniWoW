@@ -632,6 +632,36 @@ impl Changes {
         }
     }
 
+    /// These changes split in those applied to the server at once, as they are made, and the others:
+    /// the creatures of the database moved (their spawn points), and the patrols, unless they name a
+    /// creature not in the database yet (`index` holds those that are).
+    pub fn split_live(&self, index: &HashMap<EntityId, usize>) -> (Changes, Changes) {
+        let mut live = Changes::default();
+        let mut rest = self.clone();
+        let of_database =
+            |id: &EntityId| index.contains_key(id) && !self.added.contains_key(id) && !self.deleted.contains(id);
+        for (id, place) in &self.moved {
+            if id.kind == Kind::Creature && of_database(id) {
+                live.moved.insert(*id, *place);
+                rest.moved.remove(id);
+            }
+        }
+        let walkers_known = self
+            .patrols
+            .creatures()
+            .iter()
+            .all(|guid| of_database(&EntityId::creature(*guid)));
+        if !self.patrols.is_empty() && walkers_known {
+            live.patrols = std::mem::take(&mut rest.patrols);
+        }
+        (live, rest)
+    }
+
+    /// Whether these changes hold nothing.
+    pub fn is_empty(&self) -> bool {
+        *self == Changes::default()
+    }
+
     /// The changes for the server (step 16.1): the rows of the spawns moved, duplicated and deleted
     /// and of the quests given and taken, the creatures' entry in their column `entry_column`; the
     /// spawns as the database has them `spawns`, their places by id `index`. What is not written
@@ -690,7 +720,12 @@ impl Changes {
                 set: place(&spawn),
                 from: None,
             });
-            out.reloads.push(reload(id));
+            // A creature moved keeps its place in the game, its spawn point there; a game object is
+            // spawned again.
+            out.reloads.push(match id.kind {
+                Kind::Creature => world_db::Reload::Home(id.key),
+                _ => reload(id),
+            });
         }
         let mut added: Vec<&EntityId> = self.added.keys().collect();
         added.sort();
@@ -924,6 +959,35 @@ mod tests {
     }
 
     #[test]
+    fn the_creatures_of_the_database_moved_and_the_patrols_are_applied_at_once() {
+        let spawns = spawns(&guard(), Kind::Creature);
+        let index: HashMap<EntityId, usize> = spawns.iter().enumerate().map(|(at, spawn)| (spawn.id(), at)).collect();
+        let mut changes = Changes::default();
+        changes.moved.insert(spawns[0].id(), ([1.0, 2.0, 3.0], 0.5));
+        let made = EntityId::creature(900_000);
+        changes.moved.insert(made, ([4.0, 5.0, 6.0], 0.0));
+        changes.added.insert(made, spawns[1].clone());
+        changes.moved.insert(EntityId::game_object(5), ([1.0, 1.0, 1.0], 0.0));
+        changes.patrols.paths.insert(790, Some(Vec::new()));
+        let (live, rest) = changes.split_live(&index);
+        assert_eq!(live.moved.keys().collect::<Vec<_>>(), [&spawns[0].id()]);
+        assert_eq!(live.patrols.paths.len(), 1);
+        assert_eq!(rest.moved.len(), 2, "one made, a game object: they wait for Apply");
+        assert!(rest.patrols.is_empty());
+
+        // A patrol naming a creature not in the database yet waits with it.
+        changes.patrols.walkers.insert(
+            900_000,
+            crate::patrols::Walker {
+                movement: 2,
+                path: 9_000_000,
+            },
+        );
+        let (live, rest) = changes.split_live(&index);
+        assert!(live.patrols.is_empty() && !rest.patrols.is_empty());
+    }
+
+    #[test]
     fn the_changes_of_the_spawns_are_the_rows_the_server_is_given() {
         use uniwow_api::db::write::{Memory, apply};
 
@@ -977,9 +1041,9 @@ mod tests {
             pending.reloads,
             [
                 world_db::Reload::Quests,
-                world_db::Reload::Creature(spawns[0].guid),
                 world_db::Reload::Creature(spawns[1].guid),
                 world_db::Reload::Creature(900_000),
+                world_db::Reload::Home(spawns[0].guid),
             ],
             "in the order the server makes them"
         );

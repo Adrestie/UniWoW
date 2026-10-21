@@ -16,6 +16,7 @@
 
 mod bridge;
 mod exchange;
+mod live;
 mod package;
 mod sending;
 mod servers;
@@ -60,6 +61,8 @@ struct Shared {
     server: Mutex<Option<Server>>,
     chose: Mutex<Option<String>>,
     manage: std::sync::atomic::AtomicBool,
+    /// The creatures dragged in the world, moved live by a thread of their own.
+    moves: live::Moves,
 }
 
 impl Shared {
@@ -205,37 +208,11 @@ struct Application {
 }
 
 fn reload_json(reload: &Reload) -> Value {
-    match reload {
-        Reload::Quests => json!({ "quests": true }),
-        Reload::ForgetQuest(id) => json!({ "forget_quest": id }),
-        Reload::Addons => json!({ "addons": true }),
-        Reload::Path(id) => json!({ "path": id }),
-        Reload::Formation(leader) => json!({ "formation": leader }),
-        Reload::Creature(guid) => json!({ "creature": guid }),
-        Reload::GameObject(guid) => json!({ "gameobject": guid }),
-    }
+    reload.to_json()
 }
 
 fn reload_of(value: &Value) -> Option<Reload> {
-    if value["quests"].as_bool() == Some(true) {
-        return Some(Reload::Quests);
-    }
-    if let Some(id) = value["forget_quest"].as_u64() {
-        return Some(Reload::ForgetQuest(id as u32));
-    }
-    if value["addons"].as_bool() == Some(true) {
-        return Some(Reload::Addons);
-    }
-    if let Some(id) = value["path"].as_u64() {
-        return Some(Reload::Path(id as u32));
-    }
-    if let Some(leader) = value["formation"].as_u64() {
-        return Some(Reload::Formation(leader));
-    }
-    if let Some(guid) = value["creature"].as_u64() {
-        return Some(Reload::Creature(guid));
-    }
-    value["gameobject"].as_u64().map(Reload::GameObject)
+    Reload::of_json(value)
 }
 
 impl Application {
@@ -346,8 +323,15 @@ fn write_script_to(
     if folder.trim().is_empty() {
         return (None, None);
     }
-    let name = script_name(when, undone);
-    let path = std::path::Path::new(folder.trim()).join(&name);
+    // Two in the same second, as the changes applied at once are: the second numbered.
+    let mut name = script_name(when, undone);
+    let mut path = std::path::Path::new(folder.trim()).join(&name);
+    let mut count = 1;
+    while path.exists() {
+        count += 1;
+        name = script_name(when, undone).replace(".sql", &format!("_{count}.sql"));
+        path = std::path::Path::new(folder.trim()).join(&name);
+    }
     let content = write::script(title, entries);
     match std::fs::create_dir_all(folder.trim()).and_then(|_| std::fs::write(&path, &content)) {
         Ok(()) => (Some(write::applied_script(&name, &content)), None),
@@ -488,6 +472,38 @@ struct WorldDbModule {
     /// from the characters.
     bridging: Option<JobId>,
     forgetting: Vec<u32>,
+    /// The changes applied at once, waiting, and the one being written with the database it goes to.
+    live: std::collections::VecDeque<LiveApply>,
+    writing_live: Option<(JobId, LiveApply, String)>,
+}
+
+/// A change applied at once, as it is made (a spawn point dragged, a patrol changed): its owner, what
+/// it is, the ticket its owner knows it by, its rows and what the server loads again.
+struct LiveApply {
+    owner: String,
+    label: String,
+    ticket: u64,
+    changes: Vec<RowChange>,
+    reloads: Vec<Reload>,
+}
+
+impl LiveApply {
+    fn of(arguments: &Value) -> Result<Self, String> {
+        let list = |key: &str| arguments[key].as_array().cloned().unwrap_or_default();
+        Ok(Self {
+            owner: arguments["owner"]
+                .as_str()
+                .ok_or("'owner' names the module")?
+                .to_owned(),
+            label: arguments["label"].as_str().unwrap_or("A change").to_owned(),
+            ticket: arguments["ticket"].as_u64().ok_or("'ticket' is a number")?,
+            changes: list("changes")
+                .iter()
+                .map(|change| RowChange::of_json(change).ok_or("'changes' are rows changed"))
+                .collect::<Result<_, _>>()?,
+            reloads: list("reloads").iter().filter_map(reload_of).collect(),
+        })
+    }
 }
 
 impl Default for WorldDbModule {
@@ -512,6 +528,8 @@ impl Default for WorldDbModule {
             said: None,
             bridging: None,
             forgetting: Vec::new(),
+            live: std::collections::VecDeque::new(),
+            writing_live: None,
         }
     }
 }
@@ -913,7 +931,7 @@ impl WorldDbModule {
 impl Module for WorldDbModule {
     fn register(&mut self, reg: &mut Registrar) {
         let service: world_db::Handle = Arc::new(Service(self.shared.clone()));
-        let (for_query, for_state) = (self.shared.clone(), self.shared.clone());
+        let (for_query, for_state, for_moves) = (self.shared.clone(), self.shared.clone(), self.shared.clone());
         reg.panel("world-db", "World database", DockArea::Right)
             .provide(world_db::SERVICE, service)
             .command_on_caller(
@@ -950,7 +968,56 @@ impl Module for WorldDbModule {
                         State::Refused(reason) => json!({ "state": "refused", "reason": reason }),
                     })
                 }),
+            )
+            .command_on_caller(
+                "world-db.move_live",
+                "Moves the creature 'guid' (its GUID at run time, 0x… text) of 'map' and 'instance' in the world \
+                 of the server chosen to 'position' facing 'orientation', live, through its bridge, nothing \
+                 written: held still while dragged, moving again once 'let_go'. Sent ten times a second at \
+                 most, the last of each creature. What went wrong with the moves sent last, in 'said'.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "map": { "type": "integer" }, "instance": { "type": "integer" },
+                        "guid": { "type": "string" }, "position": { "type": "array" },
+                        "orientation": { "type": "number" }, "let_go": { "type": "boolean" },
+                    },
+                    "required": ["map", "guid", "position"]
+                }),
+                json!({ "type": "object" }),
+                Arc::new(move |arguments| {
+                    for_moves.moves.push(live::move_of(&arguments)?);
+                    Ok(live::answer(&for_moves.moves))
+                }),
+            )
+            .command(
+                "world-db.apply_live",
+                "Applies 'changes' (rows changed) of the module 'owner' at once, as they are made, one transaction \
+                 of their own, kept as an application with its script, 'reloads' asked of the server's bridge. \
+                 Told by the topic world-db.applied_live with the 'ticket' given: the rows replaced, or why not.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "owner": { "type": "string" }, "label": { "type": "string" }, "ticket": { "type": "integer" },
+                        "changes": { "type": "array" }, "reloads": { "type": "array" },
+                    },
+                    "required": ["owner", "ticket", "changes"]
+                }),
+                json!({ "type": "object" }),
             );
+    }
+
+    fn on_command(&mut self, name: &str, arguments: Value, ctx: &mut Context) -> Result<Value, String> {
+        match name {
+            "world-db.apply_live" => {
+                let live = LiveApply::of(&arguments)?;
+                let waiting = self.live.len() + usize::from(self.writing_live.is_some());
+                self.live.push_back(live);
+                self.write_live(ctx);
+                Ok(json!({ "waiting": waiting }))
+            }
+            other => Err(format!("'{other}' is not handled")),
+        }
     }
 
     fn init(&mut self, ctx: &mut Context) {
@@ -960,6 +1027,15 @@ impl Module for WorldDbModule {
         self.thread = Some(ctx.spawn_thread("The connection to the world database", move |job| {
             serve(shared, receiver, || job.is_cancelled());
         }));
+        let shared = self.shared.clone();
+        ctx.spawn_thread("Move the creatures dragged in the world, live", move |job| {
+            let server = || {
+                lock(&shared.server)
+                    .as_ref()
+                    .map(|server| (server.bridge_port, server.bridge_token.clone()))
+            };
+            live::run(&shared.moves, server, || job.is_cancelled());
+        });
         self.shared.set(State::Waiting);
         self.sync_servers(ctx);
         // For the modules started before it, which follow the server chosen.
@@ -1202,6 +1278,11 @@ impl Module for WorldDbModule {
             self.bridged(outcome.take::<Result<Vec<(bool, String)>, String>>());
             return;
         }
+        if let Some((_, live, database)) = self.writing_live.take_if(|(writing, _, _)| *writing == job) {
+            self.written_live(live, database, outcome.take::<Result<Vec<Entry>, String>>(), ctx);
+            self.write_live(ctx);
+            return;
+        }
         if ours && let Some(applying) = self.applying.take() {
             self.applied(applying, outcome.take::<Result<Vec<Entry>, String>>(), ctx);
             return;
@@ -1280,6 +1361,79 @@ impl WorldDbModule {
         ));
         ctx.publish(world_db::APPLIED_TOPIC, json!({ "owners": owners }));
         self.ask_bridge(&reloads, ctx);
+    }
+
+    /// Writes the next change applied at once, from a job, once the one before is written.
+    fn write_live(&mut self, ctx: &mut Context) {
+        use world_db::WorldDb as _;
+        if self.writing_live.is_some() {
+            return;
+        }
+        let Some(live) = self.live.pop_front() else {
+            return;
+        };
+        let settings = settings_of(ctx);
+        let (shared, changes) = (self.shared.clone(), live.changes.clone());
+        let job = ctx.spawn("Apply a change to the world database at once", move |_| {
+            Service(shared).apply(&changes)
+        });
+        let database = format!("{} on {}:{}", settings.database, settings.host, settings.port);
+        self.writing_live = Some((job, live, database));
+    }
+
+    /// The outcome of a change applied at once: kept as an application, its script written, the
+    /// server asked to load it again; its owner told, with the rows it replaced.
+    fn written_live(
+        &mut self,
+        live: LiveApply,
+        database: String,
+        outcome: Option<Result<Vec<Entry>, String>>,
+        ctx: &mut Context,
+    ) {
+        let entries = match outcome {
+            Some(Ok(entries)) => entries,
+            refused => {
+                let reason = match refused {
+                    Some(Err(reason)) => reason,
+                    _ => "the application stopped".to_owned(),
+                };
+                log::warn!("{} is not applied: {reason}", live.label);
+                self.said = Some((false, format!("{}: nothing written, {reason}", live.label)));
+                ctx.publish(
+                    world_db::APPLIED_LIVE_TOPIC,
+                    json!({ "owner": live.owner, "ticket": live.ticket, "refused": reason }),
+                );
+                return;
+            }
+        };
+        let when = now();
+        let application = Application {
+            when: when.clone(),
+            server: server_of(ctx).name,
+            database: database.clone(),
+            owners: vec![live.owner.clone()],
+            entries,
+            reloads: live.reloads.clone(),
+        };
+        let rows = application.rows();
+        let title = format!("Applied at once by UniWoW on {when} to {database}: {}", live.label);
+        let failed = self.write_script(ctx, &title, &when, false, &application.entries);
+        let message = format!("{}: {rows} rows written to {database} at once", live.label);
+        log::info!("{message}");
+        self.said = Some((
+            failed.is_none(),
+            failed.map_or(message.clone(), |failed| format!("{message}; {failed}")),
+        ));
+        ctx.publish(
+            world_db::APPLIED_LIVE_TOPIC,
+            json!({
+                "owner": live.owner,
+                "ticket": live.ticket,
+                "entries": application.entries.iter().map(Entry::to_json).collect::<Vec<_>>(),
+            }),
+        );
+        self.applications.push(application);
+        self.ask_bridge(&live.reloads, ctx);
     }
 
     /// Asks the bridge of the server to load again what `reloads` names, from a job.

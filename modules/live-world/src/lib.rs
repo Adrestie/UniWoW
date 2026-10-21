@@ -1,7 +1,8 @@
 //! The world as it runs on the server: the creatures, game objects and players around the camera,
 //! on the map the terrain shows, streamed by the observer `mod-uniwow-observer`, and the hour of the
-//! server and the weathers of its zones, from an observer that sends them. Read only: nothing is
-//! changed on the server, nothing goes to the history. A thread of its own holds the connection
+//! server and the weathers of its zones, from an observer that sends them. Read only, but for a
+//! creature dragged by its gizmo, moved live through the bridge of the server (`live-world.move`),
+//! nothing written, nothing in the history. A thread of its own holds the connection
 //! (`link`); the commands read the snapshot it leaves, from any thread; an event, batched, tells
 //! what each message of the observer changed.
 
@@ -205,6 +206,35 @@ fn weather(shared: &Shared, arguments: &Value) -> Result<Value, String> {
             ),
         }),
     })
+}
+
+/// The move of the creature `id` (its spawn's, or its GUID at run time) to `position` that
+/// `world-db.move_live` is given: its map, instance and GUID, the way it faces kept.
+fn live_move(shared: &Shared, arguments: &Value) -> Result<Value, String> {
+    let id: scene::EntityId = arguments["id"]
+        .as_str()
+        .ok_or("'id' is the id of a creature")?
+        .parse()?;
+    let world = shared.world();
+    let tracked = match id.kind {
+        scene::Kind::Live => world.entities.get(&id.key).cloned(),
+        scene::Kind::Creature => world
+            .entities
+            .values()
+            .find(|tracked| tracked.entity.kind == Kind::Creature && u64::from(tracked.entity.spawn) == id.key)
+            .cloned(),
+        _ => None,
+    }
+    .filter(|tracked| tracked.entity.kind == Kind::Creature)
+    .ok_or_else(|| format!("{id} is no creature of the world as it runs"))?;
+    Ok(json!({
+        "map": world.map,
+        "instance": world.instance,
+        "guid": guid_text(tracked.entity.guid),
+        "position": arguments["position"].clone(),
+        "orientation": tracked.entity.orientation,
+        "let_go": arguments["let_go"].as_bool().unwrap_or(false),
+    }))
 }
 
 /// The command `live-world.state`.
@@ -497,6 +527,31 @@ impl Module for LiveWorld {
             json!({ "type": "object" }),
             Arc::new(move |arguments| entities(&lock(&current).clone(), &arguments)),
         );
+        reg.command(
+            "live-world.move",
+            "Moves the creature 'id' (creature:<spawn> or live:<GUID>) of the world as it runs to 'position', live, \
+             through the bridge of the server, nothing written: held still while dragged, moving again once \
+             'let_go'.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" }, "position": { "type": "array" }, "let_go": { "type": "boolean" },
+                },
+                "required": ["id", "position"],
+            }),
+            json!({ "type": "object" }),
+        );
+    }
+
+    fn on_command(&mut self, name: &str, arguments: Value, ctx: &mut Context) -> Result<Value, String> {
+        match name {
+            "live-world.move" => {
+                let moved = live_move(&self.shared(), &arguments)?;
+                ctx.call("world-db.move_live", moved.clone());
+                Ok(moved)
+            }
+            other => Err(format!("'{other}' is not handled")),
+        }
     }
 
     fn init(&mut self, ctx: &mut Context) {

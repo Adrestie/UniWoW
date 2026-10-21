@@ -44,14 +44,61 @@ pub enum Reload {
     ForgetQuest(u32),
     /// The addons of the creatures: their paths, mounts and auras.
     Addons,
-    /// The path of waypoints of this id, the creatures following it set on it again.
+    /// The path of waypoints of this id, the creatures walking it set on it again from its first
+    /// point.
     Path(u32),
     /// The group of creatures led by the creature of this guid, its members gathered again.
     Formation(u64),
     /// The creature of this guid spawned again where its row places it, or taken away.
     Creature(u64),
+    /// The spawn point of the creature of this guid read again from its row: the creature keeps its
+    /// place and goes home there as it comes back; spawned again by a bridge that cannot.
+    Home(u64),
     /// The game object of this guid spawned again where its row places it, or taken away.
     GameObject(u64),
+}
+
+impl Reload {
+    /// As JSON, as the applications and the packages keep it.
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        match self {
+            Reload::Quests => json!({ "quests": true }),
+            Reload::ForgetQuest(id) => json!({ "forget_quest": id }),
+            Reload::Addons => json!({ "addons": true }),
+            Reload::Path(id) => json!({ "path": id }),
+            Reload::Formation(leader) => json!({ "formation": leader }),
+            Reload::Creature(guid) => json!({ "creature": guid }),
+            Reload::Home(guid) => json!({ "home": guid }),
+            Reload::GameObject(guid) => json!({ "gameobject": guid }),
+        }
+    }
+
+    /// Read from its JSON.
+    pub fn of_json(value: &serde_json::Value) -> Option<Reload> {
+        if value["quests"].as_bool() == Some(true) {
+            return Some(Reload::Quests);
+        }
+        if let Some(id) = value["forget_quest"].as_u64() {
+            return Some(Reload::ForgetQuest(id as u32));
+        }
+        if value["addons"].as_bool() == Some(true) {
+            return Some(Reload::Addons);
+        }
+        if let Some(id) = value["path"].as_u64() {
+            return Some(Reload::Path(id as u32));
+        }
+        if let Some(leader) = value["formation"].as_u64() {
+            return Some(Reload::Formation(leader));
+        }
+        if let Some(guid) = value["creature"].as_u64() {
+            return Some(Reload::Creature(guid));
+        }
+        if let Some(guid) = value["home"].as_u64() {
+            return Some(Reload::Home(guid));
+        }
+        value["gameobject"].as_u64().map(Reload::GameObject)
+    }
 }
 
 /// The changes a module holds for the server: its rows changed, what the server loads again, and
@@ -66,6 +113,12 @@ pub struct Pending {
     pub reloads: Vec<Reload>,
     pub held: Vec<String>,
 }
+
+/// Published once a change asked with the command `world-db.apply_live` (applied at once, as it is
+/// made) is written or refused: `{ "owner": .., "ticket": .., "entries": [..] }`, the rows it
+/// replaced, or `{ "owner": .., "ticket": .., "refused": .. }`. Its owner keeps its rows, to put
+/// them back once undone.
+pub const APPLIED_LIVE_TOPIC: &str = "world-db.applied_live";
 
 /// Published once the user chose another server (step 16.7), its name in `{ "server": .. }`: the
 /// modules that read it, or follow it, read it again through `WorldDb::server`.

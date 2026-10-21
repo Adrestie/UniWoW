@@ -464,7 +464,17 @@ fn distance(shape: &Shape, point: Pos2) -> f32 {
 
 /// The handle of `parts` under `point`, in points from the top left of the view: the nearest one
 /// seen, the one drawn over the others as near, those taken last only where no other is.
+#[cfg(test)]
 pub fn grab(parts: &[Part], point: Pos2) -> Option<Handle> {
+    nearest(parts, point).map(|(handle, _)| handle)
+}
+
+/// How far a handle is from the pointer, to choose between two gizmos: those taken last after the
+/// others, then the nearest.
+pub type Away = (bool, f32);
+
+/// The handle of `parts` under `point`, as `grab` finds it, and how far it is.
+pub fn nearest(parts: &[Part], point: Pos2) -> Option<(Handle, Away)> {
     parts
         .iter()
         .enumerate()
@@ -474,7 +484,20 @@ pub fn grab(parts: &[Part], point: Pos2) -> Option<Handle> {
             (away <= GRAB).then_some((part.last, away, drawn, part.handle))
         })
         .min_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(b.2.cmp(&a.2)))
-        .map(|(_, _, _, handle)| handle)
+        .map(|(last, away, _, handle)| (handle, (last, away)))
+}
+
+/// The gizmo of a spawn point, apart from that of the creature in the world: the colour of the
+/// circle drawn on a spawn point, and smaller.
+pub const SPAWN: Color32 = Color32::from_rgb(255, 217, 51);
+pub const SPAWN_SIZE: f32 = 0.6;
+
+/// `parts` drawn as the gizmo of a spawn point: all of its colour.
+pub fn as_spawn_point(mut parts: Vec<Part>) -> Vec<Part> {
+    for part in &mut parts {
+        part.colour = SPAWN;
+    }
+    parts
 }
 
 /// What a drag of a gizmo makes, from where it was grabbed: a move in the world, a turn, a factor
@@ -790,6 +813,20 @@ mod tests {
 
     fn at(seen: &Seen, point: Vec3) -> Pos2 {
         project(seen, point).unwrap()
+    }
+
+    #[test]
+    fn the_nearer_of_two_gizmos_is_grabbed_the_spawn_point_s_of_its_own_colour() {
+        let seen = seen();
+        let parts_at = |centre: Vec3| {
+            let frame = Frame::new(&seen, centre, Quat::IDENTITY).unwrap();
+            parts(Mode::Move, &seen, &frame, false, 1.0)
+        };
+        let (here, there) = (parts_at(Vec3::ZERO), as_spawn_point(parts_at(Vec3::new(3.0, 0.0, 0.0))));
+        assert!(there.iter().all(|part| part.colour == SPAWN));
+        let tip = at(&seen, Vec3::new(3.0, 0.0, 0.0));
+        let (_, near) = nearest(&there, tip).expect("its middle under the pointer");
+        assert!(nearest(&here, tip).is_none_or(|(_, away)| away.1 >= near.1));
     }
 
     #[test]

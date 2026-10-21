@@ -106,11 +106,28 @@ enum Change {
 }
 
 /// What a drag of a gizmo asks of the module, in order: a gesture opened as it is grabbed, the
-/// changes made as the pointer moves, the gesture ended once let go.
+/// changes made as the pointer moves, the gesture ended once let go; a creature in the world moved
+/// live, held or let go.
 enum Drag {
     Grabbed(String),
     Moved(Vec<Change>),
     LetGo,
+    Live { id: EntityId, position: Vec3, let_go: bool },
+}
+
+/// What a gizmo moves: the selection, written by its providers; or a creature in the world, live.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Target {
+    Selection,
+    Live(EntityId),
+}
+
+/// A gizmo shown: what it moves, where it stands, its parts, whether it is a spawn point's.
+struct Shown {
+    target: Target,
+    frame: gizmo::Frame,
+    parts: Vec<gizmo::Part>,
+    spawn: bool,
 }
 
 /// A handle of a gizmo held: the grab, what it made so far, where the entities of the selection
@@ -121,6 +138,10 @@ struct Held {
     starts: Vec<(EntityId, Vec3)>,
     pivot: gizmo::Pivot,
     space: gizmo::Space,
+    /// What it moves, whether it is a spawn point's, and where a creature was last moved live.
+    target: Target,
+    spawn: bool,
+    sent: Option<Vec3>,
 }
 
 /// What the tool shares with its module.
@@ -261,8 +282,9 @@ struct Selecting {
     last: Option<(egui::Pos2, EntityId)>,
     /// The last refusal of a smart selection, shown in the toolbar.
     said: Option<String>,
-    /// The handle of a gizmo being dragged.
+    /// The handle of a gizmo being dragged; when a creature dragged was last moved live.
     grabbed: Option<Held>,
+    sent_at: Option<std::time::Instant>,
 }
 
 /// The middle of the origins of the entities `ids` the snapshot holds.
@@ -321,21 +343,32 @@ impl Selecting {
     }
 
     /// The gizmo about the selection as it stands: about the middle of its bounds or the pivot of
-    /// the active one, in the axes of the world or of the active one.
+    /// the active one, in the axes of the world or of the active one. An entity written by its
+    /// provider is taken where its provider has it (a creature at its spawn point), one only seen
+    /// where it is now.
     fn frame(&self, seen: &viewport::Seen, ids: &[EntityId]) -> Option<gizmo::Frame> {
         let snapshot = self.scene.snapshot();
         let active = self.scene.selection().active();
         let pivot = *held(&self.shared.pivot);
+        let now = |id: &EntityId| {
+            if snapshot.editable(id).is_some() {
+                None
+            } else {
+                self.scene.position_now(id)
+            }
+        };
         let at = |id: &EntityId| {
-            self.scene
-                .position_now(id)
+            snapshot
+                .editable(id)
+                .map(|entity| entity.origin())
+                .or_else(|| self.scene.position_now(id))
                 .or_else(|| snapshot.get(id).map(|entity| entity.origin()))
                 .map(Vec3::from)
         };
         let centre = match (pivot, active) {
             (gizmo::Pivot::Pivot, Some(active)) => at(&active),
             _ => {
-                let (boxes, _) = boxes::boxes(&snapshot, ids, |id| self.scene.position_now(id));
+                let (boxes, _) = boxes::boxes(&snapshot, ids, now);
                 let all = boxes.iter().copied().reduce(|mut all, b| {
                     for axis in 0..3 {
                         all[axis] = all[axis].min(b[axis]);
@@ -354,8 +387,47 @@ impl Selecting {
         gizmo::Frame::new(seen, centre, turn)
     }
 
-    /// The gizmo of the mode shown about the selection, as Unity's: drawn, the handle under the
-    /// pointer lit, grabbed, dragged; its changes given to the module as the pointer moves.
+    /// The gizmos of the mode shown about the selection: its own, which writes it; for a creature
+    /// selected alone, its own is that of its spawn point, smaller and of the colour of the circle
+    /// drawn there, and with *Move* the creature in the world has one too, which moves it live.
+    fn shown(&self, mode: gizmo::Mode, seen: &viewport::Seen, ids: &[EntityId], shift: bool) -> Vec<Shown> {
+        let snapshot = self.scene.snapshot();
+        let creature = match ids {
+            [only] if only.kind == Kind::Creature => Some(*only),
+            _ => None,
+        };
+        let mut out = Vec::new();
+        if let Some(mut frame) = self.frame(seen, ids) {
+            let spawn = creature.is_some_and(|id| snapshot.editable(&id).is_some());
+            if spawn {
+                frame.size *= gizmo::SPAWN_SIZE;
+            }
+            let parts = gizmo::parts(mode, seen, &frame, shift, 1.0);
+            out.push(Shown {
+                target: Target::Selection,
+                frame,
+                parts: if spawn { gizmo::as_spawn_point(parts) } else { parts },
+                spawn,
+            });
+        }
+        if mode == gizmo::Mode::Move
+            && let Some(id) = creature
+            && let Some(now) = self.scene.position_now(&id)
+            && let Some(frame) = gizmo::Frame::new(seen, Vec3::from(now), Quat::IDENTITY)
+        {
+            out.push(Shown {
+                target: Target::Live(id),
+                frame,
+                parts: gizmo::parts(mode, seen, &frame, shift, 1.0),
+                spawn: false,
+            });
+        }
+        out
+    }
+
+    /// The gizmos of the mode shown about the selection, as Unity's: drawn, the handle under the
+    /// pointer lit, the nearest of them grabbed, dragged; the changes of the selection given to the
+    /// module as the pointer moves, a creature in the world moved live ten times a second at most.
     /// Whether it holds the pointer.
     fn gizmo(&mut self, input: &ToolInput<'_>, painter: &egui::Painter) -> bool {
         let mode = *held(&self.shared.mode);
@@ -377,37 +449,66 @@ impl Selecting {
         let ids = self.scene.groups().expanded(&self.scene.selection().ids);
         // Grabbed.
         if self.grabbed.is_none() {
-            let Some(frame) = self.frame(&input.seen, &ids) else {
+            let shown = self.shown(mode, &input.seen, &ids, shift);
+            if shown.is_empty() {
                 return false;
-            };
-            let parts = gizmo::parts(mode, &input.seen, &frame, shift, 1.0);
-            let hovered = pointer.and_then(|at| gizmo::grab(&parts, at - offset));
-            if response.drag_started_by(egui::PointerButton::Primary)
-                && let Some(handle) = origin.and_then(|at| gizmo::grab(&parts, at - offset))
-            {
-                let snapshot = self.scene.snapshot();
-                let starts = ids
+            }
+            // The handle nearest to a point, among the gizmos shown.
+            let near = |at: egui::Pos2| {
+                shown
                     .iter()
-                    .filter_map(|id| Some((*id, Vec3::from(snapshot.editable(id)?.origin()))))
-                    .collect();
+                    .enumerate()
+                    .filter_map(|(index, gizmo)| {
+                        gizmo::nearest(&gizmo.parts, at - offset).map(|(handle, away)| (index, handle, away))
+                    })
+                    .min_by(|a, b| a.2.0.cmp(&b.2.0).then(a.2.1.total_cmp(&b.2.1)))
+            };
+            let hovered = pointer.and_then(near);
+            if response.drag_started_by(egui::PointerButton::Primary)
+                && let Some((index, handle, _)) = origin.and_then(near)
+            {
+                let chosen = &shown[index];
+                let starts = match chosen.target {
+                    Target::Selection => {
+                        let snapshot = self.scene.snapshot();
+                        ids.iter()
+                            .filter_map(|id| Some((*id, Vec3::from(snapshot.editable(id)?.origin()))))
+                            .collect()
+                    }
+                    Target::Live(id) => vec![(id, chosen.frame.centre)],
+                };
                 let start = origin.unwrap_or_default() - offset;
                 self.grabbed = Some(Held {
-                    grab: gizmo::Grab::new(handle, frame, &input.seen, start),
+                    grab: gizmo::Grab::new(handle, chosen.frame, &input.seen, start),
                     applied: gizmo::Amount::none(handle),
                     starts,
                     pivot: *held(&self.shared.pivot),
                     space: *held(&self.shared.space),
+                    target: chosen.target,
+                    spawn: chosen.spawn,
+                    sent: None,
                 });
-                let label = match mode {
-                    gizmo::Mode::Rotate => "Rotate",
-                    gizmo::Mode::Scale => "Scale",
-                    _ => "Move",
-                };
-                held(&self.shared.writes).push(Drag::Grabbed(label.to_owned()));
+                if chosen.target == Target::Selection {
+                    let label = match (mode, chosen.spawn) {
+                        (gizmo::Mode::Rotate, true) => "Turn the spawn point",
+                        (_, true) => "Move the spawn point",
+                        (gizmo::Mode::Rotate, false) => "Rotate",
+                        (gizmo::Mode::Scale, false) => "Scale",
+                        _ => "Move",
+                    };
+                    held(&self.shared.writes).push(Drag::Grabbed(label.to_owned()));
+                }
             } else {
-                gizmo::draw(painter, &parts, offset, hovered, None);
+                for (index, gizmo) in shown.iter().enumerate() {
+                    let lit = hovered.filter(|(at, _, _)| *at == index).map(|(_, handle, _)| handle);
+                    gizmo::draw(painter, &gizmo.parts, offset, lit, None);
+                }
+                if let (Some(at), Some((index, _, _))) = (pointer, hovered) {
+                    let gizmo = &shown[index];
+                    hint(painter, at, gizmo.target, gizmo.spawn);
+                }
                 // A click on a handle is no choice; inside the rings, it is.
-                return hovered.is_some_and(|handle| handle != gizmo::Handle::Free);
+                return hovered.is_some_and(|(_, handle, _)| handle != gizmo::Handle::Free);
             }
         }
         let Some(holding) = self.grabbed.as_mut() else {
@@ -455,7 +556,26 @@ impl Selecting {
         }
         if !changes.is_empty() {
             holding.applied = amount;
-            held(&self.shared.writes).push(Drag::Moved(changes));
+            if holding.target == Target::Selection {
+                held(&self.shared.writes).push(Drag::Moved(changes));
+            }
+        }
+        // A creature in the world: where it is dragged, ten times a second at most.
+        let dragged_to = match (holding.target, holding.applied) {
+            (Target::Live(id), gizmo::Amount::Shift(by)) => Some((id, centre + by)),
+            _ => None,
+        };
+        if let Some((id, to)) = dragged_to
+            && holding.sent != Some(to)
+            && self.sent_at.is_none_or(|at| at.elapsed() >= LIVE_EVERY)
+        {
+            holding.sent = Some(to);
+            self.sent_at = Some(std::time::Instant::now());
+            held(&self.shared.writes).push(Drag::Live {
+                id,
+                position: to,
+                let_go: false,
+            });
         }
         // Drawn as it follows what it drags: moved with it, its axes turned with the entity in its
         // own, its axes of scale stretched.
@@ -471,14 +591,55 @@ impl Selecting {
             gizmo::draw_slice(painter, &input.seen, &holding.grab.frame, offset, slice);
         }
         let parts = gizmo::parts(mode, &input.seen, &frame, shift, stretch);
+        let parts = if holding.spawn {
+            gizmo::as_spawn_point(parts)
+        } else {
+            parts
+        };
         gizmo::draw(painter, &parts, offset, None, Some(holding.grab.handle));
         if response.drag_stopped_by(egui::PointerButton::Primary) || !down {
+            let target = holding.target;
             self.grabbed = None;
-            held(&self.shared.writes).push(Drag::LetGo);
-            self.shared.reread.store(true, Ordering::Relaxed);
+            match (target, dragged_to) {
+                (Target::Live(id), Some((_, to))) => {
+                    self.sent_at = None;
+                    held(&self.shared.writes).push(Drag::Live {
+                        id,
+                        position: to,
+                        let_go: true,
+                    });
+                }
+                (Target::Live(_), None) => {}
+                (Target::Selection, _) => {
+                    held(&self.shared.writes).push(Drag::LetGo);
+                    self.shared.reread.store(true, Ordering::Relaxed);
+                }
+            }
         }
         true
     }
+}
+
+/// How often a creature dragged in the world is moved at most.
+const LIVE_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// What the gizmo under the pointer does, beside it: a creature moved in the game, live; a spawn
+/// point written to the server once let go.
+fn hint(painter: &egui::Painter, at: egui::Pos2, target: Target, spawn: bool) {
+    let text = match (target, spawn) {
+        (Target::Live(_), _) => {
+            "The creature in the game: moved live as it is dragged, nothing written to the database; it moves again once let go"
+        }
+        (Target::Selection, true) => {
+            "Its spawn point: written to the server once let go (one undo entry, Ctrl+Z puts it back); the creature keeps its place and goes home there"
+        }
+        (Target::Selection, false) => return,
+    };
+    let font = egui::FontId::proportional(12.0);
+    let galley = painter.layout(text.to_owned(), font, egui::Color32::WHITE, 320.0);
+    let rect = egui::Rect::from_min_size(at + egui::vec2(16.0, 16.0), galley.size()).expand(4.0);
+    painter.rect_filled(rect, 3.0, egui::Color32::from_black_alpha(200));
+    painter.galley(rect.min + egui::vec2(4.0, 4.0), galley, egui::Color32::WHITE);
 }
 
 impl Tool for Selecting {
@@ -635,8 +796,10 @@ struct SceneTools {
     creating: Creating,
     scene: Option<scene::Handle>,
     view: Option<viewport::Handle>,
-    /// The gesture of the drag of a gizmo under way, taken up at each frame until let go.
+    /// The gesture of the drag of a gizmo under way, taken up at each frame until let go, and its
+    /// label.
     dragging: Option<uniwow_api::Gesture>,
+    dragging_label: String,
     /// The hotkey of Global and Local.
     space: Option<Hotkey>,
     /// The reading of the turn of the active entity for the axes of Local: the call, the entity,
@@ -813,26 +976,39 @@ impl SceneTools {
                         ctx.end_gesture(gesture);
                     }
                     let count = ids.len();
-                    self.dragging = Some(ctx.begin_gesture(&if count == 1 {
+                    let label = if count == 1 {
                         label
                     } else {
                         format!("{label} {count} objects")
-                    }));
+                    };
+                    self.dragging = Some(ctx.begin_gesture(&label));
+                    self.dragging_label = label;
                 }
                 Drag::Moved(changes) => {
                     for change in changes {
                         for (provider, field, ids, axis, change) in written(&change, &by_provider, &snapshot) {
+                            // Held while dragged: what is applied to the server at once is, once let go.
                             ctx.call(
                                 &format!("{provider}.write"),
-                                json!({ "ids": ids, "field": field, "axis": axis, "change": change }),
+                                json!({ "ids": ids, "field": field, "axis": axis, "change": change, "held": true }),
                             );
                         }
                     }
                 }
                 Drag::LetGo => {
+                    // The spawn points and patrols dragged applied to the server, in the gesture.
+                    if by_provider.contains_key("spawns") {
+                        ctx.call("spawns.commit", json!({ "label": self.dragging_label }));
+                    }
                     if let Some(gesture) = self.dragging.take() {
                         ctx.end_gesture(gesture);
                     }
+                }
+                Drag::Live { id, position, let_go } => {
+                    ctx.call(
+                        "live-world.move",
+                        json!({ "id": id.to_string(), "position": position.to_array(), "let_go": let_go }),
+                    );
                 }
             }
         }
@@ -1006,6 +1182,7 @@ impl Module for SceneTools {
                 last: None,
                 said: None,
                 grabbed: None,
+                sent_at: None,
             }),
         );
         self.scene = Some(scene);
