@@ -152,6 +152,24 @@ impl PlaceTool {
         let response = input.response;
         let hovered = response.hover_pos().and_then(|at| self.handle_at(input, at));
         let colour = egui::Color32::from_rgb(255, 80, 60);
+        // The points themselves, numbered in the order walked: clicked, one is selected and moved by
+        // its gizmo.
+        for (_, points) in &shown {
+            for (at, point) in points.iter().enumerate() {
+                let Some(on) = input.project((*point).into()) else {
+                    continue;
+                };
+                painter.circle_filled(on, 8.0, colour);
+                painter.circle_stroke(on, 8.0, egui::Stroke::new(1.5, egui::Color32::WHITE));
+                painter.text(
+                    on,
+                    egui::Align2::CENTER_CENTER,
+                    format!("{}", at + 1),
+                    egui::FontId::proportional(10.0),
+                    egui::Color32::WHITE,
+                );
+            }
+        }
         for handle in handles(&shown) {
             let Some(at) = input.project(handle.2.into()) else {
                 continue;

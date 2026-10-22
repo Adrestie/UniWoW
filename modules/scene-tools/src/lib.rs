@@ -625,10 +625,13 @@ impl Selecting {
     }
 }
 
-/// The gizmo shown for `ids` in the mode `chosen`: the points of a path selected show the one of
-/// *Move* in *Select* too, a point clicked moved by its gizmo at once.
+/// The gizmo shown for `ids` in the mode `chosen`: the points of a path selected, and a creature
+/// selected alone (its spawn point's and its own in the world), show the ones of *Move* in *Select*
+/// too, moved by their gizmos at once.
 fn gizmo_mode(chosen: gizmo::Mode, ids: &[EntityId]) -> gizmo::Mode {
-    if chosen == gizmo::Mode::Select && !ids.is_empty() && ids.iter().all(|id| id.kind == Kind::Waypoint) {
+    let points = !ids.is_empty() && ids.iter().all(|id| id.kind == Kind::Waypoint);
+    let creature = matches!(ids, [only] if only.kind == Kind::Creature);
+    if chosen == gizmo::Mode::Select && (points || creature) {
         gizmo::Mode::Move
     } else {
         chosen

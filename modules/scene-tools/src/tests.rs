@@ -133,7 +133,7 @@ fn a_creature_away_from_its_spawn_point_has_its_gizmo_box_at_its_spawn_point() {
 }
 
 #[test]
-fn the_points_of_a_path_selected_show_the_gizmo_of_move_in_select_too() {
+fn the_points_of_a_path_and_a_creature_selected_show_the_gizmos_of_move_in_select_too() {
     use crate::gizmo::Mode;
     let points = [EntityId::waypoint(790, 1), EntityId::waypoint(790, 2)];
     assert_eq!(crate::gizmo_mode(Mode::Select, &points), Mode::Move);
@@ -142,7 +142,12 @@ fn the_points_of_a_path_selected_show_the_gizmo_of_move_in_select_too() {
         Mode::Rotate,
         "the mode chosen kept"
     );
-    assert_eq!(crate::gizmo_mode(Mode::Select, &[EntityId::creature(79)]), Mode::Select);
+    assert_eq!(crate::gizmo_mode(Mode::Select, &[EntityId::creature(79)]), Mode::Move);
+    assert_eq!(
+        crate::gizmo_mode(Mode::Select, &[EntityId::creature(79), EntityId::creature(80)]),
+        Mode::Select
+    );
+    assert_eq!(crate::gizmo_mode(Mode::Select, &[EntityId::doodad(0, 7)]), Mode::Select);
     assert_eq!(crate::gizmo_mode(Mode::Select, &[]), Mode::Select);
 }
 

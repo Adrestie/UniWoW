@@ -707,11 +707,17 @@ impl SpawnsModule {
                 .collect();
             paths::segments(&self.drawn_paths, &around)
         } else {
-            let guids: Vec<u64> = selected
+            // Those of the creatures selected, and of the creatures walking the points selected.
+            let mut guids: Vec<u64> = selected
                 .iter()
                 .filter(|id| id.kind == Kind::Creature)
                 .map(|id| id.key)
                 .collect();
+            for id in selected.iter().filter(|id| id.kind == Kind::Waypoint) {
+                guids.extend(self.patrols_now.walkers_of(id.key as u32));
+            }
+            guids.sort_unstable();
+            guids.dedup();
             paths::segments(&self.drawn_paths, &guids)
         };
         for (id, now) in live {
