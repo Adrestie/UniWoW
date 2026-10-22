@@ -293,6 +293,29 @@ impl QuestsModule {
         database.set_pending(self.edits.pending(&self.loaded));
     }
 
+    /// The value the database has of the field `key` (`<quest>:<table>:<locale>:<column>`, the money
+    /// as `<quest>:money:<coin>`), when the user changed it and it waits for Apply.
+    pub(crate) fn waiting_of(&self, key: &str) -> Option<String> {
+        let parts: Vec<&str> = key.splitn(4, ':').collect();
+        let id: u32 = parts.first()?.parse().ok()?;
+        let (table, locale, column) = match parts[..] {
+            [_, "money", _] => ("quest_template", "", "RewardMoney"),
+            [_, table, locale, column] => (table, locale, column),
+            _ => return None,
+        };
+        let place = (table.to_owned(), locale.to_owned());
+        let value = self.edits.quests.get(&id)?.set.get(&place)?.get(column)?;
+        let before = self
+            .loaded
+            .get(&id)
+            .and_then(|loaded| loaded.rows.get(&place)?.get(column).cloned());
+        (before.as_ref() != Some(value)).then(|| match before {
+            None | Some(Value::Null) => "none".to_owned(),
+            Some(Value::String(text)) => format!("\"{text}\""),
+            Some(other) => other.to_string(),
+        })
+    }
+
     /// The field `key` showing `current`: typed, written once left; the text written, if changed.
     /// The field `key` showing `current`, `hint` saying what it is (its tooltip, required): typed,
     /// written once left; the text written, if changed. Every field of the quests passes here.
@@ -309,6 +332,8 @@ impl QuestsModule {
             Some((typing, text)) if *typing == key => text.clone(),
             _ => current.to_owned(),
         };
+        // Changed and not applied: on orange, the database's value said.
+        let waiting = self.waiting_of(&key);
         let edit = if lines {
             egui::TextEdit::multiline(&mut text)
                 .desired_rows(3)
@@ -316,9 +341,18 @@ impl QuestsModule {
         } else {
             egui::TextEdit::singleline(&mut text).desired_width(width)
         };
-        let written = "Written once you leave the field, one undo entry; to the database by Apply";
+        let edit = match &waiting {
+            Some(_) => edit.background_color(uniwow_api::scene::state_colour::highlight()),
+            None => edit,
+        };
+        let written = match &waiting {
+            Some(before) => format!(
+                "Changed, waiting for Apply (orange); in the database: {before}. Written once you leave the field, one undo entry; to the database by Apply"
+            ),
+            None => "Written once you leave the field, one undo entry; to the database by Apply".to_owned(),
+        };
         let response = ui.add(edit).on_hover_text(if hint.is_empty() {
-            written.to_owned()
+            written
         } else {
             format!(
                 "{hint}

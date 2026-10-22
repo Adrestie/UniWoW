@@ -633,32 +633,8 @@ impl Inspector {
             None,
             true,
             |ui| {
-                if values.is_empty() {
-                    // Shown from the registry, read only: the live world, the rooms, the doodads of the
-                    // buildings, the terrain.
-                    if let [id] = ids
-                        && let Some(entity) = snapshot.get(id)
-                    {
-                        let [x, y, z] = entity.origin();
-                        ui.label(format!("Position {x:.2}, {y:.2}, {z:.2}"));
-                    }
-                    let doodad_of_building = ids.iter().any(|id| id.kind == Kind::BuildingDoodad);
-                    ui.label(
-                    egui::RichText::new(if doodad_of_building {
-                        "Read only: a doodad of a building belongs to the building's file, changed for every placement of it in a later step."
-                    } else {
-                        "Read only."
-                    })
-                    .weak(),
-                );
-                    return;
-                }
-                if unread > 0 {
-                    ui.label(
-                        egui::RichText::new(format!("{unread} of the selection read only, left as they are")).weak(),
-                    );
-                }
-                // Changed, waiting for Apply: red, the database's value said.
+                // Changed, waiting for Apply: its fields on orange, the database's value under the
+                // pointer.
                 let waiting: Vec<String> = values
                     .iter()
                     .filter_map(|(_, value)| {
@@ -674,165 +650,191 @@ impl Inspector {
                         ))
                     })
                     .collect();
-                if !waiting.is_empty() {
-                    let [r, g, b] = uniwow_api::scene::state_colour::PENDING;
-                    ui.label(
-                        egui::RichText::new("● Moved, waiting for Apply to the server")
-                            .color(egui::Color32::from_rgb(r, g, b))
-                            .small(),
-                    )
-                    .on_hover_text(format!(
-                        "In the database: {}
-{}",
-                        waiting.join("; "),
-                        uniwow_api::scene::state_colour::LEGEND
-                    ));
-                }
-                let mut writes = Vec::new();
-                let single = values.len() == 1;
-                let mut drag: Option<DragEvent> = None;
-                let (width, letter) = (field_width(ui), letter_width(ui));
-                egui::Grid::new("inspector transform")
-                    .num_columns(4)
-                    .min_col_width(LABEL_WIDTH / 2.0)
-                    .spacing([6.0, 4.0])
-                    .show(ui, |ui| {
-                        for (field, label, vector) in TRANSFORM {
-                            if shown(values, "transform", field, if vector { Some(0) } else { None }) == Shown::Missing
-                            {
-                                continue;
-                            }
-                            ui.label(label);
-                            let axes: Vec<Option<usize>> = if vector {
-                                vec![Some(0), Some(1), Some(2)]
-                            } else {
-                                vec![None]
-                            };
-                            for axis in axes {
-                                let key = format!("{field}:{axis:?}");
-                                let value = shown(values, "transform", field, axis);
-                                ui.horizontal(|ui| {
-                                    if let Some(axis) = axis {
-                                        let (name, colour) = AXES[axis];
-                                        ui.add_sized(
-                                            [letter, ui.spacing().interact_size.y],
-                                            egui::Label::new(egui::RichText::new(name).color(colour).strong()),
-                                        );
-                                    }
-                                    match value {
-                                        // One value: dragged or typed, as Unity does.
-                                        Shown::Same(number) if single => {
-                                            let held = match &self.dragging {
-                                                Some((dragged, _, at)) if *dragged == key => *at,
-                                                _ => number,
-                                            };
-                                            let mut edited = held;
-                                            let speed = if field == "scale" {
-                                                0.01
-                                            } else if field == "rotation" {
-                                                0.5
-                                            } else {
-                                                0.1
-                                            };
-                                            let response = ui.add_sized(
-                                                [width, ui.spacing().interact_size.y],
-                                                egui::DragValue::new(&mut edited)
-                                                    .speed(speed)
-                                                    .max_decimals(3)
-                                                    .min_decimals(1),
-                                            );
-                                            if response.drag_started() {
-                                                drag = Some(DragEvent::Started(key.clone(), field, edited));
-                                            } else if response.drag_stopped() {
-                                                drag = Some(DragEvent::Stopped(field, axis, edited));
-                                            } else if response.changed() {
-                                                drag = Some(if response.dragged() {
-                                                    DragEvent::Moved(key.clone(), field, axis, edited)
-                                                } else {
-                                                    DragEvent::Typed(field, axis, edited)
-                                                });
-                                            }
-                                        }
-                                        // Several: a change typed, +n, -=n, *n, /n from each one's own.
-                                        value => {
-                                            let value = text(&value);
-                                            let typed = self.typed.entry(key.clone()).or_insert_with(|| value.clone());
-                                            let response = ui.add_sized(
-                                                [width, ui.spacing().interact_size.y],
-                                                egui::TextEdit::singleline(typed),
-                                            );
-                                            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                                                if *typed != value && !typed.trim().is_empty() && typed.trim() != "—"
-                                                {
-                                                    writes.push((field, axis, typed.trim().to_owned()));
-                                                }
-                                            } else if !response.has_focus() && *typed != value {
-                                                *typed = value;
-                                            }
-                                        }
-                                    }
-                                });
-                            }
-                            ui.end_row();
+                let fill = if waiting.is_empty() {
+                    egui::Color32::TRANSPARENT
+                } else {
+                    uniwow_api::scene::state_colour::highlight()
+                };
+                let framed = egui::Frame::new().fill(fill).corner_radius(3.0).show(ui, |ui| {
+                    if values.is_empty() {
+                        // Shown from the registry, read only: the live world, the rooms, the doodads of the
+                        // buildings, the terrain.
+                        if let [id] = ids
+                            && let Some(entity) = snapshot.get(id)
+                        {
+                            let [x, y, z] = entity.origin();
+                            ui.label(format!("Position {x:.2}, {y:.2}, {z:.2}"));
                         }
-                    });
-                let writable: Vec<EntityId> = values.iter().map(|(id, _)| *id).collect();
-                match drag {
-                    Some(DragEvent::Started(key, field, at)) => {
-                        let gesture = ctx.begin_gesture(&format!("Drag the {field}"));
-                        self.dragging = Some((key, gesture, at));
-                    }
-                    Some(DragEvent::Moved(key, field, axis, at)) => {
-                        if let Some((_, _, held)) = self.dragging.as_mut().filter(|(dragged, _, _)| *dragged == key) {
-                            *held = at;
-                        }
-                        self.write_in(&[(field, axis, format!("{at}"))], &writable, snapshot, ctx, false);
-                    }
-                    Some(DragEvent::Stopped(field, axis, at)) => {
-                        self.write_in(&[(field, axis, format!("{at}"))], &writable, snapshot, ctx, false);
-                        if let Some((_, gesture, _)) = self.dragging.take() {
-                            ctx.end_gesture(gesture);
-                        }
-                    }
-                    Some(DragEvent::Typed(field, axis, at)) => writes.push((field, axis, format!("{at}"))),
-                    None => {}
-                }
-                if !single {
-                    ui.label(
-                        egui::RichText::new("Type a value, or +n, -=n, *n, /n to change each from its own.")
-                            .weak()
-                            .small(),
+                        let doodad_of_building = ids.iter().any(|id| id.kind == Kind::BuildingDoodad);
+                        ui.label(
+                        egui::RichText::new(if doodad_of_building {
+                            "Read only: a doodad of a building belongs to the building's file, changed for every placement of it in a later step."
+                        } else {
+                            "Read only."
+                        })
+                        .weak(),
                     );
-                }
-                ui.horizontal(|ui| {
-                    if ui.button("Copy").clicked() {
-                        self.copied = values.last().map(|(_, value)| value["components"]["transform"].clone());
+                        return;
                     }
-                    if ui
-                        .add_enabled(self.copied.is_some(), egui::Button::new("Paste"))
-                        .clicked()
-                        && let Some(copied) = &self.copied
-                    {
-                        for (field, _, vector) in TRANSFORM {
-                            let axes: Vec<Option<usize>> = if vector {
-                                vec![Some(0), Some(1), Some(2)]
-                            } else {
-                                vec![None]
-                            };
-                            for axis in axes {
-                                let value = match axis {
-                                    Some(axis) => copied[field].get(axis).and_then(Value::as_f64),
-                                    None => copied[field].as_f64(),
+                    if unread > 0 {
+                        ui.label(
+                            egui::RichText::new(format!("{unread} of the selection read only, left as they are")).weak(),
+                        );
+                    }
+                    let mut writes = Vec::new();
+                    let single = values.len() == 1;
+                    let mut drag: Option<DragEvent> = None;
+                    let (width, letter) = (field_width(ui), letter_width(ui));
+                    egui::Grid::new("inspector transform")
+                        .num_columns(4)
+                        .min_col_width(LABEL_WIDTH / 2.0)
+                        .spacing([6.0, 4.0])
+                        .show(ui, |ui| {
+                            for (field, label, vector) in TRANSFORM {
+                                if shown(values, "transform", field, if vector { Some(0) } else { None }) == Shown::Missing
+                                {
+                                    continue;
+                                }
+                                ui.label(label);
+                                let axes: Vec<Option<usize>> = if vector {
+                                    vec![Some(0), Some(1), Some(2)]
+                                } else {
+                                    vec![None]
                                 };
-                                if let Some(value) = value {
-                                    writes.push((field, axis, format!("{value}")));
+                                for axis in axes {
+                                    let key = format!("{field}:{axis:?}");
+                                    let value = shown(values, "transform", field, axis);
+                                    ui.horizontal(|ui| {
+                                        if let Some(axis) = axis {
+                                            let (name, colour) = AXES[axis];
+                                            ui.add_sized(
+                                                [letter, ui.spacing().interact_size.y],
+                                                egui::Label::new(egui::RichText::new(name).color(colour).strong()),
+                                            );
+                                        }
+                                        match value {
+                                            // One value: dragged or typed, as Unity does.
+                                            Shown::Same(number) if single => {
+                                                let held = match &self.dragging {
+                                                    Some((dragged, _, at)) if *dragged == key => *at,
+                                                    _ => number,
+                                                };
+                                                let mut edited = held;
+                                                let speed = if field == "scale" {
+                                                    0.01
+                                                } else if field == "rotation" {
+                                                    0.5
+                                                } else {
+                                                    0.1
+                                                };
+                                                let response = ui.add_sized(
+                                                    [width, ui.spacing().interact_size.y],
+                                                    egui::DragValue::new(&mut edited)
+                                                        .speed(speed)
+                                                        .max_decimals(3)
+                                                        .min_decimals(1),
+                                                );
+                                                if response.drag_started() {
+                                                    drag = Some(DragEvent::Started(key.clone(), field, edited));
+                                                } else if response.drag_stopped() {
+                                                    drag = Some(DragEvent::Stopped(field, axis, edited));
+                                                } else if response.changed() {
+                                                    drag = Some(if response.dragged() {
+                                                        DragEvent::Moved(key.clone(), field, axis, edited)
+                                                    } else {
+                                                        DragEvent::Typed(field, axis, edited)
+                                                    });
+                                                }
+                                            }
+                                            // Several: a change typed, +n, -=n, *n, /n from each one's own.
+                                            value => {
+                                                let value = text(&value);
+                                                let typed = self.typed.entry(key.clone()).or_insert_with(|| value.clone());
+                                                let response = ui.add_sized(
+                                                    [width, ui.spacing().interact_size.y],
+                                                    egui::TextEdit::singleline(typed),
+                                                );
+                                                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                                    if *typed != value && !typed.trim().is_empty() && typed.trim() != "—"
+                                                    {
+                                                        writes.push((field, axis, typed.trim().to_owned()));
+                                                    }
+                                                } else if !response.has_focus() && *typed != value {
+                                                    *typed = value;
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    let writable: Vec<EntityId> = values.iter().map(|(id, _)| *id).collect();
+                    match drag {
+                        Some(DragEvent::Started(key, field, at)) => {
+                            let gesture = ctx.begin_gesture(&format!("Drag the {field}"));
+                            self.dragging = Some((key, gesture, at));
+                        }
+                        Some(DragEvent::Moved(key, field, axis, at)) => {
+                            if let Some((_, _, held)) = self.dragging.as_mut().filter(|(dragged, _, _)| *dragged == key) {
+                                *held = at;
+                            }
+                            self.write_in(&[(field, axis, format!("{at}"))], &writable, snapshot, ctx, false);
+                        }
+                        Some(DragEvent::Stopped(field, axis, at)) => {
+                            self.write_in(&[(field, axis, format!("{at}"))], &writable, snapshot, ctx, false);
+                            if let Some((_, gesture, _)) = self.dragging.take() {
+                                ctx.end_gesture(gesture);
+                            }
+                        }
+                        Some(DragEvent::Typed(field, axis, at)) => writes.push((field, axis, format!("{at}"))),
+                        None => {}
+                    }
+                    if !single {
+                        ui.label(
+                            egui::RichText::new("Type a value, or +n, -=n, *n, /n to change each from its own.")
+                                .weak()
+                                .small(),
+                        );
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Copy").clicked() {
+                            self.copied = values.last().map(|(_, value)| value["components"]["transform"].clone());
+                        }
+                        if ui
+                            .add_enabled(self.copied.is_some(), egui::Button::new("Paste"))
+                            .clicked()
+                            && let Some(copied) = &self.copied
+                        {
+                            for (field, _, vector) in TRANSFORM {
+                                let axes: Vec<Option<usize>> = if vector {
+                                    vec![Some(0), Some(1), Some(2)]
+                                } else {
+                                    vec![None]
+                                };
+                                for axis in axes {
+                                    let value = match axis {
+                                        Some(axis) => copied[field].get(axis).and_then(Value::as_f64),
+                                        None => copied[field].as_f64(),
+                                    };
+                                    if let Some(value) = value {
+                                        writes.push((field, axis, format!("{value}")));
+                                    }
                                 }
                             }
                         }
+                    });
+                    if !writes.is_empty() {
+                        self.write(&writes, &writable, snapshot, ctx);
                     }
                 });
-                if !writes.is_empty() {
-                    self.write(&writes, &writable, snapshot, ctx);
+                if !waiting.is_empty() {
+                    framed.response.on_hover_text(format!(
+                        "Moved, waiting for Apply to the server. In the database: {}
+{}",
+                        waiting.join("; "),
+                        uniwow_api::scene::state_colour::HIGHLIGHTED
+                    ));
                 }
             },
         );

@@ -10880,6 +10880,23 @@ point there, one beyond the last adds one after it; Delete and Ctrl+D as before.
 once, written by *Apply to the server*. **Tests**: a point picked before the creature on it; the
 handles of a path; the gizmo of *Move* for points in *Select*.
 
+#### After 16.9: the changes waiting, listed and coloured
+
+Asked by the user. Each change waiting for the server is a line of the panel *World database*
+(`world_db::Item`, given by each module with its rows): what changes of which entity, before and after
+in short, its detail folded; a click selects its entity; ✖ takes it away by `<owner>.discard`, with
+the changes that need it (a path made and the movement naming it), asked first, one undo entry; *Discard
+all*. The changes waiting are kept in the settings of their modules, taken back at start. Groups are
+made from the card *Patrol* of several creatures selected, the one chosen last leading, said; marked
+in the view, the leader L and its followers F joined by lines. In the view what the database has is
+green and what waits red (`scene::flags::PENDING`, `scene::state_colour`): the points and segments of
+the paths, the spawn circle and gizmo, the marks of the groups; a red dot in the Hierarchy. In the
+Inspector, the card *Patrol* and the quests, a field waiting is on orange, a fifth opaque, the
+database's value under the pointer. **Tests**: each change a line, taken away with those that need it;
+each quest a line, its fields before and after; segments red where they touch a point waiting, the
+spawn circle red once moved; a spawn moved read with where the database has it; the orange readable
+on the parchment and the dark.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which

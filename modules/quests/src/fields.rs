@@ -53,31 +53,43 @@ impl QuestsModule {
         ctx: &mut Context,
     ) {
         let value = self.whole(id, table, column);
-        ui.label(RichText::new(label).strong())
-            .on_hover_text(format!("{none} ({table}.{column})"));
-        if value == 0 {
-            ui.label(RichText::new(none).italics().weak());
-        }
+        let waiting = self.waiting_of(&format!("{id}:{table}::{column}"));
+        let fill = if waiting.is_some() {
+            uniwow_api::scene::state_colour::highlight()
+        } else {
+            egui::Color32::TRANSPARENT
+        };
         let mut changed = None;
-        egui::Grid::new(("quests mask", column))
-            .num_columns(3)
-            .spacing([12.0, 2.0])
-            .show(ui, |ui| {
-                for (at, (bit, name, hint)) in elements.iter().enumerate() {
-                    let mut ticked = value & bit != 0;
-                    if ui
-                        .checkbox(&mut ticked, name)
-                        .on_hover_text(format!("{hint} (bit {bit} of {column})"))
-                        .changed()
-                    {
-                        changed = Some(if ticked { value | bit } else { value & !bit });
-                    }
-                    if at % 3 == 2 {
-                        ui.end_row();
-                    }
+        egui::Frame::new().fill(fill).show(ui, |ui| {
+            ui.label(RichText::new(label).strong()).on_hover_text(match &waiting {
+                Some(before) => {
+                    format!("{none} ({table}.{column}); changed, waiting for Apply (orange); in the database: {before}")
                 }
+                None => format!("{none} ({table}.{column})"),
             });
-        Self::raw_ui(ui, column, column, value);
+            if value == 0 {
+                ui.label(RichText::new(none).italics().weak());
+            }
+            egui::Grid::new(("quests mask", column))
+                .num_columns(3)
+                .spacing([12.0, 2.0])
+                .show(ui, |ui| {
+                    for (at, (bit, name, hint)) in elements.iter().enumerate() {
+                        let mut ticked = value & bit != 0;
+                        if ui
+                            .checkbox(&mut ticked, name)
+                            .on_hover_text(format!("{hint} (bit {bit} of {column})"))
+                            .changed()
+                        {
+                            changed = Some(if ticked { value | bit } else { value & !bit });
+                        }
+                        if at % 3 == 2 {
+                            ui.end_row();
+                        }
+                    }
+                });
+            Self::raw_ui(ui, column, column, value);
+        });
         if let Some(value) = changed {
             self.write_whole(id, table, column, value, label, ctx);
         }
@@ -96,29 +108,41 @@ impl QuestsModule {
     ) {
         let value = self.whole(id, table, column);
         let mut chosen = None;
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(label).strong())
-                .on_hover_text(format!("{hint} ({table}.{column})"));
-            let shown = elements
-                .iter()
-                .find(|(held, _, _)| *held == value)
-                .map_or(format!("{value}"), |(_, name, _)| name.clone());
-            egui::ComboBox::from_id_salt(("quests choice", column))
-                .selected_text(shown)
-                .height(320.0)
-                .show_ui(ui, |ui| {
-                    for (held, name, element) in elements {
-                        if ui
-                            .selectable_label(*held == value, name)
-                            .on_hover_text(format!("{element} ({column} = {held})"))
-                            .clicked()
-                        {
-                            chosen = Some(*held);
+        let waiting = self.waiting_of(&format!("{id}:{table}::{column}"));
+        let fill = if waiting.is_some() {
+            uniwow_api::scene::state_colour::highlight()
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        egui::Frame::new().fill(fill).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(label).strong()).on_hover_text(match &waiting {
+                    Some(before) => format!(
+                        "{hint} ({table}.{column}); changed, waiting for Apply (orange); in the database: {before}"
+                    ),
+                    None => format!("{hint} ({table}.{column})"),
+                });
+                let shown = elements
+                    .iter()
+                    .find(|(held, _, _)| *held == value)
+                    .map_or(format!("{value}"), |(_, name, _)| name.clone());
+                egui::ComboBox::from_id_salt(("quests choice", column))
+                    .selected_text(shown)
+                    .height(320.0)
+                    .show_ui(ui, |ui| {
+                        for (held, name, element) in elements {
+                            if ui
+                                .selectable_label(*held == value, name)
+                                .on_hover_text(format!("{element} ({column} = {held})"))
+                                .clicked()
+                            {
+                                chosen = Some(*held);
+                            }
                         }
-                    }
-                })
-                .response
-                .on_hover_text(format!("{hint} ({table}.{column})"));
+                    })
+                    .response
+                    .on_hover_text(format!("{hint} ({table}.{column})"));
+            })
         });
         if let Some(value) = chosen.filter(|chosen| *chosen != value) {
             self.write_whole(id, table, column, value, label, ctx);

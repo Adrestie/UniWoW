@@ -65,6 +65,11 @@ pub fn state_colour(pending: bool) -> egui::Color32 {
     egui::Color32::from_rgb(r, g, b)
 }
 
+/// The background of a field changed and waiting for Apply.
+fn highlight() -> egui::Color32 {
+    scene::state_colour::highlight()
+}
+
 /// How near the pointer must be to a handle "+", in points.
 const HANDLE: f32 = 9.0;
 
@@ -622,14 +627,17 @@ impl SpawnsModule {
                     .weak()
                     .small(),
                 );
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("●").color(state_colour(false)));
-                    ui.label(egui::RichText::new("as the database has it").small());
-                    ui.label(egui::RichText::new("●").color(state_colour(true)));
-                    ui.label(egui::RichText::new("waiting for Apply").small());
-                })
-                .response
-                .on_hover_text(scene::state_colour::LEGEND);
+                egui::Frame::new()
+                    .fill(highlight())
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("Orange: changed, waiting for Apply").small());
+                    })
+                    .response
+                    .on_hover_text(format!(
+                        "{}; the database's value under the pointer. In the view: {}",
+                        scene::state_colour::HIGHLIGHTED,
+                        scene::state_colour::LEGEND
+                    ));
                 self.movement_ui(ui, guid, walker, ctx);
                 if walker.path == 0 || walker.movement != patrols::WALKING {
                     if ui
@@ -680,13 +688,16 @@ impl SpawnsModule {
                 let leader = self.patrols_now.leader_of(guid);
                 let group_waiting = leader.is_some_and(|leader| self.changes.patrols.groups.contains_key(&leader))
                     || self.changes.patrols.groups.contains_key(&guid);
-                ui.label(egui::RichText::new("Group").strong().color(state_colour(group_waiting)))
-                    .on_hover_text(if group_waiting {
-                        "The creatures following a leader (creature_formations): changed, waiting for Apply (red)"
-                    } else {
-                        "The creatures following a leader (creature_formations), as the database has them (green)"
+                egui::Frame::new()
+                    .fill(if group_waiting { highlight() } else { egui::Color32::TRANSPARENT })
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("Group").strong()).on_hover_text(if group_waiting {
+                            "The creatures following a leader (creature_formations): changed, waiting for Apply (orange)"
+                        } else {
+                            "The creatures following a leader (creature_formations), as the database has them"
+                        });
+                        self.group_ui(ui, guid, &creatures, ctx);
                     });
-                self.group_ui(ui, guid, &creatures, ctx);
             },
         );
     }
@@ -713,16 +724,20 @@ impl SpawnsModule {
         let mut chosen = None;
         let base = self.patrols.walkers.get(&guid).copied().unwrap_or_default();
         let waiting = base != walker;
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Movement").color(state_colour(waiting)))
-                .on_hover_text(if waiting {
-                    format!(
-                        "How the creature moves (creature.MovementType), waiting for Apply (red); in the database: MovementType {}, path {}",
-                        base.movement, base.path
-                    )
-                } else {
-                    "How the creature moves (creature.MovementType), as the database has it (green)".to_owned()
-                });
+        let frame = egui::Frame::new().fill(if waiting {
+            highlight()
+        } else {
+            egui::Color32::TRANSPARENT
+        });
+        frame.show(ui, |ui| ui.horizontal(|ui| {
+            ui.label("Movement").on_hover_text(if waiting {
+                format!(
+                    "How the creature moves (creature.MovementType), waiting for Apply (orange); in the database: MovementType {}, path {}",
+                    base.movement, base.path
+                )
+            } else {
+                "How the creature moves (creature.MovementType), as the database has it".to_owned()
+            });
             let shown = WAYS
                 .iter()
                 .find(|(way, _, _)| *way == walker.movement)
@@ -742,7 +757,7 @@ impl SpawnsModule {
                 })
                 .response
                 .on_hover_text("How the creature moves (creature.MovementType)");
-        });
+        }));
         let Some(way) = chosen.filter(|way| *way != walker.movement) else {
             return;
         };
@@ -802,35 +817,41 @@ impl SpawnsModule {
                             );
                             let hint = if waiting {
                                 format!(
-                                    "Waiting for Apply (red); in the database: {database}. Click: select it in the view"
+                                    "Changed, waiting for Apply (orange); in the database: {database}. Click: select it in the view"
                                 )
                             } else {
-                                "As the database has it (green). Click: select it in the view, its gizmo moves it"
-                                    .to_owned()
+                                "As the database has it. Click: select it in the view, its gizmo moves it".to_owned()
                             };
-                            if ui
-                                .selectable_label(
-                                    selected == Some(number),
-                                    egui::RichText::new(format!("{number}"))
-                                        .color(state_colour(waiting))
-                                        .strong(),
-                                )
-                                .on_hover_text(hint)
-                                .clicked()
-                            {
+                            let base = self.patrols.paths.get(&path).and_then(|points| points.get(at)).cloned();
+                            // A field of the point waiting for Apply: on orange, the database's under the pointer.
+                            let changed = |differs: &dyn Fn(&Point) -> bool| base.as_ref().is_none_or(differs);
+                            let number_label = egui::Frame::new()
+                                .fill(if waiting { highlight() } else { egui::Color32::TRANSPARENT })
+                                .show(ui, |ui| {
+                                    ui.selectable_label(
+                                        selected == Some(number),
+                                        egui::RichText::new(format!("{number}")).strong(),
+                                    )
+                                })
+                                .inner;
+                            if number_label.on_hover_text(hint).clicked() {
                                 chose = Some(number);
                             }
                             for (axis, name) in ["x", "y", "z"].into_iter().enumerate() {
                                 let key = format!("{path}:{number}:{name}");
                                 let value = format!("{:.2}", point.position[axis]);
-                                if let Some(typed) = self.point_field(ui, key, &value, width, "Typed, then Enter") {
+                                let differs = changed(&|base| base.position[axis] != point.position[axis]);
+                                if let Some(typed) =
+                                    self.point_field(ui, (key, differs), &value, width, "Typed, then Enter")
+                                {
                                     written = Some((at, ["x", "y", "z"][axis], typed));
                                 }
                             }
                             let key = format!("{path}:{number}:wait");
+                            let differs = changed(&|base| base.delay != point.delay);
                             if let Some(typed) = self.point_field(
                                 ui,
-                                key,
+                                (key, differs),
                                 &point.delay.to_string(),
                                 width,
                                 "How long it waits there (ms)",
@@ -838,20 +859,26 @@ impl SpawnsModule {
                                 written = Some((at, "delay", typed));
                             }
                             let mut run = point.run;
-                            if ui
-                                .checkbox(&mut run, "")
-                                .on_hover_text("Runs to it; walks otherwise")
-                                .changed()
-                            {
+                            let differs = changed(&|base| base.run != point.run);
+                            let ran = egui::Frame::new()
+                                .fill(if differs { highlight() } else { egui::Color32::TRANSPARENT })
+                                .show(ui, |ui| ui.checkbox(&mut run, ""))
+                                .inner;
+                            if ran.on_hover_text("Runs to it; walks otherwise").changed() {
                                 written = Some((at, "run", run.to_string()));
                             }
                             let key = format!("{path}:{number}:facing");
                             let facing = point
                                 .orientation
                                 .map_or(String::new(), |turn| format!("{:.0}", turn.to_degrees()));
-                            if let Some(typed) =
-                                self.point_field(ui, key, &facing, width, "Degrees; empty: the way it walks")
-                            {
+                            let differs = changed(&|base| base.orientation != point.orientation);
+                            if let Some(typed) = self.point_field(
+                                ui,
+                                (key, differs),
+                                &facing,
+                                width,
+                                "Degrees; empty: the way it walks",
+                            ) {
                                 written = Some((at, "facing", typed));
                             }
                             ui.end_row();
@@ -942,14 +969,28 @@ impl SpawnsModule {
     }
 
     /// A field of a point typed: its text kept while focused, given once Enter or once left.
-    fn point_field(&mut self, ui: &mut egui::Ui, key: String, current: &str, width: f32, hint: &str) -> Option<String> {
+    fn point_field(
+        &mut self,
+        ui: &mut egui::Ui,
+        (key, waiting): (String, bool),
+        current: &str,
+        width: f32,
+        hint: &str,
+    ) -> Option<String> {
         let mut text = self
             .point_texts
             .get(&key)
             .cloned()
             .unwrap_or_else(|| current.to_owned());
         let response = ui
-            .add_sized([width, 18.0], egui::TextEdit::singleline(&mut text))
+            .add_sized(
+                [width, 18.0],
+                egui::TextEdit::singleline(&mut text).background_color(if waiting {
+                    highlight()
+                } else {
+                    ui.visuals().extreme_bg_color
+                }),
+            )
             .on_hover_text(hint);
         if response.has_focus() || response.changed() {
             self.point_texts.insert(key.clone(), text.clone());

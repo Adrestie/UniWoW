@@ -744,6 +744,15 @@ pub mod state_colour {
     pub const PENDING: [u8; 3] = [240, 80, 70];
     /// The words telling them, for a legend or a tooltip.
     pub const LEGEND: &str = "Green: as the database has it · Red: waiting for Apply to the server";
+
+    /// The background of a field of the Inspector or a page changed and waiting for Apply: orange, a
+    /// fifth opaque, readable on the dark background and on the parchment.
+    pub fn highlight() -> crate::egui::Color32 {
+        crate::egui::Color32::from_rgba_unmultiplied(255, 140, 0, 51)
+    }
+
+    /// The words of the highlight, for a tooltip.
+    pub const HIGHLIGHTED: &str = "Orange: changed, waiting for Apply to the server";
 }
 
 /// Names a piece: its provider, its map and its part, a tile (`PieceKey::tile`) or a number of the

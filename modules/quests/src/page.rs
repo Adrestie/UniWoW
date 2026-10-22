@@ -734,6 +734,23 @@ mod tests {
     }
 
     #[test]
+    fn a_field_waiting_for_apply_shows_orange_and_reads_on_the_parchment_and_the_dark() {
+        let over = |under: Color32| {
+            let [r, g, b, a] = uniwow_api::scene::state_colour::highlight().to_srgba_unmultiplied();
+            let share = f32::from(a) / 255.0;
+            let mix = |top: u8, bottom: u8| (f32::from(top) * share + f32::from(bottom) * (1.0 - share)).round() as u8;
+            Color32::from_rgb(mix(r, under.r()), mix(g, under.g()), mix(b, under.b()))
+        };
+        // On the parchment: the ink reads, the orange is seen.
+        let field = over(PARCHMENT);
+        assert!(contrast(INK, field) >= 4.5, "{}", contrast(INK, field));
+        assert!(field.b() + 20 < PARCHMENT.b(), "orange enough to be seen: {field:?}");
+        // On the dark of the editor: its text reads.
+        let dark = over(Color32::from_gray(30));
+        assert!(contrast(Color32::from_gray(220), dark) >= 4.5);
+    }
+
+    #[test]
     fn the_money_is_shown_in_gold_silver_and_copper() {
         assert_eq!(coins(100_000_000), [10_000, 0, 0]);
         assert_eq!(coins(12_345), [1, 23, 45]);
