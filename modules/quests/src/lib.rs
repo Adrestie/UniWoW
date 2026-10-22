@@ -859,6 +859,12 @@ impl Module for QuestsModule {
             "Opens the quest 'quest' in the panel Quests, read from the world database, and shows the panel.",
             json!({ "type": "object", "properties": { "quest": { "type": "integer" } }, "required": ["quest"] }),
             json!({ "type": "object" }),
+        )
+        .command(
+            "quests.discard",
+            "Takes away the changes 'keys' of the quests (as the panel World database lists them), nothing written; one undo entry.",
+            json!({ "type": "object", "properties": { "keys": { "type": "array" } }, "required": ["keys"] }),
+            json!({ "type": "object", "properties": { "discarded": { "type": "integer" } } }),
         );
     }
 
@@ -1029,6 +1035,17 @@ impl Module for QuestsModule {
 
     fn on_command(&mut self, name: &str, arguments: Value, ctx: &mut Context) -> Result<Value, String> {
         match name {
+            "quests.discard" => {
+                let keys: Vec<String> = arguments["keys"]
+                    .as_array()
+                    .ok_or("'keys' are the keys of the changes")?
+                    .iter()
+                    .filter_map(|key| key.as_str().map(str::to_owned))
+                    .collect();
+                let after = self.edits.discarded(&keys);
+                self.change(format!("Take {} changes of the quests away", keys.len()), after, ctx);
+                Ok(json!({ "discarded": keys.len() }))
+            }
             "quests.open" => {
                 let id = arguments["quest"].as_u64().ok_or("'quest' is the id of a quest")? as u32;
                 self.search.clear();

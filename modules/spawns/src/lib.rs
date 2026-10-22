@@ -6,6 +6,7 @@
 //! 15.11c). Nothing is written until *Apply to the server* of the panel *World database*.
 
 mod data;
+mod items;
 mod mirror;
 mod paths;
 mod patrol_ui;
@@ -500,10 +501,11 @@ impl SpawnsModule {
             return;
         };
         self.given = Some(self.generation);
-        database.set_pending(
-            self.changes
-                .pending(&self.spawns, &self.index, entry_column, &self.patrols),
-        );
+        let mut pending = self
+            .changes
+            .pending(&self.spawns, &self.index, entry_column, &self.patrols);
+        pending.items = items::items(&self.changes, &self.patrols, self);
+        database.set_pending(pending);
     }
 
     fn steer(&mut self, ctx: &mut Context) {
@@ -887,6 +889,12 @@ impl Module for SpawnsModule {
                 json!({ "type": "object", "properties": { "changed": { "type": "integer" }, "refused": { "type": "array" } } }),
             )
             .command(
+                "spawns.discard",
+                "Takes away the changes 'keys' (as the panel World database lists them), nothing written; one undo entry.                  The server running loads its database's again for them.",
+                json!({ "type": "object", "properties": { "keys": { "type": "array" } }, "required": ["keys"] }),
+                json!({ "type": "object", "properties": { "discarded": { "type": "integer" } } }),
+            )
+            .command(
                 "spawns.duplicate",
                 "Duplicates the spawns 'ids', a guid above the highest of their table; one undo entry. The new ids.",
                 ids.clone(),
@@ -922,6 +930,26 @@ impl Module for SpawnsModule {
     fn on_command(&mut self, name: &str, arguments: Value, ctx: &mut Context) -> Result<Value, String> {
         if name == "spawns.from_doodad" {
             return self.make_game_object(&arguments, ctx);
+        }
+        if name == "spawns.discard" {
+            let keys: Vec<String> = arguments["keys"]
+                .as_array()
+                .ok_or("'keys' are the keys of the changes")?
+                .iter()
+                .filter_map(|key| key.as_str().map(str::to_owned))
+                .collect();
+            let after = items::discarded(&self.changes, &keys);
+            let count = keys.len();
+            self.change(
+                if count == 1 {
+                    "Take a change away".to_owned()
+                } else {
+                    format!("Take {count} changes away")
+                },
+                after,
+                ctx,
+            );
+            return Ok(json!({ "discarded": count }));
         }
         if name == "spawns.quest_titles" {
             let search = arguments["search"].as_str().unwrap_or_default();
@@ -1279,6 +1307,13 @@ impl Module for SpawnsModule {
         if let Some(view) = self.view.take() {
             view.remove_tools(MODULE);
         }
+    }
+}
+
+/// The spawns named for the list of the changes, as the database has them.
+impl items::Names for SpawnsModule {
+    fn spawn(&self, id: &EntityId) -> Option<Spawn> {
+        self.index.get(id).and_then(|at| self.spawns.get(*at)).cloned()
     }
 }
 

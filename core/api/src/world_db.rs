@@ -112,6 +112,24 @@ pub struct Pending {
     pub changes: Vec<RowChange>,
     pub reloads: Vec<Reload>,
     pub held: Vec<String>,
+    /// Each change listed for the user, which the command `<owner>.discard` takes away.
+    pub items: Vec<Item>,
+}
+
+/// A change of a module waiting for the server, as the user reads it in the panel *World database*:
+/// what changes, of which entity; before and after in short, its detail; the entity selected by a
+/// click (an id of the scene as text); the changes taken away with it, which need it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Item {
+    /// Its key, as `<owner>.discard` is given it.
+    pub key: String,
+    pub text: String,
+    pub before: String,
+    pub after: String,
+    pub detail: String,
+    pub select: Option<String>,
+    /// The keys of the changes of its module taken away with it.
+    pub with: Vec<String>,
 }
 
 /// Published once the server chosen is seen started again while it held changes set in its memory

@@ -472,6 +472,20 @@ struct WorldDbModule {
     /// from the characters.
     bridging: Option<JobId>,
     forgetting: Vec<u32>,
+    /// The changes the user asked to take away, asked first.
+    discarding: Option<Discarding>,
+}
+
+/// Changes to take away, asked first: one with those that need it (the module, their keys, what it
+/// is, what needs it), or every change of every module (by module, their keys).
+enum Discarding {
+    Some {
+        owner: String,
+        keys: Vec<String>,
+        text: String,
+        with: Vec<String>,
+    },
+    All(Vec<(String, Vec<String>)>),
 }
 
 impl Default for WorldDbModule {
@@ -496,6 +510,7 @@ impl Default for WorldDbModule {
             said: None,
             bridging: None,
             forgetting: Vec::new(),
+            discarding: None,
         }
     }
 }
@@ -1024,6 +1039,7 @@ impl Module for WorldDbModule {
             self.choose(&name, false, ctx);
         }
         self.servers_ui(egui, ctx);
+        self.discard_ui(egui, ctx);
         self.sending_ui(egui, ctx);
         self.importing_ui(egui, ctx);
         if self.confirming.is_some() && !self.asking {
@@ -1409,8 +1425,10 @@ impl WorldDbModule {
                 for held in &pending {
                     ui.horizontal(|ui| {
                         ui.strong(&held.label);
-                        ui.weak(format!("{} rows", held.changes.len()));
+                        ui.weak(format!("{} rows", held.changes.len()))
+                            .on_hover_text("The rows of the database these changes write");
                     });
+                    self.items_ui(ui, held, ctx);
                     for note in &held.held {
                         ui.label(egui::RichText::new(format!("Not written yet: {note}")).weak().small());
                     }
@@ -1438,6 +1456,26 @@ impl WorldDbModule {
                         .clicked()
                     {
                         self.confirming = Some(Confirming::Apply);
+                    }
+                    if ui
+                        .add_enabled(!pending.is_empty() && !busy, egui::Button::new("Discard all…"))
+                        .on_hover_text(
+                            "Takes away every change above, nothing written; the game shows the database's again. \
+                             Undone by Ctrl+Z. Asks first.",
+                        )
+                        .clicked()
+                    {
+                        self.discarding = Some(Discarding::All(
+                            pending
+                                .iter()
+                                .map(|held| {
+                                    (
+                                        held.owner.clone(),
+                                        held.items.iter().map(|item| item.key.clone()).collect(),
+                                    )
+                                })
+                                .collect(),
+                        ));
                     }
                     let last = self.last_here(ctx).map(|at| self.applications[at].when.clone());
                     if ui
@@ -1511,6 +1549,135 @@ impl WorldDbModule {
                 });
             },
         );
+    }
+
+    /// The changes of `held`, each a line: what changes, before and after, its detail folded; a click
+    /// selects its entity in the view, ✖ takes it away (with those that need it, asked first).
+    fn items_ui(&mut self, ui: &mut egui::Ui, held: &Pending, ctx: &mut Context) {
+        for item in &held.items {
+            ui.horizontal(|ui| {
+                if ui
+                    .small_button("✖")
+                    .on_hover_text(if item.with.is_empty() {
+                        "Takes this change away, nothing written; the game shows the database's again. Ctrl+Z puts it back".to_owned()
+                    } else {
+                        format!(
+                            "Takes this change away with the {} that need it (asked first); Ctrl+Z puts them back",
+                            item.with.len()
+                        )
+                    })
+                    .clicked()
+                {
+                    if item.with.is_empty() {
+                        ctx.call(&format!("{}.discard", held.owner), json!({ "keys": [item.key] }));
+                    } else {
+                        let texts: Vec<String> = held
+                            .items
+                            .iter()
+                            .filter(|other| item.with.contains(&other.key))
+                            .map(|other| other.text.clone())
+                            .collect();
+                        let mut keys = vec![item.key.clone()];
+                        keys.extend(item.with.iter().cloned());
+                        self.discarding = Some(Discarding::Some {
+                            owner: held.owner.clone(),
+                            keys,
+                            text: item.text.clone(),
+                            with: texts,
+                        });
+                    }
+                }
+                let line = ui
+                    .add(egui::Label::new(&item.text).sense(egui::Sense::click()).truncate())
+                    .on_hover_text(if item.select.is_some() {
+                        "Click: select it in the view"
+                    } else {
+                        "What changes"
+                    });
+                if line.clicked()
+                    && let Some(id) = item.select.as_deref().and_then(|id| id.parse::<uniwow_api::scene::EntityId>().ok())
+                    && let Some(scene) = ctx.service(uniwow_api::scene::SERVICE)
+                {
+                    scene.select(uniwow_api::scene::Select::Set(vec![id]));
+                }
+            });
+            ui.indent(("world-db item", &held.owner, &item.key), |ui| {
+                ui.label(
+                    egui::RichText::new(format!("{} → {}", item.before, item.after))
+                        .weak()
+                        .small(),
+                )
+                .on_hover_text("Before, as the database has it, and after, as it will be written");
+                if !item.detail.is_empty() {
+                    egui::CollapsingHeader::new(egui::RichText::new("Detail").weak().small())
+                        .id_salt(("world-db item detail", &held.owner, &item.key))
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new(&item.detail).small().monospace());
+                        });
+                }
+            });
+        }
+    }
+
+    /// The window asking before changes are taken away: one with those that need it, or all.
+    fn discard_ui(&mut self, egui: &egui::Context, ctx: &mut Context) {
+        let Some(discarding) = &self.discarding else {
+            return;
+        };
+        let (title, text) = match discarding {
+            Discarding::Some { text, with, .. } => (
+                "Take changes away",
+                format!(
+                    "\"{text}\" is taken away with the changes that need it:\n- {}\nNothing is written; the game shows the database's again. Ctrl+Z puts them back.",
+                    with.join("\n- ")
+                ),
+            ),
+            Discarding::All(_) => (
+                "Discard every change",
+                "Every change waiting for the server is taken away, nothing written; the game shows the database's again. Ctrl+Z puts them back."
+                    .to_owned(),
+            ),
+        };
+        let mut answer = None;
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(egui, |ui| {
+                ui.label(text);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Take them away")
+                        .on_hover_text("Ctrl+Z puts them back")
+                        .clicked()
+                    {
+                        answer = Some(true);
+                    }
+                    if ui.button("Cancel").on_hover_text("Keeps every change").clicked() {
+                        answer = Some(false);
+                    }
+                });
+            });
+        match answer {
+            Some(true) => {
+                let gesture = ctx.begin_gesture("Discard changes");
+                match self.discarding.take() {
+                    Some(Discarding::Some { owner, keys, .. }) => {
+                        ctx.call(&format!("{owner}.discard"), json!({ "keys": keys }));
+                    }
+                    Some(Discarding::All(owners)) => {
+                        for (owner, keys) in owners {
+                            ctx.call(&format!("{owner}.discard"), json!({ "keys": keys }));
+                        }
+                    }
+                    None => {}
+                }
+                ctx.end_gesture(gesture);
+            }
+            Some(false) => self.discarding = None,
+            None => {}
+        }
     }
 
     /// The window confirming an application, its undoing, or another server chosen while changes

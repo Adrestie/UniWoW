@@ -585,10 +585,93 @@ impl Edits {
 
     /// The rows of the changes, and what the server loads again; a quest created or deleted outside
     /// `RANGE` refused, said.
+    /// The changes as lines for the panel *World database*: each quest created, deleted or changed
+    /// (its fields before and after in its detail), each template given the flag of a giver.
+    pub fn items(&self, loaded: &BTreeMap<u32, Loaded>) -> Vec<world_db::Item> {
+        let shown = |value: Option<&Value>| match value {
+            None | Some(Value::Null) => "—".to_owned(),
+            Some(Value::String(text)) => format!("\"{text}\""),
+            Some(other) => other.to_string(),
+        };
+        let mut out = Vec::new();
+        for (id, edit) in &self.quests {
+            let title = self
+                .value(loaded, *id, "quest_template", "", "LogTitle")
+                .and_then(|title| title.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            let read = loaded.get(id);
+            let mut fields = Vec::new();
+            for ((table, locale), set) in &edit.set {
+                for (column, value) in set {
+                    let before = read.and_then(|read| read.rows.get(&(table.clone(), locale.clone()))?.get(column));
+                    if before == Some(value) {
+                        continue;
+                    }
+                    let place = if locale.is_empty() {
+                        format!("{table}.{column}")
+                    } else {
+                        format!("{table}.{column} ({locale})")
+                    };
+                    fields.push(format!("{place}: {} → {}", shown(before), shown(Some(value))));
+                }
+            }
+            let (what, before, after) = if edit.deleted {
+                ("deleted", "in the database".to_owned(), "none".to_owned())
+            } else if edit.created.is_some() && !loaded.contains_key(id) {
+                ("created", "none".to_owned(), format!("{} fields", fields.len()))
+            } else {
+                (
+                    "changed",
+                    format!("{} fields", fields.len()),
+                    format!("{} fields changed", fields.len()),
+                )
+            };
+            out.push(world_db::Item {
+                key: format!("quest:{id}"),
+                text: format!("Quest {id} \"{title}\": {what}"),
+                before,
+                after,
+                detail: fields.join(
+                    "
+",
+                ),
+                select: None,
+                with: Vec::new(),
+            });
+        }
+        for (entry, flags) in &self.flags {
+            out.push(world_db::Item {
+                key: format!("flags:{entry}"),
+                text: format!("Template of creature {entry}: the flags of a giver of quests"),
+                before: "—".to_owned(),
+                after: format!("npcflag {flags}"),
+                detail: String::new(),
+                select: None,
+                with: Vec::new(),
+            });
+        }
+        out
+    }
+
+    /// These edits with the changes of `keys` (as `items` names them) taken away.
+    pub fn discarded(&self, keys: &[String]) -> Edits {
+        let mut out = self.clone();
+        for key in keys {
+            if let Some(id) = key.strip_prefix("quest:").and_then(|id| id.parse().ok()) {
+                out.quests.remove(&id);
+            }
+            if let Some(entry) = key.strip_prefix("flags:").and_then(|entry| entry.parse().ok()) {
+                out.flags.remove(&entry);
+            }
+        }
+        out
+    }
+
     pub fn pending(&self, loaded: &BTreeMap<u32, Loaded>) -> world_db::Pending {
         let mut out = world_db::Pending {
             owner: "quests".to_owned(),
             label: "Quests".to_owned(),
+            items: self.items(loaded),
             ..world_db::Pending::default()
         };
         for (id, edit) in &self.quests {
@@ -768,6 +851,24 @@ mod tests {
             columns: columns.iter().map(|column| (*column).to_owned()).collect(),
             rows: values,
         }
+    }
+
+    #[test]
+    fn each_quest_changed_is_a_line_its_fields_before_and_after_in_its_detail() {
+        let loaded = loaded();
+        let mut edits = Edits::default();
+        edits.set(783, "quest_template", "", "LogTitle", json!("A Threat Without"));
+        edits.set(783, "quest_template", "", "QuestLevel", json!(1));
+        let found = edits.items(&loaded);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].key, "quest:783");
+        assert_eq!(found[0].text, "Quest 783 \"A Threat Without\": changed");
+        assert_eq!(
+            found[0].detail,
+            "quest_template.LogTitle: \"A Threat Within\" → \"A Threat Without\"",
+            "the level unchanged, left out"
+        );
+        assert_eq!(edits.discarded(&["quest:783".to_owned()]), Edits::default());
     }
 
     fn loaded() -> BTreeMap<u32, Loaded> {
