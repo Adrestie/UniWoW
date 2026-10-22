@@ -864,8 +864,7 @@ mod tests {
         assert_eq!(found[0].key, "quest:783");
         assert_eq!(found[0].text, "Quest 783 \"A Threat Without\": changed");
         assert_eq!(
-            found[0].detail,
-            "quest_template.LogTitle: \"A Threat Within\" → \"A Threat Without\"",
+            found[0].detail, "quest_template.LogTitle: \"A Threat Within\" → \"A Threat Without\"",
             "the level unchanged, left out"
         );
         assert_eq!(edits.discarded(&["quest:783".to_owned()]), Edits::default());

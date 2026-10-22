@@ -12,7 +12,7 @@ mod paths;
 mod patrol_ui;
 mod patrols;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use uniwow_api::formats::TileId;
@@ -179,6 +179,11 @@ fn live_of(snapshot: &scene::Snapshot) -> BTreeSet<EntityId> {
     out
 }
 
+/// A place on the ground to a tenth of a yard, to tell a point of a path where it is drawn.
+fn spot(at: [f32; 3]) -> (i64, i64) {
+    ((at[0] * 10.0).round() as i64, (at[1] * 10.0).round() as i64)
+}
+
 /// The setting keeping the changes not applied, for them to outlive the editor closed.
 const PENDING: &str = "pending";
 
@@ -275,10 +280,20 @@ impl SpawnsModule {
     fn set_changes(&mut self, changes: Changes) {
         self.generation += 1;
         let before = std::mem::replace(&mut self.changes, changes);
+        let mut tiles = self.tiles_of_changes(&before);
         if before.patrols != self.changes.patrols {
             self.refresh_patrols();
+            // The creatures whose patrol changed marked again, wherever they are.
+            for id in before
+                .pending_ids(&self.patrols)
+                .into_iter()
+                .chain(self.changes.pending_ids(&self.patrols))
+            {
+                if let Some(spawn) = self.find(&id) {
+                    tiles.extend(data::tile_of(spawn.position));
+                }
+            }
         }
-        let mut tiles = self.tiles_of_changes(&before);
         let after = self.changes.clone();
         tiles.extend(self.tiles_of_changes(&after));
         self.looks_wanted = true;
@@ -357,7 +372,8 @@ impl SpawnsModule {
             }
         }
         let spawns: Vec<Spawn> = found.into_values().collect();
-        let pieces = data::pieces(&spawns);
+        let pending = self.changes.pending_ids(&self.patrols);
+        let pieces = data::pieces(&spawns, &pending);
         let now: BTreeSet<TileId> = pieces.keys().copied().collect();
         // The targets held before that hold nothing now: taken away.
         let emptied: Vec<TileId> = self
@@ -697,6 +713,16 @@ impl SpawnsModule {
             return;
         }
         self.paths_for = Some(now);
+        // The points waiting for Apply, by where they are: the segments touching them drawn red.
+        let mut waiting: HashSet<(i64, i64)> = HashSet::new();
+        for (path, points) in &self.changes.patrols.paths {
+            for (at, point) in points.iter().flatten().enumerate() {
+                if patrols::pending_point(&self.patrols, *path, at, point) {
+                    waiting.insert(spot(point.position));
+                }
+            }
+        }
+        let pending = |at: [f32; 3]| waiting.contains(&spot(at));
         let mut segments = if self.all_paths {
             // Those of the spawns around the camera alone.
             let around: Vec<u64> = self
@@ -712,7 +738,7 @@ impl SpawnsModule {
                         .is_some_and(|tile| around.contains(&tile))
                 })
                 .collect();
-            paths::segments(&self.drawn_paths, &around)
+            paths::segments(&self.drawn_paths, &around, &pending)
         } else {
             // Those of the creatures selected, and of the creatures walking the points selected.
             let mut guids: Vec<u64> = selected
@@ -725,11 +751,15 @@ impl SpawnsModule {
             }
             guids.sort_unstable();
             guids.dedup();
-            paths::segments(&self.drawn_paths, &guids)
+            paths::segments(&self.drawn_paths, &guids, &pending)
         };
         for (id, now) in live {
             if let Some(spawn) = self.find(&id) {
-                segments.extend(paths::spawn_marks(spawn.position, now));
+                segments.extend(paths::spawn_marks(
+                    spawn.position,
+                    now,
+                    self.changes.moved.contains_key(&id),
+                ));
             }
         }
         let mut drawn = paths::lock(&self.drawn);
@@ -1007,6 +1037,11 @@ impl Module for SpawnsModule {
                             self.changes.moved.contains_key(id) || self.changes.added.contains_key(id),
                             &quests,
                             &self.quests_named().titles,
+                            self.changes
+                                .moved
+                                .contains_key(id)
+                                .then(|| self.index.get(id).and_then(|at| self.spawns.get(*at)))
+                                .flatten(),
                         );
                         if let Some(template) = self
                             .changes

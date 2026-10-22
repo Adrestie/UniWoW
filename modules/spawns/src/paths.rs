@@ -83,10 +83,15 @@ const LIFT: f32 = 0.4;
 /// A segment drawn: from, to, and its colour, red, green, blue and alpha in gamma.
 pub type Segment = [f32; 10];
 
-/// The colour of the paths.
-const PATH: [f32; 4] = [1.0, 0.12, 0.08, 1.0];
-/// The colour of the places of spawn and of the line to the creature.
-const SPAWN: [f32; 4] = [1.0, 0.85, 0.2, 1.0];
+/// The colours of what the database has and of what waits for Apply, red, green, blue and alpha.
+fn colour(pending: bool) -> [f32; 4] {
+    let [r, g, b] = if pending {
+        uniwow_api::scene::state_colour::PENDING
+    } else {
+        uniwow_api::scene::state_colour::DATABASE
+    };
+    [f32::from(r) / 255.0, f32::from(g) / 255.0, f32::from(b) / 255.0, 1.0]
+}
 
 fn segment(from: [f32; 3], to: [f32; 3], colour: [f32; 4]) -> Segment {
     [
@@ -96,14 +101,20 @@ fn segment(from: [f32; 3], to: [f32; 3], colour: [f32; 4]) -> Segment {
 
 /// The segments of the paths of the spawns `guids`: the path closed, a creature walking it again
 /// from its start.
-pub fn segments<'a>(paths: &Paths, guids: impl IntoIterator<Item = &'a u64>) -> Vec<Segment> {
+pub fn segments<'a>(
+    paths: &Paths,
+    guids: impl IntoIterator<Item = &'a u64>,
+    pending: &dyn Fn([f32; 3]) -> bool,
+) -> Vec<Segment> {
     let mut out = Vec::new();
     for guid in guids {
         for path in paths.get(guid).into_iter().flatten() {
             let closing = (path.len() > 2).then(|| (path[path.len() - 1], path[0]));
             for (from, to) in path.windows(2).map(|pair| (pair[0], pair[1])).chain(closing) {
                 let lifted = |at: [f32; 3]| [at[0], at[1], at[2] + LIFT];
-                out.push(segment(lifted(from), lifted(to), PATH));
+                // Red where it touches a point waiting for Apply.
+                let waiting = pending(from) || pending(to);
+                out.push(segment(lifted(from), lifted(to), colour(waiting)));
             }
         }
     }
@@ -117,7 +128,8 @@ const DASH: f32 = 0.8;
 
 /// The place of spawn `spawn` of a creature standing at `now`: a circle on it, and a dotted line
 /// from it to the creature, unless it stands there.
-pub fn spawn_marks(spawn: [f32; 3], now: [f32; 3]) -> Vec<Segment> {
+pub fn spawn_marks(spawn: [f32; 3], now: [f32; 3], pending: bool) -> Vec<Segment> {
+    let mark = colour(pending);
     let at = |angle: f32| {
         [
             spawn[0] + RING * angle.cos(),
@@ -128,7 +140,7 @@ pub fn spawn_marks(spawn: [f32; 3], now: [f32; 3]) -> Vec<Segment> {
     let sides = 24;
     let step = std::f32::consts::TAU / sides as f32;
     let mut out: Vec<Segment> = (0..sides)
-        .map(|side| segment(at(side as f32 * step), at((side + 1) as f32 * step), SPAWN))
+        .map(|side| segment(at(side as f32 * step), at((side + 1) as f32 * step), mark))
         .collect();
     let (from, to) = ([spawn[0], spawn[1], spawn[2] + LIFT], [now[0], now[1], now[2] + LIFT]);
     let length = ((to[0] - from[0]).powi(2) + (to[1] - from[1]).powi(2) + (to[2] - from[2]).powi(2)).sqrt();
@@ -147,7 +159,7 @@ pub fn spawn_marks(spawn: [f32; 3], now: [f32; 3]) -> Vec<Segment> {
     let mut start = RING;
     while start < length {
         let end = (start + DASH).min(length);
-        out.push(segment(along(start), along(end), SPAWN));
+        out.push(segment(along(start), along(end), mark));
         start += 2.0 * DASH;
     }
     out
@@ -426,12 +438,15 @@ mod tests {
             [vec![[0.0, 0.0, 1.0], [10.0, 0.0, 1.0], [10.0, 10.0, 1.0]]]
         );
         assert!(!paths.contains_key(&5), "one point is no path");
-        let drawn = segments(&paths, &[79753, 1]);
+        // The point at 10, 10 waiting for Apply: the two segments touching it red.
+        let drawn = segments(&paths, &[79753, 1], &|at| at[1] > 5.0);
         assert_eq!(drawn.len(), 3, "two segments and the one back to its start");
         assert_eq!(drawn[0][..6], [0.0, 0.0, 1.4, 10.0, 0.0, 1.4]);
         assert_eq!(drawn[2][..6], [10.0, 10.0, 1.4, 0.0, 0.0, 1.4]);
-        assert_eq!(drawn[0][6..], PATH);
-        assert!(segments(&paths, &[]).is_empty());
+        assert_eq!(drawn[0][6..], colour(false), "as the database has it");
+        assert_eq!(drawn[1][6..], colour(true), "to a point waiting");
+        assert_eq!(drawn[2][6..], colour(true), "from a point waiting");
+        assert!(segments(&paths, &[], &|_| false).is_empty());
     }
 }
 
@@ -446,7 +461,7 @@ mod wgsl_tests {
 
     #[test]
     fn a_place_of_spawn_is_a_circle_and_a_dotted_line_to_its_creature() {
-        let marks = spawn_marks([0.0, 0.0, 0.0], [10.0, 0.0, 0.0]);
+        let marks = spawn_marks([0.0, 0.0, 0.0], [10.0, 0.0, 0.0], false);
         let circle: Vec<&Segment> = marks.iter().take(24).collect();
         for side in &circle {
             let radius = (side[0].powi(2) + side[1].powi(2)).sqrt();
@@ -456,9 +471,14 @@ mod wgsl_tests {
         assert_eq!(dashes.len(), 6, "from 1 to 10 yards, 0.8 drawn then 0.8 left");
         assert!((dashes[0][0] - RING).abs() < 1e-4 && (dashes[0][3] - (RING + DASH)).abs() < 1e-4);
         assert!(dashes.iter().all(|dash| dash[3] <= 10.0 + 1e-4));
-        assert_eq!(marks[0][6..], SPAWN);
+        assert_eq!(marks[0][6..], colour(false));
         assert_eq!(
-            spawn_marks([0.0; 3], [0.5, 0.0, 0.0]).len(),
+            spawn_marks([0.0; 3], [5.0, 0.0, 0.0], true)[0][6..],
+            colour(true),
+            "moved, not applied"
+        );
+        assert_eq!(
+            spawn_marks([0.0; 3], [0.5, 0.0, 0.0], false).len(),
             24,
             "standing at its place: the circle alone"
         );

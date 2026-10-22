@@ -450,7 +450,7 @@ pub fn laid_out(guids: &[u64]) -> Vec<Member> {
 }
 
 /// The points of the paths `shown` of `patrols` as entities, their path their extra number.
-pub fn piece(patrols: &Patrols, shown: &BTreeSet<u32>) -> Option<Piece> {
+pub fn piece(patrols: &Patrols, base: &Patrols, shown: &BTreeSet<u32>) -> Option<Piece> {
     let mut builder = PieceBuilder::new(Vec::new());
     for id in shown {
         let Some(points) = patrols.paths.get(id) else {
@@ -459,7 +459,11 @@ pub fn piece(patrols: &Patrols, shown: &BTreeSet<u32>) -> Option<Piece> {
         for (at, point) in points.iter().enumerate() {
             builder.push(Entity {
                 id: EntityId::waypoint(*id, at as u32 + 1),
-                flags: flags::SERVER,
+                flags: if pending_point(base, *id, at, point) {
+                    flags::SERVER | flags::PENDING
+                } else {
+                    flags::SERVER
+                },
                 parent: None,
                 label: "Waypoint",
                 extra: *id,
@@ -469,6 +473,12 @@ pub fn piece(patrols: &Patrols, shown: &BTreeSet<u32>) -> Option<Piece> {
         }
     }
     (!builder.is_empty()).then(|| builder.build())
+}
+
+/// Whether the point `at` (from 0) of the path `path`, as `point`, waits for Apply: the database has
+/// another there, or none.
+pub fn pending_point(base: &Patrols, path: u32, at: usize, point: &Point) -> bool {
+    base.paths.get(&path).and_then(|points| points.get(at)) != Some(point)
 }
 
 /// Where a point added after the last of `points` goes: a few yards on, the way the last two go.
@@ -692,10 +702,10 @@ mod tests {
     #[test]
     fn the_points_of_the_paths_shown_are_entities_and_are_written() {
         let patrols = base();
-        let piece = piece(&patrols, &BTreeSet::from([790, 1])).unwrap();
+        let piece = piece(&patrols, &patrols, &BTreeSet::from([790, 1])).unwrap();
         assert_eq!(piece.len(), 2);
         assert_eq!(piece.ids[1], EntityId::waypoint(790, 2));
-        assert!(super::piece(&patrols, &BTreeSet::new()).is_none());
+        assert!(super::piece(&patrols, &patrols, &BTreeSet::new()).is_none());
         let point = &patrols.paths[&790][1];
         assert_eq!(
             written(point, "position", Some(2), "+3").unwrap().position,

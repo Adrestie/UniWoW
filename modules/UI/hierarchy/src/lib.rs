@@ -592,7 +592,26 @@ impl HierarchyModule {
                     if node.entity.is_none() {
                         text = text.strong();
                     }
-                    let response = ui.selectable_label(selected, text);
+                    // Changed in the editor, waiting for Apply to the server: a red dot before it.
+                    let pending = node.entity.is_some_and(|id| {
+                        snapshot
+                            .editable(&id)
+                            .is_some_and(|entity| entity.flags() & uniwow_api::scene::flags::PENDING != 0)
+                    });
+                    let response = if pending {
+                        ui.horizontal(|ui| {
+                            let [r, g, b] = uniwow_api::scene::state_colour::PENDING;
+                            ui.label(egui::RichText::new("●").color(egui::Color32::from_rgb(r, g, b)))
+                                .on_hover_text(format!(
+                                    "Changed in the editor, waiting for Apply to the server. {}",
+                                    uniwow_api::scene::state_colour::LEGEND
+                                ));
+                            ui.selectable_label(selected, text)
+                        })
+                        .inner
+                    } else {
+                        ui.selectable_label(selected, text)
+                    };
                     if response.clicked() {
                         clicked = Some((index, ui.input(|i| i.modifiers)));
                         // One far from the camera: gone to, so that its tiles are loaded.

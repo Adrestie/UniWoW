@@ -632,6 +632,24 @@ impl Changes {
         }
     }
 
+    /// The spawns these changes touch, waiting for Apply: moved, made, their movements, paths and
+    /// groups changed (`base` the patrols as the database has them).
+    pub fn pending_ids(&self, base: &crate::patrols::Patrols) -> HashSet<EntityId> {
+        let mut out: HashSet<EntityId> = self.moved.keys().chain(self.added.keys()).copied().collect();
+        let now = self.patrols.laid_over(base);
+        out.extend(self.patrols.walkers.keys().map(|guid| EntityId::creature(*guid)));
+        for path in self.patrols.paths.keys() {
+            out.extend(now.walkers_of(*path).into_iter().map(EntityId::creature));
+        }
+        for (leader, group) in &self.patrols.groups {
+            out.insert(EntityId::creature(*leader));
+            for (members, _) in group.iter().chain(base.groups.get(leader)) {
+                out.extend(members.iter().map(|member| EntityId::creature(member.guid)));
+            }
+        }
+        out
+    }
+
     /// The changes for the server (step 16.1): the rows of the spawns moved, duplicated and deleted
     /// and of the quests given and taken, the creatures' entry in their column `entry_column`; the
     /// spawns as the database has them `spawns`, their places by id `index`. What is not written
@@ -801,8 +819,9 @@ pub fn tile_of(position: [f32; 3]) -> Option<TileId> {
 }
 
 /// The spawns `spawns` as entities of the scene, by tile: named by their
-/// template, their extra number their template's entry; their bounds a box of their scale.
-pub fn pieces(spawns: &[Spawn]) -> BTreeMap<TileId, Piece> {
+/// template, their extra number their template's entry; their bounds a box of their scale; those of
+/// `pending` marked waiting for Apply.
+pub fn pieces(spawns: &[Spawn], pending: &HashSet<EntityId>) -> BTreeMap<TileId, Piece> {
     let mut builders: BTreeMap<TileId, PieceBuilder> = BTreeMap::new();
     for spawn in spawns {
         let Some(tile) = tile_of(spawn.position) else {
@@ -811,7 +830,11 @@ pub fn pieces(spawns: &[Spawn]) -> BTreeMap<TileId, Piece> {
         let builder = builders.entry(tile).or_insert_with(|| PieceBuilder::new(Vec::new()));
         builder.push(Entity {
             id: spawn.id(),
-            flags: flags::SERVER,
+            flags: if pending.contains(&spawn.id()) {
+                flags::SERVER | flags::PENDING
+            } else {
+                flags::SERVER
+            },
             parent: None,
             label: &spawn.name,
             extra: spawn.entry,
@@ -830,8 +853,15 @@ pub fn pieces(spawns: &[Spawn]) -> BTreeMap<TileId, Piece> {
 
 /// The components of the spawn `spawn` for the Inspector: *Transform* (its position in the world,
 /// its orientation in degrees about the vertical as the rotation about the axis Y of the files, no
-/// scale), *Model* (its template), *Quests* (those its template starts and ends) and its columns.
-pub fn read(spawn: &Spawn, changed: bool, quests: &[Link], titles: &BTreeMap<u32, String>) -> Value {
+/// scale), *Model* (its template), *Quests* (those its template starts and ends) and its columns;
+/// moved, where the database has it (`database`).
+pub fn read(
+    spawn: &Spawn,
+    changed: bool,
+    quests: &[Link],
+    titles: &BTreeMap<u32, String>,
+    database: Option<&Spawn>,
+) -> Value {
     let table = if spawn.kind == Kind::GameObject {
         "gameobject"
     } else {
@@ -844,6 +874,10 @@ pub fn read(spawn: &Spawn, changed: bool, quests: &[Link], titles: &BTreeMap<u32
             "transform": {
                 "position": spawn.position,
                 "rotation": [0.0, spawn.orientation.to_degrees(), 0.0],
+                "database": database.filter(|_| changed).map(|base| json!({
+                    "position": base.position,
+                    "rotation": [0.0, base.orientation.to_degrees(), 0.0],
+                })),
             },
             "model": {
                 "template": format!("{table}_template {}", spawn.entry),
@@ -1078,7 +1112,7 @@ mod tests {
         );
         assert_eq!(spawns[1].position[0], -8840.0, "a number written as text read");
         assert_eq!(spawns[1].scale, 1.0, "no model: its scale by default");
-        let pieces = pieces(&spawns);
+        let pieces = pieces(&spawns, &HashSet::new());
         let (tile, piece) = pieces.iter().next().unwrap();
         assert_eq!(*tile, tile_of(spawns[0].position).unwrap());
         assert_eq!(piece.ids[0], EntityId::creature(79753));
@@ -1141,8 +1175,13 @@ mod tests {
         assert_eq!(ids, [EntityId::creature(79753), EntityId::creature(80_001)]);
         assert_eq!(laid[0].position, position);
         assert_eq!(Changes::of_section(&changes.section()), changes);
-        let read = read(&laid[0], true, &[], &BTreeMap::new());
+        let read = read(&laid[0], true, &[], &BTreeMap::new(), Some(&spawns[0]));
         assert_eq!(read["components"]["model"]["template"], json!("creature_template 68"));
+        assert_eq!(
+            read["components"]["transform"]["database"]["position"],
+            json!(spawns[0].position),
+            "moved: where the database has it, for the Inspector to say it in red"
+        );
     }
 
     #[test]
@@ -1195,6 +1234,7 @@ mod tests {
             false,
             &changes.quests_of(&quests, Kind::Creature, 197),
             &quests.titles,
+            None,
         );
         assert_eq!(
             read["components"]["quests"][1],
@@ -1381,7 +1421,7 @@ mod tests {
             "a guid of the other table left alone"
         );
         assert_eq!(
-            read(&spawns[0], false, &[], &BTreeMap::new())["components"]["raw"]["game event"],
+            read(&spawns[0], false, &[], &BTreeMap::new(), None)["components"]["raw"]["game event"],
             2
         );
     }

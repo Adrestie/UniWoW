@@ -487,15 +487,23 @@ pub fn nearest(parts: &[Part], point: Pos2) -> Option<(Handle, Away)> {
         .map(|(last, away, _, handle)| (handle, (last, away)))
 }
 
-/// The gizmo of a spawn point, apart from that of the creature in the world: the colour of the
-/// circle drawn on a spawn point, and smaller.
-pub const SPAWN: Color32 = Color32::from_rgb(255, 217, 51);
+/// The gizmo of a spawn point, apart from that of the creature in the world: smaller, of the colour
+/// of the circle drawn on it, green as the database has it, red moved and waiting for Apply.
 pub const SPAWN_SIZE: f32 = 0.6;
 
+pub fn spawn_colour(pending: bool) -> Color32 {
+    let [r, g, b] = if pending {
+        uniwow_api::scene::state_colour::PENDING
+    } else {
+        uniwow_api::scene::state_colour::DATABASE
+    };
+    Color32::from_rgb(r, g, b)
+}
+
 /// `parts` drawn as the gizmo of a spawn point: all of its colour.
-pub fn as_spawn_point(mut parts: Vec<Part>) -> Vec<Part> {
+pub fn as_spawn_point(mut parts: Vec<Part>, pending: bool) -> Vec<Part> {
     for part in &mut parts {
-        part.colour = SPAWN;
+        part.colour = spawn_colour(pending);
     }
     parts
 }
@@ -822,8 +830,12 @@ mod tests {
             let frame = Frame::new(&seen, centre, Quat::IDENTITY).unwrap();
             parts(Mode::Move, &seen, &frame, false, 1.0)
         };
-        let (here, there) = (parts_at(Vec3::ZERO), as_spawn_point(parts_at(Vec3::new(3.0, 0.0, 0.0))));
-        assert!(there.iter().all(|part| part.colour == SPAWN));
+        let (here, there) = (
+            parts_at(Vec3::ZERO),
+            as_spawn_point(parts_at(Vec3::new(3.0, 0.0, 0.0)), false),
+        );
+        assert!(there.iter().all(|part| part.colour == spawn_colour(false)));
+        assert_ne!(spawn_colour(false), spawn_colour(true), "green, red once moved");
         let tip = at(&seen, Vec3::new(3.0, 0.0, 0.0));
         let (_, near) = nearest(&there, tip).expect("its middle under the pointer");
         assert!(nearest(&here, tip).is_none_or(|(_, away)| away.1 >= near.1));

@@ -1422,6 +1422,8 @@ impl WorldDbModule {
                 if pending.is_empty() {
                     ui.weak("No change waits for the server.");
                 }
+                ui.label(egui::RichText::new(uniwow_api::scene::state_colour::LEGEND).weak().small())
+                    .on_hover_text("The colours of the view, the Inspector and the Hierarchy: what waits here is red there");
                 for held in &pending {
                     ui.horizontal(|ui| {
                         ui.strong(&held.label);

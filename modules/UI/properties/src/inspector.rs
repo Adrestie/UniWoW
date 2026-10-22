@@ -658,6 +658,36 @@ impl Inspector {
                         egui::RichText::new(format!("{unread} of the selection read only, left as they are")).weak(),
                     );
                 }
+                // Changed, waiting for Apply: red, the database's value said.
+                let waiting: Vec<String> = values
+                    .iter()
+                    .filter_map(|(_, value)| {
+                        let database = &value["components"]["transform"]["database"];
+                        let position = database["position"].as_array()?;
+                        let number = |at: usize| position.get(at).and_then(Value::as_f64).unwrap_or(0.0);
+                        Some(format!(
+                            "{:.2}, {:.2}, {:.2} facing {:.0}°",
+                            number(0),
+                            number(1),
+                            number(2),
+                            database["rotation"][1].as_f64().unwrap_or(0.0)
+                        ))
+                    })
+                    .collect();
+                if !waiting.is_empty() {
+                    let [r, g, b] = uniwow_api::scene::state_colour::PENDING;
+                    ui.label(
+                        egui::RichText::new("● Moved, waiting for Apply to the server")
+                            .color(egui::Color32::from_rgb(r, g, b))
+                            .small(),
+                    )
+                    .on_hover_text(format!(
+                        "In the database: {}
+{}",
+                        waiting.join("; "),
+                        uniwow_api::scene::state_colour::LEGEND
+                    ));
+                }
                 let mut writes = Vec::new();
                 let single = values.len() == 1;
                 let mut drag: Option<DragEvent> = None;

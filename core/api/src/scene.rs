@@ -732,6 +732,18 @@ pub mod flags {
     pub const READ_ONLY: u16 = 0x8;
     /// A player, connected with the client of the game.
     pub const PLAYER: u16 = 0x10;
+    /// Changed in the editor, the change waiting for *Apply to the server*: drawn red, what the
+    /// database has green.
+    pub const PENDING: u16 = 0x20;
+}
+
+/// The colours of what the database has, and of what waits for *Apply to the server*, readable on
+/// the dark background of the editor.
+pub mod state_colour {
+    pub const DATABASE: [u8; 3] = [80, 200, 120];
+    pub const PENDING: [u8; 3] = [240, 80, 70];
+    /// The words telling them, for a legend or a tooltip.
+    pub const LEGEND: &str = "Green: as the database has it · Red: waiting for Apply to the server";
 }
 
 /// Names a piece: its provider, its map and its part, a tile (`PieceKey::tile`) or a number of the

@@ -33,7 +33,9 @@ pub struct Placing {
     pub stop: bool,
     pub shown: Vec<(u32, Vec<[f32; 3]>)>,
     pub inserts: Vec<(u32, usize, [f32; 3])>,
-    pub groups: Vec<(u64, Vec<u64>)>,
+    pub groups: Vec<(u64, Vec<u64>, bool)>,
+    /// Whether each point of the paths shown waits for Apply, as `shown` lists them.
+    pub shown_pending: Vec<Vec<bool>>,
 }
 
 /// The handles "+" of the paths `shown`: the middle of each segment inserting a point there, and one
@@ -51,6 +53,16 @@ pub fn handles(shown: &[(u32, Vec<[f32; 3]>)]) -> Vec<(u32, usize, [f32; 3])> {
         }
     }
     out
+}
+
+/// The colour of what the database has (green) or of what waits for Apply (red).
+pub fn state_colour(pending: bool) -> egui::Color32 {
+    let [r, g, b] = if pending {
+        scene::state_colour::PENDING
+    } else {
+        scene::state_colour::DATABASE
+    };
+    egui::Color32::from_rgb(r, g, b)
 }
 
 /// How near the pointer must be to a handle "+", in points.
@@ -157,8 +169,8 @@ impl PlaceTool {
     /// to each follower, "F" over each follower.
     fn groups_ui(&mut self, input: &ToolInput<'_>, painter: &egui::Painter) {
         let groups = lock(&self.placing).groups.clone();
-        let gold = egui::Color32::from_rgb(255, 210, 60);
-        for (leader, followers) in groups {
+        for (leader, followers, pending) in groups {
+            let gold = state_colour(pending);
             let Some(head) = self
                 .creature_at(leader)
                 .and_then(|at| input.project([at[0], at[1], at[2] + 2.5].into()))
@@ -202,15 +214,21 @@ impl PlaceTool {
         }
         let response = input.response;
         let hovered = response.hover_pos().and_then(|at| self.handle_at(input, at));
-        let colour = egui::Color32::from_rgb(255, 80, 60);
-        // The points themselves, numbered in the order walked: clicked, one is selected and moved by
-        // its gizmo.
-        for (_, points) in &shown {
+        let colour = egui::Color32::from_gray(200);
+        let pending = lock(&self.placing).shown_pending.clone();
+        // The points themselves, numbered in the order walked, green as the database has them, red
+        // waiting for Apply: clicked, one is selected and moved by its gizmo.
+        for (index, (_, points)) in shown.iter().enumerate() {
             for (at, point) in points.iter().enumerate() {
                 let Some(on) = input.project((*point).into()) else {
                     continue;
                 };
-                painter.circle_filled(on, 8.0, colour);
+                let waiting = pending
+                    .get(index)
+                    .and_then(|points| points.get(at))
+                    .copied()
+                    .unwrap_or(false);
+                painter.circle_filled(on, 8.0, state_colour(waiting));
                 painter.circle_stroke(on, 8.0, egui::Stroke::new(1.5, egui::Color32::WHITE));
                 painter.text(
                     on,
@@ -343,7 +361,7 @@ impl SpawnsModule {
             .collect();
         shown.extend(lock(&self.place_points).path);
         // The groups of the creatures selected, marked in the view.
-        let mut groups: Vec<(u64, Vec<u64>)> = Vec::new();
+        let mut groups: Vec<(u64, Vec<u64>, bool)> = Vec::new();
         for id in scene
             .groups()
             .expanded(&selection.ids)
@@ -351,13 +369,27 @@ impl SpawnsModule {
             .filter(|id| id.kind == Kind::Creature)
         {
             if let Some(leader) = self.patrols_now.leader_of(id.key)
-                && !groups.iter().any(|(kept, _)| *kept == leader)
+                && !groups.iter().any(|(kept, _, _)| *kept == leader)
                 && let Some((members, _)) = self.patrols_now.groups.get(&leader)
             {
-                groups.push((leader, members.iter().map(|member| member.guid).collect()));
+                let pending = self.changes.patrols.groups.contains_key(&leader);
+                groups.push((leader, members.iter().map(|member| member.guid).collect(), pending));
             }
         }
         lock(&self.place_points).groups = groups;
+        lock(&self.place_points).shown_pending = shown
+            .iter()
+            .filter_map(|path| {
+                let points = self.patrols_now.paths.get(path)?;
+                Some(
+                    points
+                        .iter()
+                        .enumerate()
+                        .map(|(at, point)| patrols::pending_point(&self.patrols, *path, at, point))
+                        .collect(),
+                )
+            })
+            .collect();
         lock(&self.place_points).shown = shown
             .iter()
             .filter_map(|path| {
@@ -366,7 +398,7 @@ impl SpawnsModule {
             })
             .collect();
         let key = PieceKey::part(MODULE, map, WAYPOINTS);
-        match patrols::piece(&self.patrols_now, &shown) {
+        match patrols::piece(&self.patrols_now, &self.patrols, &shown) {
             Some(piece) => scene.publish(key, Arc::new(piece)),
             None => scene.withdraw(key),
         }
@@ -590,6 +622,14 @@ impl SpawnsModule {
                     .weak()
                     .small(),
                 );
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("●").color(state_colour(false)));
+                    ui.label(egui::RichText::new("as the database has it").small());
+                    ui.label(egui::RichText::new("●").color(state_colour(true)));
+                    ui.label(egui::RichText::new("waiting for Apply").small());
+                })
+                .response
+                .on_hover_text(scene::state_colour::LEGEND);
                 self.movement_ui(ui, guid, walker, ctx);
                 if walker.path == 0 || walker.movement != patrols::WALKING {
                     if ui
@@ -637,8 +677,15 @@ impl SpawnsModule {
                     });
                 }
                 ui.separator();
-                ui.label(egui::RichText::new("Group").strong())
-                    .on_hover_text("The creatures following a leader in a group (creature_formations)");
+                let leader = self.patrols_now.leader_of(guid);
+                let group_waiting = leader.is_some_and(|leader| self.changes.patrols.groups.contains_key(&leader))
+                    || self.changes.patrols.groups.contains_key(&guid);
+                ui.label(egui::RichText::new("Group").strong().color(state_colour(group_waiting)))
+                    .on_hover_text(if group_waiting {
+                        "The creatures following a leader (creature_formations): changed, waiting for Apply (red)"
+                    } else {
+                        "The creatures following a leader (creature_formations), as the database has them (green)"
+                    });
                 self.group_ui(ui, guid, &creatures, ctx);
             },
         );
@@ -664,9 +711,18 @@ impl SpawnsModule {
             ),
         ];
         let mut chosen = None;
+        let base = self.patrols.walkers.get(&guid).copied().unwrap_or_default();
+        let waiting = base != walker;
         ui.horizontal(|ui| {
-            ui.label("Movement")
-                .on_hover_text("How the creature moves (creature.MovementType)");
+            ui.label(egui::RichText::new("Movement").color(state_colour(waiting)))
+                .on_hover_text(if waiting {
+                    format!(
+                        "How the creature moves (creature.MovementType), waiting for Apply (red); in the database: MovementType {}, path {}",
+                        base.movement, base.path
+                    )
+                } else {
+                    "How the creature moves (creature.MovementType), as the database has it (green)".to_owned()
+                });
             let shown = WAYS
                 .iter()
                 .find(|(way, _, _)| *way == walker.movement)
@@ -734,9 +790,32 @@ impl SpawnsModule {
                         ui.end_row();
                         for (at, point) in points.iter().enumerate() {
                             let number = at as u32 + 1;
+                            let waiting = patrols::pending_point(&self.patrols, path, at, point);
+                            let database = self.patrols.paths.get(&path).and_then(|points| points.get(at)).map_or(
+                                "none".to_owned(),
+                                |base| {
+                                    format!(
+                                        "{:.2}, {:.2}, {:.2}",
+                                        base.position[0], base.position[1], base.position[2]
+                                    )
+                                },
+                            );
+                            let hint = if waiting {
+                                format!(
+                                    "Waiting for Apply (red); in the database: {database}. Click: select it in the view"
+                                )
+                            } else {
+                                "As the database has it (green). Click: select it in the view, its gizmo moves it"
+                                    .to_owned()
+                            };
                             if ui
-                                .selectable_label(selected == Some(number), format!("{number}"))
-                                .on_hover_text("Select this point in the view: its gizmo moves it")
+                                .selectable_label(
+                                    selected == Some(number),
+                                    egui::RichText::new(format!("{number}"))
+                                        .color(state_colour(waiting))
+                                        .strong(),
+                                )
+                                .on_hover_text(hint)
                                 .clicked()
                             {
                                 chose = Some(number);

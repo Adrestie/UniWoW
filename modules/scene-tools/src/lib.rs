@@ -128,6 +128,8 @@ struct Shown {
     frame: gizmo::Frame,
     parts: Vec<gizmo::Part>,
     spawn: bool,
+    /// A spawn point moved, waiting for Apply: red.
+    pending: bool,
 }
 
 /// A handle of a gizmo held: the grab, what it made so far, where the entities of the selection
@@ -141,6 +143,7 @@ struct Held {
     /// What it moves, whether it is a spawn point's, and where a creature was last moved live.
     target: Target,
     spawn: bool,
+    pending: bool,
     sent: Option<Vec3>,
 }
 
@@ -404,12 +407,22 @@ impl Selecting {
             if spawn {
                 frame.size *= gizmo::SPAWN_SIZE;
             }
+            let pending = creature.is_some_and(|id| {
+                snapshot
+                    .editable(&id)
+                    .is_some_and(|entity| entity.flags() & scene::flags::PENDING != 0)
+            });
             let parts = gizmo::parts(mode, seen, &frame, shift, 1.0);
             out.push(Shown {
                 target: Target::Selection,
                 frame,
-                parts: if spawn { gizmo::as_spawn_point(parts) } else { parts },
+                parts: if spawn {
+                    gizmo::as_spawn_point(parts, pending)
+                } else {
+                    parts
+                },
                 spawn,
+                pending,
             });
         }
         if mode == gizmo::Mode::Move
@@ -422,6 +435,7 @@ impl Selecting {
                 frame,
                 parts: gizmo::parts(mode, seen, &frame, shift, 1.0),
                 spawn: false,
+                pending: false,
             });
         }
         out
@@ -491,6 +505,7 @@ impl Selecting {
                     space: *held(&self.shared.space),
                     target: chosen.target,
                     spawn: chosen.spawn,
+                    pending: chosen.pending,
                     sent: None,
                 });
                 if chosen.target == Target::Selection {
@@ -510,7 +525,7 @@ impl Selecting {
                 }
                 if let (Some(at), Some((index, _, _))) = (pointer, hovered) {
                     let gizmo = &shown[index];
-                    hint(painter, at, gizmo.target, gizmo.spawn);
+                    hint(painter, at, gizmo.target, gizmo.spawn, gizmo.pending);
                 }
                 // A click on a handle is no choice; inside the rings, it is.
                 return hovered.is_some_and(|(_, handle, _)| handle != gizmo::Handle::Free);
@@ -597,7 +612,7 @@ impl Selecting {
         }
         let parts = gizmo::parts(mode, &input.seen, &frame, shift, stretch);
         let parts = if holding.spawn {
-            gizmo::as_spawn_point(parts)
+            gizmo::as_spawn_point(parts, holding.pending)
         } else {
             parts
         };
@@ -643,13 +658,16 @@ const LIVE_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// What the gizmo under the pointer does, beside it: a creature moved in the game, live; a spawn
 /// point seen in the game at once, written to the database by *Apply to the server* alone.
-fn hint(painter: &egui::Painter, at: egui::Pos2, target: Target, spawn: bool) {
+fn hint(painter: &egui::Painter, at: egui::Pos2, target: Target, spawn: bool, pending: bool) {
     let text = match (target, spawn) {
         (Target::Live(_), _) => {
             "The creature in the game: moved live as it is dragged, nothing written to the database; it moves again once let go"
         }
+        (Target::Selection, true) if pending => {
+            "Its spawn point, moved, waiting for Apply (red): seen in the game at once, the creature keeping its place and going home there; written to the database only by Apply to the server (panel World database); lost when the server starts again unless applied"
+        }
         (Target::Selection, true) => {
-            "Its spawn point: seen in the game at once (the creature keeps its place and goes home there), written to the database only by Apply to the server (panel World database); lost when the server starts again unless applied"
+            "Its spawn point, as the database has it (green): moved, seen in the game at once, written to the database only by Apply to the server (panel World database)"
         }
         (Target::Selection, false) => return,
     };
