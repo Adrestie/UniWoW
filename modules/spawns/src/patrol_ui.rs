@@ -23,7 +23,8 @@ pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// The points being added to a path by clicks on the ground: the path, the clicks not yet taken,
 /// the last point, whether the user stopped; the paths shown, their handles "+", and the points
-/// those clicked insert (the path, the place in it, where).
+/// those clicked insert (the path, the place in it, where); the groups of the creatures selected, each
+/// its leader and its followers, marked in the view.
 #[derive(Default)]
 pub struct Placing {
     pub path: Option<u32>,
@@ -32,6 +33,7 @@ pub struct Placing {
     pub stop: bool,
     pub shown: Vec<(u32, Vec<[f32; 3]>)>,
     pub inserts: Vec<(u32, usize, [f32; 3])>,
+    pub groups: Vec<(u64, Vec<u64>)>,
 }
 
 /// The handles "+" of the paths `shown`: the middle of each segment inserting a point there, and one
@@ -95,6 +97,7 @@ impl Tool for PlaceTool {
     }
 
     fn pointer(&mut self, input: &ToolInput<'_>, painter: &egui::Painter) {
+        self.groups_ui(input, painter);
         if lock(&self.placing).path.is_none() {
             self.handles_ui(input, painter);
             return;
@@ -142,6 +145,54 @@ impl Tool for PlaceTool {
 }
 
 impl PlaceTool {
+    /// Where the creature `guid` is: where it runs in the world, else at its spawn point.
+    fn creature_at(&self, guid: u64) -> Option<[f32; 3]> {
+        let id = EntityId::creature(guid);
+        self.scene
+            .position_now(&id)
+            .or_else(|| self.scene.snapshot().editable(&id).map(|entity| entity.origin()))
+    }
+
+    /// The groups of the creatures selected marked: a crown "L" over the leader, a thin line from it
+    /// to each follower, "F" over each follower.
+    fn groups_ui(&mut self, input: &ToolInput<'_>, painter: &egui::Painter) {
+        let groups = lock(&self.placing).groups.clone();
+        let gold = egui::Color32::from_rgb(255, 210, 60);
+        for (leader, followers) in groups {
+            let Some(head) = self
+                .creature_at(leader)
+                .and_then(|at| input.project([at[0], at[1], at[2] + 2.5].into()))
+            else {
+                continue;
+            };
+            for follower in followers {
+                let Some(at) = self.creature_at(follower) else {
+                    continue;
+                };
+                let Some(over) = input.project([at[0], at[1], at[2] + 2.5].into()) else {
+                    continue;
+                };
+                painter.line_segment([head, over], egui::Stroke::new(1.0, gold.gamma_multiply(0.7)));
+                painter.circle_filled(over, 7.0, egui::Color32::from_black_alpha(170));
+                painter.text(
+                    over,
+                    egui::Align2::CENTER_CENTER,
+                    "F",
+                    egui::FontId::proportional(10.0),
+                    gold,
+                );
+            }
+            painter.circle_filled(head, 9.0, gold);
+            painter.text(
+                head,
+                egui::Align2::CENTER_CENTER,
+                "L",
+                egui::FontId::proportional(12.0),
+                egui::Color32::BLACK,
+            );
+        }
+    }
+
     /// The handles "+" of the paths shown drawn, the one under the pointer lit with what it does; a
     /// click on one inserting its point.
     fn handles_ui(&mut self, input: &ToolInput<'_>, painter: &egui::Painter) {
@@ -291,6 +342,22 @@ impl SpawnsModule {
             .filter(|path| *path != 0)
             .collect();
         shown.extend(lock(&self.place_points).path);
+        // The groups of the creatures selected, marked in the view.
+        let mut groups: Vec<(u64, Vec<u64>)> = Vec::new();
+        for id in scene
+            .groups()
+            .expanded(&selection.ids)
+            .iter()
+            .filter(|id| id.kind == Kind::Creature)
+        {
+            if let Some(leader) = self.patrols_now.leader_of(id.key)
+                && !groups.iter().any(|(kept, _)| *kept == leader)
+                && let Some((members, _)) = self.patrols_now.groups.get(&leader)
+            {
+                groups.push((leader, members.iter().map(|member| member.guid).collect()));
+            }
+        }
+        lock(&self.place_points).groups = groups;
         lock(&self.place_points).shown = shown
             .iter()
             .filter_map(|path| {
@@ -468,9 +535,13 @@ impl SpawnsModule {
 
     /// The creature whose patrol the Inspector shows for the selection, and the point of its path
     /// selected: a creature selected alone, or points of one path, the creature walking it.
-    pub(crate) fn patrolled(&self, selected: &[EntityId]) -> Option<(u64, Option<u32>)> {
+    /// Several creatures selected: the active one, the leader of a group made of them.
+    pub(crate) fn patrolled(&self, selected: &[EntityId], active: Option<EntityId>) -> Option<(u64, Option<u32>)> {
         match selected {
             [only] if only.kind == Kind::Creature => Some((only.key, None)),
+            many if many.len() > 1 && many.iter().all(|id| id.kind == Kind::Creature) => {
+                active.filter(|id| many.contains(id)).map(|id| (id.key, None))
+            }
             points if !points.is_empty() && points.iter().all(|id| id.kind == Kind::Waypoint) => {
                 let path = points[0].key as u32;
                 if points.iter().any(|id| id.key as u32 != path) {
@@ -493,7 +564,7 @@ impl SpawnsModule {
         };
         let selection = scene.selection();
         let selected = scene.groups().expanded(&selection.ids);
-        let Some((guid, point)) = self.patrolled(&selected) else {
+        let Some((guid, point)) = self.patrolled(&selected, selection.active()) else {
             return;
         };
         let creatures: Vec<u64> = selected
@@ -889,7 +960,14 @@ impl SpawnsModule {
                                 .map_or(format!("#{}", member.guid), |spawn| {
                                     format!("{} #{}", spawn.name, member.guid)
                                 });
-                            ui.label(name);
+                            if ui
+                                .link(name)
+                                .on_hover_text("Select this follower in the view")
+                                .clicked()
+                                && let Some(scene) = &self.scene
+                            {
+                                scene.select(scene::Select::Set(vec![EntityId::creature(member.guid)]));
+                            }
                             ui.add(
                                 egui::DragValue::new(&mut member.distance)
                                     .speed(0.1)
@@ -972,6 +1050,22 @@ impl SpawnsModule {
                 ui.weak("In no group.");
             }
         }
+        // How a group is made: the followers selected first, the leader last.
+        let leader_name = self
+            .find(&EntityId::creature(guid))
+            .map_or(format!("#{guid}"), |spawn| format!("{} #{guid}", spawn.name));
+        let rule = if others.is_empty() {
+            format!(
+                "To make a group: select the followers, then the leader last (Ctrl+click); {leader_name} leads it when chosen last."
+            )
+        } else {
+            format!(
+                "Select the followers, then the leader last: {leader_name}, chosen last, leads the {} others.",
+                others.len()
+            )
+        };
+        ui.label(egui::RichText::new(rule).weak().small())
+            .on_hover_text("The leader is the creature chosen last in the selection, the one the Inspector shows");
         if !others.is_empty()
             && ui
                 .button(format!("Make a group of the {} selected, led by it", others.len() + 1))
