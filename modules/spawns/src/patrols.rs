@@ -182,21 +182,6 @@ impl Edits {
         self.paths.is_empty() && self.walkers.is_empty() && self.groups.is_empty()
     }
 
-    /// The creatures these changes name: those whose movement changed, the leaders and members of
-    /// the groups changed.
-    pub fn creatures(&self) -> BTreeSet<u64> {
-        let mut out: BTreeSet<u64> = self.walkers.keys().copied().collect();
-        for (leader, group) in &self.groups {
-            out.insert(*leader);
-            out.extend(
-                group
-                    .iter()
-                    .flat_map(|(members, _)| members.iter().map(|member| member.guid)),
-            );
-        }
-        out
-    }
-
     /// `base` as the user changed it.
     pub fn laid_over(&self, base: &Patrols) -> Patrols {
         let mut out = base.clone();

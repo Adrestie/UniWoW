@@ -114,12 +114,6 @@ pub struct Pending {
     pub held: Vec<String>,
 }
 
-/// Published once a change asked with the command `world-db.apply_live` (applied at once, as it is
-/// made) is written or refused: `{ "owner": .., "ticket": .., "entries": [..] }`, the rows it
-/// replaced, or `{ "owner": .., "ticket": .., "refused": .. }`. Its owner keeps its rows, to put
-/// them back once undone.
-pub const APPLIED_LIVE_TOPIC: &str = "world-db.applied_live";
-
 /// Published once the user chose another server (step 16.7), its name in `{ "server": .. }`: the
 /// modules that read it, or follow it, read it again through `WorldDb::server`.
 pub const SERVER_TOPIC: &str = "world-db.server";

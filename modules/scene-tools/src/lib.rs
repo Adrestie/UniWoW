@@ -624,14 +624,14 @@ impl Selecting {
 const LIVE_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// What the gizmo under the pointer does, beside it: a creature moved in the game, live; a spawn
-/// point written to the server once let go.
+/// point changed in the editor, waiting for *Apply to the server*.
 fn hint(painter: &egui::Painter, at: egui::Pos2, target: Target, spawn: bool) {
     let text = match (target, spawn) {
         (Target::Live(_), _) => {
             "The creature in the game: moved live as it is dragged, nothing written to the database; it moves again once let go"
         }
         (Target::Selection, true) => {
-            "Its spawn point: written to the server once let go (one undo entry, Ctrl+Z puts it back); the creature keeps its place and goes home there"
+            "Its spawn point: changed in the editor, waiting for Apply to the server (panel World database); once applied, the creature keeps its place and goes home there"
         }
         (Target::Selection, false) => return,
     };
@@ -796,10 +796,8 @@ struct SceneTools {
     creating: Creating,
     scene: Option<scene::Handle>,
     view: Option<viewport::Handle>,
-    /// The gesture of the drag of a gizmo under way, taken up at each frame until let go, and its
-    /// label.
+    /// The gesture of the drag of a gizmo under way, taken up at each frame until let go.
     dragging: Option<uniwow_api::Gesture>,
-    dragging_label: String,
     /// The hotkey of Global and Local.
     space: Option<Hotkey>,
     /// The reading of the turn of the active entity for the axes of Local: the call, the entity,
@@ -976,30 +974,23 @@ impl SceneTools {
                         ctx.end_gesture(gesture);
                     }
                     let count = ids.len();
-                    let label = if count == 1 {
+                    self.dragging = Some(ctx.begin_gesture(&if count == 1 {
                         label
                     } else {
                         format!("{label} {count} objects")
-                    };
-                    self.dragging = Some(ctx.begin_gesture(&label));
-                    self.dragging_label = label;
+                    }));
                 }
                 Drag::Moved(changes) => {
                     for change in changes {
                         for (provider, field, ids, axis, change) in written(&change, &by_provider, &snapshot) {
-                            // Held while dragged: what is applied to the server at once is, once let go.
                             ctx.call(
                                 &format!("{provider}.write"),
-                                json!({ "ids": ids, "field": field, "axis": axis, "change": change, "held": true }),
+                                json!({ "ids": ids, "field": field, "axis": axis, "change": change }),
                             );
                         }
                     }
                 }
                 Drag::LetGo => {
-                    // The spawn points and patrols dragged applied to the server, in the gesture.
-                    if by_provider.contains_key("spawns") {
-                        ctx.call("spawns.commit", json!({ "label": self.dragging_label }));
-                    }
                     if let Some(gesture) = self.dragging.take() {
                         ctx.end_gesture(gesture);
                     }

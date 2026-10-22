@@ -1,6 +1,5 @@
-//! What is done to the server at once, as the user does it: the creatures dragged in the world moved
-//! live through the bridge, at most ten times a second, nothing written; and the changes applied as
-//! they are made (a spawn point dragged, a patrol changed), each its own application.
+//! The creatures dragged in the world moved live through the bridge, at most ten times a second,
+//! nothing written.
 
 use std::collections::BTreeMap;
 use std::sync::{Condvar, Mutex};
