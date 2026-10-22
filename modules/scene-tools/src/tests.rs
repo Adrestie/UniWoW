@@ -78,6 +78,60 @@ fn the_boxes_are_those_of_the_entities_selected_the_registry_holds() {
     assert_eq!(moved, [[10.0, 1.0, 3.0, 12.0, 3.0, 5.0]]);
 }
 
+#[test]
+fn a_creature_away_from_its_spawn_point_has_its_gizmo_box_at_its_spawn_point() {
+    use crate::boxes::written_boxes;
+    // The spawn of the creature 79 at its spawn point, and the creature live 30 yards away.
+    let piece = |at: [f32; 3], flags: u16| {
+        let mut builder = PieceBuilder::new(Vec::new());
+        builder.push(uniwow_api::scene::Entity {
+            id: EntityId::creature(79),
+            flags,
+            parent: None,
+            label: "Guard",
+            extra: 0,
+            origin: at,
+            bounds: box_around(at, 1.0),
+        });
+        Arc::new(builder.build())
+    };
+    let placed = |key: PieceKey, piece: Arc<uniwow_api::scene::Piece>| {
+        Some(Arc::new(Placed {
+            key,
+            generation: 1,
+            bounds: piece.bounds[0],
+            piece,
+            areas: Box::new([0]),
+        }))
+    };
+    let (spawn, live) = (PieceKey::part("spawns", 0, 1), PieceKey::part("live-world", 0, 0));
+    let index: Index = [(
+        EntityId::creature(79),
+        vec![Listing { slot: 1, row: 0 }, Listing { slot: 0, row: 0 }],
+    )]
+    .into_iter()
+    .collect();
+    let snapshot = Snapshot {
+        generation: 1,
+        slots: Arc::new(vec![
+            placed(spawn.clone(), piece([0.0, 0.0, 0.0], flags::SERVER)),
+            placed(live.clone(), piece([30.0, 0.0, 0.0], flags::LIVE | flags::READ_ONLY)),
+        ]),
+        keys: Arc::new([(spawn, 0), (live, 1)].into_iter().collect()),
+        index: Arc::new(index),
+        entities: 2,
+        ..Snapshot::default()
+    };
+    let at_spawn = written_boxes(&snapshot, &[EntityId::creature(79)], |_| Some([31.0, 0.0, 0.0]));
+    assert_eq!(
+        at_spawn,
+        [[-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]],
+        "the spawn point, not where it runs"
+    );
+    let (drawn, _) = boxes(&snapshot, &[EntityId::creature(79)], |_| Some([31.0, 0.0, 0.0]));
+    assert_ne!(drawn, at_spawn, "the selection drawn where it runs, apart");
+}
+
 mod gpu {
     use std::future::Future;
     use std::pin::pin;

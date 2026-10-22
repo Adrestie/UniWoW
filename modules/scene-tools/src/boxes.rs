@@ -73,6 +73,31 @@ pub fn boxes(
     (boxes, moving)
 }
 
+/// The boxes the gizmos stand about, of the entities `ids`: one written by its provider where its
+/// provider has it (a creature at its spawn point, never where it runs now), one only seen as
+/// `boxes` draws it.
+pub fn written_boxes(
+    snapshot: &Snapshot,
+    ids: &[scene::EntityId],
+    now: impl Fn(&scene::EntityId) -> Option<[f32; 3]>,
+) -> Vec<[f32; 6]> {
+    ids.iter()
+        .take(MOST)
+        .flat_map(|id| {
+            match snapshot
+                .editable(id)
+                .filter(|entity| entity.flags() & scene::flags::LIVE == 0)
+            {
+                Some(entity) => {
+                    let [low, high] = entity.bounds();
+                    vec![[low[0], low[1], low[2], high[0], high[1], high[2]]]
+                }
+                None => boxes(snapshot, std::slice::from_ref(id), &now).0,
+            }
+        })
+        .collect()
+}
+
 struct Gpu {
     pipeline: wgpu::RenderPipeline,
     globals: wgpu::Buffer,

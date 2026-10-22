@@ -350,16 +350,14 @@ impl Selecting {
         let snapshot = self.scene.snapshot();
         let active = self.scene.selection().active();
         let pivot = *held(&self.shared.pivot);
-        let now = |id: &EntityId| {
-            if snapshot.editable(id).is_some() {
-                None
-            } else {
-                self.scene.position_now(id)
-            }
-        };
-        let at = |id: &EntityId| {
+        let now = |id: &EntityId| self.scene.position_now(id);
+        let written = |id: &EntityId| {
             snapshot
                 .editable(id)
+                .filter(|entity| entity.flags() & scene::flags::LIVE == 0)
+        };
+        let at = |id: &EntityId| {
+            written(id)
                 .map(|entity| entity.origin())
                 .or_else(|| self.scene.position_now(id))
                 .or_else(|| snapshot.get(id).map(|entity| entity.origin()))
@@ -368,7 +366,7 @@ impl Selecting {
         let centre = match (pivot, active) {
             (gizmo::Pivot::Pivot, Some(active)) => at(&active),
             _ => {
-                let (boxes, _) = boxes::boxes(&snapshot, ids, now);
+                let boxes = boxes::written_boxes(&snapshot, ids, now);
                 let all = boxes.iter().copied().reduce(|mut all, b| {
                     for axis in 0..3 {
                         all[axis] = all[axis].min(b[axis]);
@@ -398,7 +396,11 @@ impl Selecting {
         };
         let mut out = Vec::new();
         if let Some(mut frame) = self.frame(seen, ids) {
-            let spawn = creature.is_some_and(|id| snapshot.editable(&id).is_some());
+            let spawn = creature.is_some_and(|id| {
+                snapshot
+                    .editable(&id)
+                    .is_some_and(|entity| entity.flags() & scene::flags::LIVE == 0)
+            });
             if spawn {
                 frame.size *= gizmo::SPAWN_SIZE;
             }
@@ -472,7 +474,10 @@ impl Selecting {
                     Target::Selection => {
                         let snapshot = self.scene.snapshot();
                         ids.iter()
-                            .filter_map(|id| Some((*id, Vec3::from(snapshot.editable(id)?.origin()))))
+                            .filter_map(|id| {
+                                let entity = snapshot.editable(id)?;
+                                (entity.flags() & scene::flags::LIVE == 0).then(|| (*id, Vec3::from(entity.origin())))
+                            })
                             .collect()
                     }
                     Target::Live(id) => vec![(id, chosen.frame.centre)],
