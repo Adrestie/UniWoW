@@ -85,6 +85,8 @@ struct QuestsModule {
     /// were given last.
     generation: u64,
     given: Option<u64>,
+    /// When the edits were kept in the settings last, for them to outlive the editor closed.
+    kept: Option<u64>,
     /// When the titles of the quests the user made were told last.
     titled: Option<u64>,
     /// The field being typed: its key and its text, written once left.
@@ -846,6 +848,9 @@ impl OrList for String {
     }
 }
 
+/// The setting keeping the changes not applied, for them to outlive the editor closed.
+const PENDING: &str = "pending";
+
 impl Module for QuestsModule {
     fn register(&mut self, reg: &mut Registrar) {
         reg.subscribe(world_db::APPLIED_TOPIC);
@@ -857,8 +862,19 @@ impl Module for QuestsModule {
         );
     }
 
+    fn init(&mut self, ctx: &mut Context) {
+        // The changes not applied when the editor closed, whatever saved its project.
+        if let Some(kept) = ctx.setting(PENDING) {
+            self.set_edits(Edits::of_section(&kept));
+        }
+    }
+
     fn windows_ui(&mut self, egui: &egui::Context, ctx: &mut Context) {
         self.egui = Some(egui.clone());
+        if self.kept != Some(self.generation) {
+            self.kept = Some(self.generation);
+            ctx.set_setting(PENDING, self.edits.section());
+        }
         self.steer(ctx);
         self.give_pending(ctx);
         self.tell_titles(ctx);

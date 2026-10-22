@@ -524,7 +524,7 @@ impl SpawnsModule {
                     if ui
                         .button("Create patrol")
                         .on_hover_text(
-                            "A path of its own (its guid × 10) from where it stands, its points added by clicks on the ground; Esc to stop",
+                            "A path of its own (its guid × 10) from where it stands; its points added by the handles + of the view, Add, or Add by clicks…",
                         )
                         .clicked()
                     {
@@ -836,16 +836,9 @@ impl SpawnsModule {
         if !self.patrols_now.paths.contains_key(&path) {
             after.patrols.paths.insert(path, Some(vec![Point::at(spawn.position)]));
         }
+        // Its points added by the handles "+" or *Add by clicks…*, asked for: a mode taking every
+        // click of the view must not start unasked.
         self.change(format!("Make a patrol for {}", spawn.name), after, ctx);
-        let mut placing = lock(&self.place_points);
-        placing.path = Some(path);
-        placing.last = Some(
-            self.patrols_now
-                .paths
-                .get(&path)
-                .and_then(|points| points.last())
-                .map_or(spawn.position, |point| point.position),
-        );
     }
 
     fn unmake_patrol(&mut self, guid: u64, ctx: &mut Context) {

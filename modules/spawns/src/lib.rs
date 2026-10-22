@@ -156,6 +156,8 @@ struct SpawnsModule {
     mirror: mirror::Mirror,
     /// The fields of the points of a path being typed in the card *Patrol*, by path, point and field.
     point_texts: HashMap<String, String>,
+    /// The changes kept in the settings, for them to outlive the editor closed.
+    kept: Option<u64>,
 }
 
 /// The creatures and game objects the world as it runs lists in `snapshot`, by the pieces of the
@@ -175,6 +177,9 @@ fn live_of(snapshot: &scene::Snapshot) -> BTreeSet<EntityId> {
     }
     out
 }
+
+/// The setting keeping the changes not applied, for them to outlive the editor closed.
+const PENDING: &str = "pending";
 
 /// The setting of how far around the camera the spawns are given and drawn, in tiles.
 const DISTANCE: &str = "distance";
@@ -1082,6 +1087,10 @@ impl Module for SpawnsModule {
         self.draw_paths();
         self.give_pending(ctx);
         self.mirror(egui, ctx);
+        if self.kept != Some(self.generation) {
+            self.kept = Some(self.generation);
+            ctx.set_setting(PENDING, self.changes.section());
+        }
     }
 
     fn on_event(&mut self, event: &uniwow_api::Event, ctx: &mut Context) {
@@ -1124,6 +1133,12 @@ impl Module for SpawnsModule {
     }
 
     fn init(&mut self, ctx: &mut Context) {
+        // The changes not applied when the editor closed, whatever saved its project: seen in the game
+        // again, the server's memory set from them.
+        if let Some(kept) = ctx.setting(PENDING) {
+            self.changes = Changes::of_section(&kept);
+            self.generation += 1;
+        }
         if let Some(view) = ctx.service(uniwow_api::viewport::SERVICE) {
             let layer = paths::PathsLayer::new(self.drawn.clone(), view.target());
             view.add_layer(ctx.module_id(), Box::new(layer));
