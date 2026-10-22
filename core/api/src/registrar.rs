@@ -13,6 +13,17 @@ pub enum DockArea {
     Bottom,
 }
 
+/// A section a module draws in the panel of another (`Registrar::section`).
+#[derive(Clone, Debug)]
+pub struct SectionSpec {
+    /// The module whose panel it is drawn in, the panel, and the section, as `Module::panel_ui`
+    /// is given it.
+    pub owner: String,
+    pub panel: String,
+    pub section: String,
+}
+
+/// A panel of a module in the dock.
 #[derive(Clone, Debug)]
 pub struct PanelSpec {
     /// Identifier, unique within the module.
@@ -83,6 +94,8 @@ pub struct SettingsCategory {
 #[derive(Default)]
 pub struct Registrar {
     pub panels: Vec<PanelSpec>,
+    /// The sections it draws in the panels of other modules: the module, its panel, the section.
+    pub sections: Vec<SectionSpec>,
     pub menu_items: Vec<MenuItemSpec>,
     /// Service id and implementation. Consumers read it back with `Context::service`.
     pub services: Vec<(String, Box<dyn Any + Send + Sync>)>,
@@ -117,6 +130,19 @@ impl Registrar {
             title: title.to_owned(),
             area,
             open_by_default: true,
+        });
+        self
+    }
+
+    /// Declares the section `section` this module draws in the panel `panel` of the module `owner`,
+    /// where that panel calls `Context::draw_sections`: drawn by `Module::panel_ui` called with
+    /// `section`, with this module's own state and context, as a part of the panel (the patrol of a
+    /// creature in the Inspector). It draws nothing where the panel shows nothing of its own.
+    pub fn section(&mut self, owner: &str, panel: &str, section: &str) -> &mut Self {
+        self.sections.push(SectionSpec {
+            owner: owner.to_owned(),
+            panel: panel.to_owned(),
+            section: section.to_owned(),
         });
         self
     }

@@ -432,7 +432,8 @@ impl Selecting {
     /// module as the pointer moves, a creature in the world moved live ten times a second at most.
     /// Whether it holds the pointer.
     fn gizmo(&mut self, input: &ToolInput<'_>, painter: &egui::Painter) -> bool {
-        let mode = *held(&self.shared.mode);
+        let ids = self.scene.groups().expanded(&self.scene.selection().ids);
+        let mode = gizmo_mode(*held(&self.shared.mode), &ids);
         let response = input.response;
         if mode == gizmo::Mode::Select {
             self.grabbed = None;
@@ -448,7 +449,6 @@ impl Selecting {
                 i.pointer.primary_down(),
             )
         });
-        let ids = self.scene.groups().expanded(&self.scene.selection().ids);
         // Grabbed.
         if self.grabbed.is_none() {
             let shown = self.shown(mode, &input.seen, &ids, shift);
@@ -622,6 +622,16 @@ impl Selecting {
             }
         }
         true
+    }
+}
+
+/// The gizmo shown for `ids` in the mode `chosen`: the points of a path selected show the one of
+/// *Move* in *Select* too, a point clicked moved by its gizmo at once.
+fn gizmo_mode(chosen: gizmo::Mode, ids: &[EntityId]) -> gizmo::Mode {
+    if chosen == gizmo::Mode::Select && !ids.is_empty() && ids.iter().all(|id| id.kind == Kind::Waypoint) {
+        gizmo::Mode::Move
+    } else {
+        chosen
     }
 }
 

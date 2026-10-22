@@ -569,3 +569,43 @@ fn a_live_creature_of_a_spawn_is_the_spawn_edited_where_it_was_put_and_live_wher
     assert_eq!(picked, Some(guard), "at its spawn's place once the world leaves");
     assert_eq!(snapshot.editable(&guard).unwrap().provider(), "spawns");
 }
+
+#[test]
+fn a_point_of_a_path_is_picked_before_the_creature_standing_on_it() {
+    let mut registry = Registry::default();
+    let guard = EntityId::creature(79753);
+    let at = middle(ELWYNN, [3, 15]);
+    let mut spawns = PieceBuilder::new(vec![ELWYNN]);
+    spawns.push(Entity {
+        flags: flags::SERVER,
+        bounds: box_around(at, 3.0),
+        ..doodad(guard, "Stormwind City Guard", at)
+    });
+    let point = EntityId::waypoint(797530, 1);
+    let mut points = PieceBuilder::new(Vec::new());
+    points.push(Entity {
+        flags: flags::SERVER,
+        bounds: box_around(at, 0.6),
+        ..doodad(point, "Waypoint", at)
+    });
+    let snapshot = publish(
+        &mut registry,
+        vec![
+            Change::Publish(PieceKey::tile("spawns", 0, ELWYNN), Arc::new(spawns.build())),
+            Change::Publish(PieceKey::part("spawns", 0, 0), Arc::new(points.build())),
+        ],
+    );
+    let ray = uniwow_api::viewport::Ray {
+        origin: uniwow_api::glam::Vec3::new(at[0], at[1], at[2] + 50.0),
+        direction: uniwow_api::glam::Vec3::NEG_Z,
+    };
+    let (none, open) = (HashMap::new(), uniwow_api::scene::Locks::default());
+    let picked = crate::picking::pick(&snapshot, &ray, &open, &none).map(|hit| hit.id);
+    assert_eq!(picked, Some(point), "the point, though the creature's box is hit first");
+    let beside = uniwow_api::viewport::Ray {
+        origin: uniwow_api::glam::Vec3::new(at[0] + 2.0, at[1], at[2] + 50.0),
+        ..ray
+    };
+    let picked = crate::picking::pick(&snapshot, &beside, &open, &none).map(|hit| hit.id);
+    assert_eq!(picked, Some(guard), "beside the point, the creature");
+}

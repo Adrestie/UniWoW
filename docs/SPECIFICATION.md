@@ -10864,6 +10864,22 @@ holds of the changes and what it loads again once they are taken back; the sets 
 gives them; a server started again told once; a bridge of the version 1 asked the demand 5; a move
 read with its GUID; the nearer of two gizmos grabbed.
 
+#### After 16.9: the patrol in the Inspector
+
+Asked by the user: the patrol edited in the Inspector, not apart; a point moved and points added to a
+path there. A module draws a section in the panel of another (`Registrar::section`,
+`Context::draw_sections`): the kernel lends it to the host while that panel is drawn, and it draws it
+with its own state and context; the Inspector draws them after its components. The card *Patrol*
+(the section `patrol` of `spawns`), for a creature selected alone or points of one path: its
+movement in a named list (stands, wanders within 5 yards, walks its path), *Create patrol* without a
+path, its points (number, X, Y, Z, wait, run, facing typed; the number selecting the point in the
+view, the one selected in the view lit), *Add*, *Insert*, *Delete*, *Up*, *Down*, *Add by clicks…*,
+the loop said, its group. In the view: a point is picked before what holds it (the creature on it),
+and shows the gizmo of *Move* in *Select* too; a handle "+" at the middle of each segment inserts a
+point there, one beyond the last adds one after it; Delete and Ctrl+D as before. Seen in the game at
+once, written by *Apply to the server*. **Tests**: a point picked before the creature on it; the
+handles of a path; the gizmo of *Move* for points in *Select*.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which

@@ -39,6 +39,8 @@ pub struct Slot {
     pub state: State,
     pub module: Option<Box<dyn Module>>,
     pub panels: Vec<PanelSpec>,
+    /// The sections it draws in the panels of other modules.
+    pub sections: Vec<uniwow_api::SectionSpec>,
     pub menu_items: Vec<MenuItemSpec>,
     /// Its category of the window *Settings*.
     pub settings: Option<SettingsCategory>,
@@ -75,6 +77,7 @@ impl Slot {
             state,
             module: None,
             panels: Vec::new(),
+            sections: Vec::new(),
             menu_items: Vec::new(),
             settings: None,
             subscriptions: Vec::new(),

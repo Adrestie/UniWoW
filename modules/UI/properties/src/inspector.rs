@@ -476,6 +476,8 @@ impl Inspector {
             self.materials_ui(ui, &values, ctx);
             self.quests_ui(ui, &values, ctx);
             self.declared_ui(ui, &read, &ids, ctx);
+            // The sections of other modules: the patrol of a creature.
+            ctx.draw_sections("inspector", ui);
             components_ui(ui, &values);
             self.server_ui(ui, &values, ctx);
             self.raw_ui(ui, &values);

@@ -132,6 +132,20 @@ fn a_creature_away_from_its_spawn_point_has_its_gizmo_box_at_its_spawn_point() {
     assert_ne!(drawn, at_spawn, "the selection drawn where it runs, apart");
 }
 
+#[test]
+fn the_points_of_a_path_selected_show_the_gizmo_of_move_in_select_too() {
+    use crate::gizmo::Mode;
+    let points = [EntityId::waypoint(790, 1), EntityId::waypoint(790, 2)];
+    assert_eq!(crate::gizmo_mode(Mode::Select, &points), Mode::Move);
+    assert_eq!(
+        crate::gizmo_mode(Mode::Rotate, &points),
+        Mode::Rotate,
+        "the mode chosen kept"
+    );
+    assert_eq!(crate::gizmo_mode(Mode::Select, &[EntityId::creature(79)]), Mode::Select);
+    assert_eq!(crate::gizmo_mode(Mode::Select, &[]), Mode::Select);
+}
+
 mod gpu {
     use std::future::Future;
     use std::pin::pin;

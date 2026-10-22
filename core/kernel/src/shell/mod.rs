@@ -252,6 +252,7 @@ impl Shell {
                 continue;
             }
             slot.panels = reg.panels;
+            slot.sections = reg.sections;
             slot.menu_items = reg.menu_items;
             slot.settings = reg.settings;
             slot.subscriptions = reg.subscriptions;

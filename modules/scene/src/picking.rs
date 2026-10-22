@@ -60,6 +60,22 @@ pub fn pick(snapshot: &Snapshot, ray: &Ray, locks: &Locks, pickers: &HashMap<Str
         }
     }
     boxes.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // A point of a path is a handle, small: taken before what holds it, the creature near it.
+    let point = boxes.iter().find(|(_, slot, row)| {
+        snapshot
+            .placed(*slot)
+            .is_some_and(|placed| placed.piece.ids[*row].kind == Kind::Waypoint)
+    });
+    if let Some(&(distance, slot, row)) = point
+        && let Some(placed) = snapshot.placed(slot)
+    {
+        let id = placed.piece.ids[row];
+        return Some(Hit {
+            id,
+            distance,
+            chain: chain(snapshot, id),
+        });
+    }
     let mut best: Option<(f32, EntityId)> = None;
     for (entered, slot, row) in boxes {
         if best.is_some_and(|(distance, _)| distance <= entered) {

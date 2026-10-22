@@ -56,8 +56,42 @@ impl TabViewer for Viewer<'_> {
             return;
         }
         let panel = tab.panel.clone();
+        // The modules drawing sections in this panel lent to the host while it is drawn, for it to
+        // draw them where the panel asks (`Context::draw_sections`).
+        let owner = self.slots[index].id.clone();
+        for (lent, slot) in self.slots.iter_mut().enumerate() {
+            if lent == index || !slot.state.is_running() {
+                continue;
+            }
+            let sections: Vec<String> = slot
+                .sections
+                .iter()
+                .filter(|spec| spec.owner == owner && spec.panel == panel)
+                .map(|spec| spec.section.clone())
+                .collect();
+            if sections.is_empty() {
+                continue;
+            }
+            if let Some(module) = slot.module.take() {
+                self.host.embedded.push(crate::host::Embedded {
+                    slot: lent,
+                    id: slot.id.clone(),
+                    sections,
+                    module: Some(module),
+                    failure: None,
+                });
+            }
+        }
+        let slot = &mut self.slots[index];
         if let Err(message) = call_module(slot, self.host, |f, ctx| f.panel_ui(&panel, ui, ctx)) {
             self.failures.push((index, format!("panel '{panel}': {message}")));
+        }
+        for lent in std::mem::take(&mut self.host.embedded) {
+            self.slots[lent.slot].module = lent.module;
+            if let Some(message) = lent.failure {
+                self.failures
+                    .push((lent.slot, format!("section in '{owner}/{panel}': {message}")));
+            }
         }
     }
 

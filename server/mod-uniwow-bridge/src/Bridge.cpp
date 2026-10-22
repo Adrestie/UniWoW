@@ -774,9 +774,14 @@ namespace UniwowBridge
             return { false, Acore::StringFormat("the server knows no creature {}, or no movement {}", id, movement) };
         CreatureData& data = sObjectMgr->NewOrExistCreatureData(id);
         data.movementType = movement;
+        // Made to wander, within a few yards: none would not wander, as the editor writes it.
+        if (movement == RANDOM_MOTION_TYPE && data.wander_distance <= 0.f)
+            data.wander_distance = 5.f;
         std::vector<Creature*> const running = RunningOf(id, data.mapid);
         for (Creature* creature : running)
         {
+            if (movement == RANDOM_MOTION_TYPE)
+                creature->SetWanderDistance(data.wander_distance);
             creature->LoadPath(pathId);
             creature->SetDefaultMovementType(MovementGeneratorType(movement));
             if (creature->IsAlive() && !_held.count(creature->GetGUID().GetRawValue()))

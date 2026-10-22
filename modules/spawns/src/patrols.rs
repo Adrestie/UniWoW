@@ -29,6 +29,9 @@ pub const GROUPS: &str = "SELECT f.leaderGUID, f.memberGUID, f.dist, f.angle, f.
 /// The movement of a creature that walks its path (`MovementType`); one that stands, idle.
 pub const WALKING: u8 = 2;
 pub const IDLE: u8 = 0;
+pub const WANDERING: u8 = 1;
+/// How far a creature made to wander wanders, in yards.
+pub const WANDER_DISTANCE: f32 = 5.0;
 
 /// The behaviour of a group made by the editor: the members help the leader and he them
 /// (`GROUP_AI_FLAG_MEMBER_ASSIST_LEADER | GROUP_AI_FLAG_LEADER_ASSIST_MEMBER`), and they follow him
@@ -265,6 +268,10 @@ impl Edits {
                 if walker.movement == WALKING {
                     set.insert("wander_distance".to_owned(), json!(0));
                 }
+                // Wandering within a few yards: none would not wander.
+                if walker.movement == WANDERING {
+                    set.insert("wander_distance".to_owned(), json!(WANDER_DISTANCE));
+                }
                 changes.push(RowChange::Put {
                     table: "creature".to_owned(),
                     key: key.clone(),
@@ -462,6 +469,23 @@ pub fn piece(patrols: &Patrols, shown: &BTreeSet<u32>) -> Option<Piece> {
         }
     }
     (!builder.is_empty()).then(|| builder.build())
+}
+
+/// Where a point added after the last of `points` goes: a few yards on, the way the last two go.
+pub fn beyond(points: &[Point]) -> [f32; 3] {
+    match points {
+        [] => [0.0; 3],
+        [only] => [only.position[0] + 4.0, only.position[1], only.position[2]],
+        [.., before, last] => {
+            let way: Vec<f32> = (0..3).map(|axis| last.position[axis] - before.position[axis]).collect();
+            let length = way[0].hypot(way[1]).max(1e-3);
+            [
+                last.position[0] + way[0] / length * 4.0,
+                last.position[1] + way[1] / length * 4.0,
+                last.position[2],
+            ]
+        }
+    }
 }
 
 /// The points of `path` changed as `field` and `change` say for the point `at` (from 0): its

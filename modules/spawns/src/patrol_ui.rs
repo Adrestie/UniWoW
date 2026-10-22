@@ -1,7 +1,7 @@
 //! The patrols in the editor (step 16.4): the points of the paths of the creatures selected given to
-//! the scene, written by the gizmos and the Inspector; the panel's section *Patrol* making a patrol,
-//! adding its points by clicks on the ground, making a group follow a leader; the paths drawn as the
-//! user changed them.
+//! the scene, written by the gizmos and the Inspector; the card *Patrol* of the Inspector making a
+//! patrol, its points listed, added, inserted, moved and deleted, a group following a leader; the
+//! handles "+" of the view inserting a point; the paths drawn as the user changed them.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -22,13 +22,52 @@ pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// The points being added to a path by clicks on the ground: the path, the clicks not yet taken,
-/// the last point, whether the user stopped.
+/// the last point, whether the user stopped; the paths shown, their handles "+", and the points
+/// those clicked insert (the path, the place in it, where).
 #[derive(Default)]
 pub struct Placing {
     pub path: Option<u32>,
     pub clicks: Vec<[f32; 3]>,
     pub last: Option<[f32; 3]>,
     pub stop: bool,
+    pub shown: Vec<(u32, Vec<[f32; 3]>)>,
+    pub inserts: Vec<(u32, usize, [f32; 3])>,
+}
+
+/// The handles "+" of the paths `shown`: the middle of each segment inserting a point there, and one
+/// beyond the last adding one after it; each its path, its place in it, where in the world.
+pub fn handles(shown: &[(u32, Vec<[f32; 3]>)]) -> Vec<(u32, usize, [f32; 3])> {
+    let mut out = Vec::new();
+    for (path, points) in shown {
+        for (at, pair) in points.windows(2).enumerate() {
+            let middle = std::array::from_fn(|axis| (pair[0][axis] + pair[1][axis]) / 2.0);
+            out.push((*path, at + 1, middle));
+        }
+        if !points.is_empty() {
+            let laid: Vec<Point> = points.iter().map(|at| Point::at(*at)).collect();
+            out.push((*path, points.len(), patrols::beyond(&laid)));
+        }
+    }
+    out
+}
+
+/// How near the pointer must be to a handle "+", in points.
+const HANDLE: f32 = 9.0;
+
+impl PlaceTool {
+    /// The handle "+" under `at` on the screen, the nearest.
+    fn handle_at(&self, input: &ToolInput<'_>, at: egui::Pos2) -> Option<(u32, usize, [f32; 3])> {
+        let placing = lock(&self.placing);
+        handles(&placing.shown)
+            .into_iter()
+            .filter_map(|handle| {
+                let on = input.project(handle.2.into())?;
+                let away = on.distance(at);
+                (away <= HANDLE).then_some((away, handle))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, handle)| handle)
+    }
 }
 
 /// The tool adding points: it takes the pointer alone while points are added, a click on the
@@ -40,14 +79,27 @@ pub struct PlaceTool {
 
 impl Tool for PlaceTool {
     fn claims(&mut self, input: &ToolInput<'_>) -> bool {
-        lock(&self.placing).path.is_some() && input.response.hovered()
+        if !input.response.hovered() {
+            return false;
+        }
+        if lock(&self.placing).path.is_some() {
+            return true;
+        }
+        // Over a handle "+", unless a drag began elsewhere.
+        let (hover, origin) = input
+            .response
+            .ctx
+            .input(|i| (i.pointer.hover_pos(), i.pointer.press_origin()));
+        hover.is_some_and(|at| self.handle_at(input, at).is_some())
+            && origin.is_none_or(|at| self.handle_at(input, at).is_some())
     }
 
     fn pointer(&mut self, input: &ToolInput<'_>, painter: &egui::Painter) {
-        let mut placing = lock(&self.placing);
-        if placing.path.is_none() {
+        if lock(&self.placing).path.is_none() {
+            self.handles_ui(input, painter);
             return;
         }
+        let mut placing = lock(&self.placing);
         let response = input.response;
         if response.ctx.input(|i| i.key_pressed(egui::Key::Escape)) || response.secondary_clicked() {
             placing.stop = true;
@@ -85,6 +137,57 @@ impl Tool for PlaceTool {
         {
             placing.clicks.push(at);
             placing.last = Some(at);
+        }
+    }
+}
+
+impl PlaceTool {
+    /// The handles "+" of the paths shown drawn, the one under the pointer lit with what it does; a
+    /// click on one inserting its point.
+    fn handles_ui(&mut self, input: &ToolInput<'_>, painter: &egui::Painter) {
+        let shown = lock(&self.placing).shown.clone();
+        if shown.is_empty() {
+            return;
+        }
+        let response = input.response;
+        let hovered = response.hover_pos().and_then(|at| self.handle_at(input, at));
+        let colour = egui::Color32::from_rgb(255, 80, 60);
+        for handle in handles(&shown) {
+            let Some(at) = input.project(handle.2.into()) else {
+                continue;
+            };
+            let lit = hovered == Some(handle);
+            let radius = if lit { 7.0 } else { 5.5 };
+            painter.circle_filled(at, radius, egui::Color32::from_black_alpha(if lit { 200 } else { 140 }));
+            painter.circle_stroke(at, radius, egui::Stroke::new(1.5, colour));
+            let arm = radius - 2.0;
+            let stroke = egui::Stroke::new(1.5, egui::Color32::WHITE);
+            painter.line_segment([at - egui::vec2(arm, 0.0), at + egui::vec2(arm, 0.0)], stroke);
+            painter.line_segment([at - egui::vec2(0.0, arm), at + egui::vec2(0.0, arm)], stroke);
+        }
+        let Some(handle) = hovered else {
+            return;
+        };
+        let last = shown
+            .iter()
+            .find(|(path, _)| *path == handle.0)
+            .is_some_and(|(_, points)| handle.1 == points.len());
+        if let Some(pointer) = response.hover_pos() {
+            let text = if last {
+                "Click: a point after the last (seen in the game at once, written by Apply)"
+            } else {
+                "Click: a point inserted here (seen in the game at once, written by Apply)"
+            };
+            painter.text(
+                pointer + egui::vec2(14.0, 14.0),
+                egui::Align2::LEFT_TOP,
+                text,
+                egui::FontId::proportional(12.0),
+                egui::Color32::WHITE,
+            );
+        }
+        if response.clicked_by(egui::PointerButton::Primary) {
+            lock(&self.placing).inserts.push(handle);
         }
     }
 }
@@ -170,6 +273,13 @@ impl SpawnsModule {
             .filter(|path| *path != 0)
             .collect();
         shown.extend(lock(&self.place_points).path);
+        lock(&self.place_points).shown = shown
+            .iter()
+            .filter_map(|path| {
+                let points = self.patrols_now.paths.get(path)?;
+                Some((*path, points.iter().map(|point| point.position).collect()))
+            })
+            .collect();
         let key = PieceKey::part(MODULE, map, WAYPOINTS);
         match patrols::piece(&self.patrols_now, &shown) {
             Some(piece) => scene.publish(key, Arc::new(piece)),
@@ -181,6 +291,19 @@ impl SpawnsModule {
     /// The clicks on the ground taken as points of the path being drawn, one undo entry for those
     /// of a frame; the drawing stopped once asked.
     pub(crate) fn take_clicks(&mut self, ctx: &mut Context) {
+        // A handle "+" clicked: its point inserted, selected.
+        let inserts = std::mem::take(&mut lock(&self.place_points).inserts);
+        for (path, at, position) in inserts {
+            let mut points = self.patrols_now.paths.get(&path).cloned().unwrap_or_default();
+            let at = at.min(points.len());
+            points.insert(at, Point::at(position));
+            let mut after = self.changes.clone();
+            after.patrols.paths.insert(path, Some(points));
+            self.change("Insert a waypoint".to_owned(), after, ctx);
+            if let Some(scene) = &self.scene {
+                scene.select(scene::Select::Set(vec![EntityId::waypoint(path, at as u32 + 1)]));
+            }
+        }
         let (clicks, path, stop) = {
             let mut placing = lock(&self.place_points);
             let stop = std::mem::take(&mut placing.stop);
@@ -325,38 +448,52 @@ impl SpawnsModule {
         }
     }
 
-    /// The section *Patrol* of the panel: the patrol of the creature selected, made, drawn by clicks
-    /// and taken away; the group it leads or follows; a group made of the creatures selected.
+    /// The creature whose patrol the Inspector shows for the selection, and the point of its path
+    /// selected: a creature selected alone, or points of one path, the creature walking it.
+    pub(crate) fn patrolled(&self, selected: &[EntityId]) -> Option<(u64, Option<u32>)> {
+        match selected {
+            [only] if only.kind == Kind::Creature => Some((only.key, None)),
+            points if !points.is_empty() && points.iter().all(|id| id.kind == Kind::Waypoint) => {
+                let path = points[0].key as u32;
+                if points.iter().any(|id| id.key as u32 != path) {
+                    return None;
+                }
+                let walker = *self.patrols_now.walkers_of(path).first()?;
+                Some((walker, (points.len() == 1).then_some(points[0].sub)))
+            }
+            _ => None,
+        }
+    }
+
+    /// The card *Patrol* of the Inspector (its section `patrol`): how the creature selected moves,
+    /// its path's points, each its place, its wait, whether it runs to it and the way it faces, the
+    /// one selected in the view lit; points added, inserted, deleted, moved up and down; its group.
+    /// Seen in the game at once, written by *Apply to the server* alone.
     pub(crate) fn patrol_ui(&mut self, ui: &mut egui::Ui, ctx: &mut Context) {
         let Some(scene) = self.scene.clone() else {
             return;
         };
         let selection = scene.selection();
-        let creatures: Vec<u64> = scene
-            .groups()
-            .expanded(&selection.ids)
+        let selected = scene.groups().expanded(&selection.ids);
+        let Some((guid, point)) = self.patrolled(&selected) else {
+            return;
+        };
+        let creatures: Vec<u64> = selected
             .iter()
             .filter(|id| id.kind == Kind::Creature)
             .map(|id| id.key)
             .collect();
-        let active = selection
-            .active()
-            .filter(|id| id.kind == Kind::Creature)
-            .map(|id| id.key)
-            .or(creatures.first().copied());
-        let drawing = lock(&self.place_points).path;
+        let walker = self.patrols_now.walkers.get(&guid).copied().unwrap_or_default();
+        let points = self.patrols_now.paths.get(&walker.path).cloned().unwrap_or_default();
+        let note = (walker.path != 0).then(|| format!("path {}, {} points", walker.path, points.len()));
         theme::section(
             ui,
-            egui::Id::new("spawns patrol"),
+            egui::Id::new("spawns patrol card"),
             theme::icon::HISTORY,
             "Patrol",
-            None,
+            note.as_deref(),
             true,
             |ui| {
-                let Some(guid) = active else {
-                    ui.weak("Select a creature: its path, its group.");
-                    return;
-                };
                 ui.label(
                     egui::RichText::new(
                         "Seen in the game at once; written to the database only by Apply to the server; lost when the server starts again unless applied.",
@@ -364,61 +501,298 @@ impl SpawnsModule {
                     .weak()
                     .small(),
                 );
-                let name = self
-                    .find(&EntityId::creature(guid))
-                    .map_or(format!("#{guid}"), |spawn| format!("{} #{guid}", spawn.name));
-                let walker = self.patrols_now.walkers.get(&guid).copied().unwrap_or_default();
-                let points = self.patrols_now.paths.get(&walker.path).map_or(0, Vec::len);
-                ui.label(match (walker.movement, walker.path) {
-                    (patrols::WALKING, path) if path != 0 => format!("{name} walks the path {path}, {points} points"),
-                    (1, _) => format!("{name} wanders about its place"),
-                    (_, path) if path != 0 => format!("{name} stands; its addon names the path {path}"),
-                    _ => format!("{name} stands still"),
-                });
-                ui.horizontal_wrapped(|ui| {
-                    if walker.path == 0 || walker.movement != patrols::WALKING {
+                self.movement_ui(ui, guid, walker, ctx);
+                if walker.path == 0 || walker.movement != patrols::WALKING {
+                    if ui
+                        .button("Create patrol")
+                        .on_hover_text(
+                            "A path of its own (its guid × 10) from where it stands, its points added by clicks on the ground; Esc to stop",
+                        )
+                        .clicked()
+                    {
+                        self.make_patrol(guid, ctx);
+                    }
+                } else {
+                    self.points_ui(ui, walker.path, &points, point, ctx);
+                    ui.label(
+                        egui::RichText::new(
+                            "It walks its path round and round, from its last point back to its first, as AzerothCore does.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        let drawing = lock(&self.place_points).path == Some(walker.path);
                         if ui
-                            .button("Make a patrol")
-                            .on_hover_text("A path of its own (its guid × 10), drawn by clicks on the ground")
-                            .clicked()
-                        {
-                            self.make_patrol(guid, ctx);
-                        }
-                    } else {
-                        let adding = drawing == Some(walker.path);
-                        if ui
-                            .selectable_label(adding, "Add points…")
+                            .selectable_label(drawing, "Add by clicks…")
                             .on_hover_text("Each click on the ground a point at the end of its path; Esc to stop")
                             .clicked()
                         {
                             let mut placing = lock(&self.place_points);
-                            if adding {
+                            if drawing {
                                 placing.path = None;
                             } else {
                                 placing.path = Some(walker.path);
-                                placing.last = self
-                                    .patrols_now
-                                    .paths
-                                    .get(&walker.path)
-                                    .and_then(|points| points.last())
-                                    .map(|point| point.position);
+                                placing.last = points.last().map(|point| point.position);
                             }
                             drop(placing);
                             self.waypoints_for = None;
                         }
                         if ui
                             .button("Take the patrol away")
-                            .on_hover_text("It stands still and its path is taken away; in memory, written by Apply")
+                            .on_hover_text("It stands still and its path is taken away")
                             .clicked()
                         {
                             self.unmake_patrol(guid, ctx);
                         }
-                    }
-                });
+                    });
+                }
                 ui.separator();
+                ui.label(egui::RichText::new("Group").strong())
+                    .on_hover_text("The creatures following a leader in a group (creature_formations)");
                 self.group_ui(ui, guid, &creatures, ctx);
             },
         );
+    }
+
+    /// How the creature `guid` moves (`MovementType`), a named list.
+    fn movement_ui(&mut self, ui: &mut egui::Ui, guid: u64, walker: Walker, ctx: &mut Context) {
+        const WAYS: [(u8, &str, &str); 3] = [
+            (
+                patrols::IDLE,
+                "Stands still",
+                "It stands at its spawn point (MovementType 0)",
+            ),
+            (
+                1,
+                "Wanders",
+                "It wanders about its spawn point, within a few yards (MovementType 1)",
+            ),
+            (
+                patrols::WALKING,
+                "Walks its path",
+                "It walks the points of its path (MovementType 2)",
+            ),
+        ];
+        let mut chosen = None;
+        ui.horizontal(|ui| {
+            ui.label("Movement")
+                .on_hover_text("How the creature moves (creature.MovementType)");
+            let shown = WAYS
+                .iter()
+                .find(|(way, _, _)| *way == walker.movement)
+                .map_or(format!("{}", walker.movement), |(_, name, _)| (*name).to_owned());
+            egui::ComboBox::from_id_salt("spawns patrol movement")
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    for (way, name, hint) in WAYS {
+                        if ui
+                            .selectable_label(way == walker.movement, name)
+                            .on_hover_text(hint)
+                            .clicked()
+                        {
+                            chosen = Some(way);
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("How the creature moves (creature.MovementType)");
+        });
+        let Some(way) = chosen.filter(|way| *way != walker.movement) else {
+            return;
+        };
+        if way == patrols::WALKING && walker.path == 0 {
+            self.make_patrol(guid, ctx);
+            return;
+        }
+        let mut after = self.changes.clone();
+        after.patrols.walkers.insert(
+            guid,
+            Walker {
+                movement: way,
+                ..walker
+            },
+        );
+        self.change("Set how a creature moves".to_owned(), after, ctx);
+    }
+
+    /// The points of the path `path`: each a row, the one `selected` lit and chosen by a click, its
+    /// fields typed; the buttons adding, inserting, deleting, moving up and down.
+    fn points_ui(&mut self, ui: &mut egui::Ui, path: u32, points: &[Point], selected: Option<u32>, ctx: &mut Context) {
+        let width = 58.0;
+        let mut written: Option<(usize, &'static str, String)> = None;
+        let mut chose = None;
+        egui::ScrollArea::vertical()
+            .id_salt("spawns patrol points")
+            .max_height(260.0)
+            .show(ui, |ui| {
+                egui::Grid::new("spawns patrol points grid")
+                    .num_columns(7)
+                    .striped(true)
+                    .spacing([6.0, 2.0])
+                    .show(ui, |ui| {
+                        for (label, hint) in [
+                            ("#", "The number of the point; click it to select it in the view"),
+                            ("X", "Where it is, west to east"),
+                            ("Y", "Where it is, south to north"),
+                            ("Z", "Its height"),
+                            ("Wait", "How long the creature waits there, in milliseconds"),
+                            ("Run", "Whether the creature runs to it, walks otherwise"),
+                            ("Facing", "The way it faces there, in degrees; empty: the way it walks"),
+                        ] {
+                            ui.label(egui::RichText::new(label).weak()).on_hover_text(hint);
+                        }
+                        ui.end_row();
+                        for (at, point) in points.iter().enumerate() {
+                            let number = at as u32 + 1;
+                            if ui
+                                .selectable_label(selected == Some(number), format!("{number}"))
+                                .on_hover_text("Select this point in the view: its gizmo moves it")
+                                .clicked()
+                            {
+                                chose = Some(number);
+                            }
+                            for (axis, name) in ["x", "y", "z"].into_iter().enumerate() {
+                                let key = format!("{path}:{number}:{name}");
+                                let value = format!("{:.2}", point.position[axis]);
+                                if let Some(typed) = self.point_field(ui, key, &value, width, "Typed, then Enter") {
+                                    written = Some((at, ["x", "y", "z"][axis], typed));
+                                }
+                            }
+                            let key = format!("{path}:{number}:wait");
+                            if let Some(typed) = self.point_field(
+                                ui,
+                                key,
+                                &point.delay.to_string(),
+                                width,
+                                "How long it waits there (ms)",
+                            ) {
+                                written = Some((at, "delay", typed));
+                            }
+                            let mut run = point.run;
+                            if ui
+                                .checkbox(&mut run, "")
+                                .on_hover_text("Runs to it; walks otherwise")
+                                .changed()
+                            {
+                                written = Some((at, "run", run.to_string()));
+                            }
+                            let key = format!("{path}:{number}:facing");
+                            let facing = point
+                                .orientation
+                                .map_or(String::new(), |turn| format!("{:.0}", turn.to_degrees()));
+                            if let Some(typed) =
+                                self.point_field(ui, key, &facing, width, "Degrees; empty: the way it walks")
+                            {
+                                written = Some((at, "facing", typed));
+                            }
+                            ui.end_row();
+                        }
+                    });
+            });
+        if let Some(number) = chose
+            && let Some(scene) = &self.scene
+        {
+            scene.select(scene::Select::Set(vec![EntityId::waypoint(path, number)]));
+        }
+        if let Some((at, field, typed)) = written {
+            let id = EntityId::waypoint(path, at as u32 + 1);
+            let (field, axis) = match field {
+                "x" => ("position", Some(0)),
+                "y" => ("position", Some(1)),
+                "z" => ("position", Some(2)),
+                other => (other, None),
+            };
+            let arguments = json!({ "ids": [id.to_string()], "field": field, "axis": axis, "change": typed });
+            let _ = self.waypoint_command("spawns.write", &[id], &arguments, ctx);
+        }
+        ui.horizontal_wrapped(|ui| {
+            let index = selected.map(|number| number as usize - 1);
+            let mut edited: Option<(String, Vec<Point>, Option<u32>)> = None;
+            if ui
+                .button("Add")
+                .on_hover_text("A point after the last, a few yards on")
+                .clicked()
+            {
+                let mut after = points.to_vec();
+                after.push(Point::at(patrols::beyond(points)));
+                edited = Some(("Add a waypoint".to_owned(), after, Some(points.len() as u32 + 1)));
+            }
+            if ui
+                .add_enabled(index.is_some(), egui::Button::new("Insert"))
+                .on_hover_text("A point before the one selected, halfway from the one before it")
+                .clicked()
+                && let Some(at) = index
+            {
+                let mut after = points.to_vec();
+                let before = at
+                    .checked_sub(1)
+                    .map_or(points[at].position, |back| points[back].position);
+                let middle = std::array::from_fn(|axis| (before[axis] + points[at].position[axis]) / 2.0);
+                after.insert(at, Point::at(middle));
+                edited = Some(("Insert a waypoint".to_owned(), after, Some(at as u32 + 1)));
+            }
+            if ui
+                .add_enabled(index.is_some(), egui::Button::new("Delete"))
+                .on_hover_text("The point selected taken away (Delete in the view)")
+                .clicked()
+                && let Some(at) = index
+            {
+                let mut after = points.to_vec();
+                after.remove(at);
+                edited = Some(("Delete a waypoint".to_owned(), after, None));
+            }
+            if ui
+                .add_enabled(index.is_some_and(|at| at > 0), egui::Button::new("Up"))
+                .on_hover_text("The point selected walked to one earlier")
+                .clicked()
+                && let Some(at) = index
+            {
+                let mut after = points.to_vec();
+                after.swap(at, at - 1);
+                edited = Some(("Move a waypoint up".to_owned(), after, Some(at as u32)));
+            }
+            if ui
+                .add_enabled(index.is_some_and(|at| at + 1 < points.len()), egui::Button::new("Down"))
+                .on_hover_text("The point selected walked to one later")
+                .clicked()
+                && let Some(at) = index
+            {
+                let mut after = points.to_vec();
+                after.swap(at, at + 1);
+                edited = Some(("Move a waypoint down".to_owned(), after, Some(at as u32 + 2)));
+            }
+            if let Some((label, after_points, select)) = edited {
+                let mut after = self.changes.clone();
+                after.patrols.paths.insert(path, Some(after_points));
+                self.change(label, after, ctx);
+                if let (Some(number), Some(scene)) = (select, &self.scene) {
+                    scene.select(scene::Select::Set(vec![EntityId::waypoint(path, number)]));
+                }
+            }
+        });
+    }
+
+    /// A field of a point typed: its text kept while focused, given once Enter or once left.
+    fn point_field(&mut self, ui: &mut egui::Ui, key: String, current: &str, width: f32, hint: &str) -> Option<String> {
+        let mut text = self
+            .point_texts
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| current.to_owned());
+        let response = ui
+            .add_sized([width, 18.0], egui::TextEdit::singleline(&mut text))
+            .on_hover_text(hint);
+        if response.has_focus() || response.changed() {
+            self.point_texts.insert(key.clone(), text.clone());
+        }
+        if response.lost_focus() {
+            self.point_texts.remove(&key);
+            if text.trim() != current {
+                return Some(text.trim().to_owned());
+            }
+        }
+        None
     }
 
     fn make_patrol(&mut self, guid: u64, ctx: &mut Context) {
@@ -644,6 +1018,21 @@ impl SpawnsModule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_path_shows_a_handle_at_the_middle_of_each_segment_and_one_beyond_its_last_point() {
+        let shown = vec![(790, vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 2.0]])];
+        let found = handles(&shown);
+        assert_eq!(found.len(), 3);
+        assert_eq!(found[0], (790, 1, [5.0, 0.0, 0.0]), "inserted as the second point");
+        assert_eq!(found[1], (790, 2, [10.0, 5.0, 1.0]));
+        assert_eq!(
+            found[2],
+            (790, 3, [10.0, 14.0, 2.0]),
+            "after the last, the way the last two go"
+        );
+        assert!(handles(&[(791, Vec::new())]).is_empty());
+    }
 
     #[test]
     fn the_paths_drawn_are_those_of_the_database_but_where_the_user_changed_them() {

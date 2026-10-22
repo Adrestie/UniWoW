@@ -39,6 +39,16 @@ pub struct Gesture {
 }
 
 /// Kernel state reachable from modules through `Context`.
+/// A module lent to the host while the panel of another is drawn, for its sections there: its slot,
+/// its id, its sections, and what went wrong drawing them.
+pub struct Embedded {
+    pub slot: usize,
+    pub id: String,
+    pub sections: Vec<String>,
+    pub module: Option<Box<dyn uniwow_api::Module>>,
+    pub failure: Option<String>,
+}
+
 pub struct KernelHost {
     /// Published this frame, delivered at the end of it.
     pub events: Vec<Event>,
@@ -77,6 +87,8 @@ pub struct KernelHost {
     pub notices: Vec<(String, Level, String)>,
     /// The panels the modules asked to show this frame: the module and its panel.
     pub shown: Vec<(String, String)>,
+    /// The modules lent while a panel is drawn, for their sections there.
+    pub embedded: Vec<Embedded>,
     next_call: u64,
 }
 
@@ -173,6 +185,7 @@ impl KernelHost {
             adopted: Vec::new(),
             notices: Vec::new(),
             shown: Vec::new(),
+            embedded: Vec::new(),
             services: HashMap::new(),
             gpu,
             gpu_memory,
@@ -287,6 +300,28 @@ impl Host for KernelHost {
         let gpu = self.gpu.clone();
         self.view(owner, objects).show(objects, panel, ui, gpu.as_ref());
         self.report_service_failures(owner, objects);
+    }
+
+    fn draw_sections(&mut self, _owner: &str, _panel: &str, ui: &mut egui::Ui) {
+        for at in 0..self.embedded.len() {
+            let Some(mut module) = self.embedded[at].module.take() else {
+                continue;
+            };
+            let (id, sections) = (self.embedded[at].id.clone(), self.embedded[at].sections.clone());
+            let mut failure = None;
+            for section in &sections {
+                let mut ctx = uniwow_api::Context::new(self, &id);
+                if let Err(message) = crate::guard::guarded_as(&id, || module.panel_ui(section, ui, &mut ctx)) {
+                    failure = Some(message);
+                    break;
+                }
+            }
+            let lent = &mut self.embedded[at];
+            lent.module = Some(module);
+            if failure.is_some() {
+                lent.failure = failure;
+            }
+        }
     }
 
     fn draw_object(&mut self, _owner: &str, module: &str, handle: u64, ui: &mut egui::Ui) -> bool {

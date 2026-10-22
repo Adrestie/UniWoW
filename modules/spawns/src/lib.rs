@@ -154,6 +154,8 @@ struct SpawnsModule {
     view: Option<uniwow_api::viewport::Handle>,
     /// What the server running holds in its memory of the changes not applied.
     mirror: mirror::Mirror,
+    /// The fields of the points of a path being typed in the card *Patrol*, by path, point and field.
+    point_texts: HashMap<String, String>,
 }
 
 /// The creatures and game objects the world as it runs lists in `snapshot`, by the pieces of the
@@ -845,6 +847,7 @@ impl Module for SpawnsModule {
         reg.subscribe(world_db::SERVER_TOPIC);
         reg.subscribe(world_db::SERVER_RESTARTED_TOPIC);
         reg.subscribe(QUEST_TITLES_TOPIC);
+        reg.section("properties", "inspector", "patrol");
         reg.panel("spawns", "Spawns", DockArea::Right)
             .command(
                 "spawns.read",
@@ -1132,7 +1135,12 @@ impl Module for SpawnsModule {
         self.declaring = Some(ctx.call("scene.declare", waypoint_component()));
     }
 
-    fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
+    fn panel_ui(&mut self, panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
+        // Its section in the Inspector.
+        if panel == "patrol" {
+            self.patrol_ui(ui, ctx);
+            return;
+        }
         let state = ctx.service(world_db::SERVICE).map(|database| database.state());
         match state {
             None => ui.label("No module world-db: the spawns are not read."),
@@ -1173,9 +1181,11 @@ impl Module for SpawnsModule {
                         format!("Show every patrol path ({} creatures walk one)", self.drawn_paths.len()),
                     )
                     .on_hover_text("Otherwise those of the creatures selected alone, in red");
-                    ui.add_space(6.0);
-                    self.patrol_ui(ui, ctx);
-                    ui.label("")
+                    ui.label(
+                        egui::RichText::new("The patrol of a creature selected: its card in the Inspector.")
+                            .weak()
+                            .small(),
+                    )
                 }
             },
             Some(_) => ui.label("The world database is not connected: see the panel World database."),
