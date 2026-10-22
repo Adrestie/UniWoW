@@ -28,6 +28,8 @@
 
 #include <array>
 #include <cmath>
+#include <ctime>
+#include <optional>
 #include <chrono>
 #include <cstring>
 #include <exception>
@@ -38,12 +40,16 @@ namespace UniwowBridge
     {
         using boost::asio::ip::tcp;
 
-        // Its version: 2 adds MOVE and the demand 8; an editor of the version 1 is welcome still.
-        constexpr uint16 VERSION = 2;
-        // The longest message from the editor: 256 demands, or 64 moves.
-        constexpr uint32 MAX_IN = 4096;
+        // Its version: 2 adds MOVE and the demand 8, 3 adds SET and when the server started; an
+        // editor of an earlier version is welcome still.
+        constexpr uint16 VERSION = 3;
+        // The longest message from the editor: 256 demands, 64 moves, or 256 sets of 1,000 points
+        // at most a path.
+        constexpr uint32 MAX_IN = 65536;
         constexpr uint16 MAX_DEMANDS = 256;
         constexpr uint16 MAX_MOVES = 64;
+        constexpr uint16 MAX_SETS = 256;
+        constexpr uint16 MAX_POINTS = 1000;
         // How long a creature held waits for its editor before it is given its movement back.
         constexpr auto FORGOTTEN = std::chrono::seconds(5);
         // How long a connection may say nothing, and a request wait for the world.
@@ -55,6 +61,7 @@ namespace UniwowBridge
             HELLO = 1,
             RELOAD = 2,
             MOVE = 3,
+            SET = 4,
             WELCOME = 101,
             REFUSED = 102,
             DONE = 103,
@@ -73,6 +80,7 @@ namespace UniwowBridge
             void U8(uint8 value) { _bytes.push_back(value); }
             void U16(uint16 value) { Little(value, 2); }
             void U32(uint32 value) { Little(value, 4); }
+            void U64(uint64 value) { Little(value, 8); }
 
             void String(std::string const& value)
             {
@@ -218,6 +226,56 @@ namespace UniwowBridge
         {
             return bool(WorldDatabase.Query("SELECT guid FROM {} WHERE guid = {}", table, spawnId));
         }
+
+        // The paths of `WaypointMgr`, which keeps them private and loads them from the database
+        // alone: reached through the explicit instantiation of a template, which may name a private
+        // member, for a path to be set in memory without touching the core.
+        struct WaypointStore
+        {
+            using type = std::unordered_map<uint32, WaypointPath> WaypointMgr::*;
+            friend type Paths(WaypointStore);
+        };
+
+        template <typename Tag, typename Tag::type Member>
+        struct Reach
+        {
+            friend typename Tag::type Paths(Tag) { return Member; }
+        };
+
+        template struct Reach<WaypointStore, &WaypointMgr::_waypointStore>;
+
+        // The creatures walking the path `pathId`, everywhere.
+        std::vector<Creature*> WalkersOf(uint32 pathId)
+        {
+            std::vector<Creature*> walkers;
+            sMapMgr->DoForAllMaps([&](Map* map)
+            {
+                for (auto const& [spawnId, creature] : map->GetCreatureBySpawnIdStore())
+                    if (creature->IsInWorld() && creature->GetWaypointPath() == pathId)
+                        walkers.push_back(creature);
+            });
+            return walkers;
+        }
+
+        // A creature's movement let go of its path, which holds its points, before they are replaced.
+        void LetGoOfPath(Creature* creature)
+        {
+            creature->GetMotionMaster()->Clear(false);
+            creature->GetMotionMaster()->MoveIdle();
+        }
+
+        // The creatures running of the spawn `spawnId`, on the map of its row.
+        std::vector<Creature*> RunningOf(ObjectGuid::LowType spawnId, uint32 mapId)
+        {
+            std::vector<Creature*> running;
+            if (Map* map = sMapMgr->FindBaseNonInstanceMap(mapId))
+            {
+                auto const bounds = map->GetCreatureBySpawnIdStore().equal_range(spawnId);
+                for (auto itr = bounds.first; itr != bounds.second; ++itr)
+                    running.push_back(itr->second);
+            }
+            return running;
+        }
     }
 
     Bridge& Bridge::Instance()
@@ -235,6 +293,7 @@ namespace UniwowBridge
         }
         _port = uint16(sConfigMgr->GetOption<uint32>("UniwowBridge.Port", 8092));
         _token = sConfigMgr->GetOption<std::string>("UniwowBridge.Token", "");
+        _started = uint64(std::time(nullptr));
         if (_token.empty())
             LOG_WARN("module", "uniwow-bridge: no UniwowBridge.Token, every connection is refused");
         _running = true;
@@ -295,7 +354,7 @@ namespace UniwowBridge
                     continue;
                 if (version < 1 || version > VERSION)
                 {
-                    Refuse(socket, "this bridge speaks the versions 1 and 2 of its protocol");
+                    Refuse(socket, "this bridge speaks the versions 1 to 3 of its protocol");
                     continue;
                 }
                 if (_token.empty() || token != _token)
@@ -307,6 +366,7 @@ namespace UniwowBridge
                     Writer welcome(WELCOME);
                     welcome.U16(VERSION);
                     welcome.String(GitRevision::GetFullVersion());
+                    welcome.U64(_started);
                     Send(socket, welcome.Finish());
                 }
                 while (_running && ReadMessage(socket, _running, kind, body))
@@ -315,13 +375,47 @@ namespace UniwowBridge
                     uint32 id = 0;
                     uint16 count = 0;
                     bool const moving = kind == MOVE && version >= 2;
-                    if ((kind != RELOAD && !moving) || !reader.U32(id) || !reader.U16(count)
-                        || count > (moving ? MAX_MOVES : MAX_DEMANDS))
+                    bool const setting = kind == SET && version >= 3;
+                    if ((kind != RELOAD && !moving && !setting) || !reader.U32(id) || !reader.U16(count)
+                        || count > (moving ? MAX_MOVES : setting ? MAX_SETS : MAX_DEMANDS))
                         break;
                     auto request = std::make_shared<Request>();
                     bool read = true;
                     for (uint16 index = 0; index < count && read; ++index)
                     {
+                        if (setting)
+                        {
+                            Set set{};
+                            read = reader.U8(set.what);
+                            if (read && set.what == Set::HOME)
+                                read = reader.U64(set.id) && reader.F32(set.x) && reader.F32(set.y)
+                                    && reader.F32(set.z) && reader.F32(set.orientation);
+                            else if (read && set.what == Set::PATH)
+                            {
+                                uint32 path = 0;
+                                uint16 points = 0;
+                                read = reader.U32(path) && reader.U16(points) && points <= MAX_POINTS;
+                                set.id = path;
+                                for (uint16 at = 0; at < points && read; ++at)
+                                {
+                                    PathPoint point{};
+                                    uint8 faces = 0;
+                                    uint8 run = 0;
+                                    read = reader.F32(point.x) && reader.F32(point.y) && reader.F32(point.z)
+                                        && reader.U8(faces) && reader.F32(point.orientation)
+                                        && reader.U32(point.delay) && reader.U8(run);
+                                    point.faces = faces == 1;
+                                    point.run = run == 1;
+                                    set.points.push_back(point);
+                                }
+                            }
+                            else if (read && set.what == Set::WALKER)
+                                read = reader.U64(set.id) && reader.U8(set.movement) && reader.U32(set.path);
+                            else
+                                read = false;
+                            request->sets.push_back(std::move(set));
+                            continue;
+                        }
                         if (moving)
                         {
                             Move move{};
@@ -342,7 +436,7 @@ namespace UniwowBridge
                     if (!read || !reader.Done())
                         break;
                     bool const made = Make(request, WAIT_SECONDS);
-                    size_t const asked = request->demands.size() + request->moves.size();
+                    size_t const asked = request->demands.size() + request->sets.size() + request->moves.size();
                     Writer done(DONE);
                     done.U32(id);
                     done.U16(uint16(asked));
@@ -389,6 +483,17 @@ namespace UniwowBridge
                 try
                 {
                     request->outcomes.push_back(MakeOne(demand));
+                }
+                catch (std::exception const& error)
+                {
+                    request->outcomes.push_back({ false, error.what() });
+                }
+            }
+            for (Set const& set : request->sets)
+            {
+                try
+                {
+                    request->outcomes.push_back(MakeSet(set));
                 }
                 catch (std::exception const& error)
                 {
@@ -553,18 +658,9 @@ namespace UniwowBridge
     // replaced, and walks the new ones from their first.
     Outcome Bridge::ReloadPath(uint32 pathId)
     {
-        std::vector<Creature*> walkers;
-        sMapMgr->DoForAllMaps([&](Map* map)
-        {
-            for (auto const& [spawnId, creature] : map->GetCreatureBySpawnIdStore())
-                if (creature->IsInWorld() && creature->GetWaypointPath() == pathId)
-                    walkers.push_back(creature);
-        });
+        std::vector<Creature*> const walkers = WalkersOf(pathId);
         for (Creature* creature : walkers)
-        {
-            creature->GetMotionMaster()->Clear(false);
-            creature->GetMotionMaster()->MoveIdle();
-        }
+            LetGoOfPath(creature);
         sWaypointMgr->ReloadPath(pathId);
         uint32 walking = 0;
         for (Creature* creature : walkers)
@@ -590,10 +686,18 @@ namespace UniwowBridge
         if (!before || !row || row->Fetch()[0].Get<uint16>() != before->mapid)
             return MakeOne({ Action::Creature, spawnId });
         Field* fields = row->Fetch();
-        float const x = fields[1].Get<float>();
-        float const y = fields[2].Get<float>();
-        float const z = fields[3].Get<float>();
-        float const orientation = fields[4].Get<float>();
+        return PlaceHome(spawnId, fields[1].Get<float>(), fields[2].Get<float>(), fields[3].Get<float>(),
+            fields[4].Get<float>());
+    }
+
+    // The spawn point of the creature `spawnId` put at `x`, `y`, `z`, facing `orientation`, in the
+    // server's memory: the creatures of it running keep their place and take it as their home.
+    Outcome Bridge::PlaceHome(uint64 spawnId, float x, float y, float z, float orientation)
+    {
+        ObjectGuid::LowType const id = ObjectGuid::LowType(spawnId);
+        CreatureData const* before = sObjectMgr->GetCreatureData(id);
+        if (!before)
+            return { false, Acore::StringFormat("the server knows no creature {}", id) };
         // Its place in the grids of the spawns follows it.
         sObjectMgr->RemoveCreatureFromGrid(id, before);
         CreatureData& data = sObjectMgr->NewOrExistCreatureData(id);
@@ -602,17 +706,83 @@ namespace UniwowBridge
         data.posZ = z;
         data.orientation = orientation;
         sObjectMgr->AddCreatureToGrid(id, &data);
-        uint32 running = 0;
-        if (Map* map = sMapMgr->FindBaseNonInstanceMap(data.mapid))
+        std::vector<Creature*> const running = RunningOf(id, data.mapid);
+        for (Creature* creature : running)
+            creature->SetHomePosition(x, y, z, orientation);
+        return { true, Acore::StringFormat("the spawn point of the creature {} moved; {} running go home there", id, running.size()) };
+    }
+
+    // A change of the editor set in the server's memory alone.
+    Outcome Bridge::MakeSet(Set const& set)
+    {
+        switch (set.what)
         {
-            auto const bounds = map->GetCreatureBySpawnIdStore().equal_range(id);
-            for (auto itr = bounds.first; itr != bounds.second; ++itr)
-            {
-                itr->second->SetHomePosition(x, y, z, orientation);
-                ++running;
-            }
+            case Set::HOME:
+                return PlaceHome(set.id, set.x, set.y, set.z, set.orientation);
+            case Set::PATH:
+                return SetPath(uint32(set.id), set.points);
+            case Set::WALKER:
+                return SetWalker(set.id, set.movement, set.path);
         }
-        return { true, Acore::StringFormat("the spawn point of the creature {} moved; {} running go home there", id, running) };
+        return { false, "an unknown set" };
+    }
+
+    // The path `pathId` given `points` in the server's memory, none taking it away: its walkers
+    // let go of it first, set on it again where they stand.
+    Outcome Bridge::SetPath(uint32 pathId, std::vector<PathPoint> const& points)
+    {
+        std::vector<Creature*> const walkers = WalkersOf(pathId);
+        for (Creature* creature : walkers)
+            LetGoOfPath(creature);
+        auto& paths = sWaypointMgr->*Paths(WaypointStore());
+        if (points.empty())
+            paths.erase(pathId);
+        else
+        {
+            std::vector<WaypointNode> nodes;
+            nodes.reserve(points.size());
+            for (size_t at = 0; at < points.size(); ++at)
+            {
+                PathPoint const& point = points[at];
+                std::optional<float> facing;
+                if (point.faces)
+                    facing = point.orientation;
+                WaypointNode node(uint32(at + 1), point.x, point.y, point.z, facing, 0.f, point.delay);
+                node.MoveType = point.run ? WAYPOINT_MOVE_TYPE_RUN : WAYPOINT_MOVE_TYPE_WALK;
+                nodes.push_back(std::move(node));
+            }
+            paths[pathId] = WaypointPath(pathId, std::move(nodes));
+        }
+        uint32 walking = 0;
+        for (Creature* creature : walkers)
+        {
+            if (!creature->IsAlive() || _held.count(creature->GetGUID().GetRawValue()))
+                continue;
+            creature->GetMotionMaster()->Initialize();
+            ++walking;
+        }
+        return { true, Acore::StringFormat("the path {} set in memory, {} points, {} creatures walking it", pathId,
+            points.size(), walking) };
+    }
+
+    // The creature `spawnId` given its movement (`MovementType`) and path in the server's memory:
+    // those of it running moving so at once.
+    Outcome Bridge::SetWalker(uint64 spawnId, uint8 movement, uint32 pathId)
+    {
+        ObjectGuid::LowType const id = ObjectGuid::LowType(spawnId);
+        if (!sObjectMgr->GetCreatureData(id) || movement >= MAX_DB_MOTION_TYPE)
+            return { false, Acore::StringFormat("the server knows no creature {}, or no movement {}", id, movement) };
+        CreatureData& data = sObjectMgr->NewOrExistCreatureData(id);
+        data.movementType = movement;
+        std::vector<Creature*> const running = RunningOf(id, data.mapid);
+        for (Creature* creature : running)
+        {
+            creature->LoadPath(pathId);
+            creature->SetDefaultMovementType(MovementGeneratorType(movement));
+            if (creature->IsAlive() && !_held.count(creature->GetGUID().GetRawValue()))
+                creature->GetMotionMaster()->Initialize();
+        }
+        return { true, Acore::StringFormat("the creature {} moves so in memory ({} running)", id, running.size()) };
     }
 
     // The creature of `move` put where the editor drags it, live, nothing written: held still while

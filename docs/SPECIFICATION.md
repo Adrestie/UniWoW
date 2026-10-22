@@ -10840,25 +10840,29 @@ first language that has one; each flag one bit of its own, each its hint.
 #### After 16.9: the creatures edited live
 
 Asked by the user: a creature of the world as it runs moved by its gizmo, its spawn point by
-another, its patrol changed. A creature selected alone shows two gizmos, the handle nearest the
-pointer taken:
+another, its patrol changed, each seen in the game at once, nothing written to the database without
+the validation of *Apply to the server*, as the quests (decided by the user). A creature selected
+alone shows two gizmos, the handle nearest the pointer taken:
 
 - **Its spawn point's**, smaller and of the colour of the circle drawn there, with *Move* and
-  *Rotate*: changed in the editor, one undo entry, listed with the changes for the server and
-  written by *Apply to the server* alone, as the quests are (decided by the user: no change written
-  without that validation). Once applied, the bridge's demand 8 (version 2) moves its spawn point in
-  the server's memory and the home of the creatures running: they keep their place and go home
-  there.
+  *Rotate*: changed in the editor, one undo entry, listed with the changes for the server.
 - **The creature's in the world**, with *Move*, at its place now: dragged, it is moved live through
   the bridge (MOVE, version 2), ten times a second at most, held still while dragged, moving again
   once let go, nothing written nor in the history. One its editor stops moving for five seconds is
   let go.
 
-The patrols changed wait for *Apply to the server* too; once applied, the bridge loads the path
-again, its walkers let go of it first and set on it again where they stand, none spawned again. A
-bridge of the version 1 is asked to spawn the creature again in place of the demand 8, and moves
-nothing live. **Tests**: a bridge of the version 1 asked the demand 5; a move read with its GUID, the
-last of a creature replacing the one waiting; the nearer of two gizmos grabbed.
+The changes not applied of the spawn points of the creatures of the database and of the patrols are
+set in the server's memory alone (SET, version 3), once the pointer is let go: a spawn point moved
+there, the creatures keeping their place and going home there; the points of a path replaced, its
+walkers let go of it and set on it again where they stand, none spawned again; the movement and
+path of a creature. A change undone is taken back there too, the server loading again what its
+database has (demands 8 and 2). *Apply to the server* writes them, the bridge loading them from the
+database as before. Lost when the server starts again: the editor, watching it every ten seconds
+while it holds changes not applied, sees it by the time WELCOME tells it started, says so and sets
+them again. The groups of creatures, made or changed, wait for *Apply*. **Tests**: what the server
+holds of the changes and what it loads again once they are taken back; the sets read as the command
+gives them; a server started again told once; a bridge of the version 1 asked the demand 5; a move
+read with its GUID; the nearer of two gizmos grabbed.
 
 ### Milestone 10: Lua modules (outline)
 

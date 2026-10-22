@@ -114,6 +114,11 @@ pub struct Pending {
     pub held: Vec<String>,
 }
 
+/// Published once the server chosen is seen started again while it held changes set in its memory
+/// alone (`world-db.set_live`), not applied: lost with its memory, they are set again by their
+/// modules.
+pub const SERVER_RESTARTED_TOPIC: &str = "world-db.server_restarted";
+
 /// Published once the user chose another server (step 16.7), its name in `{ "server": .. }`: the
 /// modules that read it, or follow it, read it again through `WorldDb::server`.
 pub const SERVER_TOPIC: &str = "world-db.server";

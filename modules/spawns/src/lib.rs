@@ -6,6 +6,7 @@
 //! 15.11c). Nothing is written until *Apply to the server* of the panel *World database*.
 
 mod data;
+mod mirror;
 mod paths;
 mod patrol_ui;
 mod patrols;
@@ -151,6 +152,8 @@ struct SpawnsModule {
     /// The titles of the quests the user made in the module quests, by id.
     quest_titles: BTreeMap<u32, String>,
     view: Option<uniwow_api::viewport::Handle>,
+    /// What the server running holds in its memory of the changes not applied.
+    mirror: mirror::Mirror,
 }
 
 /// The creatures and game objects the world as it runs lists in `snapshot`, by the pieces of the
@@ -839,6 +842,8 @@ impl Module for SpawnsModule {
             )],
         );
         reg.subscribe(world_db::APPLIED_TOPIC);
+        reg.subscribe(world_db::SERVER_TOPIC);
+        reg.subscribe(world_db::SERVER_RESTARTED_TOPIC);
         reg.subscribe(QUEST_TITLES_TOPIC);
         reg.panel("spawns", "Spawns", DockArea::Right)
             .command(
@@ -1060,16 +1065,24 @@ impl Module for SpawnsModule {
         }
     }
 
-    fn windows_ui(&mut self, _egui: &egui::Context, ctx: &mut Context) {
+    fn windows_ui(&mut self, egui: &egui::Context, ctx: &mut Context) {
         self.steer(ctx);
         self.resolve(ctx);
         self.take_clicks(ctx);
         self.show_waypoints();
         self.draw_paths();
         self.give_pending(ctx);
+        self.mirror(egui, ctx);
     }
 
-    fn on_event(&mut self, event: &uniwow_api::Event, _ctx: &mut Context) {
+    fn on_event(&mut self, event: &uniwow_api::Event, ctx: &mut Context) {
+        if event.topic == world_db::SERVER_RESTARTED_TOPIC {
+            self.mirror_restarted(ctx);
+            return;
+        }
+        if event.topic == world_db::SERVER_TOPIC {
+            self.mirror_forgotten();
+        }
         // The quests the user made in the module quests, named before they are in the database.
         if event.topic == QUEST_TITLES_TOPIC {
             self.quest_titles = event.payload["titles"]
@@ -1087,6 +1100,8 @@ impl Module for SpawnsModule {
             .as_array()
             .is_some_and(|owners| owners.iter().any(|owner| owner.as_str() == Some(MODULE)));
         if event.topic == world_db::APPLIED_TOPIC && ours {
+            // Its memory loaded from its database again by the bridge: what it held is written.
+            self.mirror_forgotten();
             self.set_changes(Changes::default());
             self.read_for = None;
         }

@@ -67,6 +67,41 @@ namespace UniwowBridge
         float orientation;
     };
 
+    // A point of a path set in memory.
+    struct PathPoint
+    {
+        float x;
+        float y;
+        float z;
+        bool faces;
+        float orientation;
+        uint32 delay;
+        bool run;
+    };
+
+    // What the editor changed and has not applied to the database yet, set in the server's memory
+    // alone, seen in the game at once, lost when the server starts again: a creature's spawn point,
+    // the points of a path, the movement and path of a creature.
+    struct Set
+    {
+        enum : uint8
+        {
+            HOME = 1,
+            PATH = 2,
+            WALKER = 3,
+        };
+
+        uint8 what;
+        uint64 id;
+        float x;
+        float y;
+        float z;
+        float orientation;
+        std::vector<PathPoint> points;
+        uint8 movement;
+        uint32 path;
+    };
+
     // What a demand made: whether it was, and what the server says of it.
     struct Outcome
     {
@@ -78,6 +113,7 @@ namespace UniwowBridge
     struct Request
     {
         std::vector<Demand> demands;
+        std::vector<Set> sets;
         std::vector<Move> moves;
         std::vector<Outcome> outcomes;
         bool made = false;
@@ -102,8 +138,12 @@ namespace UniwowBridge
         void Listen();
         Outcome MakeOne(Demand const& demand);
         Outcome MakeMove(Move const& move);
+        Outcome MakeSet(Set const& set);
         Outcome ReloadPath(uint32 pathId);
         Outcome MoveHome(uint64 spawnId);
+        Outcome PlaceHome(uint64 spawnId, float x, float y, float z, float orientation);
+        Outcome SetPath(uint32 pathId, std::vector<PathPoint> const& points);
+        Outcome SetWalker(uint64 spawnId, uint8 movement, uint32 pathId);
         // The creatures held whose editor said nothing for a while given their movement back.
         void LetGoForgotten();
 
@@ -111,6 +151,9 @@ namespace UniwowBridge
         std::thread _thread;
         uint16 _port = 8092;
         std::string _token;
+        // When the server started, in seconds since 1970: told in WELCOME, for the editor to see the
+        // server started again and set again what it had set in its memory.
+        uint64 _started = 0;
 
         std::mutex _lock;
         std::condition_variable _made;

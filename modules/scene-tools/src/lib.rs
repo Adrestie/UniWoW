@@ -624,14 +624,14 @@ impl Selecting {
 const LIVE_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// What the gizmo under the pointer does, beside it: a creature moved in the game, live; a spawn
-/// point changed in the editor, waiting for *Apply to the server*.
+/// point seen in the game at once, written to the database by *Apply to the server* alone.
 fn hint(painter: &egui::Painter, at: egui::Pos2, target: Target, spawn: bool) {
     let text = match (target, spawn) {
         (Target::Live(_), _) => {
             "The creature in the game: moved live as it is dragged, nothing written to the database; it moves again once let go"
         }
         (Target::Selection, true) => {
-            "Its spawn point: changed in the editor, waiting for Apply to the server (panel World database); once applied, the creature keeps its place and goes home there"
+            "Its spawn point: seen in the game at once (the creature keeps its place and goes home there), written to the database only by Apply to the server (panel World database); lost when the server starts again unless applied"
         }
         (Target::Selection, false) => return,
     };

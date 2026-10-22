@@ -897,7 +897,8 @@ impl WorldDbModule {
 impl Module for WorldDbModule {
     fn register(&mut self, reg: &mut Registrar) {
         let service: world_db::Handle = Arc::new(Service(self.shared.clone()));
-        let (for_query, for_state, for_moves) = (self.shared.clone(), self.shared.clone(), self.shared.clone());
+        let (for_query, for_state) = (self.shared.clone(), self.shared.clone());
+        let (for_moves, for_sets) = (self.shared.clone(), self.shared.clone());
         reg.panel("world-db", "World database", DockArea::Right)
             .provide(world_db::SERVICE, service)
             .command_on_caller(
@@ -955,6 +956,22 @@ impl Module for WorldDbModule {
                     for_moves.moves.push(live::move_of(&arguments)?);
                     Ok(live::answer(&for_moves.moves))
                 }),
+            )
+            .command_on_caller(
+                "world-db.set_live",
+                "Sets in the memory of the server chosen, through its bridge, nothing written to its database,                  'sets': the changes not applied yet ({home: guid, position, orientation}, {path: id, points:                  [{position, orientation, delay, run}]}, {walker: guid, movement, path}), seen in the game at                  once, lost once it starts again; then 'reloads' loaded again from its database (a change undone).                  'watch': whether the server holds changes not applied once they are, for it to be watched                  (topic world-db.server_restarted).",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "sets": { "type": "array" }, "reloads": { "type": "array" }, "watch": { "type": "boolean" },
+                    },
+                }),
+                json!({ "type": "object" }),
+                Arc::new(move |arguments| {
+                    let ((sets, demands), watch) = live::batch_of(&arguments)?;
+                    for_sets.moves.push_batch(sets, demands, watch);
+                    Ok(live::answer(&for_sets.moves))
+                }),
             );
     }
 
@@ -995,6 +1012,13 @@ impl Module for WorldDbModule {
 
     fn windows_ui(&mut self, egui: &egui::Context, ctx: &mut Context) {
         self.settle();
+        if self.shared.moves.restarted() {
+            log::warn!("the server was started again: the changes not applied it held are set again");
+            ctx.publish(
+                world_db::SERVER_RESTARTED_TOPIC,
+                json!({ "server": server_of(ctx).name }),
+            );
+        }
         let chose = lock(&self.shared.chose).take();
         if let Some(name) = chose {
             self.choose(&name, false, ctx);

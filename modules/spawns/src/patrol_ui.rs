@@ -357,6 +357,13 @@ impl SpawnsModule {
                     ui.weak("Select a creature: its path, its group.");
                     return;
                 };
+                ui.label(
+                    egui::RichText::new(
+                        "Seen in the game at once; written to the database only by Apply to the server; lost when the server starts again unless applied.",
+                    )
+                    .weak()
+                    .small(),
+                );
                 let name = self
                     .find(&EntityId::creature(guid))
                     .map_or(format!("#{guid}"), |spawn| format!("{} #{guid}", spawn.name));
