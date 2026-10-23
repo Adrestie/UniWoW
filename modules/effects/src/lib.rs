@@ -11,6 +11,9 @@ mod layer;
 mod load;
 mod schema;
 
+#[cfg(test)]
+mod render_tests;
+
 use std::any::Any;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
