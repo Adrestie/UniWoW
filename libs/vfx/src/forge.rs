@@ -581,6 +581,9 @@ pub fn mesh_shape(spec: &Value, dir: &Path) -> Result<Shape> {
 /// Reads the image of a file.
 pub type ReadImage = dyn Fn(&Path) -> std::result::Result<Image, String>;
 
+/// A vertex's four weights (bytes summing to 255) and its four places in its submesh's palette.
+type Influence = ([u8; 4], [u8; 4]);
+
 /// How a model is made.
 pub struct Options<'a> {
     /// Where its files sit in the game: the model names its textures by it.
@@ -1163,6 +1166,91 @@ impl<'a> Forge<'a> {
         })
     }
 
+    /// The bones of a mesh (its palette, global ids) and, for each vertex, its 4 weights (bytes
+    /// summing to 255) and 4 places in the palette. Alone, the mesh's own bone. With
+    /// `"bend": [{"at": share of the length along +X, "rotation": value or keys by phase}, ...]`, one
+    /// whole mesh bent by a chain of joints (a petal, a leaf, a tail): each joint a bone, child of
+    /// the one before, the first the mesh's own; a vertex within `bend_soft` (0.08 of the length)
+    /// of a joint is shared between the bones on either side, so that the surface bends without
+    /// parting.
+    fn bend_chain(
+        &mut self,
+        s: &Value,
+        positions: &[[f64; 3]],
+        bone: usize,
+        pivot: [f64; 3],
+        i: usize,
+    ) -> Result<(Vec<usize>, Vec<Influence>)> {
+        let mut bones = vec![bone];
+        let mut joints = vec![0.0];
+        let most = positions.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max);
+        let reach = if most == 0.0 || positions.is_empty() { 1.0 } else { most };
+        for j in s.get("bend").map(list).transpose()?.unwrap_or_default() {
+            let at = num(j.get("at").ok_or_else(|| ForgeError(format!("mesh {i}: a bend joint without at")))?)?;
+            if at <= joints[joints.len() - 1] {
+                return fail(format!(
+                    "mesh {i}: bend joints must go outward (at {})",
+                    crate::json::float_repr(at)
+                ));
+            }
+            // the first point nearest the joint along the middle of the mesh
+            let key = |p: &[f64; 3]| (p[0] - at * reach).abs() + p[1].abs();
+            let near = positions
+                .iter()
+                .fold(None::<&[f64; 3]>, |best, p| match best {
+                    Some(b) if key(b) <= key(p) => Some(b),
+                    _ => Some(p),
+                })
+                .copied()
+                .unwrap_or([0.0; 3]);
+            let joint = Value::Map(vec![
+                (
+                    "pos".into(),
+                    Value::List(vec![
+                        Value::Float(pivot[0] + at * reach),
+                        Value::Float(pivot[1]),
+                        Value::Float(pivot[2] + near[2]),
+                    ]),
+                ),
+                (
+                    "rotation".into(),
+                    j.get("rotation")
+                        .cloned()
+                        .unwrap_or(Value::List(vec![Value::Int(0), Value::Int(0), Value::Int(0)])),
+                ),
+            ]);
+            let parent = bones[bones.len() - 1] as i16;
+            bones.push(self.add_bone(&format!("_mesh{i}_j{}", bones.len()), &joint, parent)?);
+            joints.push(at);
+        }
+        if bones.len() > 5 {
+            return fail(format!("mesh {i}: 4 bend joints at most"));
+        }
+        let soft = float_or(s, "bend_soft", 0.08)?;
+        let weights = |x: f64| -> Vec<(u8, u8)> {
+            for (j, joint) in joints.iter().enumerate().skip(1) {
+                if (x - joint).abs() < soft {
+                    let f = (x - joint + soft) / (2.0 * soft);
+                    let w = py::round_int(255.0 * f * f * (3.0 - 2.0 * f)) as u8;
+                    return [((j - 1) as u8, 255 - w), (j as u8, w)].into_iter().filter(|b| b.1 != 0).collect();
+                }
+            }
+            vec![(joints[1..].iter().filter(|a| **a <= x).count() as u8, 255)]
+        };
+        let influences = positions
+            .iter()
+            .map(|p| {
+                let mut ws = if bones.len() > 1 { weights(p[0] / reach) } else { vec![(0, 255)] };
+                ws.resize(4, (0, 0));
+                (
+                    std::array::from_fn(|k| ws[k].1),
+                    std::array::from_fn(|k| if ws[k].1 != 0 { ws[k].0 } else { 0 }),
+                )
+            })
+            .collect();
+        Ok((bones, influences))
+    }
+
     fn mesh(&mut self, s: &Value, i: usize) -> Result<()> {
         let d = self.time.duration;
         // each mesh on a bone of its own (its scale, spin and place), child of the one named
@@ -1176,16 +1264,22 @@ impl<'a> Forge<'a> {
         let bone = self.add_bone(&format!("_mesh{i}"), &bone_spec, parent as i16)?;
         let pivot = self.pivots[bone];
         let shape = mesh_shape(s, &self.options.dir)?;
-        let Ok(bone_byte) = u8::try_from(bone) else {
-            return fail(format!("mesh {i}: bone {bone} past 255"));
-        };
+        let (palette, influences) = self.bend_chain(s, &shape.positions, bone, pivot, i)?;
+        let mut ids = Vec::with_capacity(palette.len());
+        for b in &palette {
+            match u8::try_from(*b) {
+                Ok(id) => ids.push(id),
+                Err(_) => return fail(format!("mesh {i}: bone {b} past 255")),
+            }
+        }
         let v0 = self.vertices.len();
-        for ((p, n), uv) in shape.positions.iter().zip(&shape.normals).zip(&shape.uvs) {
+        for (((p, n), uv), (w, b)) in shape.positions.iter().zip(&shape.normals).zip(&shape.uvs).zip(&influences) {
             let mut raw = Vec::with_capacity(48);
             for x in [p[0] + pivot[0], p[1] + pivot[1], p[2] + pivot[2]] {
                 raw.extend_from_slice(&(x as f32).to_le_bytes());
             }
-            raw.extend_from_slice(&[255, 0, 0, 0, bone_byte, 0, 0, 0]);
+            raw.extend_from_slice(w);
+            raw.extend(b.iter().map(|k| ids[*k as usize]));
             for x in [n[0], n[1], n[2], uv[0], uv[1], 0.0, 0.0] {
                 raw.extend_from_slice(&(x as f32).to_le_bytes());
             }
@@ -1194,9 +1288,9 @@ impl<'a> Forge<'a> {
         let count = shape.positions.len();
         let sk = &mut self.skin;
         let (sv0, si0) = (sk.vertices.len(), sk.indices.len());
-        for k in 0..count {
+        for (k, (_, b)) in influences.iter().enumerate() {
             sk.vertices.push((v0 + k) as u16);
-            sk.bones.push([0; 4]);
+            sk.bones.push(*b);
         }
         for tri in &shape.triangles {
             sk.indices.extend(tri.iter().map(|v| (sv0 as u32 + v) as u16));
@@ -1205,7 +1299,7 @@ impl<'a> Forge<'a> {
             return fail("too many triangles");
         }
         let bone_combo = self.lookups.bone.len();
-        self.lookups.bone.push(bone as i16);
+        self.lookups.bone.extend(palette.iter().map(|b| *b as i16));
         let n = count as f64;
         let mean = |axis: usize| py::sum(shape.positions.iter().map(|p| p[axis])) / n + pivot[axis];
         let center = [mean(0), mean(1), mean(2)];
@@ -1221,10 +1315,10 @@ impl<'a> Forge<'a> {
             vertex_count: count as u16,
             index_start: si0 as u16,
             index_count: (shape.triangles.len() * 3) as u16,
-            bone_count: 1,
+            bone_count: palette.len() as u16,
             bone_combo: bone_combo as u16,
-            bone_influences: 1,
-            center_bone: bone as u16,
+            bone_influences: if palette.len() > 1 { 2 } else { 1 },
+            center_bone: palette[0] as u16,
             center: f32x3(center),
             sort_center: f32x3(center),
             sort_radius: radius as f32,
