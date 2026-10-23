@@ -483,8 +483,17 @@ pub fn mesh_shape(spec: &Value, dir: &Path) -> Result<Shape> {
             let (l, w) = (float_or(spec, "length", 1.0)?, float_or(spec, "width", 0.4)?);
             let (cup, curl) = (float_or(spec, "cup", 0.15)?, float_or(spec, "curl", 0.1)?);
             let (rows, cols) = (int_or(spec, "rows", 10)?, int_or(spec, "cols", 6)?);
+            // span [u0, u1]: only that stretch of the petal (0 base, 1 tip), so that a petal cut in
+            // two (base and tip, each on its bone) bends at the cut; the texture runs on across it
+            let (u0, u1) = match spec.get("span") {
+                Some(span) => match list(span)? {
+                    [a, b] => (num(a)?, num(b)?),
+                    _ => return fail("petal: span [u0, u1] expected"),
+                },
+                None => (0.0, 1.0),
+            };
             s.grid(rows, cols, |i, j| {
-                let (u, v) = (i, j * 2.0 - 1.0); // u along, v across (-1..1)
+                let (u, v) = (u0 + (u1 - u0) * i, j * 2.0 - 1.0); // u along, v across (-1..1)
                 let half = w / 2.0 * (PI * u.min(0.999)).sin().powf(0.6) * (1.0 - 0.25 * u) + 0.02 * w * (1.0 - u);
                 let (x, y) = (l * u, half * v);
                 let ratio = if w != 0.0 { half / (w / 2.0) } else { 0.0 };
@@ -496,6 +505,9 @@ pub fn mesh_shape(spec: &Value, dir: &Path) -> Result<Shape> {
                 let k = py::sum(n.iter().map(|c| c * c)).sqrt();
                 ([x, y, z], n.map(|c| c / k))
             });
+            for uv in &mut s.uvs {
+                uv[1] = u0 + (u1 - u0) * uv[1];
+            }
         }
         "ring" => {
             let (ri, ro) = (float_or(spec, "inner", 0.8)?, float_or(spec, "outer", 1.0)?);
