@@ -1271,6 +1271,8 @@ impl SpawnsModule {
                     {
                         let mut after = self.changes.clone();
                         after.patrols.groups.insert(leader, None);
+                        // Its members home, then each its own movement again.
+                        after.patrols = patrols::released(&self.changes.patrols, after.patrols, &self.patrols);
                         self.change("Break a group".to_owned(), after, ctx);
                     }
                 });
@@ -1292,6 +1294,8 @@ impl SpawnsModule {
                         .patrols
                         .groups
                         .insert(leader, (!left.is_empty()).then_some((left, ai)));
+                    // Home, then its own movement again.
+                    after.patrols = patrols::released(&self.changes.patrols, after.patrols, &self.patrols);
                     self.change("Leave a group".to_owned(), after, ctx);
                 }
             }
@@ -1301,7 +1305,11 @@ impl SpawnsModule {
         }
         // How a group is made: the followers selected first, the leader last.
         // The group the others join: the one it leads or follows, else one it leads.
-        let target = now.leader_of(guid).unwrap_or(guid);
+        // A group made: the one of them walking a path leads it, keeping its patrol.
+        let target = now
+            .leader_of(guid)
+            .unwrap_or_else(|| patrols::leader_among(&now, guid, &others));
+        let others: Vec<u64> = creatures.iter().copied().filter(|other| *other != target).collect();
         let target_name = self
             .find(&EntityId::creature(target))
             .map_or(format!("#{target}"), |spawn| format!("{} #{target}", spawn.name));
@@ -1313,6 +1321,10 @@ impl SpawnsModule {
             (true, true) => format!(
                 "To add to the group of {target_name}: select the creatures to add, then one of the group last (Ctrl+click), or + Add members…"
             ),
+            (false, false) if target != guid => format!(
+                "{target_name} walks a path: it leads the {} others and keeps its patrol.",
+                others.len()
+            ),
             (false, false) => format!(
                 "Select the followers, then the leader last: {target_name}, chosen last, leads the {} others.",
                 others.len()
@@ -1320,7 +1332,7 @@ impl SpawnsModule {
             (false, true) => format!("The {} others selected join the group of {target_name}.", others.len()),
         };
         ui.label(egui::RichText::new(rule).weak().small())
-            .on_hover_text("The creature chosen last in the selection, the one the Inspector shows, is the one whose group the others join or that leads them");
+            .on_hover_text("The creature chosen last in the selection, the one the Inspector shows, is the one whose group the others join or that leads them; in a group made, the one of them walking a path leads it");
         if !others.is_empty() {
             let (label, hint) = if grouped {
                 (

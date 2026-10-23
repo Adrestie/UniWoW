@@ -240,7 +240,11 @@ mod tests {
         assert!((sets[1]["distance"].as_f64().unwrap() - 8.2).abs() < 1e-4);
         // Taken back: the database's distance set again.
         let (sets, _) = sent(&now, &Held::default(), &base);
-        assert_eq!(sets, [json!({ "wander": 55155, "distance": 5.0 })], "its movement unchanged, not sent");
+        assert_eq!(
+            sets,
+            [json!({ "wander": 55155, "distance": 5.0 })],
+            "its movement unchanged, not sent"
+        );
     }
     use uniwow_api::scene::EntityId;
 

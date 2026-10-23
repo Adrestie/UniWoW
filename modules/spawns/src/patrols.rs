@@ -566,7 +566,43 @@ pub fn joined(edits: &Edits, base: &Patrols, leader: u64, others: &[u64]) -> Edi
     let laid = laid_out(&all);
     members.extend(laid[members.len()..].iter().cloned());
     out.groups.insert(leader, Some((members, ai)));
-    out
+    // `leader` taken out of a group it followed: its own movement again.
+    released(edits, out, base)
+}
+
+/// `after` with the creatures that followed a leader in `before` and follow none now given back the
+/// movement of the database: made to stand to follow (`joined`), each walks, wanders or stands again
+/// as it did, home first (the bridge). `base` the patrols as the database has them.
+pub fn released(before: &Edits, mut after: Edits, base: &Patrols) -> Edits {
+    let was = before.laid_over(base);
+    let now = after.laid_over(base);
+    let follows = |patrols: &Patrols, guid: u64| patrols.leader_of(guid).is_some_and(|leader| leader != guid);
+    let freed: Vec<u64> = was
+        .groups
+        .values()
+        .flat_map(|(members, _)| members.iter().map(|member| member.guid))
+        .filter(|guid| !follows(&now, *guid))
+        .collect();
+    for guid in freed {
+        if after.walkers.get(&guid) == Some(&Walker::default()) {
+            after.walkers.remove(&guid);
+        }
+    }
+    after
+}
+
+/// Who leads a group made of `last` (the creature chosen last) and `others`: `last`, unless it walks
+/// no path and one alone of the others does; that one keeps its patrol and leads.
+pub fn leader_among(now: &Patrols, last: u64, others: &[u64]) -> u64 {
+    let walks = |guid: &u64| now.walkers.get(guid).is_some_and(|walker| walker.movement == WALKING);
+    if walks(&last) {
+        return last;
+    }
+    let walking: Vec<u64> = others.iter().copied().filter(walks).collect();
+    match walking[..] {
+        [one] if now.leader_of(one).is_none() => one,
+        _ => last,
+    }
 }
 
 /// `edits` with `member` made the leader of the group of `leader`: it walks the path the leader
@@ -789,6 +825,69 @@ mod tests {
         );
         assert_eq!(led.walkers[&79], Walker::default());
         assert!(led_by(&joined, &base, 79, 12345).is_none(), "not of the group");
+    }
+
+    #[test]
+    fn the_patrolling_leader_keeps_its_patrol_and_a_member_let_go_moves_as_the_database_has_it() {
+        let mut base = Patrols::default();
+        let patrol = Walker {
+            movement: WALKING,
+            path: 551760,
+            wander: 0,
+        };
+        let wandering = Walker {
+            movement: WANDERING,
+            path: 0,
+            wander: 50,
+        };
+        base.walkers.insert(55176, patrol);
+        base.walkers.insert(55175, wandering);
+        // 55174 stands.
+
+        // The patroller chosen first, a neighbour last: the patroller leads still.
+        assert_eq!(leader_among(&base, 55174, &[55176, 55175]), 55176);
+        assert_eq!(leader_among(&base, 55176, &[55175]), 55176);
+        assert_eq!(
+            leader_among(&base, 55174, &[55175]),
+            55174,
+            "none walks a path: the last"
+        );
+        let made = joined(&Edits::default(), &base, 55176, &[55175, 55174]);
+        assert!(!made.walkers.contains_key(&55176), "the leader's movement untouched");
+        assert_eq!(made.walkers[&55175], Walker::default(), "a follower stands to follow");
+        assert!(!made.walkers.contains_key(&55174), "it stood already");
+
+        // 55175 leaves: its wandering of the database again.
+        let (members, ai) = made.laid_over(&base).groups[&55176].clone();
+        let mut left = made.clone();
+        left.groups.insert(
+            55176,
+            Some((members.into_iter().filter(|member| member.guid != 55175).collect(), ai)),
+        );
+        let left = released(&made, left, &base);
+        assert!(!left.walkers.contains_key(&55175));
+        assert_eq!(left.laid_over(&base).walkers[&55175], wandering);
+        assert_eq!(left.laid_over(&base).walkers[&55176], patrol);
+
+        // The group broken: all as the database has them.
+        let mut broken = made.clone();
+        broken.groups.insert(55176, None);
+        let broken = released(&made, broken, &base);
+        assert!(broken.walkers.is_empty(), "{:?}", broken.walkers);
+
+        // A creature made to stand by the user, in no group: left standing.
+        let mut stood = Edits::default();
+        stood.walkers.insert(55175, Walker::default());
+        assert_eq!(released(&stood, stood.clone(), &base), stood);
+
+        // A follower made the leader of another group: its own patrol again.
+        let mut moved = base.clone();
+        moved.walkers.insert(55100, patrol);
+        let followed = joined(&Edits::default(), &moved, 55100, &[55176]);
+        assert_eq!(followed.walkers[&55176], Walker::default());
+        let leads = joined(&followed, &moved, 55176, &[55174]);
+        assert!(!leads.walkers.contains_key(&55176), "{:?}", leads.walkers);
+        assert_eq!(leads.groups[&55100], None, "55100 led 55176 alone");
     }
     use uniwow_api::db::write::{Memory, apply};
 
