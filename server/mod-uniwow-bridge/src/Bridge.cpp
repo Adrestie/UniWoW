@@ -864,16 +864,24 @@ namespace UniwowBridge
                     if (CreatureGroup* group = creature->GetFormation())
                         sFormationMgr->RemoveCreatureFromGroup(group, creature);
                     // Out of the group, its formation movement kept it walking where its leader
-                    // went: home again, then its own movement. One staying stops, to follow.
+                    // went: home again, then its own movement. One staying follows at its next step.
                     // The leader keeps walking its own round.
                     if (guid == leaderId || !creature->IsAlive() || creature->IsInCombat()
                         || _held.count(creature->GetGUID().GetRawValue()))
                         continue;
-                    creature->GetMotionMaster()->Clear(false);
+                    // Its formation movement holds the slot of its own movement: every movement taken
+                    // away, its own made again.
+                    creature->GetMotionMaster()->Initialize();
                     if (staying(guid))
-                        creature->GetMotionMaster()->MoveIdle();
-                    else
-                        creature->GetMotionMaster()->MoveTargetedHome();
+                        continue;
+                    // Home at its spawn point, which its formation movement kept moving with it.
+                    float x = 0.f;
+                    float y = 0.f;
+                    float z = 0.f;
+                    float o = 0.f;
+                    creature->GetRespawnPosition(x, y, z, &o);
+                    creature->SetHomePosition(x, y, z, o);
+                    creature->GetMotionMaster()->MoveTargetedHome();
                 }
             auto info = map.find(guid);
             if (info == map.end())
