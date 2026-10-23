@@ -451,7 +451,7 @@ pub const KINDS: [(&str, &[(&str, Param)]); 18] = [
         "soil",
         &[
             ("size", N(256.0)),
-            ("color", C("#2e1c10")),
+            ("earth", C("#2e1c10")),
             ("seed", N(5.0)),
             ("cracks", N(0.5)),
         ],
@@ -566,7 +566,7 @@ fn leaves(p: &Params) -> Result<Plane, String> {
 /// Dark earth, round and fading at its rim, broken by cracks: a ground decal under roots.
 fn soil(p: &Params) -> Result<(Plane, Vec<[f64; 3]>), String> {
     let size = p.size(256)?;
-    let colour = p.color("color", "#2e1c10")?;
+    let colour = p.color("earth", "#2e1c10")?;
     let (seed, cracks) = (p.i("seed", 5)?, p.f("cracks", 0.5)?);
     let n = tile_noise(size, 5.0, seed, 4.0);
     let m = tile_noise(size, 10.0, seed + 1, 3.0);

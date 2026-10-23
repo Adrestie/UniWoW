@@ -1329,6 +1329,53 @@ impl<'a> Forge<'a> {
         Ok((bones, influences))
     }
 
+    /// `"parts": [{"bone", "pos", "rotation", "scale", ...}, ...]`: the mesh's shape once a part,
+    /// each copy on a bone of its own (child of the part's `bone`, or the mesh's), placed and
+    /// animated by the part's keys: many small things in one batch (the leaves of a twig).
+    fn parts(&mut self, s: &Value, i: usize, mesh_bone: usize) -> Result<(Shape, Vec<usize>, Vec<Influence>)> {
+        let parts = list(s.get("parts").expect("tested"))?;
+        if parts.is_empty() || parts.len() > SKIN_PALETTE as usize {
+            return fail(format!("mesh {i}: 1 to {SKIN_PALETTE} parts"));
+        }
+        let one = mesh_shape(s, &self.options.dir)?;
+        let mut shape = Shape {
+            positions: Vec::new(),
+            normals: Vec::new(),
+            uvs: Vec::new(),
+            triangles: Vec::new(),
+        };
+        let (mut palette, mut influences) = (Vec::new(), Vec::new());
+        for (k, part) in parts.iter().enumerate() {
+            let spec = Value::Map(
+                ["pos", "rotation", "spin", "scale", "translation", "orbit", "bob"]
+                    .iter()
+                    .filter_map(|key| part.get(key).map(|v| ((*key).to_owned(), v.clone())))
+                    .collect(),
+            );
+            let parent = match part.get("bone") {
+                Some(_) => self.bone(str_or(part, "bone", "root")?)?,
+                None => mesh_bone,
+            };
+            let bone = self.add_bone(&format!("_mesh{i}_p{k}"), &spec, parent as i16)?;
+            let [px, py, pz] = self.pivots[bone];
+            let base = shape.positions.len() as u32;
+            shape
+                .positions
+                .extend(one.positions.iter().map(|p| [p[0] + px, p[1] + py, p[2] + pz]));
+            shape.normals.extend_from_slice(&one.normals);
+            shape.uvs.extend_from_slice(&one.uvs);
+            shape
+                .triangles
+                .extend(one.triangles.iter().map(|t| t.map(|v| v + base)));
+            influences.extend(std::iter::repeat_n(
+                ([255, 0, 0, 0], [k as u8, 0, 0, 0]),
+                one.positions.len(),
+            ));
+            palette.push(bone);
+        }
+        Ok((shape, palette, influences))
+    }
+
     fn mesh(&mut self, s: &Value, i: usize) -> Result<()> {
         let d = self.time.duration;
         // each mesh on a bone of its own (its scale, spin and place), child of the one named
@@ -1339,10 +1386,17 @@ impl<'a> Forge<'a> {
                 .collect(),
         );
         let parent = self.bone(str_or(s, "bone", "root")?)?;
-        let bone = self.add_bone(&format!("_mesh{i}"), &bone_spec, parent as i16)?;
-        let pivot = self.pivots[bone];
-        let shape = mesh_shape(s, &self.options.dir)?;
-        let (palette, influences) = self.bend_chain(s, &shape.positions, bone, pivot, i)?;
+        let (shape, pivot, palette, influences) = if s.has("parts") {
+            // copies of the shape in one mesh, each on a bone of its own: the leaves of a twig
+            let (shape, palette, influences) = self.parts(s, i, parent)?;
+            (shape, [0.0; 3], palette, influences)
+        } else {
+            let bone = self.add_bone(&format!("_mesh{i}"), &bone_spec, parent as i16)?;
+            let pivot = self.pivots[bone];
+            let shape = mesh_shape(s, &self.options.dir)?;
+            let (palette, influences) = self.bend_chain(s, &shape.positions, bone, pivot, i)?;
+            (shape, pivot, palette, influences)
+        };
         let mut ids = Vec::with_capacity(palette.len());
         for b in &palette {
             match u8::try_from(*b) {
@@ -1668,6 +1722,13 @@ impl<'a> Forge<'a> {
             .enumerate()
         {
             self.mesh(s, i)?;
+        }
+        if self.bones.len() > 256 {
+            // a vertex names its bones in bytes: past 256, a mesh could not reach them
+            return fail(format!(
+                "{} bones (at most 256: a vertex names its bones in bytes)",
+                self.bones.len()
+            ));
         }
         let emitters = spec.get("emitters").and_then(Value::as_list).unwrap_or_default();
         let particles = emitters
