@@ -105,6 +105,7 @@ pub fn locale(client: &Path) -> Result<String, String> {
 
 /// A folder mounted as an archive: its files by their path below it.
 pub struct Folder {
+    pub root: PathBuf,
     files: HashMap<String, (String, PathBuf)>,
 }
 
@@ -131,7 +132,10 @@ impl Folder {
                 }
             }
         }
-        Ok(Self { files })
+        Ok(Self {
+            root: path.to_owned(),
+            files,
+        })
     }
 
     /// Whether it holds a file at `path`, for the tests.
@@ -247,6 +251,26 @@ impl Chain {
 
     pub fn exists(&self, path: &str) -> bool {
         matches!(self.find(path), Some(Found::Archive(..) | Found::Loose(_)))
+    }
+
+    /// The archive the file at `path` is read from, or the loose file.
+    pub fn source_of(&self, path: &str) -> Option<PathBuf> {
+        match self.find(path)? {
+            Found::Archive(archive, _) => Some(archive.path().to_owned()),
+            Found::Loose(file) => Some(file.to_owned()),
+            Found::Deleted => None,
+        }
+    }
+
+    /// The archives and folders, the first read first.
+    pub fn source_paths(&self) -> Vec<PathBuf> {
+        self.sources
+            .iter()
+            .map(|source| match source {
+                Source::Archive(archive) => archive.path().to_owned(),
+                Source::Folder(folder) => folder.root.clone(),
+            })
+            .collect()
     }
 
     /// The files listed under `folder` and the folders below it.

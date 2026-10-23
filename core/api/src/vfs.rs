@@ -34,6 +34,18 @@ pub trait Vfs: Send + Sync {
     fn path_of(&self, file_data_id: u32) -> Option<String>;
 
     fn state(&self) -> VfsState;
+
+    /// Where the file at `path` is read from: the first archive of the chain that holds it (or the
+    /// loose file); none when none does. What an export replaces, and what it backs up.
+    fn source_of(&self, path: &str) -> Option<std::path::PathBuf> {
+        let _ = path;
+        None
+    }
+
+    /// The archives (and folders) of the client, the first read first.
+    fn sources(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
 }
 
 /// The service of the client's files.

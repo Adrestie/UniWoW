@@ -324,6 +324,16 @@ impl Vfs for Files {
         self.client().ok()?.file_ids.path_of(file_data_id)
     }
 
+    fn source_of(&self, path: &str) -> Option<std::path::PathBuf> {
+        self.client().ok()?.chain.source_of(path)
+    }
+
+    fn sources(&self) -> Vec<std::path::PathBuf> {
+        self.client()
+            .map(|client| client.chain.source_paths())
+            .unwrap_or_default()
+    }
+
     fn state(&self) -> VfsState {
         match &*self.state.read().unwrap_or_else(|e| e.into_inner()) {
             FilesState::NoClient(reason) => VfsState::NoClient(reason.clone()),

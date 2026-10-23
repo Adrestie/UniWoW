@@ -4,11 +4,13 @@
 //! the effect plays, its attachment points shown, the effect on the one chosen. The time is an
 //! animatable property (`effects/time`), so that the timeline can drive it.
 
+mod client;
 mod doc;
 mod gpu;
 mod inspector;
 mod layer;
 mod load;
+mod mpq;
 mod schema;
 
 #[cfg(test)]
