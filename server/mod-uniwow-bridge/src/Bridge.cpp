@@ -413,6 +413,8 @@ namespace UniwowBridge
                             }
                             else if (read && set.what == Set::WALKER)
                                 read = reader.U64(set.id) && reader.U8(set.movement) && reader.U32(set.path);
+                            else if (read && set.what == Set::WANDER)
+                                read = reader.U64(set.id) && reader.F32(set.x) && set.x >= 0.f;
                             else if (read && set.what == Set::GROUP)
                             {
                                 uint16 members = 0;
@@ -739,6 +741,8 @@ namespace UniwowBridge
                 return SetWalker(set.id, set.movement, set.path);
             case Set::GROUP:
                 return SetGroup(set.id, set.members);
+            case Set::WANDER:
+                return SetWander(set.id, set.x);
         }
         return { false, "an unknown set" };
     }
@@ -790,9 +794,6 @@ namespace UniwowBridge
             return { false, Acore::StringFormat("the server knows no creature {}, or no movement {}", id, movement) };
         CreatureData& data = sObjectMgr->NewOrExistCreatureData(id);
         data.movementType = movement;
-        // Made to wander, within a few yards: none would not wander, as the editor writes it.
-        if (movement == RANDOM_MOTION_TYPE && data.wander_distance <= 0.f)
-            data.wander_distance = 5.f;
         std::vector<Creature*> const running = RunningOf(id, data.mapid);
         for (Creature* creature : running)
         {
@@ -832,6 +833,26 @@ namespace UniwowBridge
         }
         _held[move.guid] = { move.map, move.instance, std::chrono::steady_clock::now() };
         return { true, Acore::StringFormat("{} held", creature->GetName()) };
+    }
+
+    // How far the creature `spawnId` wanders about its spawn point, in the server's memory: those of
+    // it running wandering so at once.
+    Outcome Bridge::SetWander(uint64 spawnId, float distance)
+    {
+        ObjectGuid::LowType const id = ObjectGuid::LowType(spawnId);
+        if (!sObjectMgr->GetCreatureData(id))
+            return { false, Acore::StringFormat("the server knows no creature {}", id) };
+        CreatureData& data = sObjectMgr->NewOrExistCreatureData(id);
+        data.wander_distance = distance;
+        std::vector<Creature*> const running = RunningOf(id, data.mapid);
+        for (Creature* creature : running)
+        {
+            creature->SetWanderDistance(distance);
+            if (data.movementType == RANDOM_MOTION_TYPE && creature->IsAlive() && !creature->IsInCombat()
+                && !_held.count(creature->GetGUID().GetRawValue()))
+                creature->GetMotionMaster()->Initialize();
+        }
+        return { true, Acore::StringFormat("the creature {} wanders within {} yards in memory", id, distance) };
     }
 
     // The group led by `leader` set in the server's memory as `members` (the leader among them), none

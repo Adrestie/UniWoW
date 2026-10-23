@@ -100,6 +100,7 @@ namespace UniwowBridge
             PATH = 2,
             WALKER = 3,
             GROUP = 4,
+            WANDER = 5,
         };
 
         uint8 what;
@@ -157,6 +158,7 @@ namespace UniwowBridge
         Outcome SetPath(uint32 pathId, std::vector<PathPoint> const& points);
         Outcome SetWalker(uint64 spawnId, uint8 movement, uint32 pathId);
         Outcome SetGroup(uint64 leader, std::vector<GroupMember> const& members);
+        Outcome SetWander(uint64 spawnId, float distance);
         // The creatures held whose editor said nothing for a while given their movement back.
         void LetGoForgotten();
 

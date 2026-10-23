@@ -36,6 +36,7 @@ then:
 | 2 | the points of a path, none taking it away: its walkers let go of it first, set on it again where they stand | `u32` id, `u16` count (1,000 at most), for each `f32` x, y, z, `u8` whether it faces, `f32` orientation, `u32` delay (ms), `u8` whether it runs to it |
 | 3 | the movement (`MovementType`, 0 to 2) and path of a creature, its creatures running moving so at once | `u64` guid, `u8` movement, `u32` path |
 | 4 | the group a creature leads (`creature_formations`), none breaking it: each member taken out of its group, the creatures running of them put in this one, following their leader as it walks; the formations loaded from the database do not put the creatures running in their groups | `u64` guid of the leader, `u16` count (256 at most), for each member (the leader among them) `u64` guid, `f32` distance, `f32` angle (degrees), `u16` groupAI |
+| 5 | how far a creature wanders about its spawn point (`wander_distance`), its creatures running wandering so at once | `u64` guid, `f32` distance in yards |
 
 A set undone is loaded again from the database by the demands 8 and 2.
 

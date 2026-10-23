@@ -28,7 +28,7 @@ fn place(position: [f32; 3], orientation: f32) -> String {
 fn movement(walker: Walker) -> String {
     match (walker.movement, walker.path) {
         (0, _) => "stands still".to_owned(),
-        (1, _) => "wanders".to_owned(),
+        (1, _) => format!("wanders within {:.1} yd", walker.wander_yards()),
         (_, 0) => "walks no path".to_owned(),
         (_, path) => format!("walks the path {path}"),
     }
@@ -395,7 +395,14 @@ mod tests {
         let mut base = Patrols::default();
         base.paths
             .insert(790, vec![Point::at([0.0, 0.0, 0.0]), Point::at([10.0, 0.0, 0.0])]);
-        base.walkers.insert(79, Walker { movement: 2, path: 790 });
+        base.walkers.insert(
+            79,
+            Walker {
+                movement: 2,
+                path: 790,
+                wander: 0,
+            },
+        );
         let only = |change: &dyn Fn(&mut Changes)| {
             let mut changes = Changes::default();
             change(&mut changes);
@@ -484,7 +491,14 @@ mod tests {
         let mut base = Patrols::default();
         base.paths
             .insert(790, vec![Point::at([0.0, 0.0, 0.0]), Point::at([10.0, 0.0, 0.0])]);
-        base.walkers.insert(79, Walker { movement: 2, path: 790 });
+        base.walkers.insert(
+            79,
+            Walker {
+                movement: 2,
+                path: 790,
+                wander: 0,
+            },
+        );
         let mut changes = Changes::default();
         changes.moved.insert(EntityId::creature(79), ([1.0, 2.0, 3.0], 0.0));
         // A point inserted, then moved: one change of the path.
@@ -496,7 +510,14 @@ mod tests {
             .patrols
             .paths
             .insert(800, Some(vec![Point::at([5.0, 5.0, 0.0])]));
-        changes.patrols.walkers.insert(80, Walker { movement: 2, path: 800 });
+        changes.patrols.walkers.insert(
+            80,
+            Walker {
+                movement: 2,
+                path: 800,
+                wander: 0,
+            },
+        );
         let found = items(&changes, &base, &None_);
         let keys: Vec<&str> = found.iter().map(|item| item.key.as_str()).collect();
         assert_eq!(keys, ["moved:creature:79", "path:790", "path:800", "walker:80"]);

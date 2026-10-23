@@ -124,6 +124,12 @@ pub fn set_of(value: &Value) -> Result<Set, String> {
             .collect::<Result<_, String>>()?;
         return Ok(Set::Path { path, points });
     }
+    if let Some(spawn) = value["wander"].as_u64() {
+        return Ok(Set::Wander {
+            spawn,
+            distance: value["distance"].as_f64().unwrap_or(0.0).clamp(0.0, 200.0) as f32,
+        });
+    }
     if let Some(leader) = value["group"].as_u64() {
         let members = value["members"]
             .as_array()

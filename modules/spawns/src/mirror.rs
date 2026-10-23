@@ -123,14 +123,30 @@ pub fn sent(before: &Held, now: &Held, base: &Patrols) -> (Vec<Value>, Vec<Reloa
             .map(|id| Reload::Path(*id)),
     );
     // The movements after the paths they name.
-    for (guid, walker) in &now.walkers {
-        if before.walkers.get(guid) != Some(walker) {
+    // A movement, and how far it wanders once that changed, apart: a bridge without the set of the
+    // distance takes the movement still.
+    let walker_sets = |sets: &mut Vec<Value>, guid: u64, walker: Walker, before: Option<Walker>| {
+        // What the server holds now: what was set, else the database's.
+        let held = before.unwrap_or_else(|| base.walkers.get(&guid).copied().unwrap_or_default());
+        if before.is_none() || held.movement != walker.movement || held.path != walker.path {
             sets.push(json!({ "walker": guid, "movement": walker.movement, "path": walker.path }));
         }
+        if held.wander != walker.wander {
+            sets.push(json!({ "wander": guid, "distance": walker.wander_yards() }));
+        }
+    };
+    for (guid, walker) in &now.walkers {
+        if before.walkers.get(guid) != Some(walker) {
+            walker_sets(&mut sets, *guid, *walker, before.walkers.get(guid).copied());
+        }
     }
-    for guid in before.walkers.keys().filter(|guid| !now.walkers.contains_key(guid)) {
+    for (guid, held) in before
+        .walkers
+        .iter()
+        .filter(|(guid, _)| !now.walkers.contains_key(guid))
+    {
         let walker = base.walkers.get(guid).copied().unwrap_or_default();
-        sets.push(json!({ "walker": guid, "movement": walker.movement, "path": walker.path }));
+        walker_sets(&mut sets, *guid, walker, Some(*held));
     }
     // The groups after the movements: their members stand, following.
     for (leader, group) in &now.groups {
@@ -196,6 +212,36 @@ impl SpawnsModule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn how_far_a_creature_wanders_is_set_apart_from_its_movement() {
+        let mut base = Patrols::default();
+        base.walkers.insert(
+            55155,
+            Walker {
+                movement: 1,
+                path: 0,
+                wander: 50,
+            },
+        );
+        let mut changes = Changes::default();
+        changes.patrols.walkers.insert(
+            55155,
+            Walker {
+                movement: 1,
+                path: 0,
+                wander: 82,
+            },
+        );
+        let now = wanted(&changes, &base);
+        let (sets, _) = sent(&Held::default(), &now, &base);
+        assert_eq!(sets.len(), 2, "{sets:?}");
+        assert_eq!(sets[1]["wander"], 55155);
+        assert!((sets[1]["distance"].as_f64().unwrap() - 8.2).abs() < 1e-4);
+        // Taken back: the database's distance set again.
+        let (sets, _) = sent(&now, &Held::default(), &base);
+        assert_eq!(sets, [json!({ "wander": 55155, "distance": 5.0 })], "its movement unchanged, not sent");
+    }
     use uniwow_api::scene::EntityId;
 
     #[test]
@@ -210,7 +256,14 @@ mod tests {
         changes.deleted.insert(made);
         let points = vec![Point::at([1.0, 0.0, 0.0]), Point::at([2.0, 0.0, 0.0])];
         changes.patrols.paths.insert(790, Some(points.clone()));
-        changes.patrols.walkers.insert(80, Walker { movement: 2, path: 790 });
+        changes.patrols.walkers.insert(
+            80,
+            Walker {
+                movement: 2,
+                path: 790,
+                wander: 0,
+            },
+        );
         let now = wanted(&changes, &base);
         assert_eq!(
             now.homes.keys().collect::<Vec<_>>(),

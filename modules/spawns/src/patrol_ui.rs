@@ -813,6 +813,42 @@ impl SpawnsModule {
                 .response
                 .on_hover_text("How the creature moves (creature.MovementType)");
         }));
+        // How far it wanders, its own field: the distance of the database until changed.
+        if walker.movement == patrols::WANDERING {
+            let waiting = base.wander != walker.wander;
+            let key = format!("wander:{guid}");
+            let current = format!("{:.1}", walker.wander_yards());
+            let hint = if waiting {
+                format!(
+                    "How far it wanders about its spawn point, in yards (creature.wander_distance); waiting for Apply (orange), in the database: {:.1}",
+                    base.wander_yards()
+                )
+            } else {
+                "How far it wanders about its spawn point, in yards (creature.wander_distance)".to_owned()
+            };
+            let mut typed = None;
+            ui.horizontal(|ui| {
+                ui.label("Radius (yd)").on_hover_text(hint.clone());
+                typed = self.point_field(ui, (key, waiting), &current, 58.0, &hint);
+                if walker.wander == 0 {
+                    ui.label(egui::RichText::new("0: it does not wander").weak().small())
+                        .on_hover_text("AzerothCore makes a creature with no distance stand where it is");
+                }
+            });
+            if let Some(yards) = typed.and_then(|typed| typed.replace(',', ".").parse::<f32>().ok())
+                && yards.is_finite()
+            {
+                let mut after = self.changes.clone();
+                after.patrols.walkers.insert(
+                    guid,
+                    Walker {
+                        wander: Walker::tenths(yards.min(200.0)),
+                        ..walker
+                    },
+                );
+                self.change("Set how far a creature wanders".to_owned(), after, ctx);
+            }
+        }
         let Some(way) = chosen.filter(|way| *way != walker.movement) else {
             return;
         };
@@ -1077,6 +1113,7 @@ impl SpawnsModule {
             Walker {
                 movement: patrols::WALKING,
                 path,
+                ..walker
             },
         );
         if !self.patrols_now.paths.contains_key(&path) {
@@ -1371,7 +1408,14 @@ mod tests {
         let base = Patrols::default();
         let mut edits = Edits::default();
         assert_eq!(drawn_paths(&read, &edits, &base), read);
-        edits.walkers.insert(81, Walker { movement: 2, path: 810 });
+        edits.walkers.insert(
+            81,
+            Walker {
+                movement: 2,
+                path: 810,
+                wander: 0,
+            },
+        );
         edits
             .paths
             .insert(810, Some(vec![Point::at([1.0; 3]), Point::at([2.0; 3])]));

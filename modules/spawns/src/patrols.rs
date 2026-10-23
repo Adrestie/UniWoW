@@ -7,15 +7,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use uniwow_api::db::Rows;
-use uniwow_api::db::write::{RowChange, row};
+use uniwow_api::db::write::{Row, RowChange, row};
 use uniwow_api::scene::{self, Entity, EntityId, Piece, PieceBuilder, flags};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::world_db::Reload;
 
-/// The creatures of a map that walk a path, or whose addon names one: guid, movement, path.
-pub const WALKERS: &str = "SELECT c.guid, c.MovementType, a.path_id FROM creature c \
-     LEFT JOIN creature_addon a ON a.guid = c.guid \
-     WHERE c.map = ? AND (c.MovementType = 2 OR (a.path_id IS NOT NULL AND a.path_id <> 0))";
+/// How every creature of a map moves: guid, movement, the path its addon names, how far it wanders.
+pub const WALKERS: &str = "SELECT c.guid, c.MovementType, a.path_id, c.wander_distance FROM creature c \
+     LEFT JOIN creature_addon a ON a.guid = c.guid WHERE c.map = ?";
 
 /// The points of the paths the addons of the creatures of a map name, in order.
 pub const POINTS: &str = "SELECT w.id, w.point, w.position_x, w.position_y, w.position_z, w.orientation, \
@@ -30,8 +29,6 @@ pub const GROUPS: &str = "SELECT f.leaderGUID, f.memberGUID, f.dist, f.angle, f.
 pub const WALKING: u8 = 2;
 pub const IDLE: u8 = 0;
 pub const WANDERING: u8 = 1;
-/// How far a creature made to wander wanders, in yards.
-pub const WANDER_DISTANCE: f32 = 5.0;
 
 /// The behaviour of a group made by the editor: the members help the leader and he them
 /// (`GROUP_AI_FLAG_MEMBER_ASSIST_LEADER | GROUP_AI_FLAG_LEADER_ASSIST_MEMBER`), and they follow him
@@ -95,11 +92,25 @@ impl Point {
     }
 }
 
-/// How a creature moves: its `MovementType` and the path its addon names, 0 for none.
+/// How a creature moves: its `MovementType`, the path its addon names (0 for none), and how far it
+/// wanders about its spawn point (`wander_distance`), in tenths of a yard.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Walker {
     pub movement: u8,
     pub path: u32,
+    pub wander: u32,
+}
+
+impl Walker {
+    /// How far it wanders, in yards.
+    pub fn wander_yards(self) -> f64 {
+        f64::from(self.wander) / 10.0
+    }
+
+    /// `yards` as `wander` keeps them.
+    pub fn tenths(yards: f32) -> u32 {
+        (yards.max(0.0) * 10.0).round() as u32
+    }
 }
 
 /// A creature following a leader: its guid, how far and at what angle (degrees) behind him.
@@ -140,6 +151,7 @@ impl Patrols {
                 Walker {
                     movement: number(row.get(1)).unwrap_or(0.0) as u8,
                     path: number(row.get(2)).unwrap_or(0.0) as u32,
+                    wander: Walker::tenths(number(row.get(3)).unwrap_or(0.0) as f32),
                 },
             );
         }
@@ -299,15 +311,16 @@ impl Edits {
                 continue;
             }
             let key = row([("guid", json!(guid))]);
+            // Its movement and how far it wanders, each written once changed: a movement changed
+            // leaves the distance of the database.
+            let mut set = Row::new();
             if before.movement != walker.movement {
-                let mut set = row([("MovementType", json!(walker.movement))]);
-                if walker.movement == WALKING {
-                    set.insert("wander_distance".to_owned(), json!(0));
-                }
-                // Wandering within a few yards: none would not wander.
-                if walker.movement == WANDERING {
-                    set.insert("wander_distance".to_owned(), json!(WANDER_DISTANCE));
-                }
+                set.insert("MovementType".to_owned(), json!(walker.movement));
+            }
+            if before.wander != walker.wander {
+                set.insert("wander_distance".to_owned(), json!(walker.wander_yards()));
+            }
+            if !set.is_empty() {
                 changes.push(RowChange::Put {
                     table: "creature".to_owned(),
                     key: key.clone(),
@@ -391,7 +404,7 @@ impl Edits {
                 "points": path.as_ref().map(|points| points.iter().map(point).collect::<Vec<_>>()),
             })).collect::<Vec<_>>(),
             "walkers": self.walkers.iter().map(|(guid, walker)| json!({
-                "guid": guid, "movement": walker.movement, "path": walker.path,
+                "guid": guid, "movement": walker.movement, "path": walker.path, "wander": walker.wander,
             })).collect::<Vec<_>>(),
             "groups": self.groups.iter().map(|(leader, group)| json!({
                 "leader": leader,
@@ -432,6 +445,7 @@ impl Edits {
                         Walker {
                             movement: walker["movement"].as_u64().unwrap_or(0) as u8,
                             path: walker["path"].as_u64().unwrap_or(0) as u32,
+                            wander: walker["wander"].as_u64().unwrap_or(0) as u32,
                         },
                     ))
                 })
@@ -642,6 +656,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_creature_is_read_with_how_it_moves_and_how_far_it_wanders_and_each_is_written_alone() {
+        let walkers = Rows {
+            columns: ["guid", "MovementType", "path_id", "wander_distance"]
+                .map(str::to_owned)
+                .to_vec(),
+            rows: vec![
+                vec![json!(55155), json!(1), Value::Null, json!(5.0)],
+                vec![json!(55055), json!(0), Value::Null, json!(0.0)],
+            ],
+        };
+        let empty = Rows {
+            columns: Vec::new(),
+            rows: Vec::new(),
+        };
+        let base = Patrols::of_rows(&walkers, &empty, &empty);
+        assert_eq!(
+            base.walkers[&55155],
+            Walker {
+                movement: WANDERING,
+                path: 0,
+                wander: 50
+            },
+            "wanders, as the game shows"
+        );
+        assert_eq!(base.walkers[&55055], Walker::default(), "stands");
+
+        // Its distance alone changed: that column alone written.
+        let mut edits = Edits::default();
+        edits.walkers.insert(
+            55155,
+            Walker {
+                wander: 82,
+                ..base.walkers[&55155]
+            },
+        );
+        let (changes, _) = edits.rows(&base);
+        let [RowChange::Put { set, .. }] = &changes[..] else {
+            panic!("{changes:?}");
+        };
+        assert_eq!(set.len(), 1);
+        assert_eq!(set["wander_distance"], json!(8.2));
+        // Its movement alone changed: the distance of the database left.
+        let mut edits = Edits::default();
+        edits.walkers.insert(
+            55055,
+            Walker {
+                movement: WANDERING,
+                ..base.walkers[&55055]
+            },
+        );
+        let (changes, _) = edits.rows(&base);
+        let [RowChange::Put { set, .. }] = &changes[..] else {
+            panic!("{changes:?}");
+        };
+        assert_eq!((set.len(), &set["MovementType"]), (1, &json!(1)));
+    }
+
+    #[test]
     fn creatures_join_a_group_at_its_next_places_and_a_member_is_made_its_leader() {
         let mut base = Patrols::default();
         base.walkers.insert(
@@ -649,6 +721,7 @@ mod tests {
             Walker {
                 movement: WALKING,
                 path: 790,
+                wander: 0,
             },
         );
         base.walkers.insert(
@@ -656,6 +729,7 @@ mod tests {
             Walker {
                 movement: WALKING,
                 path: 850,
+                wander: 0,
             },
         );
         let placed = Member {
@@ -709,7 +783,8 @@ mod tests {
             led.walkers[&80],
             Walker {
                 movement: WALKING,
-                path: 790
+                path: 790,
+                wander: 0,
             }
         );
         assert_eq!(led.walkers[&79], Walker::default());
@@ -768,7 +843,14 @@ mod tests {
     #[test]
     fn the_patrols_are_read_from_their_rows_points_in_order_the_leader_out_of_his_members() {
         let patrols = base();
-        assert_eq!(patrols.walkers[&79], Walker { movement: 2, path: 790 });
+        assert_eq!(
+            patrols.walkers[&79],
+            Walker {
+                movement: 2,
+                path: 790,
+                wander: 0
+            }
+        );
         let path = &patrols.paths[&790];
         assert_eq!(path.len(), 2);
         assert_eq!(path[0].position, [1.0, 0.0, 0.0], "in the order of their points");
@@ -823,6 +905,7 @@ mod tests {
             Walker {
                 movement: WALKING,
                 path,
+                wander: 0,
             },
         );
         // 79's group: 80 and 82 laid out behind him.
@@ -843,7 +926,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             (walker["MovementType"].clone(), walker["wander_distance"].clone()),
-            (json!(2), json!(0))
+            (json!(2), json!(5)),
+            "a movement changed leaves the distance of the database"
         );
         assert_eq!(
             memory.tables["creature_addon"],
