@@ -4161,6 +4161,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "uniwow-module-effects"
+version = "0.1.0"
+dependencies = [
+ "uniwow-api",
+]
+
+[[package]]
 name = "uniwow-module-hierarchy"
 version = "0.1.0"
 dependencies = [
@@ -4307,6 +4314,9 @@ version = "0.1.0"
 [[package]]
 name = "uniwow-vfx"
 version = "0.1.0"
+dependencies = [
+ "glam",
+]
 
 [[package]]
 name = "url"

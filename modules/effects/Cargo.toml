@@ -1,0 +1,19 @@
+[package]
+name = "uniwow-module-effects"
+description = "Spell effects drawn in the 3D view as the client draws them: forge's descriptions and the client's spell models, played in time on a reference character"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+uniwow-api.workspace = true
+
+[package.metadata.uniwow]
+id = "effects"
+name = "Effects"
+category = "World"
+# Services the module cannot work without, and services it uses when present.
+requires = []
+uses = ["viewport", "vfs", "models", "scene"]

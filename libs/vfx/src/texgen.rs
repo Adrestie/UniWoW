@@ -88,7 +88,7 @@ pub fn rgba(alpha: &Plane, color: [u8; 3]) -> Image {
 // --- a deterministic generator ------------------------------------------------------------------
 
 /// SplitMix64: a small generator, the same numbers from the same seed on every machine.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Rng(u64);
 
 impl Rng {

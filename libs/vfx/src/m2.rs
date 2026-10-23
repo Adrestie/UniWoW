@@ -777,6 +777,8 @@ pub fn write(m: &Model) -> Vec<u8> {
 /// Reads one blob, every array checked against its size.
 struct Reader<'a> {
     d: &'a [u8],
+    /// The sequences whose keys are in .anim files: their key sets are left empty.
+    outside: Vec<bool>,
 }
 
 impl Reader<'_> {
@@ -810,10 +812,14 @@ impl Reader<'_> {
         self.values(count, at, what)
     }
 
-    fn nested<T: Value>(&self, count: u32, at: u32, what: &str) -> Result<Vec<Vec<T>>, M2Error> {
+    /// The key sets of a track: those of a sequence whose keys are outside the model left empty.
+    fn keys<T: Value>(&self, count: u32, at: u32, gs: i16, what: &str) -> Result<Vec<Vec<T>>, M2Error> {
         self.check(count, at, 8, what)?;
         (0..count as usize)
             .map(|index| {
+                if gs < 0 && self.outside.get(index).copied().unwrap_or(false) {
+                    return Ok(Vec::new());
+                }
                 let ofs = at as usize + index * 8;
                 self.values(self.u32_at(ofs)?, self.u32_at(ofs + 4)?, what)
             })
@@ -830,8 +836,8 @@ impl Reader<'_> {
         Ok(Track {
             interpolation: u16::get(head),
             global_sequence: i16::get(&head[2..]),
-            timestamps: self.nested(u32::get(&head[4..]), u32::get(&head[8..]), what)?,
-            values: self.nested(u32::get(&head[12..]), u32::get(&head[16..]), what)?,
+            timestamps: self.keys(u32::get(&head[4..]), u32::get(&head[8..]), i16::get(&head[2..]), what)?,
+            values: self.keys(u32::get(&head[12..]), u32::get(&head[16..]), i16::get(&head[2..]), what)?,
         })
     }
 
@@ -845,7 +851,7 @@ impl Reader<'_> {
         Ok(TrackBase {
             interpolation: u16::get(head),
             global_sequence: i16::get(&head[2..]),
-            timestamps: self.nested(u32::get(&head[4..]), u32::get(&head[8..]), what)?,
+            timestamps: self.keys(u32::get(&head[4..]), u32::get(&head[8..]), i16::get(&head[2..]), what)?,
         })
     }
 
@@ -1008,12 +1014,23 @@ fn read_ribbon(r: &Reader, at: usize) -> Result<Ribbon, M2Error> {
     })
 }
 
-/// A model from its file, version 264 (a 3.3.5a client's model or one written here).
+/// A model from its file, version 264 (a 3.3.5a client's model or one written here); refused when a
+/// sequence's keys are in an .anim file.
 pub fn read(d: &[u8]) -> Result<Model, M2Error> {
+    read_model(d, false)
+}
+
+/// A model from its file, the keys of its sequences in .anim files left out (a character's, read
+/// for its bones and attachment points at rest or in Stand).
+pub fn read_without_anims(d: &[u8]) -> Result<Model, M2Error> {
+    read_model(d, true)
+}
+
+fn read_model(d: &[u8], lenient: bool) -> Result<Model, M2Error> {
     if d.get(..4) != Some(b"MD20".as_slice()) {
         return err("no MD20 magic");
     }
-    let r = Reader { d };
+    let mut r = Reader { d, outside: Vec::new() };
     let version = r.u32_at(4)?;
     if version != 264 {
         return err(format!("version {version}: 264 alone is read here"));
@@ -1024,7 +1041,8 @@ pub fn read(d: &[u8]) -> Result<Model, M2Error> {
     let global_loops = r.array(&mut p, "global loops")?;
     let sequences = r.records(&mut p, SEQUENCE_SIZE, "sequences", read_sequence)?;
     // Every sequence's keys must be in the model: those in .anim files are not read here.
-    if let Some(outside) = sequences.iter().find(|s| s.flags & EMBEDDED == 0) {
+    r.outside = sequences.iter().map(|s| s.flags & EMBEDDED == 0).collect();
+    if let Some(outside) = sequences.iter().find(|s| s.flags & EMBEDDED == 0 && !lenient) {
         return err(format!(
             "sequence {}: keys outside the model (an .anim file)",
             outside.id
@@ -1321,7 +1339,7 @@ pub fn read_skin(d: &[u8]) -> Result<Skin, M2Error> {
     let (v, i, b, m, t) = (refs[0], refs[1], refs[2], refs[3], refs[4]);
     let submesh = |at: usize| {
         let mut p = at;
-        let r = Reader { d };
+        let r = Reader { d, outside: Vec::new() };
         let mut next = || -> u16 {
             let value = u16::get(&d[p..]);
             p += 2;

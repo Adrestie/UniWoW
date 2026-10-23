@@ -1186,7 +1186,9 @@ impl<'a> Forge<'a> {
         let most = positions.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max);
         let reach = if most == 0.0 || positions.is_empty() { 1.0 } else { most };
         for j in s.get("bend").map(list).transpose()?.unwrap_or_default() {
-            let at = num(j.get("at").ok_or_else(|| ForgeError(format!("mesh {i}: a bend joint without at")))?)?;
+            let at = num(j
+                .get("at")
+                .ok_or_else(|| ForgeError(format!("mesh {i}: a bend joint without at")))?)?;
             if at <= joints[joints.len() - 1] {
                 return fail(format!(
                     "mesh {i}: bend joints must go outward (at {})",
@@ -1214,9 +1216,11 @@ impl<'a> Forge<'a> {
                 ),
                 (
                     "rotation".into(),
-                    j.get("rotation")
-                        .cloned()
-                        .unwrap_or(Value::List(vec![Value::Int(0), Value::Int(0), Value::Int(0)])),
+                    j.get("rotation").cloned().unwrap_or(Value::List(vec![
+                        Value::Int(0),
+                        Value::Int(0),
+                        Value::Int(0),
+                    ])),
                 ),
             ]);
             let parent = bones[bones.len() - 1] as i16;
@@ -1232,7 +1236,10 @@ impl<'a> Forge<'a> {
                 if (x - joint).abs() < soft {
                     let f = (x - joint + soft) / (2.0 * soft);
                     let w = py::round_int(255.0 * f * f * (3.0 - 2.0 * f)) as u8;
-                    return [((j - 1) as u8, 255 - w), (j as u8, w)].into_iter().filter(|b| b.1 != 0).collect();
+                    return [((j - 1) as u8, 255 - w), (j as u8, w)]
+                        .into_iter()
+                        .filter(|b| b.1 != 0)
+                        .collect();
                 }
             }
             vec![(joints[1..].iter().filter(|a| **a <= x).count() as u8, 255)]
@@ -1240,7 +1247,11 @@ impl<'a> Forge<'a> {
         let influences = positions
             .iter()
             .map(|p| {
-                let mut ws = if bones.len() > 1 { weights(p[0] / reach) } else { vec![(0, 255)] };
+                let mut ws = if bones.len() > 1 {
+                    weights(p[0] / reach)
+                } else {
+                    vec![(0, 255)]
+                };
                 ws.resize(4, (0, 0));
                 (
                     std::array::from_fn(|k| ws[k].1),
@@ -1273,7 +1284,13 @@ impl<'a> Forge<'a> {
             }
         }
         let v0 = self.vertices.len();
-        for (((p, n), uv), (w, b)) in shape.positions.iter().zip(&shape.normals).zip(&shape.uvs).zip(&influences) {
+        for (((p, n), uv), (w, b)) in shape
+            .positions
+            .iter()
+            .zip(&shape.normals)
+            .zip(&shape.uvs)
+            .zip(&influences)
+        {
             let mut raw = Vec::with_capacity(48);
             for x in [p[0] + pivot[0], p[1] + pivot[1], p[2] + pivot[2]] {
                 raw.extend_from_slice(&(x as f32).to_le_bytes());

@@ -10927,8 +10927,26 @@ format is WoW-mods' `tools/vfx`: the model description of `forge.py` and the eff
     FFT and Pillow's drawing are not ported. An ignored test (`cargo test -p uniwow-vfx --
     --ignored`, Python and the tools on the machine) runs `forge.py` and `validate.py` on every
     example (lotus included) and compares.
-- **Step B**: the effect drawn in the scene (particles, ribbons, bones, the tracks of colour and
-  alpha, the projection on the terrain, a character of reference with its attachment points).
+- **Step B, the effect in the 3D view** (module `effects`, and `anim`, `sim`, `frame` of the
+  library):
+  - `anim`: a track read at a moment of its sequence, or of its global sequence on the time since
+    the model appeared; the compressed quaternions read before they are blended (slerp); the bones
+    posed parents first, the billboarded ones turned to the eye; the phases of a state model played
+    one after the other (birth, the hold looped as many times as asked, decay);
+  - `sim`: the particles and ribbons, stepped 60 times a second from the start with one seed, so
+    that the same time gives the same particles however the time is reached; where the client's
+    behaviour is not yet measured in the game, the choice is said in the code (size the quad's
+    whole side, the spread leaning from Z, drag a share of the speed a second), as `preview.py`;
+  - `frame`: the triangles of a moment: meshes skinned on up to four bones a vertex through the
+    skin's palette and the bone lookup, as the client; their colour, transparency and texture
+    scroll; particles as quads facing the eye (flipbook cells, spin); ribbons as strips; a projected
+    batch cut and laid on the ground read under the effect;
+  - the module draws them in one buffer a frame, a pipeline for each blending of the M2 and each
+    depth and culling state, the opaque ones with the opaque world, the blended ones after it far
+    first; the human male of the client as reference character where the effect stands, its
+    attachment points as dots, the effect on the one chosen (base, chest, head, hands); views
+    grazing, from the top and three-quarter; the bones as dots; the time an animatable property
+    (`effects/time`), played, looped, scrubbed.
 - **Step C**: the module "Effects": hierarchy, inspector, keys and curves on the timeline (the
   three phases shown), the texture workshop, the library of the client's `Spells\*.m2`.
 - **Step D**: the spell's frieze of moments and its client rows (`effect.py`).
