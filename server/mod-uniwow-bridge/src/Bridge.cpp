@@ -851,12 +851,30 @@ namespace UniwowBridge
         std::vector<ObjectGuid::LowType> leaving = groups[leaderId];
         for (GroupMember const& member : members)
             leaving.push_back(ObjectGuid::LowType(member.guid));
+        auto staying = [&](ObjectGuid::LowType guid)
+        {
+            return std::any_of(members.begin(), members.end(),
+                [&](GroupMember const& member) { return ObjectGuid::LowType(member.guid) == guid; });
+        };
         for (ObjectGuid::LowType guid : leaving)
         {
             if (CreatureData const* data = sObjectMgr->GetCreatureData(guid))
                 for (Creature* creature : RunningOf(guid, data->mapid))
+                {
                     if (CreatureGroup* group = creature->GetFormation())
                         sFormationMgr->RemoveCreatureFromGroup(group, creature);
+                    // Out of the group, its formation movement kept it walking where its leader
+                    // went: home again, then its own movement. One staying stops, to follow.
+                    // The leader keeps walking its own round.
+                    if (guid == leaderId || !creature->IsAlive() || creature->IsInCombat()
+                        || _held.count(creature->GetGUID().GetRawValue()))
+                        continue;
+                    creature->GetMotionMaster()->Clear(false);
+                    if (staying(guid))
+                        creature->GetMotionMaster()->MoveIdle();
+                    else
+                        creature->GetMotionMaster()->MoveTargetedHome();
+                }
             auto info = map.find(guid);
             if (info == map.end())
                 continue;
