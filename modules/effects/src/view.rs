@@ -107,6 +107,12 @@ impl Default for EffectView {
     }
 }
 
+/// What the user did in the view: the gizmo moved, a part clicked (its place among the points given).
+pub struct Shown {
+    pub moved: Option<Moved>,
+    pub picked: Option<usize>,
+}
+
 /// How the camera looks at the effect.
 #[derive(Clone, Copy, Debug)]
 pub enum Angle {
@@ -124,6 +130,12 @@ impl EffectView {
         };
         (self.yaw, self.pitch, self.distance) = (yaw, pitch, distance);
         self.target = Vec3::new(0.0, 0.0, if matches!(angle, Angle::Top) { 0.0 } else { 1.0 });
+    }
+
+    /// The whole effect in view: far enough for a large model (up to 60 yards), aimed at its middle.
+    pub fn frame(&mut self, radius: f32) {
+        self.distance = (radius * 2.6).clamp(4.0, 60.0);
+        self.target = Vec3::new(0.0, 0.0, radius * 0.6);
     }
 
     pub fn eye(&self) -> Vec3 {
@@ -396,8 +408,10 @@ impl EffectView {
         stage: &Arc<Mutex<Stage>>,
         character: Option<&Character>,
         gizmo: Option<Vec3>,
-    ) -> Option<Moved> {
-        let available = ui.available_size().max(Vec2::new(160.0, 120.0));
+        points: &[Vec3],
+    ) -> Shown {
+        // room below for the line of help
+        let available = (ui.available_size() - Vec2::new(0.0, 22.0)).max(Vec2::new(160.0, 120.0));
         let pixels = ui.ctx().pixels_per_point();
         let size = [
             (available.x * pixels).round().max(16.0) as u32,
@@ -510,8 +524,32 @@ impl EffectView {
                 self.distance = (self.distance * (1.0 - scroll * 0.002)).clamp(0.5, 200.0);
             }
         }
+        // the part chosen, ringed; a click on another chooses it
+        if let Some(at) = gizmo.and_then(project) {
+            let pulse = (ui.input(|i| i.time) * 4.0).sin() as f32 * 2.0;
+            ui.painter_at(rect)
+                .circle_stroke(at, 12.0 + pulse, Stroke::new(2.0, Color32::from_rgb(255, 200, 40)));
+        }
+        let mut picked = None;
+        if response.clicked()
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            picked = points
+                .iter()
+                .enumerate()
+                .filter_map(|(k, at)| project(*at).map(|s| (k, s.distance(p))))
+                .filter(|(_, d)| *d < 24.0)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(k, _)| k);
+        }
+        // F frames the whole effect
+        if response.hovered() && ui.input(|i| i.key_pressed(egui::Key::F)) {
+            let radius = lock(stage).effect.as_ref().map_or(3.0, |e| radius_of(&e.model));
+            self.frame(radius);
+        }
+        ui.weak("drag: turn · middle button: move · wheel: zoom · F: frame · click: choose a part · arrows: move it");
         ui.ctx().request_repaint();
-        moved
+        Shown { moved, picked }
     }
 
     fn render(

@@ -45,6 +45,9 @@ pub trait Host {
     /// Opens the panel `panel` of `owner`, closed or not, and puts it in front of its part of the
     /// dock.
     fn show_panel(&mut self, _owner: &str, _panel: &str) {}
+    /// Lays the dock out as `arrangement` says, the layout before kept to come back to; with none,
+    /// puts back the layout kept.
+    fn arrange(&mut self, _owner: &str, _arrangement: Option<Arrangement>) {}
     /// Makes the gesture `gesture` of `owner`, opened at an earlier frame and not ended, the one its
     /// calls and changes join again, as `begin_gesture` made it; whether it still is open.
     fn resume_gesture(&mut self, _owner: &str, _gesture: u64) -> bool {
@@ -64,6 +67,15 @@ pub trait Host {
 /// A gesture of the user open (`Context::begin_gesture`), by its number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Gesture(pub u64);
+
+/// A layout of the dock for a task: the panels of each part, each a (module, panel) pair.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Arrangement {
+    pub center: Vec<(String, String)>,
+    pub left: Vec<(String, String)>,
+    pub right: Vec<(String, String)>,
+    pub bottom: Vec<(String, String)>,
+}
 
 /// Access to the kernel for one module, passed to every `Module` method after `register`.
 pub struct Context<'a> {
@@ -252,6 +264,17 @@ impl<'a> Context<'a> {
     /// dock, at the end of the frame: a quest clicked in the Inspector shown in the panel *Quests*.
     pub fn show_panel(&mut self, panel: &str) {
         self.host.show_panel(self.module, panel);
+    }
+
+    /// Lays the dock out for a task (the effects: their view in the middle, their tree on the
+    /// left...), at the end of the frame; the layout before is kept for `restore_arrangement`.
+    pub fn arrange(&mut self, arrangement: Arrangement) {
+        self.host.arrange(self.module, Some(arrangement));
+    }
+
+    /// Puts back the layout kept by `arrange`.
+    pub fn restore_arrangement(&mut self) {
+        self.host.arrange(self.module, None);
     }
 
     /// Ends the gesture `gesture`: its entry is made once its calls are answered.

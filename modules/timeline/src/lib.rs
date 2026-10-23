@@ -355,6 +355,14 @@ impl TimelineModule {
                 show = Some(owner);
             }
             externals.fresh.clear();
+            // shown once its object is made: a presentation of this frame waits for the next
+            let ready = externals
+                .focus
+                .as_ref()
+                .is_some_and(|o| externals.shown.get(o).is_some_and(|s| s.handle.is_some()));
+            if ready {
+                show = externals.focus.take();
+            }
         }
         if let Some(owner) = show {
             self.show_external(&owner);

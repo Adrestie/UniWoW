@@ -56,6 +56,11 @@ pub trait Timeline: Send + Sync {
     /// The tracks as the user changed them in the Timeline since `owner` last presented, with the
     /// version they started from; taken once.
     fn take_edit(&self, owner: &str) -> Option<(u64, Sequence)>;
+
+    /// Shows what `owner` presents, whatever the Timeline showed (an effect just opened).
+    fn focus(&self, owner: &str) {
+        let _ = owner;
+    }
 }
 
 pub type Handle = Arc<dyn Timeline>;

@@ -185,6 +185,29 @@ pub fn default_layout(entries: &[PanelEntry], closed: &BTreeSet<String>) -> Dock
     dock
 }
 
+/// The dock of a task's layout: its middle, then its left, right and bottom parts split off.
+pub fn arranged(arrangement: &uniwow_api::Arrangement) -> DockState<Tab> {
+    let tabs = |list: &[(String, String)]| -> Vec<Tab> { list.iter().map(|(m, p)| Tab::new(m, p)).collect() };
+    let mut dock = DockState::new(tabs(&arrangement.center));
+    let tree = dock.main_surface_mut();
+    let (left, right, bottom) = (
+        tabs(&arrangement.left),
+        tabs(&arrangement.right),
+        tabs(&arrangement.bottom),
+    );
+    // the sides beside the middle, the bottom under all three
+    if !right.is_empty() {
+        tree.split_right(NodeIndex::root(), 0.75, right);
+    }
+    if !left.is_empty() {
+        tree.split_left(NodeIndex::root(), 0.2, left);
+    }
+    if !bottom.is_empty() {
+        tree.split_below(NodeIndex::root(), 0.68, bottom);
+    }
+    dock
+}
+
 /// Every split has two non-empty children and every other non-empty node hangs from a split.
 pub fn is_consistent(tree: &Tree<Tab>) -> bool {
     let nodes: Vec<&Node<Tab>> = tree.iter().collect();

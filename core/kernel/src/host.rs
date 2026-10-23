@@ -87,6 +87,8 @@ pub struct KernelHost {
     pub notices: Vec<(String, Level, String)>,
     /// The panels the modules asked to show this frame: the module and its panel.
     pub shown: Vec<(String, String)>,
+    /// The layouts the modules asked for, the last one taking effect (none: the one kept).
+    pub arranged: Vec<Option<uniwow_api::Arrangement>>,
     /// The modules lent while a panel is drawn, for their sections there.
     pub embedded: Vec<Embedded>,
     next_call: u64,
@@ -185,6 +187,7 @@ impl KernelHost {
             adopted: Vec::new(),
             notices: Vec::new(),
             shown: Vec::new(),
+            arranged: Vec::new(),
             embedded: Vec::new(),
             services: HashMap::new(),
             gpu,
@@ -252,6 +255,10 @@ impl Host for KernelHost {
 
     fn show_panel(&mut self, owner: &str, panel: &str) {
         self.shown.push((owner.to_owned(), panel.to_owned()));
+    }
+
+    fn arrange(&mut self, _owner: &str, arrangement: Option<uniwow_api::Arrangement>) {
+        self.arranged.push(arrangement);
     }
 
     fn resume_gesture(&mut self, owner: &str, gesture: u64) -> bool {

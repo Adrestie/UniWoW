@@ -62,11 +62,105 @@ fn label_of(root: &Value, node: &Node) -> String {
 }
 
 /// The tree of the parts: chooses `selected`; adds, copies and removes parts.
+/// The icon of each kind of part.
+pub fn icon(node: &Node) -> &'static str {
+    match node {
+        Node::Effect => "◆",
+        Node::Texture(_) => "▦",
+        Node::Bone(_) => "┼",
+        Node::Emitter(_) => "✦",
+        Node::Ribbon(_) => "≈",
+        Node::Mesh(_) => "◯",
+        Node::Light(_) => "☀",
+    }
+}
+
+/// The shapes a mesh added can take, as the menu names them.
+const SHAPES: [(&str, &str); 9] = [
+    ("Ring", "ring"),
+    ("Disc", "disc"),
+    ("Plane (on the ground)", "plane"),
+    ("Sphere", "sphere"),
+    ("Petal", "petal"),
+    ("Tube", "tube"),
+    ("Cone", "cone"),
+    ("Cylinder", "cylinder"),
+    ("Mesh from Blender (glTF)", "gltf"),
+];
+
+/// The tree of the parts: chooses `selected`; adds, copies and removes parts.
 pub fn tree(ui: &mut Ui, doc: &Doc, selected: &mut Node) -> Option<Change> {
     let root = &doc.value;
     let mut change = None;
+    ui.horizontal(|ui| {
+        let mut wanted: Option<(&str, Option<&str>)> = None;
+        ui.menu_button("＋ Add", |ui| {
+            let entry = |ui: &mut Ui, label: &str, tip: &str| {
+                let clicked = ui.button(label).on_hover_text(tip).clicked();
+                if clicked {
+                    ui.close();
+                }
+                clicked
+            };
+            if entry(
+                ui,
+                "✦ Particles",
+                "Sparks, glows, smoke: many small quads born and dying (an emitter)",
+            ) {
+                wanted = Some(("emitters", None));
+            }
+            if entry(ui, "≈ Trail", "A ribbon left behind by a moving bone") {
+                wanted = Some(("ribbons", None));
+            }
+            ui.menu_button("◯ Shape", |ui| {
+                for (label, shape) in SHAPES {
+                    if ui.button(label).clicked() {
+                        wanted = Some(("meshes", Some(shape)));
+                        ui.close();
+                    }
+                }
+            });
+            if entry(
+                ui,
+                "▦ Texture",
+                "An image the parts use, drawn here (glow, ring, smoke...)",
+            ) {
+                wanted = Some(("textures", None));
+            }
+            if entry(
+                ui,
+                "┼ Bone",
+                "A point that moves (spins, orbits, bobs) and carries other parts",
+            ) {
+                wanted = Some(("bones", None));
+            }
+            if entry(ui, "☀ Light", "A point light on a bone") {
+                wanted = Some(("lights", None));
+            }
+        })
+        .response
+        .on_hover_text("Adds a part to the effect");
+        if let Some((key, shape)) = wanted {
+            change = add(root, key, shape);
+        }
+        let removable = *selected != Node::Effect;
+        if ui
+            .add_enabled(removable, egui::Button::new("Copy"))
+            .on_hover_text("A copy of the part chosen")
+            .clicked()
+        {
+            change = copy(root, selected);
+        }
+        if ui
+            .add_enabled(removable, egui::Button::new("Remove"))
+            .on_hover_text("Takes the part chosen away (Ctrl+Z brings it back)")
+            .clicked()
+        {
+            change = remove(root, selected);
+        }
+    });
     let item = |ui: &mut Ui, node: Node, selected: &mut Node| {
-        let text = RichText::new(label_of(root, &node));
+        let text = RichText::new(format!("{} {}", icon(&node), label_of(root, &node)));
         let text = if doc.node_changed(&node) {
             text.background_color(state_colour::highlight())
         } else {
@@ -79,33 +173,40 @@ pub fn tree(ui: &mut Ui, doc: &Doc, selected: &mut Node) -> Option<Change> {
     item(ui, Node::Effect, selected);
     let groups: [(&str, &str, Vec<Node>); 6] = [
         (
-            "Textures",
-            "textures",
-            names(root, "textures").into_iter().map(Node::Texture).collect(),
-        ),
-        (
-            "Bones",
-            "bones",
-            names(root, "bones").into_iter().map(Node::Bone).collect(),
-        ),
-        (
-            "Emitters",
+            "✦ Particles",
             "emitters",
             (0..count(root, "emitters")).map(Node::Emitter).collect(),
         ),
         (
-            "Ribbons",
+            "≈ Trails",
             "ribbons",
             (0..count(root, "ribbons")).map(Node::Ribbon).collect(),
         ),
-        ("Meshes", "meshes", (0..count(root, "meshes")).map(Node::Mesh).collect()),
         (
-            "Lights",
+            "◯ Shapes",
+            "meshes",
+            (0..count(root, "meshes")).map(Node::Mesh).collect(),
+        ),
+        (
+            "▦ Textures",
+            "textures",
+            names(root, "textures").into_iter().map(Node::Texture).collect(),
+        ),
+        (
+            "┼ Bones",
+            "bones",
+            names(root, "bones").into_iter().map(Node::Bone).collect(),
+        ),
+        (
+            "☀ Lights",
             "lights",
             (0..count(root, "lights")).map(Node::Light).collect(),
         ),
     ];
     for (title, key, nodes) in groups {
+        if nodes.is_empty() {
+            continue;
+        }
         egui::CollapsingHeader::new(format!("{title} ({})", nodes.len()))
             .id_salt(("effects tree", key))
             .default_open(nodes.len() <= 12)
@@ -113,27 +214,10 @@ pub fn tree(ui: &mut Ui, doc: &Doc, selected: &mut Node) -> Option<Change> {
                 for node in nodes {
                     item(ui, node, selected);
                 }
-                if ui
-                    .small_button("+")
-                    .on_hover_text(format!("Adds one to the {key}"))
-                    .clicked()
-                {
-                    change = add(root, key);
-                }
             });
     }
-    ui.horizontal(|ui| {
-        let removable = *selected != Node::Effect;
-        if ui.add_enabled(removable, egui::Button::new("Copy")).clicked() {
-            change = copy(root, selected);
-        }
-        if ui.add_enabled(removable, egui::Button::new("Remove")).clicked() {
-            change = remove(root, selected);
-        }
-    });
     change
 }
-
 fn first_texture(root: &Value) -> Value {
     names(root, "textures")
         .first()
@@ -148,7 +232,7 @@ fn fresh_name(root: &Value, map: &str, stem: &str) -> String {
         .expect("a free name")
 }
 
-fn add(root: &Value, key: &str) -> Option<Change> {
+fn add(root: &Value, key: &str, shape: Option<&str>) -> Option<Change> {
     let mut value = root.clone();
     let parse = |text: &str| json::parse(text).expect("a part written here");
 
@@ -174,7 +258,11 @@ fn add(root: &Value, key: &str) -> Option<Change> {
             let mut part = match key {
                 "emitters" => parse(r#"{"rate": 20, "life": 1.0}"#),
                 "ribbons" => parse(r#"{"edges": 30, "life": 0.5}"#),
-                "meshes" => parse(r#"{"shape": "plane"}"#),
+                "meshes" => {
+                    let mut part = parse(r#"{"shape": "plane"}"#);
+                    part.set("shape", Value::from(shape.unwrap_or("plane")));
+                    part
+                }
                 _ => parse(r##"{"color": "#ffffff"}"##),
             };
             if key != "lights" {
@@ -748,7 +836,7 @@ mod tests {
     fn parts_are_added_copied_and_removed() {
         let root = json::parse(r#"{"name": "a", "textures": {"g": {"kind": "glow"}}, "emitters": [{"texture": "g"}]}"#)
             .unwrap();
-        let added = add(&root, "emitters").unwrap();
+        let added = add(&root, "emitters", None).unwrap();
         assert_eq!(added.select, Some(Node::Emitter(1)));
         assert_eq!(
             Node::Emitter(1).get(&added.value).unwrap().get("texture"),

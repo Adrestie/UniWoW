@@ -246,6 +246,9 @@ fn segment_bar(timeline: &mut TimelineModule, ui: &mut egui::Ui) {
     let (time, _, _) = timeline.objects.playback();
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), egui::Sense::click_and_drag());
+    let response = response.on_hover_text(
+        "The phases of what is shown (an effect: born once, held while its aura lasts, ended once): click to go there",
+    );
     let painter = ui.painter_at(rect);
     let x = |frame: f64| rect.left() + rect.width() * (frame / f64::from(length)) as f32;
     let colours = [

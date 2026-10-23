@@ -28,8 +28,8 @@ use uniwow_api::vfx::frame::Ground;
 use uniwow_api::vfx::m2::{Model, Skin};
 use uniwow_api::vfx::texgen::Image;
 use uniwow_api::{
-    Context, DockArea, JobId, JobOutcome, Module, PropertyKind, PropertyValue, Registrar, egui, log, models, scene,
-    vfs, viewport, wgpu,
+    Arrangement, Context, DockArea, JobId, JobOutcome, Module, PropertyKind, PropertyValue, Registrar, egui, log,
+    models, scene, vfs, viewport, wgpu,
 };
 
 use doc::{Doc, Edit, Node};
@@ -144,6 +144,36 @@ pub const ATTACHMENTS: [(&str, u32); 5] = [
     ("right_hand", 22),
 ];
 
+/// WoW-mods' examples of effects.
+const EXAMPLES: &str = r"E:\WoW-mods\tools\vfx\examples";
+/// A new effect: a glow rising from the ground.
+const NEW_EFFECT: &str = r##"{
+ "name": "vfx_new",
+ "duration": 2000,
+ "radius": 3,
+ "textures": {
+  "glow": {
+   "kind": "glow"
+  }
+ },
+ "emitters": [
+  {
+   "texture": "glow",
+   "shape": "plane",
+   "area": [
+    1,
+    1
+   ],
+   "rate": 20,
+   "life": 1.2,
+   "speed": 1.5,
+   "spread": 10,
+   "colors": "#80c0ff",
+   "size": 0.4
+  }
+ ]
+}"##;
+
 /// The reference character.
 const CHARACTER: &str = "Character\\Human\\Male\\HumanMale.m2";
 const CHARACTER_SKIN: &str = "Character\\Human\\Male\\HumanMaleSkin00_00.blp";
@@ -161,8 +191,6 @@ pub struct EffectsModule {
     drawn: bool,
     version: u64,
     error: Option<String>,
-    /// A model of the client to open, as typed.
-    client_path: String,
     /// The character's place, and its attachment points from it (by id).
     origin: Vec3,
     placed: bool,
@@ -186,6 +214,12 @@ pub struct EffectsModule {
     target: Option<uniwow_api::viewport::Target>,
     /// A drag of the gizmo going on: one entry of the history.
     gizmo_gesture: Option<Gesture>,
+    /// The dock laid out for the effects (`Back to the world` puts it back).
+    arranged: bool,
+    /// A change of the inspector, applied once its panel is drawn.
+    pending: Option<inspector::Change>,
+    /// The Timeline to show the effect's tracks, once presented.
+    focus_timeline: bool,
     /// What the Timeline shows of the effect: the part and the description it was made from.
     presented: Option<(Node, json::Value)>,
     presented_version: u64,
@@ -207,6 +241,17 @@ pub fn module(any: &mut dyn Any) -> &mut EffectsModule {
 impl Module for EffectsModule {
     fn register(&mut self, reg: &mut Registrar) {
         reg.panel("view", "Effect view", DockArea::Right);
+        reg.panel("inspector", "Part", DockArea::Right);
+        reg.menu_item("Effects", "New effect", "new")
+            .menu_item("Effects", "Open an effect…", "open");
+        for (name, path) in Self::examples() {
+            reg.menu_item("Effects", &format!("Example: {name}"), &format!("example:{path}"));
+        }
+        reg.menu_item("Effects", "Show the effects' panels", "focus").menu_item(
+            "Effects",
+            "Back to the world",
+            "world",
+        );
         reg.panel("effects", "Effects", DockArea::Right)
             .command(
                 "effects.open",
@@ -389,109 +434,29 @@ impl Module for EffectsModule {
     }
 
     fn panel_ui(&mut self, panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
-        if panel == "view" {
-            self.view_ui(ui, ctx);
-            return;
-        }
-        if !self.drawn {
-            ui.colored_label(ui.visuals().warn_fg_color, "No 3D view: the effects are not drawn.");
-        }
-        ui.horizontal(|ui| {
-            if ui
-                .button("Open…")
-                .on_hover_text("A description of forge (.json) or a model (.m2) on the disk")
-                .clicked()
-            {
-                self.open(ctx, None);
-            }
-            ui.add(
-                egui::TextEdit::singleline(&mut self.client_path)
-                    .hint_text("Spells\\X.m2")
-                    .desired_width(160.0),
-            );
-            if ui.button("Open from the client").clicked() && !self.client_path.trim().is_empty() {
-                let path = self.client_path.trim().to_owned();
-                self.open(ctx, Some(path));
-            }
-        });
         if self.doc.as_ref().is_some_and(|d| d.stale) {
             self.reforge(ctx, false);
         }
-        if let Some(error) = self.error.clone() {
-            self.message(ui, &error, true);
-        }
-        let (name, notes, alive_text) = {
-            let stage = lock(&self.stage);
-            (
-                stage.effect.as_ref().map(|e| format!("{} ({})", e.name, e.source)),
-                stage.effect.as_ref().map(|e| e.notes.clone()).unwrap_or_default(),
-                format!("{:.2} / {:.2} s", stage.time, stage.length),
-            )
-        };
-        let Some(name) = name else {
-            ui.weak("No effect open.");
-            return;
-        };
-        ui.label(name);
-        for note in notes {
-            self.message(ui, &format!("note: {note}"), false);
-        }
-        ui.separator();
-        {
-            // the time is the Timeline's: its playhead on the effect's tracks
-            let mut stage = lock(&self.stage);
-            ui.horizontal(|ui| {
-                ui.label(alive_text);
-                if !stage.driven {
-                    ui.weak("(the Timeline plays it: choose ⚡ in its list)");
-                }
-                ui.checkbox(&mut stage.show_bones, "Bones");
-            });
-        }
-        ui.separator();
-        ui.horizontal(|ui| {
-            if ui
-                .button("Here")
-                .on_hover_text("Puts the effect and the character where the camera looks")
-                .clicked()
-            {
-                self.origin = camera_target(ctx);
-                self.place_character(ctx);
-            }
-            for (label, view) in [
-                ("Grazing", View::Grazing),
-                ("Top", View::Top),
-                ("Three-quarter", View::Three),
-            ] {
-                if ui.button(label).clicked() {
-                    self.look(ctx, view);
-                }
-            }
-        });
-        ui.horizontal(|ui| {
-            if ui.checkbox(&mut self.character, "Character").changed() {
-                self.place_character(ctx);
-            }
-            let before = self.attach;
-            egui::ComboBox::from_id_salt("effects attach")
-                .selected_text(ATTACHMENTS[self.attach].0)
-                .show_ui(ui, |ui| {
-                    for (index, (name, id)) in ATTACHMENTS.iter().enumerate() {
-                        ui.selectable_value(&mut self.attach, index, format!("{name} ({id})"));
-                    }
-                });
-            if ui.checkbox(&mut self.show_points, "Points").changed() || before != self.attach {
-                self.update_anchor();
-                self.sample_ground(ctx);
-            }
-        });
-        if self.doc.is_some() {
-            ui.separator();
-            self.edit_ui(ui, ctx);
-            self.life_ui(ui, ctx);
+        match panel {
+            "view" => self.view_ui(ui, ctx),
+            "inspector" => self.part_ui(ui, ctx),
+            _ => self.effect_ui(ui, ctx),
         }
     }
 
+    fn on_menu(&mut self, action: &str, ctx: &mut Context) {
+        match action {
+            "new" => self.new_effect(ctx),
+            "open" => self.open(ctx, None),
+            "world" => ctx.restore_arrangement(),
+            "focus" => self.arrange(ctx),
+            other => {
+                if let Some(path) = other.strip_prefix("example:") {
+                    self.open(ctx, Some(path.to_owned()));
+                }
+            }
+        }
+    }
     fn windows_ui(&mut self, _egui: &egui::Context, ctx: &mut Context) {
         self.sync_timeline(ctx);
     }
@@ -686,6 +651,10 @@ impl EffectsModule {
 
     /// The Effect view's panel: its camera's angles, its ground, its character, the view itself.
     fn view_ui(&mut self, ui: &mut egui::Ui, ctx: &mut Context) {
+        if lock(&self.stage).effect.is_none() && self.doc.is_none() {
+            self.welcome(ui, ctx);
+            return;
+        }
         self.load_character(ctx);
         if self.doc.as_ref().is_some_and(|d| d.stale) {
             self.reforge(ctx, false);
@@ -696,7 +665,12 @@ impl EffectsModule {
                 ("Top", view::Angle::Top),
                 ("Three-quarter", view::Angle::Three),
             ] {
-                if ui.button(label).clicked() {
+                let tip = match angle {
+                    view::Angle::Grazing => "From the side, close to the ground: what cuts into the ground shows",
+                    view::Angle::Top => "From above: what is laid on the ground",
+                    view::Angle::Three => "Three-quarter, as a player sees it",
+                };
+                if ui.button(label).on_hover_text(tip).clicked() {
                     self.view.angle(angle);
                 }
             }
@@ -709,13 +683,19 @@ impl EffectsModule {
                 self.view.distance = (radius * 2.6).clamp(4.0, 60.0);
                 self.view.target = Vec3::new(0.0, 0.0, radius * 0.6);
             }
-            ui.checkbox(&mut self.view.ground, "Ground");
+            ui.checkbox(&mut self.view.ground, "Ground")
+                .on_hover_text("A neutral ground with a grid of a yard");
             ui.add(egui::Slider::new(&mut self.view.slope, 0.0..=30.0).text("slope °"))
                 .on_hover_text("The ground rising along X: what is laid on it, what cuts into it");
-            ui.checkbox(&mut self.view.character, "Character");
-            ui.checkbox(&mut self.view.points, "Points");
+            ui.checkbox(&mut self.view.character, "Character")
+                .on_hover_text("The reference character (the client's human male)");
+            ui.checkbox(&mut self.view.points, "Points")
+                .on_hover_text("Its attachment points; the effect stands on the one chosen in the Effect panel");
             let mut background = self.view.background;
-            if egui::color_picker::color_edit_button_rgb(ui, &mut background).changed() {
+            if egui::color_picker::color_edit_button_rgb(ui, &mut background)
+                .on_hover_text("The background")
+                .changed()
+            {
                 self.view.background = background;
             }
         });
@@ -724,16 +704,63 @@ impl EffectsModule {
             return;
         };
         let gizmo = self.gizmo_point();
-        let moved = self.view.show(
+        let parts = self.part_points();
+        let points: Vec<Vec3> = parts.iter().map(|(_, at)| *at).collect();
+        let shown = self.view.show(
             ui,
             (&gpu, &resources, &target),
             &self.stage,
             self.character_view.as_ref(),
             gizmo,
+            &points,
         );
-        if let Some(moved) = moved {
+        if let Some(moved) = shown.moved {
             self.gizmo_moved(ctx, moved);
         }
+        if let Some(k) = shown.picked {
+            self.selected = parts[k].0.clone();
+        }
+    }
+
+    /// Where each part stands in the Effect view (its place, on the attachment point), for a click
+    /// to choose it.
+    fn part_points(&self) -> Vec<(Node, Vec3)> {
+        let Some(doc) = self.doc.as_ref() else {
+            return Vec::new();
+        };
+        let offset = lock(&self.stage).attach_offset;
+        let root = &doc.value;
+        let place = |part: &json::Value| -> Vec3 {
+            match part.get("pos").and_then(json::Value::as_list) {
+                Some([x, y, z]) => Vec3::new(
+                    x.as_f64().unwrap_or(0.0) as f32,
+                    y.as_f64().unwrap_or(0.0) as f32,
+                    z.as_f64().unwrap_or(0.0) as f32,
+                ),
+                _ => Vec3::ZERO,
+            }
+        };
+        let mut out = Vec::new();
+        for (list, make) in [
+            ("emitters", Node::Emitter as fn(usize) -> Node),
+            ("ribbons", Node::Ribbon),
+            ("meshes", Node::Mesh),
+            ("lights", Node::Light),
+        ] {
+            for (i, part) in root
+                .get(list)
+                .and_then(json::Value::as_list)
+                .unwrap_or_default()
+                .iter()
+                .enumerate()
+            {
+                out.push((make(i), place(part) + offset));
+            }
+        }
+        for (name, part) in root.get("bones").and_then(json::Value::as_map).unwrap_or_default() {
+            out.push((Node::Bone(name.clone()), place(part) + offset));
+        }
+        out
     }
 
     /// The part chosen shown in the Timeline: presented again when it or the description changed,
@@ -769,6 +796,9 @@ impl EffectsModule {
             );
             timeline.present(&owner, presented);
             self.presented = Some(current);
+        }
+        if std::mem::take(&mut self.focus_timeline) {
+            timeline.focus(&owner);
         }
         let mut changed = false;
         if let Some((version, edited)) = timeline.take_edit(&owner)
@@ -874,8 +904,17 @@ impl EffectsModule {
                     )
                 })
                 .inner;
-            if output.change != uniwow_api::curve::CurveChange::None {
-                let curves: Vec<_> = shown.into_iter().map(|s| s.curve).collect();
+            let before = link::life_curves(&value, colour);
+            let curves: Vec<_> = shown.into_iter().map(|s| s.curve).collect();
+            // written only when a key really moved, appeared or went
+            let moved = curves.iter().zip(&before).any(|(a, b)| {
+                a.keys.len() != b.keys.len()
+                    || a.keys
+                        .iter()
+                        .zip(&b.keys)
+                        .any(|(x, y)| (x.time - y.time).abs() > 1e-6 || (x.value - y.value).abs() > 1e-6)
+            });
+            if output.change != uniwow_api::curve::CurveChange::None && moved {
                 match link::life_value(&curves, colour) {
                     Some(new) if Some(&new) != part.get(key) => after = Some((key, new)),
                     Some(_) => {}
@@ -940,6 +979,14 @@ impl EffectsModule {
             }
         }
         if first {
+            // the effects' panels laid out, the view framing the effect, the Timeline on it
+            if !self.arranged {
+                self.arrange(ctx);
+            }
+            if let Some(effect) = lock(&self.stage).effect.clone() {
+                self.view.frame(view::radius_of(&effect.model));
+            }
+            self.focus_timeline = true;
             if !self.placed {
                 self.origin = camera_target(ctx);
             }
@@ -979,55 +1026,237 @@ impl EffectsModule {
         }));
     }
 
-    /// The description's editor: saving, the tree of its parts, the inspector of the one chosen.
-    fn edit_ui(&mut self, ui: &mut egui::Ui, ctx: &mut Context) {
-        let Some(doc) = self.doc.as_ref() else {
+    /// The examples of WoW-mods' tools, by name and path.
+    fn examples() -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = std::fs::read_dir(EXAMPLES)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                    .filter(|p| p.file_stem().is_some_and(|s| s != "lab"))
+                    .map(|p| {
+                        (
+                            p.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
+                            p.display().to_string(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort();
+        out
+    }
+
+    /// The layout of the effects: their view in the middle, their tree on the left, the part chosen
+    /// on the right, the Timeline at the bottom; the layout before kept for "Back to the world".
+    fn arrange(&mut self, ctx: &mut Context) {
+        let own = |panel: &str| ("effects".to_owned(), panel.to_owned());
+        ctx.arrange(Arrangement {
+            center: vec![own("view")],
+            left: vec![own("effects")],
+            right: vec![own("inspector")],
+            bottom: vec![("timeline".to_owned(), "timeline".to_owned())],
+        });
+        self.arranged = true;
+    }
+
+    /// A new effect: a glow rising, to start from; not saved until asked.
+    fn new_effect(&mut self, ctx: &mut Context) {
+        let value = json::parse(NEW_EFFECT).expect("written here");
+        self.doc = Some(Doc::new(
+            None,
+            value,
+            json::Layout {
+                crlf: true,
+                final_newline: true,
+            },
+        ));
+        self.selected = Node::Emitter(0);
+        self.reforge(ctx, true);
+    }
+
+    /// When nothing is open: what to do, in three buttons, and what each panel is for.
+    fn welcome(&mut self, ui: &mut egui::Ui, ctx: &mut Context) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(24.0);
+            ui.heading("Spell effects");
+            ui.label("Particles, trails and shapes, as the 3.3.5a client draws them.");
+            ui.add_space(16.0);
+            let big = |ui: &mut egui::Ui, text: &str| ui.add_sized([260.0, 40.0], egui::Button::new(egui::RichText::new(text).size(16.0)));
+            if big(ui, "✚  New effect").on_hover_text("Starts from a glow rising").clicked() {
+                self.new_effect(ctx);
+            }
+            ui.add_space(6.0);
+            let examples = Self::examples();
+            ui.menu_button(egui::RichText::new("★  Open an example").size(16.0), |ui| {
+                if examples.is_empty() {
+                    ui.weak("No example found in WoW-mods\\tools\\vfx\\examples");
+                }
+                for (name, path) in &examples {
+                    if ui.button(name).clicked() {
+                        self.open(ctx, Some(path.clone()));
+                        ui.close();
+                    }
+                }
+            });
+            ui.add_space(6.0);
+            if big(ui, "📂  Open a file…").on_hover_text("An effect's description (.json) or a model (.m2)").clicked() {
+                self.open(ctx, None);
+            }
+            ui.add_space(20.0);
+            ui.weak("Effect view: the effect in 3D, played. Effect (left): its parts. Part (right): the settings of the part chosen.");
+            ui.weak("Timeline (bottom): its time, its phases and the keys of the part chosen. Menu Effects: the same, from anywhere.");
+        });
+    }
+
+    /// The Effect panel: the file, the parts in a tree, forge's notes; the effect in the world.
+    fn effect_ui(&mut self, ui: &mut egui::Ui, ctx: &mut Context) {
+        if lock(&self.stage).effect.is_none() && self.doc.is_none() {
+            self.welcome(ui, ctx);
             return;
-        };
+        }
+        if let Some(error) = self.error.clone() {
+            self.message(ui, &error, true);
+        }
         let mut save_as = false;
         let mut save = false;
-        ui.horizontal(|ui| {
-            let name = doc
-                .path
+        let mut world = false;
+        if let Some(doc) = self.doc.as_ref() {
+            ui.horizontal_wrapped(|ui| {
+                let name = doc
+                    .path
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "new effect".into());
+                if doc.unsaved() {
+                    ui.label(
+                        egui::RichText::new(format!("{name} *"))
+                            .background_color(uniwow_api::scene::state_colour::highlight()),
+                    )
+                    .on_hover_text("Changed since it was saved");
+                } else {
+                    ui.label(name);
+                }
+                save = ui
+                    .add_enabled(doc.unsaved(), egui::Button::new("Save"))
+                    .on_hover_text("Writes the description (.json)")
+                    .clicked();
+                save_as = ui
+                    .button("Save as…")
+                    .on_hover_text("Writes it under another name")
+                    .clicked();
+                world = self.arranged
+                    && ui
+                        .button("⟲ Back to the world")
+                        .on_hover_text("Puts the editor's panels back as they were")
+                        .clicked();
+            });
+        } else {
+            let name = lock(&self.stage)
+                .effect
                 .as_ref()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "new".into());
-            if doc.unsaved() {
-                ui.label(
-                    egui::RichText::new(format!("{name} *"))
-                        .background_color(uniwow_api::scene::state_colour::highlight()),
-                )
-                .on_hover_text("Changed since it was saved");
-            } else {
-                ui.label(name);
-            }
-            save = ui.add_enabled(doc.unsaved(), egui::Button::new("Save")).clicked();
-            save_as = ui.button("Save as…").clicked();
-        });
+                .map(|e| e.name.clone())
+                .unwrap_or_default();
+            ui.label(format!("{name} (a model: seen, not edited)"));
+        }
         if save || save_as {
-            let path = if save_as { None } else { doc.path.clone() };
+            let path = if save_as {
+                None
+            } else {
+                self.doc.as_ref().and_then(|d| d.path.clone())
+            };
             if let Err(error) = self.save(path) {
                 self.error = Some(error);
             }
         }
-        let doc = self.doc.as_ref().expect("still there");
-        let mut change = None;
-        ui.columns(2, |columns| {
+        if world {
+            ctx.restore_arrangement();
+            self.arranged = false;
+        }
+        let notes = lock(&self.stage)
+            .effect
+            .as_ref()
+            .map(|e| e.notes.clone())
+            .unwrap_or_default();
+        for note in notes {
+            self.message(ui, &format!("note: {note}"), false);
+        }
+        ui.separator();
+        if let Some(doc) = self.doc.as_ref() {
+            let mut change = None;
             egui::ScrollArea::vertical()
                 .id_salt("effects tree")
-                .max_height(420.0)
-                .show(&mut columns[0], |ui| {
+                .max_height(ui.available_height() - 90.0)
+                .show(ui, |ui| {
                     change = inspector::tree(ui, doc, &mut self.selected);
                 });
-            egui::ScrollArea::vertical()
-                .id_salt("effects inspector")
-                .max_height(420.0)
-                .show(&mut columns[1], |ui| {
-                    if let Some(c) = inspector::inspector(ui, &mut self.inspector, doc, &self.selected) {
-                        change = Some(c);
+            if let Some(change) = change {
+                self.apply_change(ctx, change);
+            }
+        }
+        ui.separator();
+        egui::CollapsingHeader::new("In the world's 3D view")
+            .id_salt("effects world")
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .button("Here")
+                        .on_hover_text("Puts the effect and the character where the 3D view's camera looks")
+                        .clicked()
+                    {
+                        self.origin = camera_target(ctx);
+                        self.place_character(ctx);
+                    }
+                    for (label, view) in [
+                        ("Grazing", View::Grazing),
+                        ("Top", View::Top),
+                        ("Three-quarter", View::Three),
+                    ] {
+                        if ui
+                            .button(label)
+                            .on_hover_text("Moves the 3D view's camera about the effect")
+                            .clicked()
+                        {
+                            self.look(ctx, view);
+                        }
                     }
                 });
+                ui.horizontal_wrapped(|ui| {
+                    if ui.checkbox(&mut self.character, "Character").changed() {
+                        self.place_character(ctx);
+                    }
+                    let before = self.attach;
+                    egui::ComboBox::from_id_salt("effects attach")
+                        .selected_text(ATTACHMENTS[self.attach].0)
+                        .show_ui(ui, |ui| {
+                            for (index, (name, id)) in ATTACHMENTS.iter().enumerate() {
+                                ui.selectable_value(&mut self.attach, index, format!("{name} ({id})"));
+                            }
+                        })
+                        .response
+                        .on_hover_text("The attachment point the effect is put on");
+                    if ui.checkbox(&mut self.show_points, "Points").changed() || before != self.attach {
+                        self.update_anchor();
+                        self.sample_ground(ctx);
+                    }
+                    ui.checkbox(&mut lock(&self.stage).show_bones, "Bones");
+                });
+            });
+    }
+
+    /// The Part panel: the settings of the part chosen in the tree, and a particle's life.
+    fn part_ui(&mut self, ui: &mut egui::Ui, ctx: &mut Context) {
+        if self.doc.is_none() {
+            ui.weak("Open or create an effect (menu Effects): the settings of the part chosen in its tree show here.");
+            return;
+        }
+        egui::ScrollArea::vertical().id_salt("effects part").show(ui, |ui| {
+            if let Some(doc) = self.doc.as_ref() {
+                self.pending = inspector::inspector(ui, &mut self.inspector, doc, &self.selected);
+            }
+            self.life_ui(ui, ctx);
         });
         // a drag makes one entry of the history, however many frames it lasts
         let dragging = std::mem::take(&mut self.inspector.dragging);
@@ -1044,19 +1273,26 @@ impl EffectsModule {
             }
             (false, None) => {}
         }
-        if let Some(change) = change {
-            let before = doc.value.clone();
-            if let Some(select) = change.select {
-                self.selected = select;
-            }
-            ctx.execute(Edit {
-                label: change.label,
-                before,
-                after: change.value,
-            });
+        if let Some(change) = self.pending.take() {
+            self.apply_change(ctx, change);
         }
     }
 
+    /// A change of the description, one entry of the history.
+    fn apply_change(&mut self, ctx: &mut Context, change: inspector::Change) {
+        let Some(doc) = self.doc.as_ref() else {
+            return;
+        };
+        let before = doc.value.clone();
+        if let Some(select) = change.select {
+            self.selected = select;
+        }
+        ctx.execute(Edit {
+            label: change.label,
+            before,
+            after: change.value,
+        });
+    }
     /// Saves the description to `path`, or to a file chosen.
     fn save(&mut self, path: Option<PathBuf>) -> Result<(), String> {
         let Some(doc) = self.doc.as_mut() else {

@@ -83,6 +83,8 @@ pub struct Shell {
     host: KernelHost,
     slots: Vec<Slot>,
     dock: DockState<Tab>,
+    /// The layout before a module arranged the dock for a task, to put back.
+    kept_dock: Option<DockState<Tab>>,
     history: History,
     runtime_fingerprint: Option<String>,
     modules_dir: PathBuf,
@@ -192,6 +194,7 @@ impl Shell {
             host,
             slots,
             dock: DockState::new(Vec::new()),
+            kept_dock: None,
             history: History::default(),
             runtime_fingerprint,
             modules_dir,

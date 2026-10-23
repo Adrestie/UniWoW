@@ -28,6 +28,8 @@ pub struct Externals {
     pub gone: Vec<Handle>,
     /// The modules that presented for the first time, to show.
     pub fresh: Vec<String>,
+    /// The module whose tracks to show, whatever is shown.
+    pub focus: Option<String>,
 }
 
 pub fn lock(externals: &Mutex<Externals>) -> MutexGuard<'_, Externals> {
@@ -68,6 +70,10 @@ impl Timeline for Service {
 
     fn playhead(&self, owner: &str) -> Option<Playhead> {
         lock(&self.0).shown.get(owner).and_then(|shown| shown.playhead)
+    }
+
+    fn focus(&self, owner: &str) {
+        lock(&self.0).focus = Some(owner.to_owned());
     }
 
     fn take_edit(&self, owner: &str) -> Option<(u64, Sequence)> {

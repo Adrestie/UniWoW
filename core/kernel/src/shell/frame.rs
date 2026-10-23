@@ -277,6 +277,32 @@ impl Shell {
                 let _ = self.dock.set_active_tab(path);
             }
         }
+        // The layout a module asked for (its task's), or the one kept put back.
+        if let Some(arranged) = std::mem::take(&mut self.host.arranged).pop() {
+            match arranged {
+                Some(arrangement) => {
+                    let dock = crate::layout::arranged(&arrangement);
+                    if dock.main_surface().num_tabs() > 0 {
+                        for (module, panel) in arrangement
+                            .center
+                            .iter()
+                            .chain(&arrangement.left)
+                            .chain(&arrangement.right)
+                            .chain(&arrangement.bottom)
+                        {
+                            self.host.settings.closed_panels.remove(&Tab::new(module, panel).key());
+                        }
+                        let before = std::mem::replace(&mut self.dock, dock);
+                        self.kept_dock.get_or_insert(before);
+                    }
+                }
+                None => {
+                    if let Some(kept) = self.kept_dock.take() {
+                        self.dock = kept;
+                    }
+                }
+            }
+        }
         self.hotkey_window(&ctx);
         self.settings_window(&ctx);
         // A modal window takes the keyboard from the editor: one the kernel draws, from the frame it
