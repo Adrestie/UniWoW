@@ -26,6 +26,7 @@
 #include <boost/asio/read.hpp>
 #include <boost/asio/write.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <ctime>
@@ -50,6 +51,7 @@ namespace UniwowBridge
         constexpr uint16 MAX_MOVES = 64;
         constexpr uint16 MAX_SETS = 256;
         constexpr uint16 MAX_POINTS = 1000;
+        constexpr uint16 MAX_MEMBERS = 256;
         // How long a creature held waits for its editor before it is given its movement back.
         constexpr auto FORGOTTEN = std::chrono::seconds(5);
         // How long a connection may say nothing, and a request wait for the world.
@@ -411,6 +413,18 @@ namespace UniwowBridge
                             }
                             else if (read && set.what == Set::WALKER)
                                 read = reader.U64(set.id) && reader.U8(set.movement) && reader.U32(set.path);
+                            else if (read && set.what == Set::GROUP)
+                            {
+                                uint16 members = 0;
+                                read = reader.U64(set.id) && reader.U16(members) && members <= MAX_MEMBERS;
+                                for (uint16 at = 0; at < members && read; ++at)
+                                {
+                                    GroupMember member{};
+                                    read = reader.U64(member.guid) && reader.F32(member.distance)
+                                        && reader.F32(member.angle) && reader.U16(member.ai);
+                                    set.members.push_back(member);
+                                }
+                            }
                             else
                                 read = false;
                             request->sets.push_back(std::move(set));
@@ -723,6 +737,8 @@ namespace UniwowBridge
                 return SetPath(uint32(set.id), set.points);
             case Set::WALKER:
                 return SetWalker(set.id, set.movement, set.path);
+            case Set::GROUP:
+                return SetGroup(set.id, set.members);
         }
         return { false, "an unknown set" };
     }
@@ -816,6 +832,70 @@ namespace UniwowBridge
         }
         _held[move.guid] = { move.map, move.instance, std::chrono::steady_clock::now() };
         return { true, Acore::StringFormat("{} held", creature->GetName()) };
+    }
+
+    // The group led by `leader` set in the server's memory as `members` (the leader among them), none
+    // breaking it: each member taken out of the group it was in, the group's rows of the formations
+    // replaced, the creatures running of them put in it, following their leader as it walks. The
+    // formations loaded from the database (`Action::Formations`) do not put in their groups the
+    // creatures running: done here.
+    Outcome Bridge::SetGroup(uint64 leader, std::vector<GroupMember> const& members)
+    {
+        ObjectGuid::LowType const leaderId = ObjectGuid::LowType(leader);
+        CreatureData const* leaderData = sObjectMgr->GetCreatureData(leaderId);
+        if (!leaderData)
+            return { false, Acore::StringFormat("the server knows no creature {}", leaderId) };
+        auto& map = sFormationMgr->CreatureGroupMap;
+        auto& groups = sFormationMgr->CreatureGroupMembers;
+        // Those leaving: the members of its group before, and the new ones from theirs.
+        std::vector<ObjectGuid::LowType> leaving = groups[leaderId];
+        for (GroupMember const& member : members)
+            leaving.push_back(ObjectGuid::LowType(member.guid));
+        for (ObjectGuid::LowType guid : leaving)
+        {
+            if (CreatureData const* data = sObjectMgr->GetCreatureData(guid))
+                for (Creature* creature : RunningOf(guid, data->mapid))
+                    if (CreatureGroup* group = creature->GetFormation())
+                        sFormationMgr->RemoveCreatureFromGroup(group, creature);
+            auto info = map.find(guid);
+            if (info == map.end())
+                continue;
+            auto& before = groups[info->second.leaderGUID];
+            before.erase(std::remove(before.begin(), before.end(), guid), before.end());
+            map.erase(info);
+        }
+        groups.erase(leaderId);
+        if (members.empty())
+            return { true, Acore::StringFormat("the group of {} broken in memory", leaderId) };
+        for (GroupMember const& member : members)
+        {
+            ObjectGuid::LowType const guid = ObjectGuid::LowType(member.guid);
+            if (!sObjectMgr->GetCreatureData(guid))
+                continue;
+            FormationInfo info;
+            info.leaderGUID = leaderId;
+            info.groupAI = member.ai;
+            if (guid != leaderId)
+            {
+                info.follow_dist = member.distance;
+                info.follow_angle = member.angle * (static_cast<float>(M_PI) / 180);
+            }
+            map[guid] = info;
+            groups[leaderId].push_back(guid);
+        }
+        // The leader put in first, its members after: they follow it as it walks.
+        uint32 running = 0;
+        std::vector<ObjectGuid::LowType> order = groups[leaderId];
+        std::stable_partition(order.begin(), order.end(), [&](ObjectGuid::LowType guid) { return guid == leaderId; });
+        for (ObjectGuid::LowType guid : order)
+            if (CreatureData const* data = sObjectMgr->GetCreatureData(guid))
+                for (Creature* creature : RunningOf(guid, data->mapid))
+                {
+                    sFormationMgr->AddCreatureToGroup(leaderId, creature);
+                    ++running;
+                }
+        return { true, Acore::StringFormat("the group of {} set in memory, {} members, {} running", leaderId,
+            members.size(), running) };
     }
 
     // The creatures held that their editor has not moved for `FORGOTTEN` given their movement back:

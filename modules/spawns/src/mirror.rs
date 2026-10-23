@@ -14,7 +14,7 @@ use uniwow_api::{Context, egui};
 
 use crate::SpawnsModule;
 use crate::data::Changes;
-use crate::patrols::{Patrols, Point, Walker};
+use crate::patrols::{Member, Patrols, Point, Walker};
 
 /// What the server holds in its memory that its database does not: the spawn points of creatures
 /// (a place and an orientation), the points of paths, the movements of creatures.
@@ -23,11 +23,16 @@ pub struct Held {
     pub homes: BTreeMap<u64, ([f32; 3], f32)>,
     pub paths: BTreeMap<u32, Vec<Point>>,
     pub walkers: BTreeMap<u64, Walker>,
+    /// The groups by leader: their members and behaviour, none for a group broken.
+    pub groups: BTreeMap<u64, Option<Group>>,
 }
+
+/// A group: its members, its leader left out, and its behaviour.
+pub type Group = (Vec<Member>, u16);
 
 impl Held {
     pub fn is_empty(&self) -> bool {
-        self.homes.is_empty() && self.paths.is_empty() && self.walkers.is_empty()
+        self.homes.is_empty() && self.paths.is_empty() && self.walkers.is_empty() && self.groups.is_empty()
     }
 }
 
@@ -62,7 +67,27 @@ pub fn wanted(changes: &Changes, base: &Patrols) -> Held {
             })
             .map(|(guid, walker)| (*guid, *walker))
             .collect(),
+        groups: changes
+            .patrols
+            .groups
+            .iter()
+            .filter(|(leader, group)| base.groups.get(leader) != group.as_ref())
+            .map(|(leader, group)| (*leader, group.clone()))
+            .collect(),
     }
+}
+
+/// The group of `leader` as the bridge sets it: its members, the leader first, none breaking it.
+fn group_json(leader: u64, group: Option<&Group>) -> Value {
+    let members: Vec<Value> = group
+        .into_iter()
+        .flat_map(|(members, ai)| {
+            std::iter::once(json!({ "guid": leader, "distance": 0.0, "angle": 0.0, "ai": ai })).chain(members.iter().map(
+                move |member| json!({ "guid": member.guid, "distance": member.distance, "angle": member.angle, "ai": ai }),
+            ))
+        })
+        .collect();
+    json!({ "group": leader, "members": members })
 }
 
 fn point_json(point: &Point) -> Value {
@@ -106,6 +131,15 @@ pub fn sent(before: &Held, now: &Held, base: &Patrols) -> (Vec<Value>, Vec<Reloa
     for guid in before.walkers.keys().filter(|guid| !now.walkers.contains_key(guid)) {
         let walker = base.walkers.get(guid).copied().unwrap_or_default();
         sets.push(json!({ "walker": guid, "movement": walker.movement, "path": walker.path }));
+    }
+    // The groups after the movements: their members stand, following.
+    for (leader, group) in &now.groups {
+        if before.groups.get(leader) != Some(group) {
+            sets.push(group_json(*leader, group.as_ref()));
+        }
+    }
+    for leader in before.groups.keys().filter(|leader| !now.groups.contains_key(leader)) {
+        sets.push(group_json(*leader, base.groups.get(leader)));
     }
     (sets, reloads)
 }
@@ -200,6 +234,29 @@ mod tests {
             sent(&now, &now, &base),
             (Vec::new(), Vec::new()),
             "nothing changed, nothing sent"
+        );
+
+        // A group made: its leader first among its members; broken back to the database's, none.
+        let member = crate::patrols::Member {
+            guid: 81,
+            distance: 3.0,
+            angle: 180.0,
+        };
+        changes.patrols.groups.insert(80, Some((vec![member], 0x203)));
+        let grouped = wanted(&changes, &base);
+        let (sets, _) = sent(&now, &grouped, &base);
+        assert_eq!(
+            sets,
+            [json!({ "group": 80, "members": [
+                { "guid": 80, "distance": 0.0, "angle": 0.0, "ai": 0x203 },
+                { "guid": 81, "distance": 3.0, "angle": 180.0, "ai": 0x203 },
+            ] })]
+        );
+        let (sets, _) = sent(&grouped, &now, &base);
+        assert_eq!(
+            sets,
+            [json!({ "group": 80, "members": [] })],
+            "no group in the database"
         );
     }
 }

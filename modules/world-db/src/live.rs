@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::world_db::Reload;
 
-use crate::bridge::{Move, Moving, PathPoint, Set};
+use crate::bridge::{GroupMember, Move, Moving, PathPoint, Set};
 use crate::lock;
 
 /// How often the moves go to the bridge at most, how long its connection is kept without any, and
@@ -124,6 +124,22 @@ pub fn set_of(value: &Value) -> Result<Set, String> {
             .collect::<Result<_, String>>()?;
         return Ok(Set::Path { path, points });
     }
+    if let Some(leader) = value["group"].as_u64() {
+        let members = value["members"]
+            .as_array()
+            .ok_or("a group is its members")?
+            .iter()
+            .map(|member| {
+                Ok(GroupMember {
+                    guid: member["guid"].as_u64().ok_or("a member is a guid")?,
+                    distance: member["distance"].as_f64().unwrap_or(0.0) as f32,
+                    angle: member["angle"].as_f64().unwrap_or(0.0) as f32,
+                    ai: member["ai"].as_u64().and_then(|ai| u16::try_from(ai).ok()).unwrap_or(0),
+                })
+            })
+            .collect::<Result<_, String>>()?;
+        return Ok(Set::Group { leader, members });
+    }
     if let Some(spawn) = value["walker"].as_u64() {
         return Ok(Set::Walker {
             spawn,
@@ -131,7 +147,7 @@ pub fn set_of(value: &Value) -> Result<Set, String> {
             path: number(value, "path").unwrap_or(0),
         });
     }
-    Err("a change is a home, a path or a walker".to_owned())
+    Err("a change is a home, a path, a walker or a group".to_owned())
 }
 
 /// What the command `world-db.set_live` queues: its changes to set, what the server loads again from

@@ -79,9 +79,19 @@ namespace UniwowBridge
         bool run;
     };
 
+    // A member of a group set in memory: its guid, how far and at what angle (degrees) behind its
+    // leader, the behaviour of the group (`GroupAIFlags`).
+    struct GroupMember
+    {
+        uint64 guid;
+        float distance;
+        float angle;
+        uint16 ai;
+    };
+
     // What the editor changed and has not applied to the database yet, set in the server's memory
     // alone, seen in the game at once, lost when the server starts again: a creature's spawn point,
-    // the points of a path, the movement and path of a creature.
+    // the points of a path, the movement and path of a creature, a group.
     struct Set
     {
         enum : uint8
@@ -89,6 +99,7 @@ namespace UniwowBridge
             HOME = 1,
             PATH = 2,
             WALKER = 3,
+            GROUP = 4,
         };
 
         uint8 what;
@@ -100,6 +111,7 @@ namespace UniwowBridge
         std::vector<PathPoint> points;
         uint8 movement;
         uint32 path;
+        std::vector<GroupMember> members;
     };
 
     // What a demand made: whether it was, and what the server says of it.
@@ -144,6 +156,7 @@ namespace UniwowBridge
         Outcome PlaceHome(uint64 spawnId, float x, float y, float z, float orientation);
         Outcome SetPath(uint32 pathId, std::vector<PathPoint> const& points);
         Outcome SetWalker(uint64 spawnId, uint8 movement, uint32 pathId);
+        Outcome SetGroup(uint64 leader, std::vector<GroupMember> const& members);
         // The creatures held whose editor said nothing for a while given their movement back.
         void LetGoForgotten();
 

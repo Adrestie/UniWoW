@@ -1119,6 +1119,28 @@ impl SpawnsModule {
                     after.patrols.groups.insert(leader, Some((held, ai)));
                     self.change("Place the members of a group".to_owned(), after, ctx);
                 }
+                // How the group behaves (creature_formations.groupAI), each flag ticked by name.
+                let mut ticked = ai;
+                egui::Grid::new("spawns group ai").num_columns(2).show(ui, |ui| {
+                    for (at, (bit, name, hint)) in patrols::GROUP_FLAGS.iter().enumerate() {
+                        let mut on = ticked & bit != 0;
+                        if ui
+                            .checkbox(&mut on, *name)
+                            .on_hover_text(format!("{hint} (groupAI {bit:#05x})"))
+                            .changed()
+                        {
+                            ticked = if on { ticked | bit } else { ticked & !bit };
+                        }
+                        if at % 2 == 1 {
+                            ui.end_row();
+                        }
+                    }
+                });
+                if ticked != ai {
+                    let mut after = self.changes.clone();
+                    after.patrols.groups.insert(leader, Some((members.clone(), ticked)));
+                    self.change("Set how a group behaves".to_owned(), after, ctx);
+                }
                 ui.horizontal(|ui| {
                     if ui
                         .button("Lay them out behind")

@@ -332,6 +332,18 @@ pub enum Set {
     Path { path: u32, points: Vec<PathPoint> },
     /// The movement (`MovementType`) and path of the creature of this guid.
     Walker { spawn: u64, movement: u8, path: u32 },
+    /// The group led by the creature of this guid: its members (the leader among them), each how far
+    /// and at what angle (degrees) behind it, the behaviour of the group; none breaking it.
+    Group { leader: u64, members: Vec<GroupMember> },
+}
+
+/// A member of a group set in memory.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GroupMember {
+    pub guid: u64,
+    pub distance: f32,
+    pub angle: f32,
+    pub ai: u16,
 }
 
 /// A point of a path set in memory: where it is, the way it faces there, how long the creature waits
@@ -379,6 +391,18 @@ impl Set {
                 out.extend_from_slice(&spawn.to_le_bytes());
                 out.push(*movement);
                 out.extend_from_slice(&path.to_le_bytes());
+            }
+            Set::Group { leader, members } => {
+                out.push(4);
+                out.extend_from_slice(&leader.to_le_bytes());
+                let members = &members[..members.len().min(256)];
+                out.extend_from_slice(&(members.len() as u16).to_le_bytes());
+                for member in members {
+                    out.extend_from_slice(&member.guid.to_le_bytes());
+                    out.extend_from_slice(&member.distance.to_le_bytes());
+                    out.extend_from_slice(&member.angle.to_le_bytes());
+                    out.extend_from_slice(&member.ai.to_le_bytes());
+                }
             }
         }
         out

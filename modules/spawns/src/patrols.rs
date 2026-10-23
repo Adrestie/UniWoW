@@ -38,6 +38,42 @@ pub const WANDER_DISTANCE: f32 = 5.0;
 /// (`GROUP_AI_FLAG_FOLLOW_LEADER`).
 pub const GROUP_AI: u16 = 0x003 | 0x200;
 
+/// The flags of the behaviour of a group (`GroupAIFlags` of AzerothCore's CreatureGroups.h), by name
+/// and what each does; a group made has those of `GROUP_AI`, its members following their leader.
+pub const GROUP_FLAGS: [(u16, &str, &str); 7] = [
+    (
+        0x001,
+        "Members assist the leader",
+        "The members attack what attacks their leader",
+    ),
+    (
+        0x002,
+        "Leader assists the members",
+        "The leader attacks what attacks one of its members",
+    ),
+    (0x004, "Evade together", "When one leaves combat to go home, all do"),
+    (
+        0x008,
+        "Respawn on evade",
+        "The members dead respawn when the group leaves combat",
+    ),
+    (
+        0x010,
+        "Leader not respawned on evade",
+        "With Respawn on evade: the leader dead stays dead",
+    ),
+    (
+        0x020,
+        "New target on evade",
+        "One leaving combat attacks what another of the group fights",
+    ),
+    (
+        0x200,
+        "Follow the leader",
+        "The members walk behind their leader as it walks, at their distance and angle; without it they stay where they stand",
+    ),
+];
+
 /// A point of a path: where, the way it faces there if it turns, how long it waits there (ms), and
 /// whether it runs to it.
 #[derive(Clone, Debug, PartialEq)]

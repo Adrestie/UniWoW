@@ -295,6 +295,13 @@ pub fn items(changes: &Changes, base: &Patrols, names: &dyn Names) -> Vec<Item> 
             })
             .collect::<Vec<_>>()
             .join("\n");
+        // Its members made to stand, to follow it: taken back with it.
+        let with = group
+            .iter()
+            .flat_map(|(members, _)| members)
+            .filter(|member| changes.patrols.walkers.contains_key(&member.guid))
+            .map(|member| format!("walker:{}", member.guid))
+            .collect();
         out.push(Item {
             key: format!("group:{leader}"),
             text: format!("{}: its group", name(&id)),
@@ -302,7 +309,7 @@ pub fn items(changes: &Changes, base: &Patrols, names: &dyn Names) -> Vec<Item> 
             after: count(group.as_ref()),
             detail,
             select: Some(id.to_string()),
-            with: Vec::new(),
+            with,
         });
     }
     out
