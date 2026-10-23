@@ -214,7 +214,7 @@ fn the_examples_are_forge_py_s_models() {
                 .and_then(|t| t.get("kind"));
             let analytic = !matches!(
                 kind.and_then(Value::as_str),
-                Some("noise" | "smoke" | "rune" | "lightning" | "petal" | "bark" | "soil")
+                Some("noise" | "smoke" | "rune" | "lightning" | "petal" | "bark" | "soil" | "fresnel" | "leaf")
             );
             let theirs_file = std::fs::read(python.join(&texture.file_name)).unwrap();
             if analytic && theirs_file[8] == 1 {

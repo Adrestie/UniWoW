@@ -49,6 +49,12 @@ pub const MATERIAL_FLAGS: [(&str, u32); 5] = [
 /// 0x17, common in the client's spells.
 pub const DEFAULT_MATERIAL: [&str; 4] = ["unlit", "no_fog", "two_sided", "no_depth_write"];
 pub const SKIN_PALETTE: u32 = 21;
+/// The palette sizes of the client's own skins: the smallest holding the largest submesh.
+pub const BONE_PALETTES: [u32; 3] = [21, 53, 64];
+/// Bones of one submesh at most (the client's largest skinned palette).
+pub const SUBMESH_BONES: usize = 64;
+/// The material of the client's environment-map layers (0x13).
+pub const ENV_MATERIAL: [&str; 3] = ["unlit", "no_fog", "no_depth_write"];
 /// What the client's own spell models stay under.
 pub const PARTICLE_LOAD: f64 = 800.0;
 pub const MODEL_LOAD: f64 = 2000.0;
@@ -612,6 +618,42 @@ pub fn mesh_shape(spec: &Value, dir: &Path) -> Result<Shape> {
 
 /// Reads the image of a file.
 pub type ReadImage = dyn Fn(&Path) -> std::result::Result<Image, String>;
+
+/// The triangles in groups of at most `SUBMESH_BONES` bones (one group when the mesh has that
+/// few): a submesh draws with one palette of bones.
+fn split(triangles: &[[u32; 3]], influences: &[Influence], bones: usize) -> Vec<Vec<[u32; 3]>> {
+    if bones <= SUBMESH_BONES {
+        return vec![triangles.to_vec()];
+    }
+    let bones_of = |tri: &[u32; 3]| -> std::collections::BTreeSet<u8> {
+        tri.iter()
+            .flat_map(|v| {
+                let (w, b) = influences[*v as usize];
+                (0..4).filter(move |k| w[*k] != 0).map(move |k| b[k])
+            })
+            .collect()
+    };
+    let mut order: Vec<[u32; 3]> = triangles.to_vec();
+    order.sort_by_key(|tri| bones_of(tri).iter().next().copied().unwrap_or(u8::MAX));
+    let mut groups = Vec::new();
+    let (mut current, mut used): (Vec<[u32; 3]>, std::collections::BTreeSet<u8>) = (Vec::new(), Default::default());
+    for tri in order {
+        let bones = bones_of(&tri);
+        if used.union(&bones).count() > SUBMESH_BONES {
+            groups.push(std::mem::take(&mut current));
+            used.clear();
+        }
+        current.push(tri);
+        used.extend(bones);
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    groups
+}
+
+/// A mesh skinned on a skeleton: its texture coordinates, its palette, each vertex's influences.
+type Skinned = (Vec<[f64; 2]>, Vec<usize>, Vec<Influence>);
 
 /// A vertex's four weights (bytes summing to 255) and its four places in its submesh's palette.
 type Influence = ([u8; 4], [u8; 4]);
@@ -1377,110 +1419,96 @@ impl<'a> Forge<'a> {
     }
 
     fn mesh(&mut self, s: &Value, i: usize) -> Result<()> {
-        let d = self.time.duration;
-        // each mesh on a bone of its own (its scale, spin and place), child of the one named
-        let bone_spec = Value::Map(
-            ["pos", "rotation", "spin", "scale", "orbit", "bob", "billboard"]
-                .iter()
-                .filter_map(|k| s.get(k).map(|v| ((*k).to_owned(), v.clone())))
-                .collect(),
-        );
         let parent = self.bone(str_or(s, "bone", "root")?)?;
-        let (shape, pivot, palette, influences) = if s.has("parts") {
+        let (mut shape, pivot, palette, influences) = if s.has("parts") {
             // copies of the shape in one mesh, each on a bone of its own: the leaves of a twig
             let (shape, palette, influences) = self.parts(s, i, parent)?;
             (shape, [0.0; 3], palette, influences)
+        } else if s.has("skeleton") {
+            // one whole mesh (modelled in place) skinned on a skeleton of bones: a tree's wood
+            let mut shape = mesh_shape(s, &self.options.dir)?;
+            let (uvs, palette, influences) = self.skeleton_skin(s, &shape.positions, &shape.uvs, i)?;
+            shape.uvs = uvs;
+            (shape, [0.0; 3], palette, influences)
         } else {
+            // each mesh on a bone of its own (its scale, spin and place), child of the one named
+            let bone_spec = Value::Map(
+                ["pos", "rotation", "spin", "scale", "orbit", "bob", "billboard"]
+                    .iter()
+                    .filter_map(|k| s.get(k).map(|v| ((*k).to_owned(), v.clone())))
+                    .collect(),
+            );
             let bone = self.add_bone(&format!("_mesh{i}"), &bone_spec, parent as i16)?;
             let pivot = self.pivots[bone];
             let shape = mesh_shape(s, &self.options.dir)?;
             let (palette, influences) = self.bend_chain(s, &shape.positions, bone, pivot, i)?;
             (shape, pivot, palette, influences)
         };
-        let mut ids = Vec::with_capacity(palette.len());
-        for b in &palette {
-            match u8::try_from(*b) {
-                Ok(id) => ids.push(id),
-                Err(_) => return fail(format!("mesh {i}: bone {b} past 255")),
-            }
+        for p in &mut shape.positions {
+            *p = [p[0] + pivot[0], p[1] + pivot[1], p[2] + pivot[2]];
         }
-        let v0 = self.vertices.len();
-        for (((p, n), uv), (w, b)) in shape
-            .positions
-            .iter()
-            .zip(&shape.normals)
-            .zip(&shape.uvs)
-            .zip(&influences)
-        {
-            let mut raw = Vec::with_capacity(48);
-            for x in [p[0] + pivot[0], p[1] + pivot[1], p[2] + pivot[2]] {
-                raw.extend_from_slice(&(x as f32).to_le_bytes());
-            }
-            raw.extend_from_slice(w);
-            raw.extend(b.iter().map(|k| ids[*k as usize]));
-            for x in [n[0], n[1], n[2], uv[0], uv[1], 0.0, 0.0] {
-                raw.extend_from_slice(&(x as f32).to_le_bytes());
-            }
-            self.vertices.push(raw.try_into().expect("48 bytes"));
+        let mut subs = Vec::new();
+        for group in split(&shape.triangles, &influences, palette.len()) {
+            subs.push(self.submesh(&shape, &group, &palette, &influences)?);
         }
-        let count = shape.positions.len();
-        let sk = &mut self.skin;
-        let (sv0, si0) = (sk.vertices.len(), sk.indices.len());
-        for (k, (_, b)) in influences.iter().enumerate() {
-            sk.vertices.push((v0 + k) as u16);
-            sk.bones.push(*b);
+        // its layers: one batch each on every submesh, drawn in order over the first
+        let layers: Vec<Value> = match s.get("layers").filter(|l| l.truthy()) {
+            Some(layers) => list(layers)?.to_vec(),
+            None => vec![Value::Map(
+                [
+                    "texture",
+                    "blend",
+                    "material_flags",
+                    "color",
+                    "alpha",
+                    "uv_scroll",
+                    "priority",
+                ]
+                .iter()
+                .filter_map(|k| s.get(k).map(|v| ((*k).to_owned(), v.clone())))
+                .collect(),
+            )],
+        };
+        for (li, ly) in layers.iter().enumerate() {
+            self.layer(s, ly, i, li, &subs)?;
         }
-        for tri in &shape.triangles {
-            sk.indices.extend(tri.iter().map(|v| (sv0 as u32 + v) as u16));
-        }
-        if sk.indices.len() > 65535 || v0 + count > 65536 {
-            return fail("too many triangles");
-        }
-        let bone_combo = self.lookups.bone.len();
-        self.lookups.bone.extend(palette.iter().map(|b| *b as i16));
-        let n = count as f64;
-        let mean = |axis: usize| py::sum(shape.positions.iter().map(|p| p[axis])) / n + pivot[axis];
-        let center = [mean(0), mean(1), mean(2)];
-        let radius = shape
-            .positions
-            .iter()
-            .map(|p| py::dist(&center, &[p[0] + pivot[0], p[1] + pivot[1], p[2] + pivot[2]]))
-            .fold(f64::NEG_INFINITY, f64::max);
-        self.skin.submeshes.push(Submesh {
-            id: 0,
-            level: 0,
-            vertex_start: sv0 as u16,
-            vertex_count: count as u16,
-            index_start: si0 as u16,
-            index_count: (shape.triangles.len() * 3) as u16,
-            bone_count: palette.len() as u16,
-            bone_combo: bone_combo as u16,
-            bone_influences: if palette.len() > 1 { 2 } else { 1 },
-            center_bone: palette[0] as u16,
-            center: f32x3(center),
-            sort_center: f32x3(center),
-            sort_radius: radius as f32,
-        });
-        let key = s
+        Ok(())
+    }
+
+    /// One layer of a mesh: its texture, material, colour and scroll; a batch on each submesh.
+    fn layer(&mut self, s: &Value, ly: &Value, i: usize, li: usize, subs: &[u16]) -> Result<()> {
+        let d = self.time.duration;
+        let what = format!("mesh {i} layer {li}");
+        let key = ly
             .get("texture")
             .and_then(Value::as_str)
-            .ok_or_else(|| ForgeError(format!("mesh {i}: no texture")))?;
+            .ok_or_else(|| ForgeError(format!("{what}: no texture")))?;
         let tex = self.texture(key)?;
         let texture_combo = self.lookups.texture.len();
         self.lookups.texture.push(tex as i16);
-        let mat = self.material(str_or(s, "blend", "add")?, s.get("material_flags"))?;
+        let env = ly.get("env").is_some_and(Value::truthy);
+        let flags = match ly.get("material_flags") {
+            Some(f) => f.clone(),
+            None => Value::List(
+                (if env { &ENV_MATERIAL[..] } else { &DEFAULT_MATERIAL[..] })
+                    .iter()
+                    .map(|n| Value::from(*n))
+                    .collect(),
+            ),
+        };
+        let mat = self.material(str_or(ly, "blend", "add")?, Some(&flags))?;
         // colour and alpha over the sequence
         let mut color = -1;
-        if s.has("color") || s.has("alpha") {
+        if ly.has("color") || ly.has("alpha") {
             self.colors.push(Color {
                 color: self
                     .time
-                    .value_or_keys(s.get("color").unwrap_or(&Value::from("#ffffff")), |c| {
+                    .value_or_keys(ly.get("color").unwrap_or(&Value::from("#ffffff")), |c| {
                         hex_rgb(c).map(|rgb| rgb.map(|x| (x / 255.0) as f32))
                     })?,
                 alpha: self
                     .time
-                    .value_or_keys(s.get("alpha").unwrap_or(&Value::Float(1.0)), |a| {
+                    .value_or_keys(ly.get("alpha").unwrap_or(&Value::Float(1.0)), |a| {
                         Ok(py::round_int(num(a)? * FIX16 as f64) as i16)
                     })?,
             });
@@ -1492,10 +1520,10 @@ impl<'a> Forge<'a> {
         });
         self.lookups.weight.push((self.weights.len() - 1) as i16);
         let transform_combo = self.lookups.transform.len();
-        if let Some(scroll) = s.get("uv_scroll") {
+        if let Some(scroll) = ly.get("uv_scroll") {
             let scroll = list(scroll)?;
             if scroll.len() < 2 {
-                return fail(format!("mesh {i}: uv_scroll [u, v] expected"));
+                return fail(format!("{what}: uv_scroll [u, v] expected"));
             }
             let du = num(&scroll[0])? * d as f64 / 1000.0;
             let dv = num(&scroll[1])? * d as f64 / 1000.0;
@@ -1514,7 +1542,7 @@ impl<'a> Forge<'a> {
             }
             if (ru - du).abs() > 1e-6 || (rv - dv).abs() > 1e-6 {
                 self.notes.push(format!(
-                    "mesh {i}: UV scroll {du:.2},{dv:.2} per loop rounded to {},{} (no seam)",
+                    "{what}: UV scroll {du:.2},{dv:.2} per loop rounded to {},{} (no seam)",
                     ru as i64, rv as i64
                 ));
             }
@@ -1529,28 +1557,274 @@ impl<'a> Forge<'a> {
         } else {
             self.lookups.transform.push(-1);
         }
+        // an environment map, as the client's own spell models lay one over a mesh: coordinates
+        // from the normal as the camera sees it (a sphere map), a texture unit of -1, batch flag 0x10
+        let coord = if env {
+            if !self.lookups.unit.contains(&-1) {
+                self.lookups.unit.push(-1);
+            }
+            self.lookups.unit.iter().position(|u| *u == -1).expect("pushed") as u16
+        } else {
+            0
+        };
         // 0x04: projected texture, the client lays the quad on the terrain under it (Blizzard's
         // ground circles: consecration, death and decay...); 0x18 as on those batches
         let projected = s.get("projected").is_some_and(Value::truthy);
-        let submesh = (self.skin.submeshes.len() - 1) as u16;
-        self.skin.batches.push(Batch {
-            flags: if projected { PROJECTED_BATCH } else { 0 },
-            priority: int_or(s, "priority", 0)? as i8,
-            shader: 0,
-            submesh,
-            geoset: submesh,
-            color,
-            material: mat,
-            layer: 0,
-            texture_count: 1,
-            texture_combo: texture_combo as u16,
-            coord_combo: 0,
-            weight_combo: weight_combo as u16,
-            transform_combo: transform_combo as u16,
-        });
+        let flags = if projected {
+            PROJECTED_BATCH
+        } else if env {
+            0x10
+        } else {
+            0
+        };
+        let priority = match ly.get("priority") {
+            Some(p) => int(p)?,
+            None => int_or(s, "priority", 0)?,
+        } as i8;
+        for &sub in subs {
+            self.skin.batches.push(Batch {
+                flags,
+                priority,
+                shader: 0,
+                submesh: sub,
+                geoset: sub,
+                color,
+                material: mat,
+                layer: li as u16,
+                texture_count: 1,
+                texture_combo: texture_combo as u16,
+                coord_combo: coord,
+                weight_combo: weight_combo as u16,
+                transform_combo: transform_combo as u16,
+            });
+        }
         Ok(())
     }
 
+    /// Writes the vertices of some triangles (those they use, again when another submesh uses them
+    /// too: the same place, normal and weights) and their submesh; its index.
+    fn submesh(
+        &mut self,
+        shape: &Shape,
+        tris: &[[u32; 3]],
+        palette: &[usize],
+        influences: &[Influence],
+    ) -> Result<u16> {
+        let mut used: Vec<u32> = tris.iter().flatten().copied().collect();
+        used.sort_unstable();
+        used.dedup();
+        let mut bones: Vec<u8> = used
+            .iter()
+            .flat_map(|v| {
+                let (w, b) = influences[*v as usize];
+                (0..4).filter(move |k| w[*k] != 0).map(move |k| b[k])
+            })
+            .collect();
+        bones.sort_unstable();
+        bones.dedup();
+        if bones.is_empty() {
+            bones.push(0);
+        }
+        let local = |b: u8| bones.iter().position(|x| *x == b).expect("among them") as u8;
+        let (v0, sv0, si0) = (self.vertices.len(), self.skin.vertices.len(), self.skin.indices.len());
+        if v0 + used.len() > 65536 || sv0 + used.len() > 65536 {
+            return fail("too many vertices: a skin addresses 65,535 at most");
+        }
+        let mut place = std::collections::HashMap::new();
+        for (k, v) in used.iter().enumerate() {
+            let (w, b) = influences[*v as usize];
+            let p = shape.positions[*v as usize];
+            let n = shape.normals[*v as usize];
+            let uv = shape.uvs[*v as usize];
+            let mut raw = Vec::with_capacity(48);
+            for x in p {
+                raw.extend_from_slice(&(x as f32).to_le_bytes());
+            }
+            raw.extend_from_slice(&w);
+            for k in 0..4 {
+                let id = if w[k] != 0 { palette[b[k] as usize] } else { 0 };
+                raw.push(u8::try_from(id).map_err(|_| ForgeError(format!("bone {id} past 255")))?);
+            }
+            for x in [n[0], n[1], n[2], uv[0], uv[1], 0.0, 0.0] {
+                raw.extend_from_slice(&(x as f32).to_le_bytes());
+            }
+            self.vertices.push(raw.try_into().expect("48 bytes"));
+            self.skin.vertices.push((v0 + k) as u16);
+            self.skin
+                .bones
+                .push(std::array::from_fn(|k| if w[k] != 0 { local(b[k]) } else { 0 }));
+            place.insert(*v, (sv0 + k) as u16);
+        }
+        for tri in tris {
+            self.skin.indices.extend(tri.iter().map(|v| place[v]));
+        }
+        if self.skin.indices.len() > 65535 {
+            return fail("too many triangles: a skin addresses 65,535 indices at most");
+        }
+        let bone_combo = self.lookups.bone.len();
+        self.lookups
+            .bone
+            .extend(bones.iter().map(|b| palette[*b as usize] as i16));
+        let n = used.len() as f64;
+        let mean = |axis: usize| py::sum(used.iter().map(|v| shape.positions[*v as usize][axis])) / n;
+        let center = [mean(0), mean(1), mean(2)];
+        let radius = used
+            .iter()
+            .map(|v| py::dist(&center, &shape.positions[*v as usize]))
+            .fold(f64::NEG_INFINITY, f64::max);
+        let most = used
+            .iter()
+            .map(|v| influences[*v as usize].0.iter().filter(|w| **w != 0).count())
+            .max()
+            .unwrap_or(0);
+        self.skin.submeshes.push(Submesh {
+            id: 0,
+            level: 0,
+            vertex_start: sv0 as u16,
+            vertex_count: used.len() as u16,
+            index_start: si0 as u16,
+            index_count: (tris.len() * 3) as u16,
+            bone_count: bones.len() as u16,
+            bone_combo: bone_combo as u16,
+            bone_influences: most as u16,
+            center_bone: palette[bones[0] as usize] as u16,
+            center: f32x3(center),
+            sort_center: f32x3(center),
+            sort_radius: radius as f32,
+        });
+        Ok((self.skin.submeshes.len() - 1) as u16)
+    }
+
+    /// `"skeleton": [[bone a, bone b(, [radius a, radius b])], ...]`: segments between bones'
+    /// pivots (the mesh modelled around them, in place). Each vertex goes to its nearest segment
+    /// (nearest for its thickness, when given), shared between its two bones as far along as it
+    /// lies. With `"skeleton_uv": [around, along]`: coordinates around each segment and along the
+    /// skeleton (repeats a turn and a yard), for a bark that runs along every branch.
+    fn skeleton_skin(
+        &mut self,
+        s: &Value,
+        positions: &[[f64; 3]],
+        uvs: &[[f64; 2]],
+        i: usize,
+    ) -> Result<Skinned> {
+        let segs = list(s.get("skeleton").expect("tested"))?;
+        let mut parsed = Vec::with_capacity(segs.len());
+        for g in segs {
+            let g = list(g)?;
+            let name = |k: usize| -> Result<String> {
+                g.get(k).and_then(Value::as_str).map(str::to_owned).ok_or_else(|| {
+                    ForgeError(format!(
+                        "mesh {i}: a skeleton segment [bone a, bone b(, radii)] expected"
+                    ))
+                })
+            };
+            let radii = match g.get(2) {
+                Some(r) => {
+                    let r = list(r)?;
+                    [num(&r[0])?, num(&r[1])?]
+                }
+                None => [1.0, 1.0],
+            };
+            parsed.push((name(0)?, name(1)?, radii));
+        }
+        let mut names: Vec<String> = parsed.iter().flat_map(|(a, b, _)| [a.clone(), b.clone()]).collect();
+        names.sort();
+        names.dedup();
+        let mut ids = Vec::with_capacity(names.len());
+        for n in &names {
+            ids.push((self.bone(n)?, n.clone()));
+        }
+        ids.sort_by_key(|(id, _)| *id);
+        let palette: Vec<usize> = ids.iter().map(|(id, _)| *id).collect();
+        let place = |n: &str| ids.iter().position(|(_, m)| m == n).expect("named") as u8;
+        let pivot = |n: &str| -> Result<[f64; 3]> { Ok(self.pivots[self.bone(n)?]) };
+        let mut a_of = Vec::new();
+        let mut ab_of = Vec::new();
+        let mut ll_of = Vec::new();
+        for (a, b, _) in &parsed {
+            let (pa, pb) = (pivot(a)?, pivot(b)?);
+            let ab = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+            a_of.push(pa);
+            ab_of.push(ab);
+            ll_of.push((ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]).max(1e-9));
+        }
+        // the length along the skeleton at each bone, for the bark running along
+        let mut arc: Vec<(String, f64)> = Vec::new();
+        for ((a, b, _), (pa, ab)) in parsed.iter().zip(a_of.iter().zip(&ab_of)) {
+            let _ = pa;
+            if !arc.iter().any(|(n, _)| n == a) {
+                arc.push((a.clone(), 0.0));
+            }
+            let from = arc.iter().find(|(n, _)| n == a).map(|(_, v)| *v).expect("set");
+            let length = (ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]).sqrt();
+            match arc.iter_mut().find(|(n, _)| n == b) {
+                Some((_, v)) => *v = from + length,
+                None => arc.push((b.clone(), from + length)),
+            }
+        }
+        let tile = match s.get("skeleton_uv") {
+            Some(t) => {
+                let t = list(t)?;
+                Some([num(&t[0])?, num(&t[1])?])
+            }
+            None => None,
+        };
+        let mut influences = Vec::with_capacity(positions.len());
+        let mut out_uv = Vec::with_capacity(positions.len());
+        for p in positions {
+            // the nearest segment, for its thickness
+            let mut best = (f64::INFINITY, 0usize, 0.0f64);
+            for (k, (pa, ab)) in a_of.iter().zip(&ab_of).enumerate() {
+                let q = [p[0] - pa[0], p[1] - pa[1], p[2] - pa[2]];
+                let t = ((q[0] * ab[0] + q[1] * ab[1] + q[2] * ab[2]) / ll_of[k]).clamp(0.0, 1.0);
+                let near = [pa[0] + ab[0] * t, pa[1] + ab[1] * t, pa[2] + ab[2] * t];
+                let [r0, r1] = parsed[k].2;
+                let r = r0 + (r1 - r0) * t;
+                let dd = [p[0] - near[0], p[1] - near[1], p[2] - near[2]];
+                let d = (dd[0] * dd[0] + dd[1] * dd[1] + dd[2] * dd[2]).sqrt() / r.max(1e-4);
+                if d < best.0 {
+                    best = (d, k, t);
+                }
+            }
+            let (_, k, tv) = best;
+            let wb = py::round_int(255.0 * tv) as u8;
+            let (ia, ib) = (place(&parsed[k].0), place(&parsed[k].1));
+            influences.push(match wb {
+                0 => ([255, 0, 0, 0], [ia, 0, 0, 0]),
+                255 => ([255, 0, 0, 0], [ib, 0, 0, 0]),
+                _ => ([255 - wb, wb, 0, 0], [ia, ib, 0, 0]),
+            });
+            if let Some(tile) = tile {
+                let ab = ab_of[k];
+                let n = ll_of[k].sqrt();
+                let dd = [ab[0] / n, ab[1] / n, ab[2] / n];
+                let reference = if dd[2].abs() < 0.9 {
+                    [0.0, 0.0, 1.0]
+                } else {
+                    [1.0, 0.0, 0.0]
+                };
+                let cross = |a: [f64; 3], b: [f64; 3]| {
+                    [
+                        a[1] * b[2] - a[2] * b[1],
+                        a[2] * b[0] - a[0] * b[2],
+                        a[0] * b[1] - a[1] * b[0],
+                    ]
+                };
+                let mut e1 = cross(reference, dd);
+                let norm = (e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2]).sqrt();
+                let norm = if norm == 0.0 { 1.0 } else { norm };
+                e1 = e1.map(|v| v / norm);
+                let e2 = cross(dd, e1);
+                let pa = a_of[k];
+                let q = [p[0] - pa[0], p[1] - pa[1], p[2] - pa[2]];
+                let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+                let angle = dot(q, e2).atan2(dot(q, e1));
+                let along = arc.iter().find(|(m, _)| *m == parsed[k].0).map_or(0.0, |(_, v)| *v);
+                out_uv.push([angle / (2.0 * PI) * tile[0], (along + tv * n) * tile[1]]);
+            }
+        }
+        Ok((if tile.is_some() { out_uv } else { uvs.to_vec() }, palette, influences))
+    }
     /// Notes billboards and ribbons that dip into a sloped ground: only a projected mesh follows
     /// the ground, which rises about tan(SLOPE_DEG) times the distance from the centre.
     fn ground_check(&mut self) -> Result<()> {
@@ -1823,7 +2097,7 @@ impl<'a> Forge<'a> {
             materials: std::mem::take(&mut self.materials),
             bone_lookup: lk.bone,
             texture_lookup: lk.texture,
-            texture_unit_lookup: if has_batches { vec![0] } else { Vec::new() },
+            texture_unit_lookup: if has_batches { lk.unit.clone() } else { Vec::new() },
             transparency_lookup: lk.weight,
             texture_transform_lookup: lk.transform,
             ribbons,
@@ -1831,7 +2105,15 @@ impl<'a> Forge<'a> {
             ..Model::default()
         };
         let _ = lk.unit;
-        let skin = std::mem::take(&mut self.skin);
+        let mut skin = std::mem::take(&mut self.skin);
+        // the smallest palette of the client's own that holds the submesh with most bones
+        let most = skin
+            .submeshes
+            .iter()
+            .map(|s| u32::from(s.bone_count))
+            .max()
+            .unwrap_or(0);
+        skin.bone_count_max = BONE_PALETTES.iter().copied().find(|v| *v >= most).unwrap_or(256);
         let m2 = m2::write(&model);
         let skin_file = m2::write_skin(&skin);
         Ok(Forged {

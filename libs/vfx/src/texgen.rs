@@ -323,7 +323,7 @@ pub enum Param {
 use Param::{Color as C, Num as N};
 
 /// Every kind, with its parameters and their defaults.
-pub const KINDS: [(&str, &[(&str, Param)]); 18] = [
+pub const KINDS: [(&str, &[(&str, Param)]); 19] = [
     (
         "petal",
         &[
@@ -456,6 +456,16 @@ pub const KINDS: [(&str, &[(&str, Param)]); 18] = [
             ("cracks", N(0.5)),
         ],
     ),
+    (
+        "fresnel",
+        &[
+            ("size", N(128.0)),
+            ("inner", C("#50c878")),
+            ("outer", C("#b0ffd8")),
+            ("start", N(0.35)),
+            ("power", N(1.6)),
+        ],
+    ),
 ];
 
 impl Params<'_> {
@@ -468,6 +478,24 @@ impl Params<'_> {
             .map(|c| c.map(f64::from))
             .ok_or_else(|| format!("{key}: #rrggbb expected"))
     }
+}
+
+/// A sphere map for an environment-map layer: dark where the surface faces the camera (the
+/// middle), bright toward its silhouette (the rim), coloured inner to outer: a fresnel edge.
+fn fresnel(p: &Params) -> Result<(Plane, Vec<[f64; 3]>), String> {
+    let size = p.size(128)?;
+    let (inner, outer) = (p.color("inner", "#50c878")?, p.color("outer", "#b0ffd8")?);
+    let (start, power) = (p.f("start", 0.35)?, p.f("power", 1.6)?);
+    let mut rgb = Vec::with_capacity(size * size);
+    let alpha = grid(size, |x, y| {
+        let r = x.hypot(y).clamp(0.0, 1.0);
+        let rim = smooth(start, 1.0, r).powf(power);
+        rgb.push(std::array::from_fn(|c| {
+            ((inner[c] + (outer[c] - inner[c]) * rim) * rim).clamp(0.0, 255.0)
+        }));
+        (rim * 1.2).clamp(0.0, 1.0)
+    });
+    Ok((alpha, rgb))
 }
 
 /// Bark, coloured and opaque: grooves running along v (the length of a `tube`), tileable both ways.
@@ -927,6 +955,7 @@ pub fn draw(kind: &str, spec: &Value) -> Result<(Plane, Option<Colours>), String
         "leaf" => Some(leaf(&p)?),
         "bark" => Some(bark(&p)?),
         "soil" => Some(soil(&p)?),
+        "fresnel" => Some(fresnel(&p)?),
         _ => None,
     };
     if let Some((alpha, rgb)) = coloured {

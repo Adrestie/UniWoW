@@ -65,6 +65,7 @@ pub struct RawVertex {
     pub pos: Vec3,
     pub weights: [u8; 4],
     pub bones: [u8; 4],
+    pub normal: Vec3,
     pub uv: [f32; 2],
 }
 
@@ -74,6 +75,7 @@ pub fn raw(bytes: &[u8; 48]) -> RawVertex {
         pos: Vec3::new(f(0), f(4), f(8)),
         weights: bytes[12..16].try_into().expect("four"),
         bones: bytes[16..20].try_into().expect("four"),
+        normal: Vec3::new(f(20), f(24), f(28)),
         uv: [f(32), f(36)],
     }
 }
@@ -135,6 +137,11 @@ pub fn build(
                 .texture_lookup
                 .get(b.texture_combo as usize)
                 .and_then(|t| usize::try_from(*t).ok());
+            // an environment map (texture unit -1): a sphere map read at the normal as the eye sees it
+            let env = model
+                .texture_unit_lookup
+                .get(b.coord_combo as usize)
+                .is_some_and(|u| *u == -1);
             let start = sm.level as usize * 65536 + sm.index_start as usize;
             let end = (start + sm.index_count as usize).min(skin.indices.len());
             let mut tris = Vec::with_capacity(end.saturating_sub(start));
@@ -148,6 +155,7 @@ pub fn build(
                     continue;
                 };
                 let mut pos = Vec3::ZERO;
+                let mut normal = Vec3::ZERO;
                 let mut total = 0.0;
                 for (w, slot) in v.weights.iter().zip(bones) {
                     if *w == 0 {
@@ -160,15 +168,23 @@ pub fn build(
                         .unwrap_or(0);
                     let m = pose.get(bone).copied().unwrap_or(Mat4::IDENTITY);
                     pos += m.transform_point3(v.pos) * (f32::from(*w) / 255.0);
+                    normal += m.transform_vector3(v.normal) * (f32::from(*w) / 255.0);
                     total += f32::from(*w) / 255.0;
                 }
                 if total == 0.0 {
                     pos = v.pos;
+                    normal = v.normal;
                 }
+                let uv = if env {
+                    let n = normal.normalize_or_zero();
+                    [0.5 + 0.5 * n.dot(eye.right), 0.5 - 0.5 * n.dot(eye.up)]
+                } else {
+                    [v.uv[0] + scroll[0], v.uv[1] + scroll[1]]
+                };
                 centre += pos;
                 tris.push(Vertex {
                     pos: pos.to_array(),
-                    uv: [v.uv[0] + scroll[0], v.uv[1] + scroll[1]],
+                    uv,
                     color,
                 });
             }
