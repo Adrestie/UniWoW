@@ -34,6 +34,8 @@ pub struct EffectLayer {
     textures: Option<Arc<Vec<Option<wgpu::BindGroup>>>>,
     /// The view's time at the last frame, for the time the effect plays.
     last: Option<f32>,
+    /// The effect last told in the log.
+    logged: u64,
     stats: LayerStats,
 }
 
@@ -48,6 +50,7 @@ impl EffectLayer {
             draws: Vec::new(),
             textures: None,
             last: None,
+            logged: 0,
             stats: LayerStats::default(),
         }
     }
@@ -169,6 +172,16 @@ impl Layer for EffectLayer {
                 range: start..vertices.len() as u32,
                 blended: true,
             });
+        }
+        if let Some(e) = effect.as_ref().filter(|e| self.logged != e.version) {
+            self.logged = e.version;
+            uniwow_api::log::info!(
+                "effect {} at {anchor}, seen from {}: {} draws, {} triangles, {alive} particles at {time:.2} s",
+                e.name,
+                view.eye,
+                self.draws.len(),
+                vertices.len() / 3
+            );
         }
         let floats: Vec<f32> = vertices
             .iter()

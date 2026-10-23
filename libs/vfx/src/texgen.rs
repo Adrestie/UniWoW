@@ -323,7 +323,7 @@ pub enum Param {
 use Param::{Color as C, Num as N};
 
 /// Every kind, with its parameters and their defaults.
-pub const KINDS: [(&str, &[(&str, Param)]); 14] = [
+pub const KINDS: [(&str, &[(&str, Param)]); 18] = [
     (
         "petal",
         &[
@@ -419,7 +419,170 @@ pub const KINDS: [(&str, &[(&str, Param)]); 14] = [
         ],
     ),
     ("solid", &[("size", N(8.0))]),
+    (
+        "leaf",
+        &[
+            ("size", N(128.0)),
+            ("base", C("#b6e27a")),
+            ("tip", C("#4f9a32")),
+            ("veins", N(6.0)),
+        ],
+    ),
+    (
+        "leaves",
+        &[
+            ("size", N(256.0)),
+            ("rows", N(4.0)),
+            ("cols", N(4.0)),
+            ("veins", N(5.0)),
+        ],
+    ),
+    (
+        "bark",
+        &[
+            ("size", N(256.0)),
+            ("dark", C("#3a2616")),
+            ("light", C("#7d5a3a")),
+            ("seed", N(3.0)),
+            ("streaks", N(10.0)),
+        ],
+    ),
+    (
+        "soil",
+        &[
+            ("size", N(256.0)),
+            ("color", C("#2e1c10")),
+            ("seed", N(5.0)),
+            ("cracks", N(0.5)),
+        ],
+    ),
 ];
+
+impl Params<'_> {
+    fn color(&self, key: &str, default: &str) -> Result<[f64; 3], String> {
+        let text = match self.spec.get(key) {
+            None => default,
+            Some(v) => v.as_str().ok_or_else(|| format!("{key}: #rrggbb expected"))?,
+        };
+        parse_color(text)
+            .map(|c| c.map(f64::from))
+            .ok_or_else(|| format!("{key}: #rrggbb expected"))
+    }
+}
+
+/// Bark, coloured and opaque: grooves running along v (the length of a `tube`), tileable both ways.
+fn bark(p: &Params) -> Result<(Plane, Vec<[f64; 3]>), String> {
+    let size = p.size(256)?;
+    let (d, l) = (p.color("dark", "#3a2616")?, p.color("light", "#7d5a3a")?);
+    let (seed, streaks) = (p.i("seed", 3)?, p.f("streaks", 10.0)?);
+    let n = tile_noise(size, 4.0, seed, 4.0);
+    // the noise averaged over rows: grooves that run lengthwise
+    let k = (size / 12).max(1) as i64;
+    let mut stretched = Plane::new(size, size);
+    for y in 0..size {
+        for x in 0..size {
+            let sum: f64 = (-k..=k)
+                .map(|dy| n.at(x, (y as i64 + dy).rem_euclid(size as i64) as usize))
+                .sum();
+            stretched.v[y * size + x] = sum / (2 * k + 1) as f64;
+        }
+    }
+    let lo = stretched.v.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = stretched.v.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let span = (hi - lo).max(1e-6);
+    let mut rgb = Vec::with_capacity(size * size);
+    for y in 0..size {
+        for x in 0..size {
+            let v = stretched.v[y * size + x];
+            let grooves = 0.5 + 0.5 * (2.0 * PI * (x as f64 / size as f64 * streaks + v * 1.5)).sin();
+            let t = ((v - lo) / span * 0.6 + grooves * 0.5 - 0.1).clamp(0.0, 1.0);
+            rgb.push(std::array::from_fn(|c| d[c] + (l[c] - d[c]) * t));
+        }
+    }
+    Ok((Plane::from_fn(size, size, |_, _| 1.0), rgb))
+}
+
+/// The alpha and the vein shade of a leaf: u along (0 stem, 1 tip), v across (-1..1).
+fn leaf_shape(u: f64, v: f64, veins: f64) -> (f64, f64) {
+    let half = 0.92 * (PI * u.clamp(0.0, 1.0)).sin().clamp(0.0, 1.0).powf(0.75) * (1.0 - 0.15 * u);
+    let mut a = 1.0 - smooth(half - 0.06, half, v.abs());
+    if !(0.0..=1.0).contains(&u) {
+        a = 0.0;
+    }
+    let rib = (-(v / 0.05).powi(2)).exp();
+    let side = ((u * veins - v.abs() * 1.2) * PI).sin().abs();
+    let inside = if v.abs() < half { 1.0 } else { 0.0 };
+    let vein = 1.0 - 0.25 * rib - 0.12 * (1.0 - smooth(0.0, 0.15, side)) * inside;
+    (a.clamp(0.0, 1.0), vein)
+}
+
+/// A leaf, coloured: x across, y from the stem (top row) to the tip; a midrib and side veins; the
+/// alpha draws its outline.
+fn leaf(p: &Params) -> Result<(Plane, Vec<[f64; 3]>), String> {
+    let size = p.size(128)?;
+    let (b, t) = (p.color("base", "#b6e27a")?, p.color("tip", "#4f9a32")?);
+    let veins = p.f("veins", 6.0)?;
+    let mut rgb = Vec::with_capacity(size * size);
+    let alpha = grid(size, |x, y| {
+        let u = (y + 1.0) / 2.0;
+        let (a, vein) = leaf_shape(u, x, veins);
+        let mix = smooth(0.0, 1.0, u);
+        rgb.push(std::array::from_fn(|c| {
+            ((b[c] + (t[c] - b[c]) * mix) * vein).clamp(0.0, 255.0)
+        }));
+        a
+    });
+    Ok((alpha, rgb))
+}
+
+/// A flipbook of a leaf tumbling (rows x cols cells): turning in the plane, seen edge on and back,
+/// white (a particle's colour tints it).
+fn leaves(p: &Params) -> Result<Plane, String> {
+    let size = p.size(256)?;
+    let (rows, cols) = (p.i("rows", 4)?.max(1) as usize, p.i("cols", 4)?.max(1) as usize);
+    let veins = p.f("veins", 5.0)?;
+    let cell = (size / rows.max(cols)).max(1);
+    let mut out = Plane::new(cell * cols, cell * rows);
+    let n = rows * cols;
+    let c0 = (cell as f64 - 1.0) / 2.0;
+    let half = cell as f64 / 2.0;
+    for k in 0..n {
+        let th = 2.0 * PI * k as f64 / n as f64;
+        let squash = (2.0 * th).cos().abs().max(0.2); // edge on twice a turn
+        let (c, s) = (th.cos(), th.sin());
+        let (rr, cc) = (k / cols, k % cols);
+        for y in 0..cell {
+            for x in 0..cell {
+                let (gx, gy) = ((x as f64 - c0) / half, (y as f64 - c0) / half);
+                let (xr, yr) = (c * gx + s * gy, -s * gx + c * gy);
+                let (a, vein) = leaf_shape((yr / 0.9 + 1.0) / 2.0, xr / (0.55 * squash), veins);
+                out.v[(rr * cell + y) * out.width + cc * cell + x] = a * (0.75 + 0.25 * vein);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Dark earth, round and fading at its rim, broken by cracks: a ground decal under roots.
+fn soil(p: &Params) -> Result<(Plane, Vec<[f64; 3]>), String> {
+    let size = p.size(256)?;
+    let colour = p.color("color", "#2e1c10")?;
+    let (seed, cracks) = (p.i("seed", 5)?, p.f("cracks", 0.5)?);
+    let n = tile_noise(size, 5.0, seed, 4.0);
+    let m = tile_noise(size, 10.0, seed + 1, 3.0);
+    let mut rgb = Vec::with_capacity(size * size);
+    let c = (size as f64 - 1.0) / 2.0;
+    let half = size as f64 / 2.0;
+    let alpha = Plane::from_fn(size, size, |x, y| {
+        let r = ((x as f64 - c) / half).hypot((y as f64 - c) / half);
+        let (nv, mv) = (n.at(x, y), m.at(x, y));
+        let crack = 1.0 - (-((mv - 0.5).abs() / 0.03).powi(2)).exp() * cracks;
+        let a = (1.0 - smooth(0.45, 0.95, r + (nv - 0.5) * 0.35)) * (0.75 + 0.25 * nv);
+        rgb.push(colour.map(|k| (k * (0.7 + 0.6 * nv) * crack).clamp(0.0, 255.0)));
+        (a * (0.85 + 0.15 * crack)).clamp(0.0, 1.0)
+    });
+    Ok((alpha, rgb))
+}
 
 /// A petal skin, coloured: x across the petal, y from the base (top row) to the tip. Light at the
 /// base, the tip colour toward the tip, darker veins fanning out, a bright rim; the alpha denser
@@ -759,8 +922,14 @@ pub fn draw(kind: &str, spec: &Value) -> Result<(Plane, Option<Colours>), String
         }
     }
     let p = Params { spec };
-    if kind == "petal" {
-        let (alpha, rgb) = petal(&p)?;
+    let coloured = match kind {
+        "petal" => Some(petal(&p)?),
+        "leaf" => Some(leaf(&p)?),
+        "bark" => Some(bark(&p)?),
+        "soil" => Some(soil(&p)?),
+        _ => None,
+    };
+    if let Some((alpha, rgb)) = coloured {
         return Ok((alpha, Some(rgb)));
     }
     let alpha = match kind {
@@ -776,6 +945,7 @@ pub fn draw(kind: &str, spec: &Value) -> Result<(Plane, Option<Colours>), String
         "swirl" => swirl(&p),
         "rune" => rune(&p),
         "lightning" => lightning(&p),
+        "leaves" => leaves(&p),
         _ => solid(&p),
     }?;
     Ok((alpha, None))
@@ -814,6 +984,7 @@ pub fn cells(kind: &str, spec: &Value) -> Result<(i64, i64), String> {
     match kind {
         "smoke" => Ok((p.i("rows", 4)?, p.i("cols", 4)?)),
         "lightning" => Ok((p.i("rows", 2)?, p.i("cols", 2)?)),
+        "leaves" => Ok((p.i("rows", 4)?, p.i("cols", 4)?)),
         _ => Ok((1, 1)),
     }
 }

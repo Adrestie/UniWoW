@@ -135,6 +135,10 @@ pub struct EffectsModule {
     forge_job: Option<JobId>,
     /// A drag of a value going on: one entry of the history.
     gesture: Option<Gesture>,
+    /// The view asked at the start (`UNIWOW_EFFECTS_VIEW`), taken once the effect is shown.
+    start_view: Option<View>,
+    /// The time asked at the start (`UNIWOW_EFFECTS_TIME`, seconds): the effect held there.
+    start_time: Option<f64>,
 }
 
 /// The module, for its commands.
@@ -175,6 +179,26 @@ impl Module for EffectsModule {
     fn init(&mut self, ctx: &mut Context) {
         self.character = true;
         self.show_points = true;
+        // checks without the mouse: an effect opened, a view and a moment chosen at the start
+        self.start_view = std::env::var("UNIWOW_EFFECTS_VIEW")
+            .ok()
+            .and_then(|v| match v.as_str() {
+                "grazing" => Some(View::Grazing),
+                "top" => Some(View::Top),
+                "three" => Some(View::Three),
+                _ => None,
+            });
+        self.start_time = std::env::var("UNIWOW_EFFECTS_TIME").ok().and_then(|t| t.parse().ok());
+        if let Some(at) = std::env::var("UNIWOW_EFFECTS_AT").ok().and_then(|t| {
+            let v: Vec<f32> = t.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            (v.len() == 3).then(|| Vec3::new(v[0], v[1], v[2]))
+        }) {
+            self.origin = at;
+            self.placed = true;
+        }
+        if let Ok(path) = std::env::var("UNIWOW_EFFECTS_OPEN") {
+            self.open(ctx, Some(path));
+        }
         let Some(view) = ctx.service(viewport::SERVICE) else {
             log::info!("no viewport service: the effects are not drawn");
             return;
@@ -239,9 +263,19 @@ impl Module for EffectsModule {
             }
         } else if self.ground_job.is_some_and(|(j, _)| j == job) {
             let (_, at) = self.ground_job.take().expect("tested");
+            let ground = outcome.take::<Ground>();
+            // the character and the effect stand on the ground under them
+            let under = ground.as_ref().and_then(|g| g.height(0.0, 0.0));
+            if let Some(h) = under.filter(|h| h.abs() > 0.02)
+                && lock(&self.stage).anchor == at
+            {
+                self.origin.z += h;
+                self.place_character(ctx);
+                return;
+            }
             let mut stage = lock(&self.stage);
             if stage.anchor == at {
-                stage.ground = outcome.take::<Ground>().map(Arc::new);
+                stage.ground = ground.map(Arc::new);
             }
         } else if Some(job) == self.character_job {
             match outcome.take::<Result<Vec<(u32, Vec3)>, String>>() {
@@ -529,6 +563,14 @@ impl EffectsModule {
                 self.origin = camera_target(ctx);
             }
             self.place_character(ctx);
+            if let Some(view) = self.start_view.take() {
+                self.look(ctx, view);
+            }
+            if let Some(time) = self.start_time.take() {
+                let mut stage = lock(&self.stage);
+                stage.time = time;
+                stage.playing = false;
+            }
         }
         self.upload_textures(ctx);
     }
@@ -778,6 +820,7 @@ impl EffectsModule {
             View::Top => self.origin + Vec3::new(0.01, 0.0, 9.0),
             View::Three => self.origin + Vec3::new(5.0, 5.0, 4.0),
         };
+        log::info!("effects: the camera at {eye}, looking at {target}");
         let vector = |v: Vec3| PropertyValue::Vector([f64::from(v.x), f64::from(v.y), f64::from(v.z)]);
         for (path, value) in [("viewport/camera_position", eye), ("viewport/camera_target", target)] {
             if let Err(error) = ctx.write_property(path, vector(value)) {

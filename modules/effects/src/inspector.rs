@@ -343,7 +343,10 @@ pub fn inspector(ui: &mut Ui, state: &mut Inspector, doc: &Doc, node: &Node) -> 
                         .unwrap_or_else(|| json::parse(field.default).unwrap_or(Value::Null));
                     let key = (node_id.clone(), field.key.to_owned());
                     let edited = editor(ui, state, &key, &field, &mut value, &context, given);
-                    if given && ui.small_button("↺").on_hover_text("Back to forge's default").clicked() {
+                    // forge needs these: no default to go back to
+                    let required = matches!(field.key, "name" | "texture")
+                        || (field.key == "shape" && matches!(node, Node::Mesh(_)));
+                    if given && !required && ui.small_button("↺").on_hover_text("Back to forge's default").clicked() {
                         work.remove(field.key);
                     } else if edited {
                         work.set(field.key, value);

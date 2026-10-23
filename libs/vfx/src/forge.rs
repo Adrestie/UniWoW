@@ -54,6 +54,8 @@ pub const PARTICLE_LOAD: f64 = 800.0;
 pub const MODEL_LOAD: f64 = 2000.0;
 pub const EMITTERS: usize = 24;
 pub const RIBBON_EDGES: f64 = 64.0;
+/// The joints of a bent mesh at most: 7 bones, well under the palette.
+pub const BEND_JOINTS: usize = 6;
 pub const PARTICLE_KEYS: usize = 8;
 /// Ground guard: the steepest slope a ground effect is expected to stand on.
 pub const SLOPE_DEG: f64 = 20.0;
@@ -444,7 +446,9 @@ impl Shape {
     }
 }
 
-pub const SHAPES: [&str; 8] = ["gltf", "petal", "ring", "disc", "plane", "sphere", "cone", "cylinder"];
+pub const SHAPES: [&str; 9] = [
+    "gltf", "petal", "tube", "ring", "disc", "plane", "sphere", "cone", "cylinder",
+];
 
 /// The shape a mesh description names; a glTF file named from `dir`, the description's folder.
 pub fn mesh_shape(spec: &Value, dir: &Path) -> Result<Shape> {
@@ -507,6 +511,34 @@ pub fn mesh_shape(spec: &Value, dir: &Path) -> Result<Shape> {
             });
             for uv in &mut s.uvs {
                 uv[1] = u0 + (u1 - u0) * uv[1];
+            }
+        }
+        "tube" => {
+            // a tube from its base (at 0) along +X: radius0 at the base to radius1, closed by a
+            // cone; bent a little (bend_y, bend_z: the axis's offset at the far end, growing as the
+            // square of the distance). u around, v along, repeating every turn of the base
+            let l = float_or(spec, "length", 1.0)?;
+            let (r0, r1) = (float_or(spec, "radius0", 0.1)?, float_or(spec, "radius1", 0.05)?);
+            let (sides, rows) = (int_or(spec, "sides", 8)?, int_or(spec, "rows", 12)?);
+            let (by, bz) = (float_or(spec, "bend_y", 0.0)?, float_or(spec, "bend_z", 0.0)?);
+            let per = if 2.0 * PI * r0 != 0.0 { 2.0 * PI * r0 } else { 1.0 };
+            s.grid(rows, sides, |u, j| {
+                let a = 2.0 * PI * j;
+                let r = r0 + (r1 - r0) * u;
+                let n = [0.0, a.cos(), a.sin()];
+                ([l * u, by * u * u + r * n[1], bz * u * u + r * n[2]], n)
+            });
+            for uv in &mut s.uvs {
+                uv[1] = uv[1] * l / per;
+            }
+            // the cone closing the far end
+            let tip = s.positions.len() as u32;
+            s.positions.push([l + 2.0 * r1, by, bz]);
+            s.normals.push([1.0, 0.0, 0.0]);
+            s.uvs.push([0.5, (l + 2.0 * r1) / per]);
+            let last = (rows * (sides + 1)) as u32;
+            for j in 0..sides as u32 {
+                s.triangles.push([last + j, last + j + 1, tip]);
             }
         }
         "ring" => {
@@ -766,6 +798,13 @@ impl<'a> Forge<'a> {
             rec.rotation = self.time.keyed(1, ts, vs);
         } else if b.has("rotation") && rec.rotation.timestamps.is_empty() {
             rec.rotation = self.time.fixed(cquat(base));
+        }
+        if let Some(translation) = b.get("translation") {
+            // an offset from the rest place, in the parent's frame: a value, keys or keys by phase
+            if orbit.is_some() || bob.is_some() {
+                return fail(format!("bone {name}: translation keys and orbit/bob together"));
+            }
+            rec.translation = self.time.value_or_keys(translation, |v| vec3(Some(v)).map(f32x3))?;
         }
         if let Some(scale) = b.get("scale") {
             rec.scale = self.time.value_or_keys(scale, |s| match s {
@@ -1183,9 +1222,20 @@ impl<'a> Forge<'a> {
     ) -> Result<(Vec<usize>, Vec<Influence>)> {
         let mut bones = vec![bone];
         let mut joints = vec![0.0];
+        let tube = s.get("shape").and_then(Value::as_str) == Some("tube");
         let most = positions.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max);
-        let reach = if most == 0.0 || positions.is_empty() { 1.0 } else { most };
-        for j in s.get("bend").map(list).transpose()?.unwrap_or_default() {
+        let reach = if tube {
+            float_or(s, "length", 1.0)?
+        } else if most == 0.0 || positions.is_empty() {
+            1.0
+        } else {
+            most
+        };
+        let joints_given = s.get("bend").map(list).transpose()?.unwrap_or_default();
+        if joints_given.len() > BEND_JOINTS {
+            return fail(format!("mesh {i}: {BEND_JOINTS} bend joints at most"));
+        }
+        for j in joints_given {
             let at = num(j
                 .get("at")
                 .ok_or_else(|| ForgeError(format!("mesh {i}: a bend joint without at")))?)?;
@@ -1195,23 +1245,40 @@ impl<'a> Forge<'a> {
                     crate::json::float_repr(at)
                 ));
             }
-            // the first point nearest the joint along the middle of the mesh
-            let key = |p: &[f64; 3]| (p[0] - at * reach).abs() + p[1].abs();
-            let near = positions
-                .iter()
-                .fold(None::<&[f64; 3]>, |best, p| match best {
-                    Some(b) if key(b) <= key(p) => Some(b),
-                    _ => Some(p),
-                })
-                .copied()
-                .unwrap_or([0.0; 3]);
-            let joint = Value::Map(vec![
+            let (y, z) = if tube {
+                // on the axis
+                (
+                    float_or(s, "bend_y", 0.0)? * at * at,
+                    float_or(s, "bend_z", 0.0)? * at * at,
+                )
+            } else {
+                // the first point nearest the joint along the middle of the mesh
+                let key = |p: &[f64; 3]| (p[0] - at * reach).abs() + p[1].abs();
+                let near = positions
+                    .iter()
+                    .fold(None::<&[f64; 3]>, |best, p| match best {
+                        Some(b) if key(b) <= key(p) => Some(b),
+                        _ => Some(p),
+                    })
+                    .copied()
+                    .unwrap_or([0.0; 3]);
+                (0.0, near[2])
+            };
+            let name = match j.get("name") {
+                Some(Value::Str(name)) => name.clone(),
+                Some(other) => return fail(format!("mesh {i}: a bend joint's name {}", other.repr())),
+                None => format!("_mesh{i}_j{}", bones.len()),
+            };
+            if self.bone(&name).is_ok() {
+                return fail(format!("mesh {i}: bend joint {name}: a bone of that name exists"));
+            }
+            let mut joint = Value::Map(vec![
                 (
                     "pos".into(),
                     Value::List(vec![
                         Value::Float(pivot[0] + at * reach),
-                        Value::Float(pivot[1]),
-                        Value::Float(pivot[2] + near[2]),
+                        Value::Float(pivot[1] + y),
+                        Value::Float(pivot[2] + z),
                     ]),
                 ),
                 (
@@ -1223,12 +1290,12 @@ impl<'a> Forge<'a> {
                     ])),
                 ),
             ]);
+            if let Some(translation) = j.get("translation") {
+                joint.set("translation", translation.clone());
+            }
             let parent = bones[bones.len() - 1] as i16;
-            bones.push(self.add_bone(&format!("_mesh{i}_j{}", bones.len()), &joint, parent)?);
+            bones.push(self.add_bone(&name, &joint, parent)?);
             joints.push(at);
-        }
-        if bones.len() > 5 {
-            return fail(format!("mesh {i}: 4 bend joints at most"));
         }
         let soft = float_or(s, "bend_soft", 0.08)?;
         let weights = |x: f64| -> Vec<(u8, u8)> {
@@ -1592,6 +1659,16 @@ impl<'a> Forge<'a> {
             }
         }
         let spec = self.spec;
+        // meshes first: their bend joints may carry a name that an emitter or a ribbon hangs on
+        for (i, s) in spec
+            .get("meshes")
+            .and_then(Value::as_list)
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            self.mesh(s, i)?;
+        }
         let emitters = spec.get("emitters").and_then(Value::as_list).unwrap_or_default();
         let particles = emitters
             .iter()
@@ -1612,15 +1689,6 @@ impl<'a> Forge<'a> {
             .enumerate()
             .map(|(i, r)| self.ribbon(r, i))
             .collect::<Result<Vec<_>>>()?;
-        for (i, s) in spec
-            .get("meshes")
-            .and_then(Value::as_list)
-            .unwrap_or_default()
-            .iter()
-            .enumerate()
-        {
-            self.mesh(s, i)?;
-        }
         if particles.len() > EMITTERS {
             return fail(format!("{} emitters (at most {EMITTERS})", particles.len()));
         }

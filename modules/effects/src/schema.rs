@@ -98,6 +98,10 @@ const EMITTER_SHAPES: &[&str] = &["point", "plane", "sphere"];
 const ENCODINGS: &[&str] = &["auto", "palette", "dxt5"];
 pub const TEXTURE_KINDS: &[&str] = &[
     "petal",
+    "leaf",
+    "leaves",
+    "bark",
+    "soil",
     "glow",
     "spark",
     "star",
@@ -239,6 +243,13 @@ pub const BONE: &[Field] = &[
         Kind::Json,
         "{}",
         "{\"height\", \"speed\" (turns/s)}: up and down.",
+    ),
+    f(
+        "translation",
+        "Offset",
+        Kind::Json,
+        "[0, 0, 0]",
+        "An offset from its rest place, in its parent's frame: [x, y, z], keys, or keys by phase (not with orbit or bob).",
     ),
     f(
         "scale",
@@ -503,7 +514,9 @@ pub const RIBBON: &[Field] = &[
     ),
 ];
 
-const ALL_SHAPES: &[&str] = &["gltf", "petal", "ring", "disc", "plane", "sphere", "cone", "cylinder"];
+const ALL_SHAPES: &[&str] = &[
+    "gltf", "petal", "tube", "ring", "disc", "plane", "sphere", "cone", "cylinder",
+];
 
 pub const MESH: &[Field] = &[
     f(
@@ -584,7 +597,7 @@ pub const MESH: &[Field] = &[
     ),
     s(
         f("rows", "Rows", Kind::Int { min: 1, max: 64 }, "4", "Rows along it."),
-        &["disc", "cone", "cylinder", "petal"],
+        &["disc", "cone", "cylinder", "petal", "tube"],
     ),
     s(
         f(
@@ -599,7 +612,51 @@ pub const MESH: &[Field] = &[
     s(f("width", "Width", POSITIVE, "2.0", "Its width."), &["plane", "petal"]),
     s(
         f("length", "Length", POSITIVE, "2.0", "Its length."),
-        &["plane", "petal"],
+        &["plane", "petal", "tube"],
+    ),
+    s(
+        f(
+            "radius0",
+            "Base radius",
+            POSITIVE,
+            "0.1",
+            "The tube's radius at its base.",
+        ),
+        &["tube"],
+    ),
+    s(
+        f(
+            "radius1",
+            "Tip radius",
+            POSITIVE,
+            "0.05",
+            "The tube's radius at its far end, closed by a cone.",
+        ),
+        &["tube"],
+    ),
+    s(
+        f(
+            "sides",
+            "Sides",
+            Kind::Int { min: 3, max: 64 },
+            "8",
+            "Sides around the tube.",
+        ),
+        &["tube"],
+    ),
+    s(
+        f(
+            "bend_y",
+            "Bend sideways",
+            YARDS,
+            "0",
+            "The axis's offset at the far end, across (grows as the square of the distance).",
+        ),
+        &["tube"],
+    ),
+    s(
+        f("bend_z", "Bend up", YARDS, "0", "The axis's offset at the far end, up."),
+        &["tube"],
     ),
     s(
         f("height", "Height", POSITIVE, "2.0", "Its height."),
@@ -663,7 +720,7 @@ pub const MESH: &[Field] = &[
         "Bend",
         Kind::Json,
         "[]",
-        "[{\"at\": share of the length along +X, \"rotation\": value or keys by phase}]: up to 4 joints, each a bone; the vertices about a joint shared between its two bones.",
+        "[{\"at\": share of the length along +X, \"rotation\": value or keys by phase}]: up to 6 joints, each a bone (on a tube, on its axis), each with \"rotation\" and \"translation\" (a value or keys by phase) and a \"name\" others hang on; the vertices about a joint shared between its two bones.",
     ),
     f(
         "bend_soft",
