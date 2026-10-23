@@ -1,7 +1,7 @@
 //! An effect read: a description of forge made into its model here, or a model of the disk or of
 //! the client with its skin; the images of its textures, drawn by forge or read from the client.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use uniwow_api::glam::Vec3;
 use uniwow_api::vfs::Vfs;
@@ -37,45 +37,60 @@ fn texture_path(texture: &m2::Texture) -> String {
     String::from_utf8_lossy(&texture.filename[..end]).into_owned()
 }
 
-pub fn load(path: &str, vfs: Option<&dyn Vfs>) -> Result<Loaded, String> {
-    let lower = path.to_lowercase();
-    if lower.ends_with(".json") {
+/// What was opened: a description to edit (its file, its JSON, how its lines end), or a model.
+pub enum Opened {
+    Description(PathBuf, json::Value, json::Layout),
+    Model(Box<Loaded>),
+}
+
+pub fn open(path: &str, vfs: Option<&dyn Vfs>) -> Result<Opened, String> {
+    if path.to_lowercase().ends_with(".json") {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
         let spec = json::parse(&text).map_err(|e| format!("{path}: {e}"))?;
         if spec.has("effects") {
             return Err(format!("{path}: an effect sheet; open one of its models' descriptions"));
         }
-        let options = forge::Options {
-            dir: Path::new(path).parent().map(Path::to_path_buf).unwrap_or_default(),
-            ..forge::Options::default()
-        };
-        let forged = forge::forge(&spec, &options).map_err(|e| format!("refused: {e}"))?;
-        let images = forged
-            .model
-            .textures
-            .iter()
-            .map(|texture| {
-                let name = texture_path(texture);
-                match forged
-                    .textures
-                    .iter()
-                    .find(|t| name.to_lowercase().ends_with(&t.file_name))
-                {
-                    Some(made) => Some(made.image.clone()),
-                    None => game_image(&name, vfs),
-                }
-            })
-            .collect();
-        return Ok(Loaded {
-            name: forged.name,
-            source: path.to_owned(),
-            model: forged.model,
-            skin: Some(forged.skin),
-            images,
-            notes: forged.notes,
-            version: 0,
-        });
+        return Ok(Opened::Description(PathBuf::from(path), spec, json::Layout::of(&text)));
     }
+    load(path, vfs).map(|loaded| Opened::Model(Box::new(loaded)))
+}
+
+/// The model a description makes, the images of its textures with it.
+pub fn forged(spec: &json::Value, dir: &Path, source: &str, vfs: Option<&dyn Vfs>) -> Result<Loaded, String> {
+    let options = forge::Options {
+        dir: dir.to_path_buf(),
+        ..forge::Options::default()
+    };
+    let forged = forge::forge(spec, &options).map_err(|e| format!("refused: {e}"))?;
+    let images = forged
+        .model
+        .textures
+        .iter()
+        .map(|texture| {
+            let name = texture_path(texture);
+            match forged
+                .textures
+                .iter()
+                .find(|t| name.to_lowercase().ends_with(&t.file_name))
+            {
+                Some(made) => Some(made.image.clone()),
+                None => game_image(&name, vfs),
+            }
+        })
+        .collect();
+    Ok(Loaded {
+        name: forged.name,
+        source: source.to_owned(),
+        model: forged.model,
+        skin: Some(forged.skin),
+        images,
+        notes: forged.notes,
+        version: 0,
+    })
+}
+
+pub fn load(path: &str, vfs: Option<&dyn Vfs>) -> Result<Loaded, String> {
+    let lower = path.to_lowercase();
     if !lower.ends_with(".m2") {
         return Err(format!("{path}: a description (.json) or a model (.m2)"));
     }

@@ -4,10 +4,15 @@
 //! the effect plays, its attachment points shown, the effect on the one chosen. The time is an
 //! animatable property (`effects/time`), so that the timeline can drive it.
 
+mod doc;
 mod gpu;
+mod inspector;
 mod layer;
 mod load;
+mod schema;
 
+use std::any::Any;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use uniwow_api::glam::{Mat4, Vec3};
@@ -20,8 +25,12 @@ use uniwow_api::{
     vfs, viewport, wgpu,
 };
 
+use doc::{Doc, Edit, Node};
 use gpu::Gpu;
+use inspector::Inspector;
 use layer::EffectLayer;
+use uniwow_api::Gesture;
+use uniwow_api::vfx::json;
 
 pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
@@ -98,7 +107,7 @@ const CHARACTER: &str = "Character\\Human\\Male\\HumanMale.m2";
 const CHARACTER_SKIN: &str = "Character\\Human\\Male\\HumanMaleSkin00_00.blp";
 
 #[derive(Default)]
-struct EffectsModule {
+pub struct EffectsModule {
     stage: Arc<Mutex<Stage>>,
     incoming: Arc<Mutex<Option<Arc<Gpu>>>>,
     gpu: Option<Arc<Gpu>>,
@@ -119,6 +128,18 @@ struct EffectsModule {
     points: Vec<(u32, Vec3)>,
     attach: usize,
     show_points: bool,
+    /// The description edited, when the effect is one.
+    doc: Option<Doc>,
+    selected: Node,
+    inspector: Inspector,
+    forge_job: Option<JobId>,
+    /// A drag of a value going on: one entry of the history.
+    gesture: Option<Gesture>,
+}
+
+/// The module, for its commands.
+pub fn module(any: &mut dyn Any) -> &mut EffectsModule {
+    any.downcast_mut().expect("commands of this module are applied to it")
 }
 
 impl Module for EffectsModule {
@@ -185,27 +206,29 @@ impl Module for EffectsModule {
                 }
             }
         } else if Some(job) == self.load_job {
-            match outcome.take::<Result<Option<Loaded>, String>>() {
-                Some(Ok(Some(mut loaded))) => {
-                    self.version += 1;
-                    loaded.version = self.version;
-                    self.error = None;
-                    {
-                        let mut stage = lock(&self.stage);
-                        stage.effect = Some(Arc::new(loaded));
-                        stage.textures = None;
-                        stage.time = 0.0;
-                        stage.playing = true;
-                    }
-                    if !self.placed {
-                        self.origin = camera_target(ctx);
-                    }
-                    self.place_character(ctx);
-                    self.upload_textures(ctx);
+            match outcome.take::<Result<Option<load::Opened>, String>>() {
+                Some(Ok(Some(load::Opened::Model(loaded)))) => {
+                    self.doc = None;
+                    self.show(ctx, *loaded, true);
+                }
+                Some(Ok(Some(load::Opened::Description(path, value, layout)))) => {
+                    self.doc = Some(Doc::new(Some(path), value, layout));
+                    self.selected = Node::Effect;
+                    self.reforge(ctx, true);
                 }
                 Some(Ok(None)) => {}
                 Some(Err(error)) => self.error = Some(error),
                 None => self.error = Some("the effect could not be read".into()),
+            }
+        } else if Some(job) == self.forge_job {
+            self.forge_job = None;
+            match outcome.take::<(bool, Result<Loaded, String>)>() {
+                Some((first, Ok(loaded))) => self.show(ctx, loaded, first),
+                Some((_, Err(error))) => self.error = Some(error),
+                None => self.error = Some("the model could not be made".into()),
+            }
+            if self.doc.as_ref().is_some_and(|d| d.stale) {
+                self.reforge(ctx, false);
             }
         } else if Some(job) == self.textures_job {
             if let Some((version, groups)) = outcome.take::<(u64, Vec<Option<wgpu::BindGroup>>)>() {
@@ -280,8 +303,11 @@ impl Module for EffectsModule {
                 self.open(ctx, Some(path));
             }
         });
-        if let Some(error) = &self.error {
-            ui.colored_label(ui.visuals().error_fg_color, error);
+        if self.doc.as_ref().is_some_and(|d| d.stale) {
+            self.reforge(ctx, false);
+        }
+        if let Some(error) = self.error.clone() {
+            self.message(ui, &error, true);
         }
         let (name, notes, alive_text) = {
             let stage = lock(&self.stage);
@@ -297,7 +323,7 @@ impl Module for EffectsModule {
         };
         ui.label(name);
         for note in notes {
-            ui.weak(format!("note: {note}"));
+            self.message(ui, &format!("note: {note}"), false);
         }
         ui.separator();
         {
@@ -370,6 +396,28 @@ impl Module for EffectsModule {
                 self.sample_ground(ctx);
             }
         });
+        if self.doc.is_some() {
+            ui.separator();
+            self.edit_ui(ui, ctx);
+        }
+    }
+
+    fn unsaved(&self) -> Vec<String> {
+        match &self.doc {
+            Some(doc) if doc.unsaved() => vec![
+                doc.value
+                    .get("name")
+                    .and_then(json::Value::as_str)
+                    .unwrap_or("effect")
+                    .to_owned(),
+            ],
+            _ => Vec::new(),
+        }
+    }
+
+    fn save_unsaved(&mut self, _ctx: &mut Context) -> Result<(), String> {
+        let path = self.doc.as_ref().and_then(|d| d.path.clone());
+        self.save(path)
     }
 }
 
@@ -419,22 +467,199 @@ fn camera_target(ctx: &Context) -> Vec3 {
 impl EffectsModule {
     fn open(&mut self, ctx: &mut Context, path: Option<String>) {
         let vfs = ctx.service(vfs::SERVICE);
-        self.load_job = Some(ctx.spawn("Open an effect", move |_| -> Result<Option<Loaded>, String> {
-            let path = match path {
-                Some(path) => path,
-                None => {
-                    let Some(picked) = uniwow_api::rfd::FileDialog::new()
-                        .set_title("Open an effect")
-                        .add_filter("Effect description or model", &["json", "m2"])
-                        .pick_file()
-                    else {
-                        return Ok(None);
-                    };
-                    picked.to_string_lossy().into_owned()
+        self.load_job = Some(
+            ctx.spawn("Open an effect", move |_| -> Result<Option<load::Opened>, String> {
+                let path = match path {
+                    Some(path) => path,
+                    None => {
+                        let Some(picked) = uniwow_api::rfd::FileDialog::new()
+                            .set_title("Open an effect")
+                            .add_filter("Effect description or model", &["json", "m2"])
+                            .pick_file()
+                        else {
+                            return Ok(None);
+                        };
+                        picked.to_string_lossy().into_owned()
+                    }
+                };
+                load::open(&path, vfs.as_deref()).map(Some)
+            }),
+        );
+    }
+
+    /// A message of forge: clicked, it chooses the part it names.
+    fn message(&mut self, ui: &mut egui::Ui, text: &str, error: bool) {
+        let colour = if error {
+            ui.visuals().error_fg_color
+        } else {
+            ui.visuals().weak_text_color()
+        };
+        match Node::named_in(text).filter(|_| self.doc.is_some()) {
+            Some(node) => {
+                let link = ui.add(
+                    egui::Label::new(egui::RichText::new(text).color(colour).underline()).sense(egui::Sense::click()),
+                );
+                if link.on_hover_text("Shows this part in the inspector").clicked() {
+                    self.selected = node;
                 }
-            };
-            load::load(&path, vfs.as_deref()).map(Some)
+            }
+            None => {
+                ui.colored_label(colour, text);
+            }
+        }
+    }
+
+    /// Shows an effect loaded: from its start when `first`, at the same time when it was only made
+    /// again after a change.
+    fn show(&mut self, ctx: &mut Context, mut loaded: Loaded, first: bool) {
+        self.version += 1;
+        loaded.version = self.version;
+        self.error = None;
+        {
+            let mut stage = lock(&self.stage);
+            stage.effect = Some(Arc::new(loaded));
+            stage.textures = None;
+            if first {
+                stage.time = 0.0;
+                stage.playing = true;
+            }
+        }
+        if first {
+            if !self.placed {
+                self.origin = camera_target(ctx);
+            }
+            self.place_character(ctx);
+        }
+        self.upload_textures(ctx);
+    }
+
+    /// Makes the model again from the description, in a job; one at a time, the last change made
+    /// once the one running is done.
+    fn reforge(&mut self, ctx: &mut Context, first: bool) {
+        if self.forge_job.is_some() {
+            return;
+        }
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        doc.stale = false;
+        let spec = doc.value.clone();
+        let dir = doc
+            .path
+            .as_ref()
+            .and_then(|p| p.parent().map(PathBuf::from))
+            .unwrap_or_default();
+        let source = doc.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
+        let vfs = ctx.service(vfs::SERVICE);
+        self.forge_job = Some(ctx.spawn("Make the effect's model", move |_| {
+            (first, load::forged(&spec, &dir, &source, vfs.as_deref()))
         }));
+    }
+
+    /// The description's editor: saving, the tree of its parts, the inspector of the one chosen.
+    fn edit_ui(&mut self, ui: &mut egui::Ui, ctx: &mut Context) {
+        let Some(doc) = self.doc.as_ref() else {
+            return;
+        };
+        let mut save_as = false;
+        let mut save = false;
+        ui.horizontal(|ui| {
+            let name = doc
+                .path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "new".into());
+            if doc.unsaved() {
+                ui.label(
+                    egui::RichText::new(format!("{name} *"))
+                        .background_color(uniwow_api::scene::state_colour::highlight()),
+                )
+                .on_hover_text("Changed since it was saved");
+            } else {
+                ui.label(name);
+            }
+            save = ui.add_enabled(doc.unsaved(), egui::Button::new("Save")).clicked();
+            save_as = ui.button("Save as…").clicked();
+        });
+        if save || save_as {
+            let path = if save_as { None } else { doc.path.clone() };
+            if let Err(error) = self.save(path) {
+                self.error = Some(error);
+            }
+        }
+        let doc = self.doc.as_ref().expect("still there");
+        let mut change = None;
+        ui.columns(2, |columns| {
+            egui::ScrollArea::vertical()
+                .id_salt("effects tree")
+                .max_height(420.0)
+                .show(&mut columns[0], |ui| {
+                    change = inspector::tree(ui, doc, &mut self.selected);
+                });
+            egui::ScrollArea::vertical()
+                .id_salt("effects inspector")
+                .max_height(420.0)
+                .show(&mut columns[1], |ui| {
+                    if let Some(c) = inspector::inspector(ui, &mut self.inspector, doc, &self.selected) {
+                        change = Some(c);
+                    }
+                });
+        });
+        // a drag makes one entry of the history, however many frames it lasts
+        let dragging = std::mem::take(&mut self.inspector.dragging);
+        match (dragging, self.gesture) {
+            (true, Some(gesture)) => {
+                if !ctx.resume_gesture(gesture) {
+                    self.gesture = Some(ctx.begin_gesture("effect: value dragged"));
+                }
+            }
+            (true, None) => self.gesture = Some(ctx.begin_gesture("effect: value dragged")),
+            (false, Some(gesture)) => {
+                ctx.end_gesture(gesture);
+                self.gesture = None;
+            }
+            (false, None) => {}
+        }
+        if let Some(change) = change {
+            let before = doc.value.clone();
+            if let Some(select) = change.select {
+                self.selected = select;
+            }
+            ctx.execute(Edit {
+                label: change.label,
+                before,
+                after: change.value,
+            });
+        }
+    }
+
+    /// Saves the description to `path`, or to a file chosen.
+    fn save(&mut self, path: Option<PathBuf>) -> Result<(), String> {
+        let Some(doc) = self.doc.as_mut() else {
+            return Ok(());
+        };
+        let path = match path {
+            Some(path) => path,
+            None => {
+                let name = doc
+                    .value
+                    .get("name")
+                    .and_then(json::Value::as_str)
+                    .unwrap_or("vfx")
+                    .to_owned();
+                let Some(path) = uniwow_api::rfd::FileDialog::new()
+                    .set_title("Save the effect's description")
+                    .add_filter("Effect description", &["json"])
+                    .set_file_name(format!("{name}.json"))
+                    .save_file()
+                else {
+                    return Ok(());
+                };
+                path
+            }
+        };
+        doc.save(path)
     }
 
     /// Uploads the textures of the effect shown, once the GPU resources are there.
