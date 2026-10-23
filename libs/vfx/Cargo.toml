@@ -1,0 +1,7 @@
+[package]
+name = "uniwow-vfx"
+description = "The spell effects of the 3.3.5a client made from scratch: their description, textures, BLP2, M2 264 and its skin, the checks the client's own spell models pass"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

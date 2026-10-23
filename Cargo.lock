@@ -4065,6 +4065,7 @@ dependencies = [
  "uniwow-db",
  "uniwow-lua",
  "uniwow-server-link",
+ "uniwow-vfx",
  "windows",
 ]
 
@@ -4301,6 +4302,10 @@ dependencies = [
 
 [[package]]
 name = "uniwow-server-link"
+version = "0.1.0"
+
+[[package]]
+name = "uniwow-vfx"
 version = "0.1.0"
 
 [[package]]

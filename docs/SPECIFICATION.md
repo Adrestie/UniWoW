@@ -10897,6 +10897,43 @@ each quest a line, its fields before and after; segments red where they touch a 
 spawn circle red once moved; a spawn moved read with where the database has it; the orange readable
 on the parchment and the dark.
 
+### Milestone 17: spell effects made in the editor (in progress)
+
+Spell effects (particles, ribbons, meshes, lights on animated bones) made from scratch, in the
+client's own format and nothing past it: every setting is written as it is into an M2 264, its
+skin and the DBC rows of 3.3.5a, and what the editor shows is what the client shows. The file
+format is WoW-mods' `tools/vfx`: the model description of `forge.py` and the effect sheet of
+`effect.py`, read and written the same (keys in their order, numbers as Python writes them).
+
+- **Step A, the library** `libs/vfx` (crate `uniwow-vfx`, in the runtime as `uniwow_api::vfx`):
+  - `json`: the descriptions read and written as `json.load` and `json.dump(indent=1)` do, line
+    endings kept;
+  - `m2`: the M2 264 and its skin, read and written as m2port's `m2.py` (each array in the same
+    order and alignment);
+  - `forge`: `forge.py` ported: bones (orbit, bob, spin, scale, rotation, keys by phase), emitters
+    (bursts, windows, flipbooks), ribbons, meshes (petal, glTF from Blender, ring, disc, plane,
+    sphere, cone, cylinder; projected on the ground), point lights, the phases of a state model
+    (birth Stand 0 once, hold 158 looping, decay 159 once; the looping tracks on a global
+    sequence), the ground guard and its notes, the client's limits (24 emitters, 800 particles an
+    emitter and 2,000 a model, 64 ribbon edges, 8 keys a particle track);
+  - `validate`: the checks of m2port's `validate.py` and the domains of `port.py`;
+  - `texgen`, `blp`: the textures and their BLP2 (a palette with 8 bits of alpha, or DXT5, every
+    mipmap averaged by alpha).
+  - **Equivalence** (chosen with the coordinator): the M2 and its skin are `forge.py`'s to the byte
+    and its notes the same; the analytic textures (glow, spark, star, ring, shockwave, streak, trail,
+    swirl, solid, petal, the faded edge) are `texgen.py`'s to one level; the random ones (noise,
+    smoke, rune, lightning) come from a generator of their own, deterministic (the same seed, the
+    same image), of the same look and parameters, not the same pixels: PCG64, numpy's ziggurat, the
+    FFT and Pillow's drawing are not ported. An ignored test (`cargo test -p uniwow-vfx --
+    --ignored`, Python and the tools on the machine) runs `forge.py` and `validate.py` on every
+    example (lotus included) and compares.
+- **Step B**: the effect drawn in the scene (particles, ribbons, bones, the tracks of colour and
+  alpha, the projection on the terrain, a character of reference with its attachment points).
+- **Step C**: the module "Effects": hierarchy, inspector, keys and curves on the timeline (the
+  three phases shown), the texture workshop, the library of the client's `Spells\*.m2`.
+- **Step D**: the spell's frieze of moments and its client rows (`effect.py`).
+- **Step E**: animated meshes from Blender.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which

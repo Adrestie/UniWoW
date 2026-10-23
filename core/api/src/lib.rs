@@ -27,6 +27,9 @@ pub use uniwow_db as db;
 pub use uniwow_lua::mlua;
 /// The client of the observer of the server (`libs/server-link`), part of the runtime.
 pub use uniwow_server_link as server_link;
+/// The spell effects made from scratch (`libs/vfx`): their description, textures, BLP2, M2 264
+/// and its skin, the checks of the client's own spell models; part of the runtime.
+pub use uniwow_vfx as vfx;
 /// The API of Windows, for what wgpu does not tell, such as the memory of the GPU.
 #[cfg(windows)]
 pub use windows;

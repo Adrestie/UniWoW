@@ -18,6 +18,7 @@ uniwow-lua = { path = "libs/lua" }
 uniwow-audio = { path = "libs/audio" }
 uniwow-server-link = { path = "libs/server-link" }
 uniwow-db = { path = "libs/db" }
+uniwow-vfx = { path = "libs/vfx" }
 eframe = "0.36"
 egui_dock = { version = "0.21", features = ["serde"] }
 glam = "0.30"
