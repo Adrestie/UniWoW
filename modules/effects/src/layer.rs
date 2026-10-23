@@ -32,8 +32,6 @@ pub struct EffectLayer {
     sim: Option<(u64, Simulation)>,
     draws: Vec<Draw>,
     textures: Option<Arc<Vec<Option<wgpu::BindGroup>>>>,
-    /// The view's time at the last frame, for the time the effect plays.
-    last: Option<f32>,
     /// The effect last told in the log.
     logged: u64,
     stats: LayerStats,
@@ -49,7 +47,6 @@ impl EffectLayer {
             sim: None,
             draws: Vec::new(),
             textures: None,
-            last: None,
             logged: 0,
             stats: LayerStats::default(),
         }
@@ -78,22 +75,9 @@ impl Layer for EffectLayer {
         let Some(resources) = self.gpu.clone() else {
             return;
         };
-        let dt = self.last.map_or(0.0, |last| (view.time - last).max(0.0));
-        self.last = Some(view.time);
         let (effect, textures, anchor, time, holds, show_bones, markers, ground) = {
             let mut stage = lock(&self.stage);
-            let length = stage
-                .effect
-                .as_ref()
-                .map_or(0.0, |e| Playback::of(&e.model, stage.holds).length() / 1000.0);
-            if stage.playing && length > 0.0 {
-                stage.time += f64::from(dt) * f64::from(stage.speed);
-                if stage.time > length {
-                    stage.time = if stage.looping { stage.time % length } else { length };
-                    stage.playing &= stage.looping;
-                }
-            }
-            stage.length = length;
+            stage.tick();
             (
                 stage.effect.clone(),
                 stage.textures.clone(),

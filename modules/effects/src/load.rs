@@ -135,22 +135,67 @@ pub fn load(path: &str, vfs: Option<&dyn Vfs>) -> Result<Loaded, String> {
     })
 }
 
+/// The reference character as the Effect view draws it: its model, its skin cut to the submeshes a
+/// bare character shows, the images of its textures (its own skin for the body), its attachment
+/// points.
+pub struct CharacterData {
+    pub model: m2::Model,
+    pub skin: m2::Skin,
+    pub images: Vec<Option<uniwow_api::vfx::texgen::Image>>,
+    pub points: Vec<(u32, Vec3)>,
+}
+
+/// Whether a bare character shows the submesh `id`: its body, and the first of each group (no
+/// hair, gloves or boots beyond the bare ones).
+fn bare(id: u16) -> bool {
+    id == 0 || (id % 100 == 1 && matches!(id / 100, 3 | 4 | 5 | 8 | 9 | 10 | 11 | 12 | 13 | 15)) || id == 702
+}
+
+pub fn character(vfs: Option<&dyn Vfs>, path: &str, body: &str) -> Result<CharacterData, String> {
+    let model = m2::read_without_anims(&read(path, vfs)?).map_err(|e| format!("{path}: {e}"))?;
+    let skin_path = format!("{}00.skin", &path[..path.len() - 3]);
+    let mut skin = m2::read_skin(&read(&skin_path, vfs)?).map_err(|e| format!("{skin_path}: {e}"))?;
+    let shown: Vec<bool> = skin.submeshes.iter().map(|s| bare(s.id)).collect();
+    skin.batches
+        .retain(|b| shown.get(b.submesh as usize).copied().unwrap_or(false));
+    let images = model
+        .textures
+        .iter()
+        .map(|texture| match texture.kind {
+            0 => game_image(&texture_path(texture), vfs),
+            1 => game_image(body, vfs),
+            _ => None,
+        })
+        .collect();
+    let points = attachment_points_of(&model);
+    Ok(CharacterData {
+        model,
+        skin,
+        images,
+        points,
+    })
+}
+
 /// The attachment points of a character at the start of its Stand: (id, place in its model).
 pub fn attachment_points(vfs: Option<&dyn Vfs>, path: &str) -> Result<Vec<(u32, Vec3)>, String> {
     let model = m2::read_without_anims(&read(path, vfs)?).map_err(|e| format!("{path}: {e}"))?;
+    Ok(attachment_points_of(&model))
+}
+
+fn attachment_points_of(model: &m2::Model) -> Vec<(u32, Vec3)> {
     let stand = model.sequences.iter().position(|s| s.id == 0).unwrap_or(0);
     let clock = Clock {
         sequence: stand,
         time: 0.0,
         global: 0.0,
     };
-    let pose = anim::pose(&model, &clock, None);
-    Ok(model
+    let pose = anim::pose(model, &clock, None);
+    model
         .attachments
         .iter()
         .map(|a| {
             let m = pose.get(a.bone as usize).copied().unwrap_or_default();
             (a.id, m.transform_point3(Vec3::from(a.position)))
         })
-        .collect())
+        .collect()
 }

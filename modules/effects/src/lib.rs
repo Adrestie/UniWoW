@@ -12,6 +12,7 @@ mod layer;
 mod load;
 mod mpq;
 mod schema;
+mod view;
 
 #[cfg(test)]
 mod render_tests;
@@ -75,6 +76,35 @@ pub struct Stage {
     pub markers: Vec<([f32; 3], [f32; 4])>,
     /// The ground under the effect, in its space, for what the client lays on it.
     pub ground: Option<Arc<Ground>>,
+    /// The attachment point chosen, and where it is on the reference character (the Effect view
+    /// puts the effect there).
+    pub attach_id: u32,
+    pub attach_offset: Vec3,
+    /// When the time last moved on.
+    last_tick: Option<std::time::Instant>,
+}
+
+impl Stage {
+    /// Moves the time on by what passed since the last call, when it plays: one clock for the 3D
+    /// view and the Effect view, whichever draws first.
+    pub fn tick(&mut self) {
+        let now = std::time::Instant::now();
+        let dt = self
+            .last_tick
+            .map_or(0.0, |last| now.duration_since(last).as_secs_f64().min(0.25));
+        self.last_tick = Some(now);
+        let length = self.effect.as_ref().map_or(0.0, |e| {
+            uniwow_api::vfx::anim::Playback::of(&e.model, self.holds).length() / 1000.0
+        });
+        if self.playing && length > 0.0 {
+            self.time += dt * f64::from(self.speed);
+            if self.time > length {
+                self.time = if self.looping { self.time % length } else { length };
+                self.playing &= self.looping;
+            }
+        }
+        self.length = length;
+    }
 }
 
 impl Default for Stage {
@@ -92,6 +122,9 @@ impl Default for Stage {
             show_bones: false,
             markers: Vec::new(),
             ground: None,
+            attach_id: 19,
+            attach_offset: Vec3::ZERO,
+            last_tick: None,
         }
     }
 }
@@ -140,6 +173,15 @@ pub struct EffectsModule {
     forge_job: Option<JobId>,
     /// A drag of a value going on: one entry of the history.
     gesture: Option<Gesture>,
+    /// The Effect view, the reference character it draws, and what makes it.
+    view: view::EffectView,
+    character_view: Option<view::Character>,
+    character_data_job: Option<JobId>,
+    character_upload_job: Option<JobId>,
+    /// The viewport's target, which the pipelines are made for.
+    target: Option<uniwow_api::viewport::Target>,
+    /// A drag of the gizmo going on: one entry of the history.
+    gizmo_gesture: Option<Gesture>,
     /// The view asked at the start (`UNIWOW_EFFECTS_VIEW`), taken once the effect is shown.
     start_view: Option<View>,
     /// The time asked at the start (`UNIWOW_EFFECTS_TIME`, seconds): the effect held there.
@@ -153,6 +195,7 @@ pub fn module(any: &mut dyn Any) -> &mut EffectsModule {
 
 impl Module for EffectsModule {
     fn register(&mut self, reg: &mut Registrar) {
+        reg.panel("view", "Effect view", DockArea::Right);
         reg.panel("effects", "Effects", DockArea::Right)
             .command(
                 "effects.open",
@@ -217,6 +260,7 @@ impl Module for EffectsModule {
         );
         self.drawn = true;
         let target = view.target();
+        self.target = Some(target);
         self.gpu_job = Some(ctx.spawn("Build the effects' GPU resources", move |_| {
             Arc::new(gpu::create(&gpu.device, &gpu.queue, &target))
         }));
@@ -282,6 +326,19 @@ impl Module for EffectsModule {
             if stage.anchor == at {
                 stage.ground = ground.map(Arc::new);
             }
+        } else if Some(job) == self.character_data_job {
+            self.character_data_job = None;
+            match outcome.take::<Result<load::CharacterData, String>>() {
+                Some(Ok(data)) => self.upload_character(ctx, data),
+                Some(Err(error)) => log::warn!("the Effect view's character: {error}"),
+                None => {}
+            }
+        } else if Some(job) == self.character_upload_job {
+            self.character_upload_job = None;
+            if let Some(character) = outcome.take::<view::Character>() {
+                self.character_view = Some(character);
+                self.update_anchor();
+            }
         } else if Some(job) == self.character_job {
             match outcome.take::<Result<Vec<(u32, Vec3)>, String>>() {
                 Some(Ok(points)) => {
@@ -320,7 +377,11 @@ impl Module for EffectsModule {
         }
     }
 
-    fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
+    fn panel_ui(&mut self, panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
+        if panel == "view" {
+            self.view_ui(ui, ctx);
+            return;
+        }
         if !self.drawn {
             ui.colored_label(ui.visuals().warn_fg_color, "No 3D view: the effects are not drawn.");
         }
@@ -524,6 +585,161 @@ impl EffectsModule {
                 load::open(&path, vfs.as_deref()).map(Some)
             }),
         );
+    }
+
+    /// The reference character of the Effect view: read by a job once the client's archives are
+    /// open, its textures uploaded by another.
+    fn load_character(&mut self, ctx: &mut Context) {
+        if self.character_view.is_some() || self.character_data_job.is_some() || self.character_upload_job.is_some() {
+            return;
+        }
+        let Some(vfs) = ctx.service(vfs::SERVICE) else {
+            return;
+        };
+        if !matches!(vfs.state(), uniwow_api::vfs::VfsState::Ready { .. }) {
+            return;
+        }
+        self.character_data_job = Some(ctx.spawn("Read the reference character", move |_| {
+            load::character(Some(vfs.as_ref()), CHARACTER, CHARACTER_SKIN)
+        }));
+    }
+
+    fn upload_character(&mut self, ctx: &mut Context, data: load::CharacterData) {
+        let (Some(resources), Some(gpu)) = (self.gpu.clone(), ctx.gpu().cloned()) else {
+            return;
+        };
+        self.character_upload_job = Some(ctx.spawn("Upload the reference character's textures", move |_| {
+            let groups = data
+                .images
+                .iter()
+                .zip(&data.model.textures)
+                .map(|(image, texture)| {
+                    image.as_ref().map(|image| {
+                        gpu::texture_group(
+                            &gpu.device,
+                            &gpu.queue,
+                            &resources.texture_layout,
+                            &resources.samplers,
+                            image,
+                            texture.flags,
+                        )
+                    })
+                })
+                .collect();
+            view::Character {
+                model: data.model,
+                skin: data.skin,
+                groups,
+                points: data.points,
+            }
+        }));
+    }
+
+    /// Where the part chosen stands in the Effect view: its place (`pos`), on the attachment point.
+    fn gizmo_point(&self) -> Option<Vec3> {
+        let doc = self.doc.as_ref()?;
+        if matches!(self.selected, Node::Effect | Node::Texture(_)) {
+            return None;
+        }
+        let part = self.selected.get(&doc.value)?;
+        let pos = match part.get("pos").and_then(json::Value::as_list) {
+            Some([x, y, z]) => Vec3::new(
+                x.as_f64().unwrap_or(0.0) as f32,
+                y.as_f64().unwrap_or(0.0) as f32,
+                z.as_f64().unwrap_or(0.0) as f32,
+            ),
+            _ => Vec3::ZERO,
+        };
+        Some(pos + lock(&self.stage).attach_offset)
+    }
+
+    /// The part chosen moved by the gizmo: its place changed, one entry of the history a drag.
+    fn gizmo_moved(&mut self, ctx: &mut Context, moved: view::Moved) {
+        if moved.done {
+            if let Some(gesture) = self.gizmo_gesture.take() {
+                ctx.end_gesture(gesture);
+            }
+            return;
+        }
+        let Some(doc) = self.doc.as_ref() else {
+            return;
+        };
+        let before = doc.value.clone();
+        let mut after = before.clone();
+        let Some(part) = self.selected.get_mut(&mut after) else {
+            return;
+        };
+        let mut pos: Vec<json::Value> = part
+            .get("pos")
+            .and_then(json::Value::as_list)
+            .map(<[json::Value]>::to_vec)
+            .unwrap_or_else(|| vec![json::Value::Int(0); 3]);
+        pos.resize(3, json::Value::Int(0));
+        let v = pos[moved.axis].as_f64().unwrap_or(0.0) + f64::from(moved.yards);
+        // a hundredth of a yard: what the inspector shows
+        pos[moved.axis] = json::Value::Float((v * 100.0).round() / 100.0);
+        part.set("pos", json::Value::List(pos));
+        match self.gizmo_gesture {
+            Some(gesture) if ctx.resume_gesture(gesture) => {}
+            _ => self.gizmo_gesture = Some(ctx.begin_gesture("effect: part moved")),
+        }
+        ctx.execute(Edit {
+            label: "effect: part moved".into(),
+            before,
+            after,
+        });
+    }
+
+    /// The Effect view's panel: its camera's angles, its ground, its character, the view itself.
+    fn view_ui(&mut self, ui: &mut egui::Ui, ctx: &mut Context) {
+        self.load_character(ctx);
+        if self.doc.as_ref().is_some_and(|d| d.stale) {
+            self.reforge(ctx, false);
+        }
+        ui.horizontal_wrapped(|ui| {
+            for (label, angle) in [
+                ("Grazing", view::Angle::Grazing),
+                ("Top", view::Angle::Top),
+                ("Three-quarter", view::Angle::Three),
+            ] {
+                if ui.button(label).clicked() {
+                    self.view.angle(angle);
+                }
+            }
+            if ui.button("Frame").on_hover_text("The whole effect in view").clicked() {
+                let radius = lock(&self.stage)
+                    .effect
+                    .as_ref()
+                    .map_or(3.0, |e| view::radius_of(&e.model));
+                // far enough for a large model, up to 60 yards, aimed at its middle
+                self.view.distance = (radius * 2.6).clamp(4.0, 60.0);
+                self.view.target = Vec3::new(0.0, 0.0, radius * 0.6);
+            }
+            ui.checkbox(&mut self.view.ground, "Ground");
+            ui.add(egui::Slider::new(&mut self.view.slope, 0.0..=30.0).text("slope °"))
+                .on_hover_text("The ground rising along X: what is laid on it, what cuts into it");
+            ui.checkbox(&mut self.view.character, "Character");
+            ui.checkbox(&mut self.view.points, "Points");
+            let mut background = self.view.background;
+            if egui::color_picker::color_edit_button_rgb(ui, &mut background).changed() {
+                self.view.background = background;
+            }
+        });
+        let (Some(resources), Some(gpu), Some(target)) = (self.gpu.clone(), ctx.gpu().cloned(), self.target) else {
+            ui.weak("No GPU: the Effect view is not drawn.");
+            return;
+        };
+        let gizmo = self.gizmo_point();
+        let moved = self.view.show(
+            ui,
+            (&gpu, &resources, &target),
+            &self.stage,
+            self.character_view.as_ref(),
+            gizmo,
+        );
+        if let Some(moved) = moved {
+            self.gizmo_moved(ctx, moved);
+        }
     }
 
     /// A message of forge: clicked, it chooses the part it names.
@@ -800,6 +1016,12 @@ impl EffectsModule {
         };
         let mut stage = lock(&self.stage);
         stage.anchor = self.origin + on.unwrap_or(Vec3::ZERO);
+        stage.attach_id = id;
+        stage.attach_offset = self
+            .character_view
+            .as_ref()
+            .and_then(|c| c.points.iter().find(|(p, _)| *p == id).map(|(_, at)| *at))
+            .unwrap_or(Vec3::ZERO);
         stage.markers = if self.character && self.show_points {
             self.points
                 .iter()

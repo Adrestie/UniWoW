@@ -65,6 +65,7 @@ pub struct Gpu {
     pub pipelines: HashMap<State, wgpu::RenderPipeline>,
     pub globals: wgpu::Buffer,
     pub globals_group: wgpu::BindGroup,
+    pub globals_layout: wgpu::BindGroupLayout,
     pub texture_layout: wgpu::BindGroupLayout,
     /// The samplers: clamped, repeated across, repeated down, repeated both ways (the texture's
     /// flags 0x1 and 0x2).
@@ -244,6 +245,7 @@ pub fn create(device: &wgpu::Device, queue: &wgpu::Queue, target: &Target) -> Gp
         pipelines,
         globals,
         globals_group,
+        globals_layout,
         texture_layout,
         samplers,
         white,

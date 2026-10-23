@@ -271,6 +271,83 @@ fn the_examples_are_drawn() {
     }
 }
 
+/// The Effect view of each example, on its sloped grid, at a moment of its playback.
+#[test]
+#[ignore = "needs WoW-mods' tools, and a while on the software adapter"]
+fn the_effect_view_draws_the_examples_on_their_ground() {
+    let Some(gpu) = device() else {
+        return;
+    };
+    const VIEW: Target = Target {
+        color_format: wgpu::TextureFormat::Rgba8Unorm,
+        depth_format: wgpu::TextureFormat::Depth32Float,
+        sample_count: 4,
+        depth_compare: wgpu::CompareFunction::Greater,
+    };
+    let dir = PathBuf::from(r"E:\WoW-mods\tools\vfx\examples");
+    let shots = std::env::var_os("UNIWOW_EFFECTS_SHOTS").map(PathBuf::from);
+    let resources = Arc::new(gpu::create(&gpu.device, &gpu.queue, &VIEW));
+    for (name, slope) in [
+        ("holy_pillar", 0.0),
+        ("lotus", 15.0),
+        ("tree", 0.0),
+        ("arcane_nova", 20.0),
+    ] {
+        let path = dir.join(format!("{name}.json"));
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let spec = json::parse(&text).unwrap();
+        let mut loaded = load::forged(&spec, &dir, &path.display().to_string(), None).unwrap();
+        loaded.version = 1;
+        let groups = loaded
+            .images
+            .iter()
+            .zip(&loaded.model.textures)
+            .map(|(image, texture)| {
+                image.as_ref().map(|image| {
+                    gpu::texture_group(
+                        &gpu.device,
+                        &gpu.queue,
+                        &resources.texture_layout,
+                        &resources.samplers,
+                        image,
+                        texture.flags,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let radius = loaded
+            .model
+            .boxes
+            .get(24..28)
+            .map_or(3.0, |b| f32::from_le_bytes(b.try_into().unwrap()));
+        let stage = Stage {
+            effect: Some(Arc::new(loaded)),
+            textures: Some(Arc::new(groups)),
+            playing: false,
+            time: 2.0,
+            ..Stage::default()
+        };
+        let mut view = crate::view::EffectView::default();
+        view.slope = slope;
+        view.angle(crate::view::Angle::Three);
+        view.distance = (radius * 2.6).clamp(4.0, 60.0);
+        view.target = uniwow_api::glam::Vec3::new(0.0, 0.0, radius * 0.6);
+        let image = view.snapshot(&gpu, &resources, &VIEW, &stage, [320, 240]);
+        if let Some(dir) = &shots {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(format!("view_{name}.png")), png(&image, 320, 240)).unwrap();
+        }
+        // the background is (41, 43, 48): the ground and the effect cover a good share of the view
+        let drawn = image
+            .chunks(4)
+            .filter(|p| p[0].abs_diff(41) > 6 || p[2].abs_diff(48) > 6)
+            .count();
+        assert!(drawn > 320 * 240 / 10, "{name}: {drawn} pixels drawn");
+    }
+}
+
 fn lock_time(stage: &Mutex<Stage>, time: f64) {
     let mut stage = stage.lock().unwrap();
     stage.time = time;

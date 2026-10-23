@@ -716,6 +716,13 @@ pub const MESH: &[Field] = &[
     ),
     s(f("size", "Size", POSITIVE, "1", "Its scale."), &["gltf"]),
     f(
+        "parts",
+        "Parts",
+        Kind::Json,
+        "[]",
+        "[{\"bone\", \"pos\", \"rotation\", \"scale\", ...}]: copies of the shape in this one mesh, each on a bone of its own, placed and animated by its keys (up to 21: the leaves of a twig).",
+    ),
+    f(
         "bend",
         "Bend",
         Kind::Json,
