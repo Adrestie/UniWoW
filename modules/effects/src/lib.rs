@@ -9,6 +9,7 @@ mod doc;
 mod gpu;
 mod inspector;
 mod layer;
+mod link;
 mod load;
 mod mpq;
 mod schema;
@@ -72,6 +73,8 @@ pub struct Stage {
     /// The length of the playback, seconds (the layer writes it).
     pub length: f64,
     pub show_bones: bool,
+    /// Its time set by the Timeline's playhead: it does not move on by itself.
+    pub driven: bool,
     /// Points drawn as dots, in the world: the attachment points of the reference.
     pub markers: Vec<([f32; 3], [f32; 4])>,
     /// The ground under the effect, in its space, for what the client lays on it.
@@ -96,7 +99,7 @@ impl Stage {
         let length = self.effect.as_ref().map_or(0.0, |e| {
             uniwow_api::vfx::anim::Playback::of(&e.model, self.holds).length() / 1000.0
         });
-        if self.playing && length > 0.0 {
+        if self.playing && !self.driven && length > 0.0 {
             self.time += dt * f64::from(self.speed);
             if self.time > length {
                 self.time = if self.looping { self.time % length } else { length };
@@ -120,6 +123,7 @@ impl Default for Stage {
             holds: 2,
             length: 0.0,
             show_bones: false,
+            driven: false,
             markers: Vec::new(),
             ground: None,
             attach_id: 19,
@@ -182,6 +186,13 @@ pub struct EffectsModule {
     target: Option<uniwow_api::viewport::Target>,
     /// A drag of the gizmo going on: one entry of the history.
     gizmo_gesture: Option<Gesture>,
+    /// What the Timeline shows of the effect: the part and the description it was made from.
+    presented: Option<(Node, json::Value)>,
+    presented_version: u64,
+    /// A change of keys in the Timeline going on: one entry of the history.
+    timeline_gesture: Option<Gesture>,
+    /// The time axes of the curves of a particle's life, by key.
+    life_axes: std::collections::HashMap<String, uniwow_api::curve::TimeAxis>,
     /// The view asked at the start (`UNIWOW_EFFECTS_VIEW`), taken once the effect is shown.
     start_view: Option<View>,
     /// The time asked at the start (`UNIWOW_EFFECTS_TIME`, seconds): the effect held there.
@@ -427,35 +438,13 @@ impl Module for EffectsModule {
         }
         ui.separator();
         {
+            // the time is the Timeline's: its playhead on the effect's tracks
             let mut stage = lock(&self.stage);
             ui.horizontal(|ui| {
-                let label = if stage.playing { "Pause" } else { "Play" };
-                if ui.button(label).clicked() {
-                    stage.playing = !stage.playing;
-                    if stage.playing && stage.time >= stage.length {
-                        stage.time = 0.0;
-                    }
-                }
-                if ui.button("⏮").on_hover_text("Back to the start").clicked() {
-                    stage.time = 0.0;
-                }
-                ui.checkbox(&mut stage.looping, "Loop");
                 ui.label(alive_text);
-            });
-            let length = stage.length.max(0.001);
-            if ui
-                .add(egui::Slider::new(&mut stage.time, 0.0..=length).text("time (s)"))
-                .changed()
-            {
-                stage.playing = false;
-            }
-            ui.horizontal(|ui| {
-                ui.add(egui::Slider::new(&mut stage.speed, 0.05..=2.0).text("speed"));
-            });
-            ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut stage.holds).range(1..=20))
-                    .on_hover_text("How many times the hold of a state model loops (birth, hold, decay)");
-                ui.label("holds");
+                if !stage.driven {
+                    ui.weak("(the Timeline plays it: choose ⚡ in its list)");
+                }
                 ui.checkbox(&mut stage.show_bones, "Bones");
             });
         }
@@ -499,7 +488,12 @@ impl Module for EffectsModule {
         if self.doc.is_some() {
             ui.separator();
             self.edit_ui(ui, ctx);
+            self.life_ui(ui, ctx);
         }
+    }
+
+    fn windows_ui(&mut self, _egui: &egui::Context, ctx: &mut Context) {
+        self.sync_timeline(ctx);
     }
 
     fn unsaved(&self) -> Vec<String> {
@@ -739,6 +733,172 @@ impl EffectsModule {
         );
         if let Some(moved) = moved {
             self.gizmo_moved(ctx, moved);
+        }
+    }
+
+    /// The part chosen shown in the Timeline: presented again when it or the description changed,
+    /// the user's changes of its keys brought back into the description, the playhead followed.
+    fn sync_timeline(&mut self, ctx: &mut Context) {
+        let Some(timeline) = ctx.service(uniwow_api::timeline::SERVICE) else {
+            return;
+        };
+        let owner = ctx.module_id().to_owned();
+        let Some(doc) = self.doc.as_ref() else {
+            if self.presented.take().is_some() {
+                timeline.withdraw(&owner);
+            }
+            lock(&self.stage).driven = false;
+            return;
+        };
+        let current = (self.selected.clone(), doc.value.clone());
+        if self.presented.as_ref() != Some(&current) {
+            self.presented_version += 1;
+            let name = doc.value.get("name").and_then(json::Value::as_str).unwrap_or("effect");
+            let part = match &self.selected {
+                Node::Effect => String::new(),
+                other => format!(
+                    " · {}",
+                    format!("{other:?}").to_lowercase().replace(['(', ')', '"'], " ").trim()
+                ),
+            };
+            let presented = link::present(
+                &doc.value,
+                &self.selected,
+                &format!("{name}{part}"),
+                self.presented_version,
+            );
+            timeline.present(&owner, presented);
+            self.presented = Some(current);
+        }
+        let mut changed = false;
+        if let Some((version, edited)) = timeline.take_edit(&owner)
+            && version == self.presented_version
+            && let Some(after) = link::apply(&doc.value, &self.selected, &edited)
+        {
+            match self.timeline_gesture {
+                Some(gesture) if ctx.resume_gesture(gesture) => {}
+                _ => self.timeline_gesture = Some(ctx.begin_gesture("effect: keys changed in the Timeline")),
+            }
+            ctx.execute(Edit {
+                label: "effect: keys changed in the Timeline".into(),
+                before: doc.value.clone(),
+                after,
+            });
+            changed = true;
+        }
+        if !changed && let Some(gesture) = self.timeline_gesture.take() {
+            ctx.end_gesture(gesture);
+        }
+        let mut stage = lock(&self.stage);
+        match timeline.playhead(&owner) {
+            Some(playhead) => {
+                stage.driven = true;
+                stage.holds = 1;
+                stage.time = playhead.time;
+            }
+            None => stage.driven = false,
+        }
+    }
+
+    /// The particle's values over its life (colour, alpha, size) of the emitter chosen, as curves,
+    /// the life from 0 to 1; 8 keys at most, as the client's.
+    fn life_ui(&mut self, ui: &mut egui::Ui, ctx: &mut Context) {
+        let Node::Emitter(_) = self.selected else {
+            return;
+        };
+        let (Some(doc), Some(editor)) = (self.doc.as_ref(), ctx.service(uniwow_api::curve::SERVICE)) else {
+            return;
+        };
+        let Some(part) = self.selected.get(&doc.value) else {
+            return;
+        };
+        ui.separator();
+        ui.label("Over a particle's life (8 keys at most)");
+        let mut after = None;
+        for (key, colour, default, label) in [
+            ("colors", true, "[[0, \"#ffffff\"], [1, \"#ffffff\"]]", "colour"),
+            ("alpha", false, "[[0, 0], [0.15, 1], [1, 0]]", "alpha"),
+            ("size", false, "0.5", "size"),
+        ] {
+            let value = part
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| json::parse(default).unwrap_or(json::Value::Null));
+            let value = match value {
+                json::Value::Str(c) if colour => json::Value::List(vec![
+                    json::Value::List(vec![json::Value::Int(0), json::Value::Str(c.clone())]),
+                    json::Value::List(vec![json::Value::Int(1), json::Value::Str(c)]),
+                ]),
+                other => other,
+            };
+            let names = if colour {
+                vec!["red", "green", "blue"]
+            } else {
+                vec![label]
+            };
+            let mut shown: Vec<uniwow_api::curve::ShownCurve> = link::life_curves(&value, colour)
+                .into_iter()
+                .zip(names)
+                .enumerate()
+                .map(|(n, (curve, name))| uniwow_api::curve::ShownCurve {
+                    label: name.to_owned(),
+                    colour: if colour {
+                        uniwow_api::sequence::number_colour(PropertyKind::Colour, n)
+                    } else {
+                        [230, 160, 40]
+                    },
+                    curve,
+                    visible: true,
+                })
+                .collect();
+            let axis = self
+                .life_axes
+                .entry(key.to_owned())
+                .or_insert(uniwow_api::curve::TimeAxis {
+                    first: -0.05,
+                    pixels_per_unit: 300.0,
+                });
+            ui.label(label);
+            let output = ui
+                .allocate_ui(egui::vec2(ui.available_width(), 110.0), |ui| {
+                    editor.show(
+                        ui,
+                        egui::Id::new(("effects life", key)),
+                        &mut shown,
+                        axis,
+                        &uniwow_api::curve::CurveOptions {
+                            snap: None,
+                            playhead: None,
+                            span: Some([0.0, 1.0]),
+                        },
+                    )
+                })
+                .inner;
+            if output.change != uniwow_api::curve::CurveChange::None {
+                let curves: Vec<_> = shown.into_iter().map(|s| s.curve).collect();
+                match link::life_value(&curves, colour) {
+                    Some(new) if Some(&new) != part.get(key) => after = Some((key, new)),
+                    Some(_) => {}
+                    None => {
+                        self.error = Some(format!(
+                            "{label}: {} keys at most over a particle's life",
+                            link::LIFE_KEYS
+                        ))
+                    }
+                }
+            }
+        }
+        if let Some((key, new)) = after {
+            let before = doc.value.clone();
+            let mut value = before.clone();
+            if let Some(part) = self.selected.get_mut(&mut value) {
+                part.set(key, new);
+            }
+            ctx.execute(Edit {
+                label: "effect: a particle's life changed".into(),
+                before,
+                after: value,
+            });
         }
     }
 

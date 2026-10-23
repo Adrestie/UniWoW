@@ -67,31 +67,35 @@ pub(super) fn playback_bar(timeline: &mut TimelineModule, sequence: &Sequence, u
         {
             timeline.objects.seek(f64::from(frame));
         }
-        ui.label("Frame rate");
-        let mut frame_rate = sequence.frame_rate;
-        let response = ui.add(
-            egui::DragValue::new(&mut frame_rate)
-                .range(1..=MAX_FRAME_RATE)
-                .update_while_editing(false),
-        );
-        if response.changed() {
-            change_live(timeline, "frame rate", Property::FrameRate, f64::from(frame_rate));
-        }
-        let mut finished = ended(&response);
-        ui.label("Length");
-        let mut length = sequence.length;
-        let response = ui.add(
-            egui::DragValue::new(&mut length)
-                .range(1..=MAX_LENGTH)
-                .update_while_editing(false),
-        );
-        if response.changed() {
-            change_live(timeline, "length", Property::Length, f64::from(length));
-        }
-        finished |= ended(&response);
-        if finished {
-            finish_editing(timeline, ctx);
-        }
+        // the frame rate and the length of a module's tracks are its own
+        let editable = timeline.external.is_none();
+        ui.add_enabled_ui(editable, |ui| {
+            ui.label("Frame rate");
+            let mut frame_rate = sequence.frame_rate;
+            let response = ui.add(
+                egui::DragValue::new(&mut frame_rate)
+                    .range(1..=MAX_FRAME_RATE)
+                    .update_while_editing(false),
+            );
+            if response.changed() {
+                change_live(timeline, "frame rate", Property::FrameRate, f64::from(frame_rate));
+            }
+            let mut finished = ended(&response);
+            ui.label("Length");
+            let mut length = sequence.length;
+            let response = ui.add(
+                egui::DragValue::new(&mut length)
+                    .range(1..=MAX_LENGTH)
+                    .update_while_editing(false),
+            );
+            if response.changed() {
+                change_live(timeline, "length", Property::Length, f64::from(length));
+            }
+            finished |= ended(&response);
+            if finished {
+                finish_editing(timeline, ctx);
+            }
+        });
         ui.separator();
         let mut curves = timeline.panel.curves;
         if ui.selectable_label(!curves, "Dopesheet").clicked() {
@@ -105,7 +109,9 @@ pub(super) fn playback_bar(timeline: &mut TimelineModule, sequence: &Sequence, u
             timeline.objects.show_curves(curves);
         }
         ui.separator();
-        add_property(timeline, sequence, ui);
+        if editable {
+            add_property(timeline, sequence, ui);
+        }
     });
 }
 

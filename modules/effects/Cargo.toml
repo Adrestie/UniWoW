@@ -16,4 +16,4 @@ name = "Effects"
 category = "World"
 # Services the module cannot work without, and services it uses when present.
 requires = []
-uses = ["viewport", "vfs", "models", "scene"]
+uses = ["viewport", "vfs", "models", "scene", "timeline", "curve-editor"]

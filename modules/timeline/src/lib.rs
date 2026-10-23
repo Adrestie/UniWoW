@@ -4,6 +4,7 @@
 //! the core (section 3): a `Sequence` per sequence opened, a `Player`, a `DopesheetView` and a
 //! `CurveView`. The module keeps the files and its bars.
 
+mod external;
 mod panel;
 #[cfg(test)]
 mod testing;
@@ -17,6 +18,7 @@ use std::sync::Arc;
 use uniwow_api::hotkey::{Hotkey, HotkeyKind, Keys};
 use uniwow_api::sequence::Sequence;
 use uniwow_api::serde_json;
+use uniwow_api::timeline;
 use uniwow_api::ui::{self, Handle, Kind, Property, SharedUi, Ui};
 use uniwow_api::{
     CallId, Command, Context, DIALOG_ANSWERED_TOPIC, DockArea, Editor, Event, Module, Registrar, egui, log,
@@ -153,6 +155,9 @@ struct TimelineModule {
     question: Option<Question>,
     panel: panel::State,
     play: Hotkey,
+    /// What the other modules present, and whose is shown.
+    externals: Arc<std::sync::Mutex<external::Externals>>,
+    external: Option<String>,
 }
 
 impl Default for TimelineModule {
@@ -167,14 +172,18 @@ impl Default for TimelineModule {
             question: None,
             panel: panel::State::default(),
             play: Hotkey::new(HotkeyKind::Press, PLAY),
+            externals: Arc::default(),
+            external: None,
         }
     }
 }
 
 impl Module for TimelineModule {
     fn register(&mut self, reg: &mut Registrar) {
+        let service: timeline::Handle = Arc::new(external::Service(self.externals.clone()));
         reg.panel("timeline", "Timeline", DockArea::Bottom)
-            .subscribe(DIALOG_ANSWERED_TOPIC);
+            .subscribe(DIALOG_ANSWERED_TOPIC)
+            .provide(timeline::SERVICE, service);
         self.play = reg.hotkey("play", "Play or pause", HotkeyKind::Press, PLAY);
     }
 
@@ -192,7 +201,13 @@ impl Module for TimelineModule {
     }
 
     fn panel_ui(&mut self, _panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
+        self.sync();
         panel::show(self, ui, ctx);
+    }
+
+    fn windows_ui(&mut self, _egui: &egui::Context, _ctx: &mut Context) {
+        // at each frame, shown or not: the playhead and the edits handed to the modules
+        self.sync();
     }
 
     fn on_reply(&mut self, call: CallId, result: Result<serde_json::Value, String>, _ctx: &mut Context) {
@@ -278,9 +293,106 @@ impl TimelineModule {
         self.objects.lock().sequence(document.sequence).ok()
     }
 
-    /// The sequence shown.
+    /// The sequence shown: a module's, or one of the folder.
     fn sequence(&self) -> Option<Arc<Sequence>> {
+        if let Some(owner) = &self.external {
+            let handle = external::lock(&self.externals).shown.get(owner)?.handle?;
+            return self.objects.lock().sequence(handle).ok();
+        }
         self.data(self.current.as_ref()?)
+    }
+
+    /// Takes in what the modules presented, hands back what the user changed, and tells each the
+    /// playhead on its tracks while they are shown.
+    fn sync(&mut self) {
+        let (time, playing, _) = self.objects.playback();
+        let mut show = None;
+        {
+            let mut externals = external::lock(&self.externals);
+            for handle in std::mem::take(&mut externals.gone) {
+                let _ = self.objects.lock().destroy(handle);
+            }
+            let externals = &mut *externals;
+            for (owner, shown) in externals.shown.iter_mut() {
+                let version = shown.presented.version;
+                if shown.applied != Some(version) {
+                    let mut objects = self.objects.lock();
+                    let data = &shown.presented.sequence;
+                    let made = match shown.handle {
+                        Some(handle) => objects
+                            .set_numbers(handle, Property::FrameRate, &[f64::from(data.frame_rate)])
+                            .and_then(|()| objects.set_numbers(handle, Property::Length, &[f64::from(data.length)]))
+                            .and_then(|()| objects.set_tracks_under_way(handle, data.tracks.clone()))
+                            .map(|()| handle),
+                        None => objects.create_sequence(data.clone()),
+                    };
+                    match made {
+                        Ok(handle) => {
+                            let _ = objects.set_text(handle, Property::Title, &shown.presented.title);
+                            shown.handle = Some(handle);
+                            shown.applied = Some(version);
+                            shown.set = data.tracks.clone();
+                        }
+                        Err(error) => log::warn!("'{owner}' presented tracks the Timeline cannot show: {error}"),
+                    }
+                } else if let Some(handle) = shown.handle
+                    && let Ok(data) = self.objects.lock().sequence(handle)
+                    && data.tracks != shown.set
+                {
+                    shown.set = data.tracks.clone();
+                    shown.edit = Some((version, (*data).clone()));
+                }
+                let rate = f64::from(shown.presented.sequence.frame_rate.max(1));
+                shown.playhead = (self.external.as_deref() == Some(owner.as_str())).then_some(timeline::Playhead {
+                    time: time / rate,
+                    playing,
+                });
+            }
+            // a module presenting for the first time is shown, unless the user shows another's
+            if let Some(owner) = externals.fresh.pop()
+                && self.external.is_none()
+            {
+                show = Some(owner);
+            }
+            externals.fresh.clear();
+        }
+        if let Some(owner) = show {
+            self.show_external(&owner);
+            // its playhead told from this frame
+            let (time, playing, _) = self.objects.playback();
+            if let Some(shown) = external::lock(&self.externals).shown.get_mut(&owner) {
+                let rate = f64::from(shown.presented.sequence.frame_rate.max(1));
+                shown.playhead = Some(timeline::Playhead {
+                    time: time / rate,
+                    playing,
+                });
+            }
+        }
+    }
+
+    /// Shows what the module `owner` presents.
+    fn show_external(&mut self, owner: &str) {
+        let (handle, title) = {
+            let externals = external::lock(&self.externals);
+            let Some(shown) = externals.shown.get(owner) else {
+                return;
+            };
+            (shown.handle, shown.presented.title.clone())
+        };
+        let Some(handle) = handle else {
+            return;
+        };
+        panel::cancel_editing(self);
+        self.external = Some(owner.to_owned());
+        self.objects.show(handle, &title);
+    }
+
+    /// The segments of what is shown (an effect's phases), and its length in frames.
+    fn segments(&self) -> Option<(Vec<timeline::Segment>, u32)> {
+        let owner = self.external.as_ref()?;
+        let externals = external::lock(&self.externals);
+        let shown = externals.shown.get(owner)?;
+        Some((shown.presented.segments.clone(), shown.presented.sequence.length))
     }
 
     /// Whether the sequence `name` differs from its file.
@@ -340,6 +452,7 @@ impl TimelineModule {
                 .map_err(|e| format!("{}: {e}", path.display()))?;
         }
         self.current = Some(name.to_owned());
+        self.external = None;
         if let Some(document) = self.documents.get(name) {
             self.objects.show(document.sequence, name);
         }
@@ -713,5 +826,47 @@ mod tests {
         assert!(timeline.create("outro").is_ok());
         assert!(timeline.names.contains(&"outro".to_owned()));
         std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn a_module_presents_its_tracks_and_gets_back_the_users_change() {
+        use uniwow_api::timeline::{EXTERNAL, Presented, Timeline};
+        let mut timeline = TimelineModule::default();
+        let service = crate::external::Service(timeline.externals.clone());
+        let mut sequence = Sequence::default();
+        let mut track = Track::new(&format!("{EXTERNAL}rate"), PropertyKind::Number);
+        track.set_key(0, uniwow_api::PropertyValue::Number(10.0));
+        sequence.tracks.push(track);
+        service.present(
+            "effects",
+            Presented {
+                title: "nova".into(),
+                sequence: sequence.clone(),
+                segments: Vec::new(),
+                version: 1,
+            },
+        );
+        timeline.sync();
+        assert_eq!(timeline.external.as_deref(), Some("effects"), "shown at once");
+        assert_eq!(*timeline.sequence().unwrap(), sequence);
+        assert!(service.playhead("effects").is_some());
+        assert_eq!(service.take_edit("effects"), None, "nothing changed");
+        // the user adds a key
+        let handle = crate::external::lock(&timeline.externals).shown["effects"]
+            .handle
+            .unwrap();
+        let mut tracks = sequence.tracks.clone();
+        tracks[0].set_key(30, uniwow_api::PropertyValue::Number(20.0));
+        timeline
+            .objects
+            .lock()
+            .change_tracks(handle, tracks.clone(), "key")
+            .unwrap();
+        timeline.sync();
+        let (version, edited) = service.take_edit("effects").unwrap();
+        assert_eq!((version, edited.tracks), (1, tracks));
+        service.withdraw("effects");
+        timeline.sync();
+        assert!(timeline.objects.lock().object(handle).is_none(), "its object destroyed");
     }
 }

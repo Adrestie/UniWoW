@@ -61,6 +61,10 @@ impl Players {
                 }
                 written.at = Some(at);
                 for track in &frame.data.tracks {
+                    // a module's tracks presented to the Timeline: it reads the playhead itself
+                    if track.property.starts_with(uniwow_api::timeline::EXTERNAL) {
+                        continue;
+                    }
                     // A number without keys keeps the value the property has.
                     let current = if track.has_bare_number() {
                         store.editor.read_property(&track.property).ok()

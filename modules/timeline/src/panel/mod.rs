@@ -53,6 +53,7 @@ pub fn show(timeline: &mut TimelineModule, ui: &mut egui::Ui, ctx: &mut Context)
         return;
     };
     playback_bar(timeline, &sequence, ui, ctx);
+    segment_bar(timeline, ui);
     ui.separator();
     ctx.draw_objects(&timeline.objects.store, VIEWS, ui);
     keyboard(timeline, ui);
@@ -63,15 +64,35 @@ fn sequence_bar(timeline: &mut TimelineModule, ui: &mut egui::Ui, ctx: &mut Cont
     let dirty = timeline.current.as_ref().is_some_and(|name| timeline.dirty(name));
     ui.horizontal(|ui| {
         ui.label("Sequence");
-        let shown = match &timeline.current {
-            Some(name) if dirty => format!("{name} *"),
-            Some(name) => name.clone(),
-            None => "none".to_owned(),
+        let externals: Vec<(String, String)> = crate::external::lock(&timeline.externals)
+            .shown
+            .iter()
+            .map(|(owner, shown)| (owner.clone(), shown.presented.title.clone()))
+            .collect();
+        let shown = match (&timeline.external, &timeline.current) {
+            (Some(owner), _) => externals
+                .iter()
+                .find(|(o, _)| o == owner)
+                .map_or_else(|| owner.clone(), |(_, title)| title.clone()),
+            (None, Some(name)) if dirty => format!("{name} *"),
+            (None, Some(name)) => name.clone(),
+            (None, None) => "none".to_owned(),
         };
         let mut chosen = None;
+        let mut chosen_external = None;
         let list = egui::ComboBox::from_id_salt("timeline-sequence")
             .selected_text(shown)
             .show_ui(ui, |ui| {
+                // what the modules present first: an effect's keys...
+                for (owner, title) in &externals {
+                    if ui
+                        .selectable_label(timeline.external.as_ref() == Some(owner), format!("⚡ {title}"))
+                        .on_hover_text(format!("Presented by the module '{owner}': its changes go back to it"))
+                        .clicked()
+                    {
+                        chosen_external = Some(owner.clone());
+                    }
+                }
                 for name in &timeline.names {
                     if ui
                         .selectable_label(timeline.current.as_ref() == Some(name), name)
@@ -85,7 +106,11 @@ fn sequence_bar(timeline: &mut TimelineModule, ui: &mut egui::Ui, ctx: &mut Cont
         if list.response.clicked() {
             timeline.refresh_names();
         }
-        if let Some(name) = chosen.filter(|name| timeline.current.as_ref() != Some(name)) {
+        if let Some(owner) = chosen_external {
+            timeline.show_external(&owner);
+        }
+        if let Some(name) = chosen.filter(|name| timeline.external.is_some() || timeline.current.as_ref() != Some(name))
+        {
             switch(timeline, ctx, name, dirty);
         }
         let save = ui.add_enabled(dirty, egui::Button::new("Save"));
@@ -206,6 +231,49 @@ fn finish_editing(timeline: &mut TimelineModule, ctx: &mut Context) {
             after,
             before: None,
         });
+    }
+}
+
+/// The segments of what a module presents (an effect's phases) across the panel, the playhead on
+/// them; a click puts the playhead at its point.
+fn segment_bar(timeline: &mut TimelineModule, ui: &mut egui::Ui) {
+    let Some((segments, length)) = timeline.segments() else {
+        return;
+    };
+    if segments.is_empty() || length == 0 {
+        return;
+    }
+    let (time, _, _) = timeline.objects.playback();
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), egui::Sense::click_and_drag());
+    let painter = ui.painter_at(rect);
+    let x = |frame: f64| rect.left() + rect.width() * (frame / f64::from(length)) as f32;
+    let colours = [
+        egui::Color32::from_rgb(70, 110, 160),
+        egui::Color32::from_rgb(80, 140, 90),
+        egui::Color32::from_rgb(150, 100, 70),
+    ];
+    for (index, segment) in segments.iter().enumerate() {
+        let span = egui::Rect::from_x_y_ranges(x(f64::from(segment.start))..=x(f64::from(segment.end)), rect.y_range());
+        painter.rect_filled(span.shrink(1.0), 3.0, colours[index % colours.len()]);
+        painter.text(
+            span.center(),
+            egui::Align2::CENTER_CENTER,
+            &segment.label,
+            egui::FontId::proportional(11.0),
+            egui::Color32::WHITE,
+        );
+    }
+    painter.vline(
+        x(time),
+        rect.y_range(),
+        egui::Stroke::new(2.0, egui::Color32::from_rgb(240, 200, 60)),
+    );
+    if (response.clicked() || response.dragged())
+        && let Some(pointer) = response.interact_pointer_pos()
+    {
+        let share = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        timeline.objects.seek((f64::from(share) * f64::from(length)).round());
     }
 }
 
