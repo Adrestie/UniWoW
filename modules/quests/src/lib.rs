@@ -1077,6 +1077,8 @@ impl Module for QuestsModule {
                     .filter_map(|key| key.as_str().map(str::to_owned))
                     .collect();
                 let after = self.edits.discarded(&keys);
+                // What was being typed forgotten, not written again once left.
+                self.typing = None;
                 self.change(format!("Take {} changes of the quests away", keys.len()), after, ctx);
                 Ok(json!({ "discarded": keys.len() }))
             }

@@ -34,6 +34,10 @@ pub struct Placing {
     pub shown: Vec<(u32, Vec<[f32; 3]>)>,
     pub inserts: Vec<(u32, usize, [f32; 3])>,
     pub groups: Vec<(u64, Vec<u64>, bool)>,
+    /// The leader whose group the creatures clicked join (*+ Add members…*), and those clicked not
+    /// yet taken.
+    pub adding_to: Option<u64>,
+    pub picked: Vec<u64>,
     /// Whether each point of the paths shown waits for Apply, as `shown` lists them.
     pub shown_pending: Vec<Vec<bool>>,
 }
@@ -101,9 +105,12 @@ impl Tool for PlaceTool {
         if !input.response.hovered() {
             return false;
         }
-        if lock(&self.placing).path.is_some() {
+        // Points added by clicks, or creatures picked for a group: every click, until Esc.
+        let placing = lock(&self.placing);
+        if placing.path.is_some() || placing.adding_to.is_some() {
             return true;
         }
+        drop(placing);
         // Over a handle "+", unless a drag began elsewhere.
         let (hover, origin) = input
             .response
@@ -115,6 +122,10 @@ impl Tool for PlaceTool {
 
     fn pointer(&mut self, input: &ToolInput<'_>, painter: &egui::Painter) {
         self.groups_ui(input, painter);
+        if lock(&self.placing).adding_to.is_some() {
+            self.picking_ui(input, painter);
+            return;
+        }
         if lock(&self.placing).path.is_none() {
             self.handles_ui(input, painter);
             return;
@@ -162,6 +173,31 @@ impl Tool for PlaceTool {
 }
 
 impl PlaceTool {
+    /// The creatures clicked joining the group of the leader asked (*+ Add members…*): a banner
+    /// saying so by the pointer; Esc or a right click stops.
+    fn picking_ui(&mut self, input: &ToolInput<'_>, painter: &egui::Painter) {
+        let response = input.response;
+        if response.ctx.input(|i| i.key_pressed(egui::Key::Escape)) || response.secondary_clicked() {
+            lock(&self.placing).adding_to = None;
+            return;
+        }
+        let Some(pointer) = response.hover_pos() else {
+            return;
+        };
+        let text = "Click: a creature joins the group · Esc: done";
+        let galley = painter.layout_no_wrap(text.to_owned(), egui::FontId::proportional(12.0), egui::Color32::WHITE);
+        let rect = egui::Rect::from_min_size(pointer + egui::vec2(14.0, 14.0), galley.size()).expand(4.0);
+        painter.rect_filled(rect, 3.0, egui::Color32::from_black_alpha(200));
+        painter.galley(rect.min + egui::vec2(4.0, 4.0), galley, egui::Color32::WHITE);
+        if response.clicked_by(egui::PointerButton::Primary)
+            && let Some(ray) = input.ray_at(pointer)
+            && let Some(hit) = self.scene.pick(&ray)
+            && let Some(creature) = hit.chain.iter().rev().find(|id| id.kind == scene::Kind::Creature)
+        {
+            lock(&self.placing).picked.push(creature.key);
+        }
+    }
+
     /// Where the creature `guid` is: where it runs in the world, else at its spawn point.
     fn creature_at(&self, guid: u64) -> Option<[f32; 3]> {
         let id = EntityId::creature(guid);
@@ -365,6 +401,15 @@ impl SpawnsModule {
             .filter(|path| *path != 0)
             .collect();
         shown.extend(lock(&self.place_points).path);
+        // Creatures added to a group by clicks while its leader alone is selected.
+        {
+            let mut placing = lock(&self.place_points);
+            if let Some(leader) = placing.adding_to
+                && selection.ids != [EntityId::creature(leader)]
+            {
+                placing.adding_to = None;
+            }
+        }
         // The groups of the creatures selected, marked in the view.
         let mut groups: Vec<(u64, Vec<u64>, bool)> = Vec::new();
         for id in scene
@@ -413,6 +458,16 @@ impl SpawnsModule {
     /// The clicks on the ground taken as points of the path being drawn, one undo entry for those
     /// of a frame; the drawing stopped once asked.
     pub(crate) fn take_clicks(&mut self, ctx: &mut Context) {
+        // Creatures clicked for a group: they join it, one undo entry for those of a frame.
+        let (picked, adding_to) = {
+            let mut placing = lock(&self.place_points);
+            (std::mem::take(&mut placing.picked), placing.adding_to)
+        };
+        if let Some(leader) = adding_to
+            && !picked.is_empty()
+        {
+            self.make_group(leader, &picked, ctx);
+        }
         // A handle "+" clicked: its point inserted, selected.
         let inserts = std::mem::take(&mut lock(&self.place_points).inserts);
         for (path, at, position) in inserts {
@@ -1066,13 +1121,15 @@ impl SpawnsModule {
                     _ => members.clone(),
                 };
                 let mut edited = shown.clone();
+                let mut new_leader = None;
                 egui::Grid::new("spawns group")
-                    .num_columns(3)
+                    .num_columns(4)
                     .striped(true)
                     .show(ui, |ui| {
                         ui.weak("Member");
                         ui.weak("Distance");
                         ui.weak("Angle");
+                        ui.weak("");
                         ui.end_row();
                         for member in &mut edited {
                             let name = self
@@ -1104,9 +1161,22 @@ impl SpawnsModule {
                             .on_hover_text(
                                 "The angle from the leader it walks at, in degrees, 180 right behind; written by Apply",
                             );
+                            if ui
+                                .small_button("Make leader")
+                                .on_hover_text(
+                                    "It leads the group and walks the leader's path; the leader follows at its place",
+                                )
+                                .clicked()
+                            {
+                                new_leader = Some(member.guid);
+                            }
                             ui.end_row();
                         }
                     });
+                if let Some(member) = new_leader {
+                    self.make_leader(leader, member, ctx);
+                    return;
+                }
                 // Held while dragged, written once let go: one undo entry.
                 if edited != shown {
                     self.group_edit = Some((leader, edited, ai));
@@ -1193,72 +1263,81 @@ impl SpawnsModule {
             }
         }
         // How a group is made: the followers selected first, the leader last.
-        let leader_name = self
-            .find(&EntityId::creature(guid))
-            .map_or(format!("#{guid}"), |spawn| format!("{} #{guid}", spawn.name));
-        let rule = if others.is_empty() {
-            format!(
-                "To make a group: select the followers, then the leader last (Ctrl+click); {leader_name} leads it when chosen last."
-            )
-        } else {
-            format!(
-                "Select the followers, then the leader last: {leader_name}, chosen last, leads the {} others.",
+        // The group the others join: the one it leads or follows, else one it leads.
+        let target = now.leader_of(guid).unwrap_or(guid);
+        let target_name = self
+            .find(&EntityId::creature(target))
+            .map_or(format!("#{target}"), |spawn| format!("{} #{target}", spawn.name));
+        let grouped = now.groups.contains_key(&target);
+        let rule = match (others.is_empty(), grouped) {
+            (true, false) => format!(
+                "To make a group: select the followers, then the leader last (Ctrl+click); {target_name} leads it when chosen last."
+            ),
+            (true, true) => format!(
+                "To add to the group of {target_name}: select the creatures to add, then one of the group last (Ctrl+click), or + Add members…"
+            ),
+            (false, false) => format!(
+                "Select the followers, then the leader last: {target_name}, chosen last, leads the {} others.",
                 others.len()
-            )
+            ),
+            (false, true) => format!("The {} others selected join the group of {target_name}.", others.len()),
         };
         ui.label(egui::RichText::new(rule).weak().small())
-            .on_hover_text("The leader is the creature chosen last in the selection, the one the Inspector shows");
-        if !others.is_empty()
-            && ui
-                .button(format!("Make a group of the {} selected, led by it", others.len() + 1))
-                .on_hover_text("They follow it, two by two behind it; each taken out of any other group")
+            .on_hover_text("The creature chosen last in the selection, the one the Inspector shows, is the one whose group the others join or that leads them");
+        if !others.is_empty() {
+            let (label, hint) = if grouped {
+                (
+                    format!("Add the {} selected to {target_name}'s group", others.len()),
+                    "They follow its leader at the next places behind it, two by two, the others staying where they are; each taken out of any other group",
+                )
+            } else {
+                (
+                    format!("Make a group of the {} selected, led by it", others.len() + 1),
+                    "They follow it, two by two behind it; each taken out of any other group",
+                )
+            };
+            if ui.button(label).on_hover_text(hint).clicked() {
+                self.make_group(target, &others, ctx);
+            }
+        }
+        // Creatures added by clicks in the view, while the leader is selected alone.
+        if others.is_empty() && target == guid {
+            let adding = lock(&self.place_points).adding_to == Some(guid);
+            if ui
+                .selectable_label(adding, "+ Add members…")
+                .on_hover_text("Each creature clicked in the view joins its group, at the next place behind it; Esc or a right click to stop")
                 .clicked()
-        {
-            self.make_group(guid, &others, ctx);
+            {
+                let mut placing = lock(&self.place_points);
+                placing.adding_to = if adding { None } else { Some(guid) };
+                placing.path = None;
+            }
         }
     }
 
+    /// `others` put in the group of `leader`, made when it leads none (`patrols::joined`).
     fn make_group(&mut self, leader: u64, others: &[u64], ctx: &mut Context) {
-        let now = self.patrols_now.clone();
         let mut after = self.changes.clone();
-        for member in others {
-            // Taken out of the group it was in; one it led broken.
-            if let Some(before) = now.leader_of(*member).filter(|before| *before != leader) {
-                if before == *member {
-                    after.patrols.groups.insert(before, None);
-                } else if let Some((members, ai)) = after.patrols.laid_over(&self.patrols).groups.get(&before).cloned()
-                {
-                    let left: Vec<Member> = members.into_iter().filter(|kept| kept.guid != *member).collect();
-                    after
-                        .patrols
-                        .groups
-                        .insert(before, (!left.is_empty()).then_some((left, ai)));
-                }
-            }
-            // A member follows: it walks no path of its own.
-            if now
-                .walkers
-                .get(member)
-                .is_some_and(|walker| walker.movement != patrols::IDLE)
-            {
-                after.patrols.walkers.insert(*member, Walker::default());
-            }
+        after.patrols = patrols::joined(&self.changes.patrols, &self.patrols, leader, others);
+        let label = if self.patrols_now.groups.contains_key(&leader) {
+            format!("Add {} to a group", others.len())
+        } else {
+            format!("Make a group of {}", others.len() + 1)
+        };
+        self.change(label, after, ctx);
+    }
+
+    /// `member` made the leader of the group of `leader`, taking its path (`patrols::led_by`).
+    fn make_leader(&mut self, leader: u64, member: u64, ctx: &mut Context) {
+        let Some(patrols) = patrols::led_by(&self.changes.patrols, &self.patrols, leader, member) else {
+            return;
+        };
+        let mut after = self.changes.clone();
+        after.patrols = patrols;
+        self.change("Change the leader of a group".to_owned(), after, ctx);
+        if let Some(scene) = &self.scene {
+            scene.select(scene::Select::Set(vec![EntityId::creature(member)]));
         }
-        if now.leader_of(leader).is_some_and(|before| before != leader) {
-            let before = now.leader_of(leader).unwrap_or(leader);
-            if let Some((members, ai)) = now.groups.get(&before).cloned() {
-                let left: Vec<Member> = members.into_iter().filter(|kept| kept.guid != leader).collect();
-                after
-                    .patrols
-                    .groups
-                    .insert(before, (!left.is_empty()).then_some((left, ai)));
-            }
-        }
-        after
-            .patrols
-            .groups
-            .insert(leader, Some((patrols::laid_out(others), patrols::GROUP_AI)));
-        self.change(format!("Make a group of {}", others.len() + 1), after, ctx);
     }
 }
 

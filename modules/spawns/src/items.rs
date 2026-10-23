@@ -390,6 +390,87 @@ pub fn discarded(changes: &Changes, keys: &[String]) -> Changes {
 mod tests {
     use super::*;
 
+    #[test]
+    fn each_kind_of_change_taken_away_leaves_the_changes_as_the_database_has_them() {
+        let mut base = Patrols::default();
+        base.paths
+            .insert(790, vec![Point::at([0.0, 0.0, 0.0]), Point::at([10.0, 0.0, 0.0])]);
+        base.walkers.insert(79, Walker { movement: 2, path: 790 });
+        let only = |change: &dyn Fn(&mut Changes)| {
+            let mut changes = Changes::default();
+            change(&mut changes);
+            changes
+        };
+        let cases: Vec<(&str, Changes)> = vec![
+            (
+                "spawn",
+                only(&|changes| {
+                    changes.moved.insert(EntityId::creature(79), ([1.0, 2.0, 3.0], 0.5));
+                }),
+            ),
+            (
+                "point",
+                only(&|changes| {
+                    let mut points = base.paths[&790].clone();
+                    points[1].position = [12.0, 3.0, 0.0];
+                    changes.patrols.paths.insert(790, Some(points));
+                }),
+            ),
+            (
+                "path",
+                only(&|changes| {
+                    changes
+                        .patrols
+                        .paths
+                        .insert(800, Some(vec![Point::at([5.0, 5.0, 0.0])]));
+                }),
+            ),
+            (
+                "movement",
+                only(&|changes| {
+                    changes.patrols.walkers.insert(79, Walker::default());
+                }),
+            ),
+            (
+                "group",
+                only(&|changes| {
+                    let member = crate::patrols::Member {
+                        guid: 80,
+                        distance: 3.0,
+                        angle: 180.0,
+                    };
+                    changes
+                        .patrols
+                        .groups
+                        .insert(79, Some((vec![member], crate::patrols::GROUP_AI)));
+                    changes.patrols.walkers.insert(80, Walker::default());
+                }),
+            ),
+        ];
+        for (kind, changes) in cases {
+            let found = items(&changes, &base, &None_);
+            assert!(!found.is_empty(), "{kind}: listed");
+            let keys: Vec<String> = found
+                .iter()
+                .flat_map(|item| std::iter::once(item.key.clone()).chain(item.with.iter().cloned()))
+                .collect();
+            // The first line and those that need it taken away: nothing left of that change.
+            let mut first = vec![found[0].key.clone()];
+            first.extend(found[0].with.iter().cloned());
+            let left = discarded(&changes, &first);
+            let rest: Vec<String> = keys.iter().filter(|key| !first.contains(key)).cloned().collect();
+            assert_eq!(
+                discarded(&left, &rest),
+                Changes::default(),
+                "{kind}: as the database has it"
+            );
+            assert!(
+                items(&discarded(&changes, &keys), &base, &None_).is_empty(),
+                "{kind}: no line left"
+            );
+        }
+    }
+
     struct None_;
 
     impl Names for None_ {

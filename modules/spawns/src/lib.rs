@@ -969,6 +969,9 @@ impl Module for SpawnsModule {
                 .filter_map(|key| key.as_str().map(str::to_owned))
                 .collect();
             let after = items::discarded(&self.changes, &keys);
+            // What was being typed or dragged of them forgotten, not written again once let go.
+            self.point_texts.clear();
+            self.group_edit = None;
             let count = keys.len();
             self.change(
                 if count == 1 {

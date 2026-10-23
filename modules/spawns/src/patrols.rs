@@ -511,6 +511,71 @@ pub fn piece(patrols: &Patrols, base: &Patrols, shown: &BTreeSet<u32>) -> Option
     (!builder.is_empty()).then(|| builder.build())
 }
 
+/// `edits` with `others` put in the group of `leader`, made when it leads none: each taken out of
+/// the group it was in (one it led broken), made to stand to follow; the members it had kept in
+/// their places, the new ones at the next places behind it, two by two; `leader` taken out of a group
+/// it followed. `base` the patrols as the database has them.
+pub fn joined(edits: &Edits, base: &Patrols, leader: u64, others: &[u64]) -> Edits {
+    let now = edits.laid_over(base);
+    let mut out = edits.clone();
+    let (mut members, ai) = now.groups.get(&leader).cloned().unwrap_or((Vec::new(), GROUP_AI));
+    let mut new: Vec<u64> = Vec::new();
+    for guid in others {
+        if *guid != leader && !members.iter().any(|member| member.guid == *guid) && !new.contains(guid) {
+            new.push(*guid);
+        }
+    }
+    let leave = |out: &mut Edits, guid: u64| {
+        let Some(before) = out.laid_over(base).leader_of(guid).filter(|before| *before != leader) else {
+            return;
+        };
+        if before == guid {
+            out.groups.insert(before, None);
+        } else if let Some((kept, ai)) = out.laid_over(base).groups.get(&before).cloned() {
+            let left: Vec<Member> = kept.into_iter().filter(|member| member.guid != guid).collect();
+            out.groups.insert(before, (!left.is_empty()).then_some((left, ai)));
+        }
+    };
+    for guid in &new {
+        leave(&mut out, *guid);
+        // A member follows: it walks no path of its own.
+        if now.walkers.get(guid).is_some_and(|walker| walker.movement != IDLE) {
+            out.walkers.insert(*guid, Walker::default());
+        }
+    }
+    leave(&mut out, leader);
+    let all: Vec<u64> = members
+        .iter()
+        .map(|member| member.guid)
+        .chain(new.iter().copied())
+        .collect();
+    let laid = laid_out(&all);
+    members.extend(laid[members.len()..].iter().cloned());
+    out.groups.insert(leader, Some((members, ai)));
+    out
+}
+
+/// `edits` with `member` made the leader of the group of `leader`: it walks the path the leader
+/// walked, the leader following at the place it had; the others where they were. None when `member`
+/// is not of that group.
+pub fn led_by(edits: &Edits, base: &Patrols, leader: u64, member: u64) -> Option<Edits> {
+    let now = edits.laid_over(base);
+    let (members, ai) = now.groups.get(&leader)?.clone();
+    let slot = members.iter().position(|kept| kept.guid == member)?;
+    let mut next = members.clone();
+    next[slot] = Member {
+        guid: leader,
+        ..members[slot]
+    };
+    let mut out = edits.clone();
+    out.groups.insert(leader, None);
+    out.groups.insert(member, Some((next, ai)));
+    out.walkers
+        .insert(member, now.walkers.get(&leader).copied().unwrap_or_default());
+    out.walkers.insert(leader, Walker::default());
+    Some(out)
+}
+
 /// Whether the point `at` (from 0) of the path `path`, as `point`, waits for Apply: the database has
 /// another there, or none.
 pub fn pending_point(base: &Patrols, path: u32, at: usize, point: &Point) -> bool {
@@ -575,6 +640,81 @@ pub fn written(point: &Point, field: &str, axis: Option<usize>, change: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creatures_join_a_group_at_its_next_places_and_a_member_is_made_its_leader() {
+        let mut base = Patrols::default();
+        base.walkers.insert(
+            79,
+            Walker {
+                movement: WALKING,
+                path: 790,
+            },
+        );
+        base.walkers.insert(
+            85,
+            Walker {
+                movement: WALKING,
+                path: 850,
+            },
+        );
+        let placed = Member {
+            guid: 80,
+            distance: 7.0,
+            angle: 90.0,
+        };
+        base.groups.insert(79, (vec![placed.clone()], GROUP_AI));
+        base.groups.insert(
+            90,
+            (
+                vec![Member {
+                    guid: 91,
+                    distance: 3.0,
+                    angle: 180.0,
+                }],
+                GROUP_AI,
+            ),
+        );
+
+        // 91 leaves the group of 90, 85 stops its own patrol: both join 79's at the next places.
+        let joined = joined(&Edits::default(), &base, 79, &[91, 85, 80]);
+        let (members, ai) = joined.groups[&79].clone().unwrap();
+        assert_eq!(ai, GROUP_AI);
+        assert_eq!(members[0], placed, "the member it had kept where it was");
+        assert_eq!(
+            members.iter().map(|member| member.guid).collect::<Vec<_>>(),
+            [80, 91, 85]
+        );
+        assert_eq!(members[1..], laid_out(&[80, 91, 85])[1..]);
+        assert_eq!(joined.groups[&90], None, "90 led 91 alone: no group left");
+        assert_eq!(
+            joined.walkers[&85],
+            Walker::default(),
+            "a member walks no path of its own"
+        );
+
+        // 80 made the leader: it walks 79's path, 79 follows at 80's place.
+        let led = led_by(&joined, &base, 79, 80).unwrap();
+        assert_eq!(led.groups[&79], None);
+        let (members, _) = led.groups[&80].clone().unwrap();
+        assert_eq!(
+            members[0],
+            Member {
+                guid: 79,
+                distance: 7.0,
+                angle: 90.0
+            }
+        );
+        assert_eq!(
+            led.walkers[&80],
+            Walker {
+                movement: WALKING,
+                path: 790
+            }
+        );
+        assert_eq!(led.walkers[&79], Walker::default());
+        assert!(led_by(&joined, &base, 79, 12345).is_none(), "not of the group");
+    }
     use uniwow_api::db::write::{Memory, apply};
 
     fn rows(columns: &[&str], rows: Vec<Vec<Value>>) -> Rows {
