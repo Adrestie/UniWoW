@@ -20,6 +20,8 @@
 #include <unordered_map>
 #include <vector>
 
+class Creature;
+
 namespace UniwowBridge
 {
     // What the editor asks the server to load again.
@@ -161,6 +163,9 @@ namespace UniwowBridge
         Outcome SetWander(uint64 spawnId, float distance);
         // The creatures held whose editor said nothing for a while given their movement back.
         void LetGoForgotten();
+        void SendHome(Creature* creature);
+        // The creatures sent home given their own movement there, once arrived.
+        void ResumeHomed();
 
         std::atomic<bool> _running{ false };
         std::thread _thread;
@@ -183,6 +188,14 @@ namespace UniwowBridge
             std::chrono::steady_clock::time_point last;
         };
         std::unordered_map<uint64, Held> _held;
+        // On the world thread alone: the creatures walking home out of their group, by their GUID,
+        // their map and instance.
+        struct Homing
+        {
+            uint32 map;
+            uint32 instance;
+        };
+        std::unordered_map<uint64, Homing> _homing;
     };
 }
 

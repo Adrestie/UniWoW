@@ -485,6 +485,7 @@ namespace UniwowBridge
     void Bridge::Update()
     {
         LetGoForgotten();
+        ResumeHomed();
         std::deque<std::shared_ptr<Request>> queued;
         {
             std::lock_guard<std::mutex> lock(_lock);
@@ -892,17 +893,10 @@ namespace UniwowBridge
                         continue;
                     // Its formation movement holds the slot of its own movement: every movement taken
                     // away, its own made again.
-                    creature->GetMotionMaster()->Initialize();
                     if (staying(guid))
-                        continue;
-                    // Home at its spawn point, which its formation movement kept moving with it.
-                    float x = 0.f;
-                    float y = 0.f;
-                    float z = 0.f;
-                    float o = 0.f;
-                    creature->GetRespawnPosition(x, y, z, &o);
-                    creature->SetHomePosition(x, y, z, o);
-                    creature->GetMotionMaster()->MoveTargetedHome();
+                        creature->GetMotionMaster()->Initialize();
+                    else
+                        SendHome(creature);
                 }
             auto info = map.find(guid);
             if (info == map.end())
@@ -943,6 +937,44 @@ namespace UniwowBridge
                 }
         return { true, Acore::StringFormat("the group of {} set in memory, {} members, {} running", leaderId,
             members.size(), running) };
+    }
+
+    // The creature out of its group walking home to its spawn point, which its formation movement kept
+    // moving with it, standing on the way: its own movement made where it stands would take that place
+    // for its home (a wanderer's), and keep it there. `ResumeHomed` gives it back once arrived.
+    void Bridge::SendHome(Creature* creature)
+    {
+        float x = 0.f;
+        float y = 0.f;
+        float z = 0.f;
+        float o = 0.f;
+        creature->GetRespawnPosition(x, y, z, &o);
+        creature->SetHomePosition(x, y, z, o);
+        MotionMaster* motion = creature->GetMotionMaster();
+        motion->Clear(false);
+        motion->MoveIdle();
+        motion->MoveTargetedHome();
+        _homing[creature->GetGUID().GetRawValue()] = { creature->GetMapId(), creature->GetInstanceId() };
+    }
+
+    // The creatures sent home that arrived given their own movement there: walking its path, wandering
+    // about its spawn point, standing. One put in a group again, fighting or held keeps what it has.
+    void Bridge::ResumeHomed()
+    {
+        for (auto itr = _homing.begin(); itr != _homing.end();)
+        {
+            Map* map = sMapMgr->FindMap(itr->second.map, itr->second.instance);
+            Creature* creature = map ? map->GetCreature(ObjectGuid(itr->first)) : nullptr;
+            bool const here = creature && creature->IsInWorld() && creature->IsAlive();
+            if (here && creature->GetMotionMaster()->GetCurrentMovementGeneratorType() == HOME_MOTION_TYPE)
+            {
+                ++itr;
+                continue;
+            }
+            if (here && !creature->GetFormation() && !creature->IsInCombat() && !_held.count(itr->first))
+                creature->GetMotionMaster()->Initialize();
+            itr = _homing.erase(itr);
+        }
     }
 
     // The creatures held that their editor has not moved for `FORGOTTEN` given their movement back:
