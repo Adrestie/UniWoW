@@ -10952,6 +10952,36 @@ format is WoW-mods' `tools/vfx`: the model description of `forge.py` and the eff
 - **Step D**: the spell's frieze of moments and its client rows (`effect.py`).
 - **Step E**: animated meshes from Blender.
 
+### Milestone 18: non-player characters made in the editor (in progress)
+
+A non-player character is made in the editor and kept as a file of its own, a prefab, used again
+and placed in the world as many times as wished: its sheet (`creature_template`), its name and
+title in every language of the client (`creature_template_locale`), its models
+(`creature_template_model`), its three weapons (`creature_equip_template`, its look otherwise its
+model's: no client table is written), its skills in SmartAI (`smart_scripts`, source 0) and the
+texts they say (`creature_text`). The templates the editor makes take the entries of its block
+82800-82999 (`ID_RANGES.md`). Nothing is written to the database before *Apply to the server*.
+
+- **Step 18.1, the prefab and its sheet** (module `npcs`): the file `<name>.npc.json`, JSON a
+  person reads (its format numbered), in `Documents\UniWoW\Workspace\Prefabs` by default; the menu
+  *NPC* (new, open, save, save as, its layout, back to the world), the panel *Prefabs* (those of the
+  folder) and the panel *NPC*, its sheet: the name and title in the language chosen, the English
+  beside the others; level, stats of an expansion, class, rank, kind, family, school of its blows
+  as named lists; its faction searched by name among those of the client (`FactionTemplate` named
+  by `Faction`); its strength and movement; its models, each its file named (`CreatureDisplayInfo`,
+  `CreatureModelData`); loot and money; its roles (`npcflag`) and its flags (`unit_flags`,
+  `unit_flags2`, `type_flags`, `flags_extra`) as boxes of named flags, as AzerothCore says them,
+  those the server sets itself left out. A column the file does not have shows the value a prefab
+  starts with. Each field written once left, one undo entry; every control says what it does.
+- **Step 18.2**: the NPC in 3D in a view of its own, its weapons in its hands, chosen by searching
+  the items by id or by a name of any language.
+- **Step 18.3**: its skills in SmartAI: an event, an action and a target, as AzerothCore runs them,
+  their parameters named; the spells searched; the texts said in every language; links.
+- **Step 18.4**: the prefab placed in the world, its spawns moved and copied, its rows given to the
+  server and kept in the packages `.uniwow`.
+- **Step 18.5**: the bridge loads again a template, its weapons, scripts and texts, and spawns its
+  creatures again, live.
+
 ### Milestone 10: Lua modules (outline)
 
 Lua modules in `modules\<id>\` (manifest and `main.lua`), loaded at start by `scripting-lua`, which
