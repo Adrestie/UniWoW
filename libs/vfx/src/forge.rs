@@ -1700,13 +1700,7 @@ impl<'a> Forge<'a> {
     /// (nearest for its thickness, when given), shared between its two bones as far along as it
     /// lies. With `"skeleton_uv": [around, along]`: coordinates around each segment and along the
     /// skeleton (repeats a turn and a yard), for a bark that runs along every branch.
-    fn skeleton_skin(
-        &mut self,
-        s: &Value,
-        positions: &[[f64; 3]],
-        uvs: &[[f64; 2]],
-        i: usize,
-    ) -> Result<Skinned> {
+    fn skeleton_skin(&mut self, s: &Value, positions: &[[f64; 3]], uvs: &[[f64; 2]], i: usize) -> Result<Skinned> {
         let segs = list(s.get("skeleton").expect("tested"))?;
         let mut parsed = Vec::with_capacity(segs.len());
         for g in segs {
