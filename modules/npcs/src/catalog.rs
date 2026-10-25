@@ -147,7 +147,12 @@ pub type Icon = (usize, usize, Vec<u8>);
 
 /// Decodes the icon `name` of `Interface\Icons` through the client's formats.
 pub fn decode(formats: &std::sync::Arc<dyn uniwow_api::formats::Formats>, name: &str) -> Option<Icon> {
-    let file = uniwow_api::formats::FileRef::Path(format!("Interface\\Icons\\{name}.blp"));
+    decode_path(formats, &format!("Interface\\Icons\\{name}.blp"))
+}
+
+/// Decodes the texture at `path` through the client's formats.
+pub fn decode_path(formats: &std::sync::Arc<dyn uniwow_api::formats::Formats>, path: &str) -> Option<Icon> {
+    let file = uniwow_api::formats::FileRef::Path(path.to_owned());
     let texture = formats.texture_rgba(&file).ok()?;
     let level = texture.levels.first()?.clone();
     let (width, height) = (texture.width as usize, texture.height as usize);

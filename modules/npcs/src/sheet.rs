@@ -77,7 +77,14 @@ impl NpcsModule {
 
     /// The field `key` showing `current`, `hint` saying what it is: typed, written once left; the
     /// text written, if changed. Every text field of the sheet passes here.
-    fn typed(&mut self, ui: &mut egui::Ui, key: &str, current: &str, width: f32, hint: &str) -> Option<String> {
+    pub(crate) fn typed(
+        &mut self,
+        ui: &mut egui::Ui,
+        key: &str,
+        current: &str,
+        width: f32,
+        hint: &str,
+    ) -> Option<String> {
         let mut text = match &self.typing {
             Some((typing, text)) if typing == key => text.clone(),
             _ => current.to_owned(),
@@ -312,6 +319,8 @@ impl NpcsModule {
             );
             self.models_ui(ui, ctx);
             self.weapons_ui(ui, ctx);
+            self.skills_ui(ui, ctx);
+            self.texts_ui(ui, ctx);
             self.loot_ui(ui, ctx);
             theme::section(
                 ui,

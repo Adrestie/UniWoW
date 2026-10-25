@@ -58,6 +58,10 @@ pub struct Stage {
     icons: HashMap<u32, Option<egui::TextureHandle>>,
     icon_jobs: Vec<(JobId, u32)>,
     icons_wanted: BTreeSet<u32>,
+    /// The icons of the spells, by id of `SpellIcon.dbc`.
+    spell_icons: HashMap<u32, Option<egui::TextureHandle>>,
+    spell_icon_jobs: Vec<(JobId, u32)>,
+    spell_icons_wanted: BTreeSet<u32>,
     /// The texts searched among the loots and the items, by slot.
     loot_search: [String; 3],
     item_search: [String; 3],
@@ -203,6 +207,15 @@ impl NpcsModule {
             let (_, key) = stage.loot_jobs.remove(at);
             let drops = take(outcome).take::<Result<Vec<Drop>, String>>().and_then(Result::ok);
             stage.loots.insert(key, drops.map(Arc::new));
+        } else if let Some(at) = stage.spell_icon_jobs.iter().position(|(id, _)| *id == job) {
+            let (_, icon) = stage.spell_icon_jobs.remove(at);
+            if let (Some(Some((width, height, pixels))), Some(egui)) =
+                (take(outcome).take::<Option<catalog::Icon>>(), self.egui.as_ref())
+            {
+                let image = egui::ColorImage::from_rgba_unmultiplied([width, height], &pixels);
+                let texture = egui.load_texture(format!("npcs spell icon {icon}"), image, egui::TextureOptions::LINEAR);
+                stage.spell_icons.insert(icon, Some(texture));
+            }
         } else if let Some(at) = stage.icon_jobs.iter().position(|(id, _)| *id == job) {
             let (_, display) = stage.icon_jobs.remove(at);
             if let (Some(Some((width, height, pixels))), Some(egui)) =
@@ -242,6 +255,61 @@ impl NpcsModule {
         }
     }
 
+    /// The icons of the spells wanted decoded, each by a job, once.
+    fn ask_spell_icons(&mut self, ctx: &mut Context) {
+        let (Some(client), Some(formats)) = (self.client.clone(), ctx.service(formats::SERVICE)) else {
+            return;
+        };
+        for icon in std::mem::take(&mut self.stage.spell_icons_wanted) {
+            if self.stage.spell_icons.contains_key(&icon) {
+                continue;
+            }
+            self.stage.spell_icons.insert(icon, None);
+            let Some(path) = client.spell_icons.get(&icon).cloned().filter(|p| !p.is_empty()) else {
+                continue;
+            };
+            let formats = formats.clone();
+            let job = ctx.spawn("Decode the icon of a spell", move |_| {
+                catalog::decode_path(&formats, &format!("{path}.blp"))
+            });
+            self.stage.spell_icon_jobs.push((job, icon));
+        }
+    }
+
+    /// The icon `icon` of `SpellIcon.dbc`, asked when it is not there yet.
+    pub(crate) fn spell_icon(&mut self, icon: u32) -> Option<egui::TextureHandle> {
+        if icon == 0 {
+            return None;
+        }
+        match self.stage.spell_icons.get(&icon) {
+            Some(texture) => texture.clone(),
+            None => {
+                self.stage.spell_icons_wanted.insert(icon);
+                None
+            }
+        }
+    }
+
+    /// The creatures of the database, once read.
+    pub(crate) fn world(&self) -> Option<Arc<World>> {
+        self.stage.world.clone()
+    }
+
+    /// The name of the creature `entry` of the database.
+    pub(crate) fn creature_name(&self, entry: u32) -> Option<String> {
+        let world = self.stage.world.as_ref()?;
+        let at = world
+            .creatures
+            .binary_search_by_key(&entry, |creature| creature.entry)
+            .ok()?;
+        Some(world.creatures[at].name().to_owned())
+    }
+
+    /// The name of the item `id`, when it is one of the hands.
+    pub(crate) fn item_name(&self, id: u32) -> Option<String> {
+        self.stage.catalog.as_ref()?.get(id).map(|item| item.name.clone())
+    }
+
     /// The icon of the item display `display`, asked when it is not there yet.
     fn icon(&mut self, display: u32) -> Option<egui::TextureHandle> {
         match self.stage.icons.get(&display) {
@@ -259,6 +327,7 @@ impl NpcsModule {
         self.read_world(ctx);
         self.refigure(ctx);
         self.ask_icons(ctx);
+        self.ask_spell_icons(ctx);
         self.picker_window(egui, ctx);
     }
 

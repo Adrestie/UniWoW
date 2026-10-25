@@ -164,6 +164,126 @@ pub struct Client {
     /// The languages whose archives were read, and the client's own (that of its names).
     pub locales: Vec<String>,
     pub locale: String,
+    /// The spells, by increasing id; the files of their icons, by id of `SpellIcon.dbc`.
+    pub spells: Vec<Spell>,
+    pub spell_icons: HashMap<u32, String>,
+    /// The emotes (`Emotes.dbc`), by id, their names.
+    pub emotes: Vec<(u32, String)>,
+}
+
+/// A spell: its id, its names by language (`Spell.dbc` of each), its rank (as `Rank 2`), its icon
+/// (an id of `SpellIcon.dbc`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Spell {
+    pub id: u32,
+    pub names: Vec<(String, String)>,
+    pub rank: String,
+    pub icon: u32,
+}
+
+impl Spell {
+    /// Its name in `locale`, else in the first language that has one.
+    pub fn name(&self, locale: &str) -> String {
+        self.names
+            .iter()
+            .find(|(held, name)| held == locale && !name.is_empty())
+            .or_else(|| self.names.iter().find(|(_, name)| !name.is_empty()))
+            .map_or_else(|| format!("Spell {}", self.id), |(_, name)| name.clone())
+    }
+}
+
+/// A spell as `Spell.dbc` gives it: its id, name, rank and icon.
+pub type SpellRow = (u32, String, String, u32);
+
+/// The fields of `Spell.dbc` as AzerothCore's DBCfmt.h reads them: its icon, its name and its rank
+/// (16 languages each and a mask).
+const SPELL_ICON: usize = 133;
+const SPELL_NAME: usize = 136;
+const SPELL_RANK: usize = 153;
+
+/// Each spell of `bytes` (a `Spell.dbc`): its id, its name and rank in the first language that has
+/// one, its icon. Read field by field: the table is too large to be held whole in each language.
+pub fn spells_of(bytes: &[u8]) -> Vec<SpellRow> {
+    let word = |at: usize| -> Option<u32> { Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?)) };
+    if bytes.get(0..4) != Some(b"WDBC") {
+        return Vec::new();
+    }
+    let (count, fields, size, strings) = (
+        word(4).unwrap_or(0) as usize,
+        word(8).unwrap_or(0) as usize,
+        word(12).unwrap_or(0) as usize,
+        word(16).unwrap_or(0) as usize,
+    );
+    if fields <= SPELL_RANK + 16 || size < fields * 4 {
+        return Vec::new();
+    }
+    let block = 20 + count * size;
+    let Some(table) = bytes.get(block..block + strings) else {
+        return Vec::new();
+    };
+    let string = |offset: u32| -> String {
+        let start = offset as usize;
+        if start == 0 || start >= table.len() {
+            return String::new();
+        }
+        let end = table[start..]
+            .iter()
+            .position(|b| *b == 0)
+            .map_or(table.len(), |n| start + n);
+        String::from_utf8_lossy(&table[start..end]).into_owned()
+    };
+    let first = |record: usize, from: usize| -> String {
+        (from..from + 16)
+            .filter_map(|field| word(20 + record * size + field * 4))
+            .map(string)
+            .find(|text| !text.is_empty())
+            .unwrap_or_default()
+    };
+    (0..count)
+        .filter_map(|record| {
+            let at = 20 + record * size;
+            Some((
+                word(at)?,
+                first(record, SPELL_NAME),
+                first(record, SPELL_RANK),
+                word(at + SPELL_ICON * 4).unwrap_or(0),
+            ))
+        })
+        .collect()
+}
+
+/// The spells of the client's own `Spell.dbc` (`own`, its custom ones too), named in each language
+/// of `named`.
+pub fn spells_named(own: &[SpellRow], named: &[(String, Vec<SpellRow>)]) -> Vec<Spell> {
+    let by_locale: Vec<(String, HashMap<u32, String>)> = named
+        .iter()
+        .map(|(locale, spells)| {
+            (
+                locale.clone(),
+                spells.iter().map(|(id, name, _, _)| (*id, name.clone())).collect(),
+            )
+        })
+        .collect();
+    let mut out: Vec<Spell> = own
+        .iter()
+        .map(|(id, name, rank, icon)| {
+            let mut names: Vec<(String, String)> = by_locale
+                .iter()
+                .map(|(locale, names)| (locale.clone(), names.get(id).cloned().unwrap_or_default()))
+                .collect();
+            if names.iter().all(|(_, held)| held.is_empty()) {
+                names.push((String::new(), name.clone()));
+            }
+            Spell {
+                id: *id,
+                names,
+                rank: rank.clone(),
+                icon: *icon,
+            }
+        })
+        .collect();
+    out.sort_by_key(|spell| spell.id);
+    out
 }
 
 /// The archives of each language of the client in `data` (its folder `Data`), the one read first
@@ -218,13 +338,18 @@ pub fn data_folder(sources: &[PathBuf]) -> Option<PathBuf> {
 
 /// The table `name` of the first of `archives` that holds it.
 pub fn read_in(archives: &[PathBuf], name: &str) -> Option<Dbc> {
+    Dbc::read(&bytes_in(archives, name)?).ok()
+}
+
+/// The bytes of the table `name` of the first of `archives` that holds it.
+pub fn bytes_in(archives: &[PathBuf], name: &str) -> Option<Vec<u8>> {
     let path = format!("DBFilesClient\\{name}");
     archives.iter().find_map(|archive| {
         let opened = uniwow_api::mpq::Archive::open(archive).ok()?;
         if !opened.contains(&path) {
             return None;
         }
-        Dbc::read(&opened.read(&path).ok()?).ok()
+        opened.read(&path).ok()
     })
 }
 
@@ -264,6 +389,36 @@ impl Client {
                 }
             }
         }
+        let mut spells_by_locale = Vec::new();
+        if let Some(data) = data_folder(&sources) {
+            for (locale, archives) in locale_archives(&data) {
+                if let Some(bytes) = bytes_in(&archives, "Spell.dbc") {
+                    spells_by_locale.push((locale, spells_of(&bytes)));
+                }
+            }
+        }
+        let own = vfs
+            .read(r"DBFilesClient\Spell.dbc")
+            .ok()
+            .flatten()
+            .map(|bytes| spells_of(&bytes))
+            .unwrap_or_default();
+        out.spells = spells_named(&own, &spells_by_locale);
+        if let Some(icons) = table("SpellIcon.dbc") {
+            out.spell_icons = icons
+                .records
+                .iter()
+                .filter_map(|record| Some((*record.first()?, icons.string(*record.get(1)?))))
+                .collect();
+        }
+        if let Some(emotes) = table("Emotes.dbc") {
+            out.emotes = emotes
+                .records
+                .iter()
+                .filter_map(|record| Some((*record.first()?, emotes.string(*record.get(1)?))))
+                .collect();
+            out.emotes.sort_by_key(|(id, _)| *id);
+        }
         if named.is_empty()
             && let Some(dbc) = table("Faction.dbc")
         {
@@ -281,6 +436,19 @@ impl Client {
         out
     }
 
+    pub fn spell(&self, id: u32) -> Option<&Spell> {
+        self.spells
+            .binary_search_by_key(&id, |spell| spell.id)
+            .ok()
+            .map(|at| &self.spells[at])
+    }
+
+    /// The name of the emote `id`, as the client names it (`ONESHOT_TALK(DNR)` read `talk`).
+    pub fn emote(&self, id: u32) -> Option<String> {
+        let at = self.emotes.binary_search_by_key(&id, |(held, _)| *held).ok()?;
+        Some(emote_name(&self.emotes[at].1))
+    }
+
     /// The template of faction `id`.
     pub fn faction(&self, id: u32) -> Option<&Faction> {
         self.factions
@@ -288,6 +456,18 @@ impl Client {
             .ok()
             .map(|at| &self.factions[at])
     }
+}
+
+/// The name of an emote of `Emotes.dbc` read plainly: `ONESHOT_TALK(DNR)` is `talk`, `STATE_DANCE`
+/// is `dance (held)`.
+pub fn emote_name(raw: &str) -> String {
+    let raw = raw.split('(').next().unwrap_or(raw).trim();
+    let (held, rest) = match raw.strip_prefix("STATE_") {
+        Some(rest) => (true, rest),
+        None => (false, raw.strip_prefix("ONESHOT_").unwrap_or(raw)),
+    };
+    let name = rest.replace('_', " ").to_lowercase();
+    if held { format!("{name} (held)") } else { name }
 }
 
 /// Each template of faction, by id, named by its faction in each language of `named`.
@@ -436,6 +616,19 @@ mod tests {
             b"\0Sword_1H_Short_A_01.mdx\0Sword_1H_Short_A_01Blue\0INV_Sword_04\0",
         ))
         .unwrap();
+        assert_eq!(emote_name("ONESHOT_TALK(DNR)"), "talk");
+        assert_eq!(emote_name("STATE_DANCE"), "dance (held)");
+        let mut record = vec![133u32];
+        record.extend(vec![0u32; 132]);
+        record.push(7); // its icon
+        record.extend([0, 0]);
+        record.extend((0..17).map(|at| if at == 2 { 1 } else { 0 })); // its name, the French
+        record.extend((0..17).map(|_| 0));
+        record.extend(vec![0u32; 30]);
+        let spells = spells_of(&dbc(&[record], b"\0Boule de feu\0"));
+        assert_eq!(spells, [(133, "Boule de feu".to_owned(), String::new(), 7)]);
+        let named = spells_named(&spells, &[("frFR".to_owned(), spells.clone())]);
+        assert_eq!(named[0].name("enUS"), "Boule de feu");
         let shown = items_of(&items);
         assert_eq!(
             shown[&1542],

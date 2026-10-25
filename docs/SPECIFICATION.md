@@ -10988,8 +10988,18 @@ texts they say (`creature_text`). The templates the editor makes take the entrie
   name or entry, the items of each loot, their icons and chances under the pointer. The MPQ
   archives' reader and writer is the library `libs/mpq` (`uniwow_api::mpq`), the effects' and the
   NPCs'.
-- **Step 18.3**: its skills in SmartAI: an event, an action and a target, as AzerothCore runs them,
-  their parameters named; the spells searched; the texts said in every language; links.
+- **Step 18.3, its skills and its texts**: the card *Skills (SmartAI)*, each skill a sentence (its
+  event, its action, its target, the parameters set), the one chosen edited below: some sixty
+  events, ninety actions and thirty targets of AzerothCore's SmartScriptMgr.h, those of another
+  expansion and those it does not support left out, every parameter named and said (a number with
+  its unit, yes or no, a named list, a mask of named bits, a phase, a spell searched by a name of
+  any language of the client with its icon, a creature of the database, an emote of `Emotes.dbc`, a
+  group of its own texts); the phases it happens in, its chance and flags; a skill followed at once
+  by the next (`link`); skills ready made (casts in combat, heals itself when hurt, calls for help,
+  flees, says a text on aggro, death or kill, plays an emote, enrages). The card *Texts*: groups of
+  lines (`creature_text`), each line in every language (`creature_text_locale`), said, yelled,
+  whispered or an emote, its language, chance, emote and sound. Kept in the prefab; its AI is
+  SmartAI once it has a skill.
 - **Step 18.4**: the prefab placed in the world, its spawns moved and copied, its rows given to the
   server and kept in the packages `.uniwow`.
 - **Step 18.5**: the bridge loads again a template, its weapons, scripts and texts, and spawns its

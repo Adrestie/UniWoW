@@ -11,7 +11,10 @@ mod figure;
 mod gpu;
 mod prefab;
 mod sheet;
+mod skills;
+mod smart;
 mod stage;
+mod texts;
 mod view;
 mod world;
 
@@ -93,6 +96,10 @@ struct NpcsModule {
     /// The NPC in 3D, the window choosing its model, what the database tells.
     stage: stage::Stage,
     egui: Option<egui::Context>,
+    /// The texts searched in the lists, by list.
+    searches: std::collections::HashMap<String, String>,
+    /// The skill edited, by its place.
+    skill_chosen: Option<usize>,
 }
 
 impl NpcsModule {
@@ -446,6 +453,8 @@ mod tests {
             ("lib.rs", include_str!("lib.rs")),
             ("sheet.rs", include_str!("sheet.rs")),
             ("stage.rs", include_str!("stage.rs")),
+            ("skills.rs", include_str!("skills.rs")),
+            ("texts.rs", include_str!("texts.rs")),
         ] {
             let lines: Vec<&str> = code.lines().collect();
             let end = lines
