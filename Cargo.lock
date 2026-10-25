@@ -4064,6 +4064,7 @@ dependencies = [
  "uniwow-audio",
  "uniwow-db",
  "uniwow-lua",
+ "uniwow-mpq",
  "uniwow-server-link",
  "uniwow-vfx",
  "windows",
@@ -4312,6 +4313,13 @@ name = "uniwow-module-world-db"
 version = "0.1.0"
 dependencies = [
  "uniwow-api",
+]
+
+[[package]]
+name = "uniwow-mpq"
+version = "0.1.0"
+dependencies = [
+ "miniz_oxide 0.8.9",
 ]
 
 [[package]]

@@ -6,9 +6,6 @@
 //! name joins `(listfile)`; `(attributes)` follows. The space of the old version is not given back
 //! (compaction, apart).
 
-// Wired to the browser of the client's archives, the next step.
-#![allow(dead_code)]
-
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -403,8 +400,7 @@ impl Archive {
 fn decompress(chunk: &[u8], expected: usize, name: &str) -> Result<Vec<u8>, String> {
     let (method, rest) = chunk.split_first().ok_or("an empty sector")?;
     let raw = match method {
-        0x02 => uniwow_api::miniz_oxide::inflate::decompress_to_vec_zlib(rest)
-            .map_err(|e| format!("{name}: zlib: {e:?}"))?,
+        0x02 => miniz_oxide::inflate::decompress_to_vec_zlib(rest).map_err(|e| format!("{name}: zlib: {e:?}"))?,
         other => {
             return Err(format!(
                 "{name}: compression 0x{other:02X} is not read here (zlib only)"
@@ -423,7 +419,7 @@ fn compress_sectors(raw: &[u8], sector_size: usize) -> Vec<u8> {
     let chunks: Vec<Vec<u8>> = (0..count)
         .map(|i| {
             let sector = &raw[(i * sector_size).min(raw.len())..((i + 1) * sector_size).min(raw.len())];
-            let packed = uniwow_api::miniz_oxide::deflate::compress_to_vec_zlib(sector, 9);
+            let packed = miniz_oxide::deflate::compress_to_vec_zlib(sector, 9);
             // a sector that does not shrink is kept as it is, without a method byte
             if packed.len() + 1 < sector.len() {
                 let mut out = vec![0x02];

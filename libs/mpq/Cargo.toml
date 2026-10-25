@@ -1,0 +1,8 @@
+[package]
+name = "uniwow-mpq"
+description = "The MPQ archives of the 3.3.5a client, read and written as WoW-mods' installer does: formats v1 and v2, files in sectors or whole, zlib, encrypted or not"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+miniz_oxide.workspace = true

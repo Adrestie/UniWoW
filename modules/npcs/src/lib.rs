@@ -4,10 +4,16 @@
 //! strength, movement, models, loot, roles and flags, each named and said; one undo entry a field.
 //! Saved when asked; the file read again by any editor.
 
+mod catalog;
 mod client;
 mod fields;
+mod figure;
+mod gpu;
 mod prefab;
 mod sheet;
+mod stage;
+mod view;
+mod world;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -84,6 +90,9 @@ struct NpcsModule {
     arranged: bool,
     client: Option<Arc<client::Client>>,
     client_job: Option<JobId>,
+    /// The NPC in 3D, the window choosing its model, what the database tells.
+    stage: stage::Stage,
+    egui: Option<egui::Context>,
 }
 
 impl NpcsModule {
@@ -178,14 +187,15 @@ impl NpcsModule {
         self.said = self.save(choose).err();
     }
 
-    /// The layout of the NPCs: the sheet in the middle, the prefabs on the left; the layout before
+    /// The layout of the NPCs: the NPC in 3D in the middle, the prefabs on the left, its sheet on the
+    /// right; the layout before
     /// kept for "Back to the world".
     fn arrange(&mut self, ctx: &mut Context) {
         let own = |panel: &str| ("npcs".to_owned(), panel.to_owned());
         ctx.arrange(Arrangement {
-            center: vec![own("npc")],
+            center: vec![own("view")],
             left: vec![own("prefabs")],
-            right: Vec::new(),
+            right: vec![own("npc")],
             bottom: Vec::new(),
         });
         self.arranged = true;
@@ -301,6 +311,7 @@ impl NpcsModule {
 impl Module for NpcsModule {
     fn register(&mut self, reg: &mut Registrar) {
         reg.panel("npc", "NPC", DockArea::Right)
+            .panel("view", "NPC view", DockArea::Right)
             .panel("prefabs", "Prefabs", DockArea::Left);
         reg.menu_item("NPC", "New NPC", "new")
             .menu_item("NPC", "Open an NPC…", "open")
@@ -321,6 +332,11 @@ impl Module for NpcsModule {
         if let Some(path) = std::env::var_os("UNIWOW_NPCS_OPEN") {
             self.open(Some(PathBuf::from(path)), ctx);
         }
+        self.start_stage(ctx);
+    }
+
+    fn windows_ui(&mut self, egui: &egui::Context, ctx: &mut Context) {
+        self.tick_stage(egui, ctx);
     }
 
     fn panel_ui(&mut self, panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
@@ -335,6 +351,7 @@ impl Module for NpcsModule {
         }
         match panel {
             "prefabs" => self.library_ui(ui, ctx),
+            "view" => self.view_ui(ui, ctx),
             _ if self.doc.is_none() => self.welcome(ui, ctx),
             _ => self.sheet_ui(ui, ctx),
         }
@@ -356,6 +373,11 @@ impl Module for NpcsModule {
     }
 
     fn on_job(&mut self, job: JobId, outcome: JobOutcome, _ctx: &mut Context) {
+        let mut outcome = Some(outcome);
+        if self.stage_job(job, &mut outcome) {
+            return;
+        }
+        let outcome = outcome.expect("not taken");
         if self.client_job == Some(job) {
             self.client_job = None;
             if let Some(client) = outcome.take::<client::Client>() {
@@ -423,6 +445,7 @@ mod tests {
         for (file, code) in [
             ("lib.rs", include_str!("lib.rs")),
             ("sheet.rs", include_str!("sheet.rs")),
+            ("stage.rs", include_str!("stage.rs")),
         ] {
             let lines: Vec<&str> = code.lines().collect();
             let end = lines

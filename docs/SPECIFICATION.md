@@ -10973,8 +10973,21 @@ texts they say (`creature_text`). The templates the editor makes take the entrie
   `unit_flags2`, `type_flags`, `flags_extra`) as boxes of named flags, as AzerothCore says them,
   those the server sets itself left out. A column the file does not have shows the value a prefab
   starts with. Each field written once left, one undo entry; every control says what it does.
-- **Step 18.2**: the NPC in 3D in a view of its own, its weapons in its hands, chosen by searching
-  the items by id or by a name of any language.
+- **Step 18.2, the NPC seen and chosen from what the game has**: the panel *NPC view*, the NPC
+  alone in 3D as the Effect view draws an effect (its pipelines and shader the same), its model
+  dressed as the client dresses it (a creature's skins and variants, a character's race, baked skin
+  and hair), standing in its Stand, its weapons on the points of its hands (the right, the left, a
+  shield's), its ranged weapon not drawn (the client shows it as it shoots); the window *Choose a
+  model* (Pick…): every display of `CreatureDisplayInfo`, searched by its id, its model's file or
+  the names, in every language, of the creatures of the database wearing it, kept to a kind of
+  creature, the one clicked in 3D, chosen by Select or a double click; the weapons searched among
+  the items held in the hands (`InventoryType`) by id or a name of any language, with their icons;
+  the faction a list named in the client's language, searched in every language the client holds
+  (its `Data\<locale>` archives read with `libs/mpq`), each said friendly, neutral or hostile to
+  the Alliance and the Horde; the three loots chosen by the creatures that leave them, searched by
+  name or entry, the items of each loot, their icons and chances under the pointer. The MPQ
+  archives' reader and writer is the library `libs/mpq` (`uniwow_api::mpq`), the effects' and the
+  NPCs'.
 - **Step 18.3**: its skills in SmartAI: an event, an action and a target, as AzerothCore runs them,
   their parameters named; the spells searched; the texts said in every language; links.
 - **Step 18.4**: the prefab placed in the world, its spawns moved and copied, its rows given to the

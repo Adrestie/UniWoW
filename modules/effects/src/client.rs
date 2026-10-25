@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use uniwow_api::serde_json::{self, Value, json};
 use uniwow_api::vfs::Vfs;
 
-use crate::mpq;
+use uniwow_api::mpq;
 
 /// The workspace by default: `Documents\UniWoW\Workspace`.
 pub fn default_workspace() -> PathBuf {

@@ -7,9 +7,9 @@ use uniwow_api::egui::{self, RichText};
 use uniwow_api::serde_json::{Value, json};
 use uniwow_api::{Context, theme};
 
-use crate::NpcsModule;
 use crate::fields::{self, Choice, Flag, Number};
-use crate::prefab::{self, Model, Prefab, number};
+use crate::prefab::{self, Prefab, number};
+use crate::{NpcsModule, client};
 
 /// A value as a field shows it.
 fn shown(value: Option<&Value>) -> String {
@@ -18,6 +18,46 @@ fn shown(value: Option<&Value>) -> String {
         Some(Value::String(text)) => text.clone(),
         Some(other) => other.to_string(),
     }
+}
+
+/// How a template of faction stands to the sides, said.
+fn stances(faction: &client::Faction) -> String {
+    let said = |stance| match stance {
+        client::Stance::Friendly => "friendly",
+        client::Stance::Neutral => "neutral",
+        client::Stance::Hostile => "hostile",
+    };
+    format!(
+        "{} to the Alliance, {} to the Horde",
+        said(faction.alliance()),
+        said(faction.horde())
+    )
+}
+
+/// Everything a template of faction is: its names, its stance, its groups.
+fn faction_said(faction: &client::Faction, locale: &str) -> String {
+    let mut out = format!(
+        "{} (template {}, faction {})
+",
+        faction.name(locale),
+        faction.id,
+        faction.faction
+    );
+    out.push_str(&format!(
+        "{}
+Its groups: {}",
+        stances(faction),
+        faction.groups()
+    ));
+    for (held, name) in &faction.names {
+        if !name.is_empty() {
+            out.push_str(&format!(
+                "
+{held}: {name}"
+            ));
+        }
+    }
+    out
 }
 
 /// Copper as gold, silver and copper.
@@ -271,6 +311,7 @@ impl NpcsModule {
                 },
             );
             self.models_ui(ui, ctx);
+            self.weapons_ui(ui, ctx);
             self.loot_ui(ui, ctx);
             theme::section(
                 ui,
@@ -496,11 +537,14 @@ impl NpcsModule {
     fn faction_ui(&mut self, ui: &mut egui::Ui, ctx: &mut Context) {
         let faction = self.prefab().whole("faction");
         let client = self.client.clone();
-        let name = client
+        let locale = client
+            .as_ref()
+            .map_or("enUS".to_owned(), |client| client.locale.clone());
+        let held = client
             .as_ref()
             .and_then(|client| client.faction(faction as u32))
-            .unwrap_or("")
-            .to_owned();
+            .cloned();
+        let name = held.as_ref().map(|held| held.name(&locale)).unwrap_or_default();
         theme::section(
             ui,
             egui::Id::new("npcs faction"),
@@ -509,59 +553,72 @@ impl NpcsModule {
             Some(&name),
             true,
             |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Faction").weak()).on_hover_text(
-                        "Who it fights and who it helps: a template of FactionTemplate.dbc (creature_template.faction)",
-                    );
-                    let current = faction.to_string();
-                    if let Some(typed) = self.typed(
-                        ui,
-                        "faction",
-                        &current,
-                        70.0,
-                        "The id of its template of faction (creature_template.faction)",
-                    ) {
-                        self.write_number("faction", "faction", &typed, false, ctx);
-                    }
-                    ui.label(RichText::new(&name).strong());
-                });
                 let Some(client) = client else {
-                    ui.weak("The names of the factions are read from the client's FactionTemplate.dbc and Faction.dbc: open the client.");
+                    ui.label(RichText::new(format!("Faction {faction}")).strong());
+                    ui.weak(
+                        "The factions are read from the client's FactionTemplate.dbc and Faction.dbc: open the client.",
+                    );
                     return;
                 };
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.faction_search)
-                        .hint_text("Search a faction by name or id")
-                        .desired_width(260.0),
-                )
-                .on_hover_text(
-                    "Lists the factions of the client whose name holds the text, or whose id begins with it",
-                );
-                let search = self.faction_search.trim().to_lowercase();
-                if search.is_empty() {
-                    return;
-                }
-                let found: Vec<&(u32, String)> = client
-                    .factions
-                    .iter()
-                    .filter(|(id, name)| id.to_string().starts_with(&search) || name.to_lowercase().contains(&search))
-                    .take(200)
-                    .collect();
                 let mut chosen = None;
-                egui::ScrollArea::vertical()
-                    .id_salt("npcs factions")
-                    .max_height(160.0)
-                    .show(ui, |ui| {
-                        for (id, faction_name) in found {
-                            if ui
-                                .selectable_label(i64::from(*id) == faction, format!("{id}  {faction_name}"))
-                                .on_hover_text("Makes it this faction's")
-                                .clicked()
-                            {
-                                chosen = Some(*id);
+                ui.horizontal(|ui| {
+                ui.label(RichText::new("Faction").weak())
+                    .on_hover_text("Who it fights and who it helps: a template of FactionTemplate.dbc (creature_template.faction)");
+                let shown = held.as_ref().map_or(format!("{faction} (not in the client)"), |held| held.name(&locale));
+                let combo = egui::ComboBox::from_id_salt("npcs faction list")
+                    .selected_text(shown)
+                    .width(280.0)
+                    .height(360.0)
+                    .show_ui(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.faction_search)
+                                .hint_text("Search by name, in any language, or id")
+                                .desired_width(260.0),
+                        )
+                        .on_hover_text("Lists the factions whose name, in any language of the client, holds the text, or whose id begins with it");
+                        let search = self.faction_search.trim().to_lowercase();
+                        let found: Vec<&client::Faction> = client
+                            .factions
+                            .iter()
+                            .filter(|entry| {
+                                search.is_empty()
+                                    || entry.id.to_string().starts_with(&search)
+                                    || entry.names.iter().any(|(_, name)| name.to_lowercase().contains(&search))
+                            })
+                            .collect();
+                        egui::ScrollArea::vertical().max_height(320.0).show_rows(ui, 18.0, found.len(), |ui, rows| {
+                            for entry in &found[rows] {
+                                let label = egui::text::LayoutJob::default();
+                                let mut job = label;
+                                job.append(&entry.name(&locale), 0.0, egui::TextFormat::default());
+                                job.append(
+                                    &format!("  {}", entry.id),
+                                    0.0,
+                                    egui::TextFormat {
+                                        font_id: egui::FontId::proportional(10.0),
+                                        color: ui.visuals().weak_text_color(),
+                                        ..Default::default()
+                                    },
+                                );
+                                if ui
+                                    .selectable_label(i64::from(entry.id) == faction, job)
+                                    .on_hover_text(faction_said(entry, &locale))
+                                    .clicked()
+                                {
+                                    chosen = Some(entry.id);
+                                }
                             }
-                        }
+                        });
                     });
+                if let Some(held) = &held {
+                    combo.response.on_hover_text(faction_said(held, &locale));
+                }
+                ui.label(RichText::new(faction.to_string()).weak().small())
+                    .on_hover_text("Its id (creature_template.faction)");
+            });
+                if let Some(held) = &held {
+                    ui.label(RichText::new(stances(held)).weak().small());
+                }
                 if let Some(id) = chosen {
                     self.faction_search.clear();
                     self.write_whole("faction", i64::from(id), "faction", ctx);
@@ -607,26 +664,36 @@ impl NpcsModule {
                     }
                     ui.end_row();
                 }
+                let mut picked = None;
                 for (at, model) in prefab.models.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("Pick…")
+                            .on_hover_text("Chooses its model among all those of the game, each seen in 3D")
+                            .clicked()
+                        {
+                            picked = Some(at);
+                        }
+                        ui.label(RichText::new(model.display.to_string()).weak().small())
+                            .on_hover_text("Its display (creature_template_model.CreatureDisplayID): chosen with Pick");
+                    });
                     for (field, value, real) in [
-                        ("display", f64::from(model.display), false),
                         ("scale", f64::from(model.scale), true),
                         ("probability", f64::from(model.probability), true),
                     ] {
                         let key = format!("model:{at}:{field}");
                         let current = number(value).to_string();
-                        if let Some(typed) = self.typed(ui, &key, &current, 70.0, "Its display, scale or chance (creature_template_model)") {
+                        if let Some(typed) = self.typed(ui, &key, &current, 70.0, "Its scale or chance (creature_template_model)") {
                             let parsed = typed.trim().replace(',', ".").parse::<f64>().ok().filter(|value| {
                                 value.is_finite() && *value >= 0.0 && (real || value.fract() == 0.0)
                             });
                             let Some(parsed) = parsed else {
-                                self.said = Some(format!("'{typed}' is no {}", if real { "number" } else { "display id" }));
+                                self.said = Some(format!("'{typed}' is no {}", if real { "number" } else { "whole number" }));
                                 continue;
                             };
                             let mut after = self.prefab();
                             let changed = &mut after.models[at];
                             match field {
-                                "display" => changed.display = parsed as u32,
                                 "scale" => changed.scale = parsed as f32,
                                 _ => changed.probability = parsed as f32,
                             }
@@ -644,6 +711,9 @@ impl NpcsModule {
                     }
                     ui.end_row();
                 }
+                if let Some(at) = picked {
+                    self.pick_model(at);
+                }
             });
                 if let Some(at) = removed {
                     let mut after = self.prefab();
@@ -652,16 +722,12 @@ impl NpcsModule {
                 }
                 if ui
                     .button("✚ Add a model")
-                    .on_hover_text("Another display it can have; the client shows one of them, by their chances")
+                    .on_hover_text("Another model it can have, chosen among those of the game; the client shows one of them, by their chances")
                     .clicked()
                 {
-                    let mut after = self.prefab();
-                    after.models.push(Model {
-                        display: after.models.last().map_or(0, |model| model.display),
-                        scale: 1.0,
-                        probability: 1.0,
-                    });
-                    self.change("Add a model to the NPC".to_owned(), after, ctx);
+                    // chosen in the window, which makes its row
+                    let rows = self.prefab().models.len();
+                    self.pick_model(rows);
                 }
             },
         );
@@ -677,7 +743,14 @@ impl NpcsModule {
             None,
             false,
             |ui| {
-                self.numbers_ui(ui, "loot", &fields::LOOT, ctx);
+                egui::Grid::new("npcs loots")
+                    .num_columns(3)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                        for kind in 0..fields::LOOT.len() {
+                            self.loot_field(ui, kind, ctx);
+                        }
+                    });
                 egui::Grid::new("npcs gold")
                     .num_columns(3)
                     .spacing([8.0, 4.0])

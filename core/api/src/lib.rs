@@ -25,6 +25,9 @@ pub use uniwow_audio::rodio;
 pub use uniwow_db as db;
 /// Lua 5.1 (`libs/lua`), part of the runtime.
 pub use uniwow_lua::mlua;
+/// The client's MPQ archives (`libs/mpq`), read and written as WoW-mods' installer does; part of
+/// the runtime.
+pub use uniwow_mpq as mpq;
 /// The client of the observer of the server (`libs/server-link`), part of the runtime.
 pub use uniwow_server_link as server_link;
 /// The spell effects made from scratch (`libs/vfx`): their description, textures, BLP2, M2 264

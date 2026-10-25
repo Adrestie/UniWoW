@@ -20,6 +20,7 @@ uniwow-lua.workspace = true
 uniwow-server-link.workspace = true
 uniwow-db.workspace = true
 uniwow-vfx.workspace = true
+uniwow-mpq.workspace = true
 miniz_oxide.workspace = true
 rfd.workspace = true
 

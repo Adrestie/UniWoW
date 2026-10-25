@@ -11,7 +11,6 @@ mod inspector;
 mod layer;
 mod link;
 mod load;
-mod mpq;
 mod schema;
 mod view;
 
