@@ -86,18 +86,16 @@ pub fn rows(entry: u32, prefab: &Prefab, names: &dyn Names) -> Vec<RowChange> {
         })
         .collect();
     replace(&mut out, "creature_template_model", "CreatureID", models);
-    let weapons = if prefab.equipment.iter().any(|item| *item != 0) {
-        vec![row([
-            ("CreatureID", json!(entry)),
-            ("ID", json!(1)),
-            ("ItemID1", json!(prefab.equipment[0])),
-            ("ItemID2", json!(prefab.equipment[1])),
-            ("ItemID3", json!(prefab.equipment[2])),
-            ("VerifiedBuild", json!(0)),
-        ])]
-    } else {
-        Vec::new()
-    };
+    // Its weapons, its row written even with empty hands: its spawns name it (equipment_id 1), and
+    // the server, which keeps the rows it read, takes its hands emptied too.
+    let weapons = vec![row([
+        ("CreatureID", json!(entry)),
+        ("ID", json!(1)),
+        ("ItemID1", json!(prefab.equipment[0])),
+        ("ItemID2", json!(prefab.equipment[1])),
+        ("ItemID3", json!(prefab.equipment[2])),
+        ("VerifiedBuild", json!(0)),
+    ])];
     replace(&mut out, "creature_equip_template", "CreatureID", weapons);
     let mut skills: Vec<Skill> = prefab.skills.iter().map(Skill::of_json).collect();
     // the last skill links to none; those of the phases after
@@ -372,6 +370,18 @@ mod tests {
         assert_eq!(template["faction"], 35, "the value a prefab starts with");
         assert_eq!(memory.tables["creature_template_locale"].len(), 1);
         assert_eq!(memory.tables["creature_equip_template"][0]["ItemID1"], 1899);
+        // its weapons changed, then taken: its row written again each time, emptied
+        let mut changed = prefab.clone();
+        changed.equipment = [2504, 0, 0];
+        apply(&mut memory, &rows(82800, &changed, &NoNames)).unwrap();
+        assert_eq!(memory.tables["creature_equip_template"].len(), 1);
+        assert_eq!(memory.tables["creature_equip_template"][0]["ItemID1"], 2504);
+        changed.equipment = [0; 3];
+        apply(&mut memory, &rows(82800, &changed, &NoNames)).unwrap();
+        assert_eq!(
+            memory.tables["creature_equip_template"][0]["ItemID1"], 0,
+            "emptied, not gone"
+        );
         let scripts = &memory.tables["smart_scripts"];
         assert_eq!(scripts.len(), 3, "the other entry's kept, the older one gone");
         let ours: Vec<&Row> = scripts

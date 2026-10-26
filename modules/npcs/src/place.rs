@@ -147,7 +147,8 @@ impl NpcsModule {
                 "orientation": 0.0,
                 "name": prefab.name("enUS"),
                 "display": prefab.models.first().map_or(0, |model| model.display),
-                "armed": prefab.equipment.iter().any(|item| *item != 0),
+                // its weapons those of its template's row, written even with empty hands
+                "armed": true,
             }),
         );
         self.placing.push(call);
@@ -194,13 +195,32 @@ impl NpcsModule {
     /// The sent prefab of the one opened kept as it changes; the changes for the server given
     /// once they changed.
     pub(crate) fn give_pending(&mut self, ctx: &mut Context) {
+        // The prefab opened kept sent as it changes: once sent, or once in the database (as it was
+        // applied or opened, its changes since sent again).
+        // A prefab opened whose entry the database has: its file as the database has it.
         if let Some(doc) = self.doc.as_ref()
             && let Some(entry) = doc.prefab.entry
-            && let Some(sent) = self.sent.prefabs.get(&entry)
-            && *sent != doc.prefab
+            && !self.sent.prefabs.contains_key(&entry)
+            && !self.written.contains_key(&entry)
+            && self.known_entry(entry)
         {
-            self.sent.prefabs.insert(entry, doc.prefab.clone());
-            self.sent_generation += 1;
+            let baseline = doc.saved.clone().unwrap_or_else(|| doc.prefab.clone());
+            self.written.insert(entry, baseline);
+        }
+        if let Some(doc) = self.doc.as_ref()
+            && let Some(entry) = doc.prefab.entry
+        {
+            let sent = self.sent.prefabs.get(&entry);
+            let written = self.written.get(&entry);
+            let changed = match (sent, written) {
+                (Some(sent), _) => *sent != doc.prefab,
+                (None, Some(written)) => *written != doc.prefab,
+                (None, None) => false,
+            };
+            if changed {
+                self.sent.prefabs.insert(entry, doc.prefab.clone());
+                self.sent_generation += 1;
+            }
         }
         if self.given == Some(self.sent_generation) {
             return;

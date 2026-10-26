@@ -108,6 +108,9 @@ struct NpcsModule {
     sent: server::Sent,
     sent_generation: u64,
     given: Option<u64>,
+    /// The prefabs as the database has them, by entry: applied here, or opened while it had their
+    /// entry; a prefab opened changed from them is sent again.
+    written: std::collections::BTreeMap<u32, prefab::Prefab>,
     /// The prefabs dropped into the 3D view, and the creatures asked of the spawns.
     drops: place::Drops,
     placing: Vec<uniwow_api::CallId>,
@@ -401,8 +404,9 @@ impl Module for NpcsModule {
             .as_array()
             .is_some_and(|owners| owners.iter().any(|owner| owner.as_str() == Some("npcs")));
         if event.topic == uniwow_api::world_db::APPLIED_TOPIC && ours {
-            // Written: the database's now, read again.
-            self.sent = server::Sent::default();
+            // Written: the database's now, read again; their changes from now on sent again.
+            let sent = std::mem::take(&mut self.sent);
+            self.written.extend(sent.prefabs);
             self.sent_generation += 1;
             self.forget_world();
         }
