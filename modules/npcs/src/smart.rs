@@ -113,6 +113,18 @@ const TRIGGERED: &[(i64, &str)] = &[
     (0x40000, "no error said"),
     (0x80000, "no item equipped needed"),
 ];
+/// The kinds of movement that end (`MovementGeneratorType`).
+const MOVES: &[(i64, &str)] = &[
+    (0, "any"),
+    (2, "a path of waypoints"),
+    (6, "home"),
+    (8, "a point (Move to)"),
+    (11, "fleeing for help"),
+    (14, "following"),
+    (16, "a jump"),
+    (17, "an escort"),
+    (18, "its group"),
+];
 /// The slots of the hands sent (`SMART_ACTION_EQUIP`).
 const SLOTS: &[(i64, &str)] = &[(1, "main hand"), (2, "off hand"), (4, "ranged")];
 const SCHOOLS: &[(i64, &str)] = &[
@@ -582,7 +594,7 @@ pub const EVENTS: &[Spec] = &[
         "Movement ends",
         "When it arrives where it was sent (SMART_EVENT_MOVEMENTINFORM)",
         &[
-            p("movement", "The kind of movement; 0 for any", N),
+            p("movement", "The kind of movement that ended", Kind::Choice(MOVES)),
             p("point", "The point it reached", N),
         ],
     ),
@@ -758,7 +770,11 @@ pub const ACTIONS: &[Spec] = &[
         "The target takes a posture (SMART_ACTION_SET_UNIT_FIELD_BYTES_1)",
         &[
             p("posture", "The posture", Kind::Choice(STANDS)),
-            p("byte", "0, its posture", N),
+            p(
+                "part",
+                "The part of its bytes: its posture",
+                Kind::Choice(&[(0, "posture")]),
+            ),
         ],
     ),
     s(
@@ -767,7 +783,11 @@ pub const ACTIONS: &[Spec] = &[
         "The target leaves its posture (SMART_ACTION_REMOVE_UNIT_FIELD_BYTES_1)",
         &[
             p("posture", "The posture it leaves", Kind::Choice(STANDS)),
-            p("byte", "0, its posture", N),
+            p(
+                "part",
+                "The part of its bytes: its posture",
+                Kind::Choice(&[(0, "posture")]),
+            ),
         ],
     ),
     s(
