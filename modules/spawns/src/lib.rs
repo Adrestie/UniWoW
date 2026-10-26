@@ -804,6 +804,13 @@ impl SpawnsModule {
         };
         let id = spawn.id();
         after.added.insert(id, spawn);
+        after.created.insert(
+            id,
+            data::Created {
+                map: self.map.ok_or("no map is shown: the NPC has no map to stand on")?,
+                equipment: i8::from(arguments["armed"].as_bool().unwrap_or(false)),
+            },
+        );
         self.change("Place an NPC".to_owned(), after, ctx);
         if let Some(scene) = &self.scene {
             scene.select(scene::Select::Set(vec![id]));
@@ -1236,9 +1243,20 @@ impl Module for SpawnsModule {
             .as_array()
             .is_some_and(|owners| owners.iter().any(|owner| owner.as_str() == Some(MODULE)));
         if event.topic == world_db::APPLIED_TOPIC && ours {
-            // Its memory loaded from its database again by the bridge: what it held is written.
+            // Its memory loaded from its database again by the bridge: what it held is written; what
+            // waits for a later step kept, said.
             self.mirror_forgotten();
-            self.set_changes(Changes::default());
+            let held = self.changes.held();
+            if !held.added.is_empty() {
+                ctx.notify(
+                    uniwow_api::theme::Level::Warning,
+                    &format!(
+                        "{} spawns made of doodads are not written yet (a later step): they are kept, waiting",
+                        held.added.len()
+                    ),
+                );
+            }
+            self.set_changes(held);
             self.read_for = None;
         }
         // Rows written by another (an import): read again, the changes kept.

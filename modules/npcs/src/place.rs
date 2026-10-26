@@ -147,6 +147,7 @@ impl NpcsModule {
                 "orientation": 0.0,
                 "name": prefab.name("enUS"),
                 "display": prefab.models.first().map_or(0, |model| model.display),
+                "armed": prefab.equipment.iter().any(|item| *item != 0),
             }),
         );
         self.placing.push(call);

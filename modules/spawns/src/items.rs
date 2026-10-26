@@ -334,6 +334,7 @@ pub fn discarded(changes: &Changes, keys: &[String]) -> Changes {
                     out.added.remove(&id);
                     out.moved.remove(&id);
                     out.sources.remove(&id);
+                    out.created.remove(&id);
                 }
             }
             "deleted" => {

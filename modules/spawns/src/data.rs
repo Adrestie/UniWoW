@@ -291,8 +291,18 @@ pub struct Changes {
     pub displays: BTreeMap<u32, String>,
     /// The spawn of the database each spawn duplicated was made of, its row copied once applied.
     pub sources: BTreeMap<EntityId, EntityId>,
+    /// The creatures made from nothing (an NPC placed), their row written whole once applied: the
+    /// map they stand on and their weapons (`equipment_id`: 1 those of their template, 0 none).
+    pub created: BTreeMap<EntityId, Created>,
     /// The patrols as the user changed them (step 16.4).
     pub patrols: crate::patrols::Edits,
+}
+
+/// A creature made from nothing: its map, its `equipment_id`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Created {
+    pub map: u32,
+    pub equipment: i8,
 }
 
 /// A template of game objects created in memory: its entry, name, display and size. Its type is 2
@@ -490,6 +500,24 @@ impl Changes {
         *given
     }
 
+    /// What of these changes is not written by an Apply and outlives it: the game objects made of
+    /// doodads, waiting for a later step, their templates and displays.
+    pub fn held(&self) -> Changes {
+        let added: HashMap<EntityId, Spawn> = self
+            .added
+            .iter()
+            .filter(|(id, _)| !self.sources.contains_key(id) && !self.created.contains_key(id))
+            .map(|(id, spawn)| (*id, spawn.clone()))
+            .collect();
+        Changes {
+            added,
+            given: self.given.clone(),
+            templates: self.templates.clone(),
+            displays: self.displays.clone(),
+            ..Changes::default()
+        }
+    }
+
     /// The changes as the project keeps them, in order.
     pub fn section(&self) -> Value {
         let mut moved: Vec<_> = self.moved.iter().collect();
@@ -527,6 +555,9 @@ impl Changes {
             "quests taken": links(&self.unlinked),
             "copied from": self.sources.iter().map(|(id, source)| json!({
                 "id": id.to_string(), "source": source.to_string(),
+            })).collect::<Vec<_>>(),
+            "made from nothing": self.created.iter().map(|(id, created)| json!({
+                "id": id.to_string(), "map": created.map, "equipment": created.equipment,
             })).collect::<Vec<_>>(),
             "patrols": self.patrols.section(),
         })
@@ -628,6 +659,18 @@ impl Changes {
                 .iter()
                 .filter_map(|entry| Some((id(entry)?, entry["source"].as_str()?.parse().ok()?)))
                 .collect(),
+            created: list("made from nothing")
+                .iter()
+                .filter_map(|entry| {
+                    Some((
+                        id(entry)?,
+                        Created {
+                            map: entry["map"].as_u64()? as u32,
+                            equipment: entry["equipment"].as_i64().unwrap_or(0) as i8,
+                        },
+                    ))
+                })
+                .collect(),
             patrols: crate::patrols::Edits::of_section(&section["patrols"]),
         }
     }
@@ -725,6 +768,26 @@ impl Changes {
             let Some(spawn) = self.find(spawns, index, id) else {
                 continue;
             };
+            // A creature made from nothing: its row whole, its map, entry, place and weapons.
+            if let Some(created) = self.created.get(id).filter(|_| id.kind == Kind::Creature) {
+                let mut set = place(&spawn);
+                set.insert(entry_column.to_owned(), json!(spawn.entry));
+                set.insert("map".to_owned(), json!(created.map));
+                set.insert("spawnMask".to_owned(), json!(1));
+                set.insert("phaseMask".to_owned(), json!(1));
+                set.insert("equipment_id".to_owned(), json!(created.equipment));
+                set.insert("spawntimesecs".to_owned(), json!(300));
+                set.insert("curhealth".to_owned(), json!(1));
+                set.insert("MovementType".to_owned(), json!(0));
+                out.changes.push(RowChange::Put {
+                    table: "creature".to_owned(),
+                    key: key(id),
+                    set,
+                    from: None,
+                });
+                out.reloads.push(reload(id));
+                continue;
+            }
             // A copy of a spawn of the database: its row copied, its guid, entry and place its own.
             let Some(source) = self.sources.get(id).filter(|source| index.contains_key(source)) else {
                 made += 1;
@@ -960,6 +1023,60 @@ mod tests {
             columns: columns.iter().map(|column| (*column).to_owned()).collect(),
             rows,
         }
+    }
+
+    #[test]
+    fn an_npc_placed_from_nothing_is_its_whole_row_and_what_waits_outlives_an_apply() {
+        use uniwow_api::db::write::{Memory, apply};
+
+        let mut changes = Changes::default();
+        let npc = Spawn {
+            kind: Kind::Creature,
+            guid: 900_001,
+            entry: 82800,
+            name: "Test".to_owned(),
+            display: 140,
+            position: [1.0, 2.0, 3.0],
+            orientation: 0.5,
+            scale: 1.0,
+            rotation: None,
+            event: 0,
+        };
+        changes.added.insert(npc.id(), npc.clone());
+        changes.created.insert(npc.id(), Created { map: 530, equipment: 1 });
+        // a game object made of a doodad, its template not written yet
+        let object = Spawn {
+            kind: Kind::GameObject,
+            guid: 700_001,
+            ..npc.clone()
+        };
+        changes.added.insert(object.id(), object.clone());
+        let pending = changes.pending(
+            &[npc.clone(), object.clone()],
+            &HashMap::new(),
+            "id1",
+            &crate::patrols::Patrols::default(),
+        );
+        assert_eq!(pending.reloads, [world_db::Reload::Creature(900_001)]);
+        assert_eq!(pending.held.len(), 1, "the game object waits: {:?}", pending.held);
+        let mut memory = Memory::default();
+        apply(&mut memory, &pending.changes).unwrap();
+        let written = &memory.tables["creature"][0];
+        assert_eq!(
+            (
+                written["id1"].clone(),
+                written["map"].clone(),
+                written["equipment_id"].clone()
+            ),
+            (json!(82800), json!(530), json!(1))
+        );
+        let held = changes.held();
+        assert_eq!(
+            held.added.keys().copied().collect::<Vec<_>>(),
+            [object.id()],
+            "the NPC written, the game object kept"
+        );
+        assert_eq!(Changes::of_section(&changes.section()).created, changes.created);
     }
 
     #[test]

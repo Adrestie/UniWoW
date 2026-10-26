@@ -722,7 +722,25 @@ namespace UniwowBridge
         stmt->SetData(0, entry);
         PreparedQueryResult row = WorldDatabase.Query(stmt);
         if (!row)
-            return { false, Acore::StringFormat("the template {} has no row in creature_template", entry) };
+        {
+            // Its row taken away (an application undone): its creatures running taken away with it,
+            // the template left unused in memory (the server keeps pointers to it).
+            uint32 taken = 0;
+            sMapMgr->DoForAllMaps([&](Map* map)
+            {
+                std::vector<Creature*> running;
+                for (auto const& [spawnId, creature] : map->GetCreatureBySpawnIdStore())
+                    if (creature->GetEntry() == entry)
+                        running.push_back(creature);
+                for (Creature* creature : running)
+                {
+                    creature->CombatStop();
+                    creature->AddObjectToRemoveList();
+                    ++taken;
+                }
+            });
+            return { true, Acore::StringFormat("the template {} has no row: {} of its creatures taken away", entry, taken) };
+        }
         sObjectMgr->LoadCreatureTemplate(row->Fetch(), true);
         CreatureTemplate* cInfo = const_cast<CreatureTemplate*>(sObjectMgr->GetCreatureTemplate(entry));
         if (!cInfo)
