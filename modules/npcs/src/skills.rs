@@ -36,7 +36,35 @@ impl Names for Named<'_> {
             }
             Kind::Display => client?.models.get(&id).cloned(),
             Kind::Creature => self.module.creature_name(id),
-            Kind::Item => self.module.item_name(id),
+            Kind::Item | Kind::Quest | Kind::GameObject | Kind::Path | Kind::Gossip => {
+                let world = self.module.world()?;
+                let list = match kind {
+                    Kind::Item => &world.lists.items,
+                    Kind::Quest => &world.lists.quests,
+                    Kind::GameObject => &world.lists.objects,
+                    Kind::Path => &world.lists.paths,
+                    _ => &world.lists.gossips,
+                };
+                crate::world::find(list, id).map(|named| named.name().to_owned())
+            }
+            Kind::Sound => {
+                let sounds = &client?.sounds;
+                let at = sounds.binary_search_by_key(&id, |(held, _)| *held).ok()?;
+                Some(sounds[at].1.clone())
+            }
+            Kind::Map => client?
+                .maps
+                .iter()
+                .find(|(held, _)| *held == id)
+                .map(|(_, name)| name.clone()),
+            Kind::Visual => {
+                let locale = client?.locale.clone();
+                client?
+                    .spells
+                    .iter()
+                    .find(|spell| spell.visual == id)
+                    .map(|spell| format!("that of {}", spell.name(&locale)))
+            }
             Kind::Text => {
                 let doc = self.module.doc.as_ref()?;
                 texts::groups_of(&doc.prefab.texts)
@@ -555,18 +583,214 @@ impl NpcsModule {
                     out = chosen;
                 }
             }
-            Kind::Faction | Kind::Display | Kind::Item | Kind::GameObject | Kind::Quest => {
-                ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut out).range(0..=i64::from(u32::MAX)))
-                        .on_hover_text(param.hint);
-                    let names = Named { module: self };
-                    if let Some(name) = names.named(param.kind, value) {
-                        ui.label(RichText::new(name).weak());
-                    }
+            Kind::NpcFlags | Kind::UnitFlags => {
+                let flags: &[crate::fields::Flag] = if param.kind == Kind::NpcFlags {
+                    &crate::fields::NPC_FLAGS
+                } else {
+                    &crate::fields::UNIT_FLAGS
+                };
+                ui.vertical(|ui| {
+                    egui::Grid::new(("npcs param flags", salt))
+                        .num_columns(3)
+                        .show(ui, |ui| {
+                            for (k, flag) in flags.iter().enumerate() {
+                                let bit = i64::from(flag.bit);
+                                let mut on = value & bit != 0;
+                                if ui.checkbox(&mut on, flag.name).on_hover_text(flag.hint).changed() {
+                                    out = if on { out | bit } else { out & !bit };
+                                }
+                                if k % 3 == 2 {
+                                    ui.end_row();
+                                }
+                            }
+                        });
                 });
+            }
+            Kind::TimedEvent => {
+                // the timed events its skills create
+                let made: Vec<i64> = self
+                    .skills()
+                    .iter()
+                    .filter(|skill| skill.action == 67 && skill.action_params[0] != 0)
+                    .map(|skill| skill.action_params[0])
+                    .collect();
+                egui::ComboBox::from_id_salt(("npcs param", salt))
+                    .selected_text(if value == 0 {
+                        "none".to_owned()
+                    } else {
+                        format!("timed event {value}")
+                    })
+                    .show_ui(ui, |ui| {
+                        if made.is_empty() {
+                            ui.weak("No skill creates a timed event: add one doing Create a timed event.");
+                        }
+                        for id in &made {
+                            ui.selectable_value(&mut out, *id, format!("timed event {id}"))
+                                .on_hover_text("Created by a skill of its own (Create a timed event)");
+                        }
+                    })
+                    .response
+                    .on_hover_text(param.hint);
+            }
+            _ => {
+                if let Some(chosen) = self.list_combo(ui, ("npcs param", salt), param, value) {
+                    out = chosen;
+                }
             }
         }
         (out != value).then_some(out)
+    }
+
+    /// What the parameter `param` names searched by name in any language, or by id: the choices of
+    /// its kind found for the text typed, 300 at most; the one chosen.
+    pub(crate) fn list_combo(
+        &mut self,
+        ui: &mut egui::Ui,
+        salt: impl egui::AsIdSalt,
+        param: &Param,
+        value: i64,
+    ) -> Option<i64> {
+        let id = ui.make_persistent_id(salt);
+        let names = Named { module: self };
+        let shown = match (value, names.named(param.kind, value)) {
+            (0, _) => "none".to_owned(),
+            (_, Some(name)) => format!("{name}  {value}"),
+            _ => value.to_string(),
+        };
+        let client = self.client.clone();
+        let world = self.world();
+        let mut chosen = None;
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(shown)
+            .width(260.0)
+            .height(400.0)
+            .show_ui(ui, |ui| {
+                let search = self.searches.entry(format!("{id:?}")).or_default();
+                ui.add(
+                    egui::TextEdit::singleline(search)
+                        .hint_text("Search by name, any language, or id")
+                        .desired_width(240.0),
+                )
+                .on_hover_text("Lists those whose name holds the text, or whose id begins with it");
+                let search = search.trim().to_lowercase();
+                if ui.selectable_label(value == 0, "none").on_hover_text("None").clicked() {
+                    chosen = Some(0);
+                }
+                let matches = |id: u32, names: &[&str]| {
+                    search.is_empty()
+                        || id.to_string().starts_with(&search)
+                        || names.iter().any(|name| name.to_lowercase().contains(&search))
+                };
+                let found: Vec<(u32, String, String)> = match param.kind {
+                    Kind::Item | Kind::Quest | Kind::GameObject | Kind::Path | Kind::Gossip => {
+                        let Some(world) = &world else {
+                            ui.weak("They come with the world database.");
+                            return;
+                        };
+                        let list = match param.kind {
+                            Kind::Item => &world.lists.items,
+                            Kind::Quest => &world.lists.quests,
+                            Kind::GameObject => &world.lists.objects,
+                            Kind::Path => &world.lists.paths,
+                            _ => &world.lists.gossips,
+                        };
+                        crate::world::search(list, &search, 300)
+                            .into_iter()
+                            .map(|named| (named.id, named.name().to_owned(), named.names.join("\n")))
+                            .collect()
+                    }
+                    _ => {
+                        let Some(client) = &client else {
+                            ui.weak("They come with the client: open it.");
+                            return;
+                        };
+                        let locale = client.locale.clone();
+                        match param.kind {
+                            Kind::Faction => client
+                                .factions
+                                .iter()
+                                .filter(|faction| {
+                                    matches(
+                                        faction.id,
+                                        &faction.names.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>(),
+                                    )
+                                })
+                                .take(300)
+                                .map(|faction| (faction.id, faction.name(&locale), faction.groups()))
+                                .collect(),
+                            Kind::Display => {
+                                let mut models: Vec<(u32, String, String)> = client
+                                    .models
+                                    .iter()
+                                    .filter(|(display, file)| matches(**display, &[file.as_str()]))
+                                    .map(|(display, file)| (*display, file.clone(), self.wearers_said(*display, 6)))
+                                    .collect();
+                                models.sort_by_key(|(display, _, _)| *display);
+                                models.truncate(300);
+                                models
+                            }
+                            Kind::Sound => client
+                                .sounds
+                                .iter()
+                                .filter(|(sound, name)| matches(*sound, &[name.as_str()]))
+                                .take(300)
+                                .map(|(sound, name)| (*sound, name.clone(), String::new()))
+                                .collect(),
+                            Kind::Map => client
+                                .maps
+                                .iter()
+                                .filter(|(map, name)| matches(*map, &[name.as_str()]))
+                                .take(300)
+                                .map(|(map, name)| (*map, name.clone(), String::new()))
+                                .collect(),
+                            Kind::Visual => {
+                                if search.chars().count() < 2 {
+                                    ui.weak("Type two letters or more of a spell's name.");
+                                    return;
+                                }
+                                client
+                                    .spells
+                                    .iter()
+                                    .filter(|spell| {
+                                        spell.visual != 0
+                                            && matches(
+                                                spell.id,
+                                                &spell.names.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>(),
+                                            )
+                                    })
+                                    .take(300)
+                                    .map(|spell| {
+                                        (
+                                            spell.visual,
+                                            format!("that of {}", spell.name(&locale)),
+                                            format!("The visual {} of the spell {}", spell.visual, spell.id),
+                                        )
+                                    })
+                                    .collect()
+                            }
+                            _ => Vec::new(),
+                        }
+                    }
+                };
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show_rows(ui, 18.0, found.len(), |ui, rows| {
+                        for (id, name, hint) in &found[rows] {
+                            let response = ui.selectable_label(i64::from(*id) == value, format!("{name}  {id}"));
+                            let response = if hint.is_empty() {
+                                response.on_hover_text(param.hint)
+                            } else {
+                                response.on_hover_text(hint.as_str())
+                            };
+                            if response.clicked() {
+                                chosen = Some(i64::from(*id));
+                            }
+                        }
+                    });
+            })
+            .response
+            .on_hover_text(param.hint);
+        chosen
     }
 
     /// The spells of the client searched by a name of any language or by id, with their icons; the

@@ -169,6 +169,9 @@ pub struct Client {
     pub spell_icons: HashMap<u32, String>,
     /// The emotes (`Emotes.dbc`), by id, their names.
     pub emotes: Vec<(u32, String)>,
+    /// The sounds (`SoundEntries.dbc`) and the maps (`Map.dbc`), by id, their names.
+    pub sounds: Vec<(u32, String)>,
+    pub maps: Vec<(u32, String)>,
 }
 
 /// A spell: its id, its names by language (`Spell.dbc` of each), its rank (as `Rank 2`), its icon
@@ -179,6 +182,8 @@ pub struct Spell {
     pub names: Vec<(String, String)>,
     pub rank: String,
     pub icon: u32,
+    /// Its visual (`SpellVisual.dbc`).
+    pub visual: u32,
 }
 
 impl Spell {
@@ -193,10 +198,11 @@ impl Spell {
 }
 
 /// A spell as `Spell.dbc` gives it: its id, name, rank and icon.
-pub type SpellRow = (u32, String, String, u32);
+pub type SpellRow = (u32, String, String, u32, u32);
 
 /// The fields of `Spell.dbc` as AzerothCore's DBCfmt.h reads them: its icon, its name and its rank
 /// (16 languages each and a mask).
+const SPELL_VISUAL: usize = 131;
 const SPELL_ICON: usize = 133;
 const SPELL_NAME: usize = 136;
 const SPELL_RANK: usize = 153;
@@ -247,6 +253,7 @@ pub fn spells_of(bytes: &[u8]) -> Vec<SpellRow> {
                 first(record, SPELL_NAME),
                 first(record, SPELL_RANK),
                 word(at + SPELL_ICON * 4).unwrap_or(0),
+                word(at + SPELL_VISUAL * 4).unwrap_or(0),
             ))
         })
         .collect()
@@ -260,13 +267,13 @@ pub fn spells_named(own: &[SpellRow], named: &[(String, Vec<SpellRow>)]) -> Vec<
         .map(|(locale, spells)| {
             (
                 locale.clone(),
-                spells.iter().map(|(id, name, _, _)| (*id, name.clone())).collect(),
+                spells.iter().map(|(id, name, _, _, _)| (*id, name.clone())).collect(),
             )
         })
         .collect();
     let mut out: Vec<Spell> = own
         .iter()
-        .map(|(id, name, rank, icon)| {
+        .map(|(id, name, rank, icon, visual)| {
             let mut names: Vec<(String, String)> = by_locale
                 .iter()
                 .map(|(locale, names)| (locale.clone(), names.get(id).cloned().unwrap_or_default()))
@@ -279,6 +286,7 @@ pub fn spells_named(own: &[SpellRow], named: &[(String, Vec<SpellRow>)]) -> Vec<
                 names,
                 rank: rank.clone(),
                 icon: *icon,
+                visual: *visual,
             }
         })
         .collect();
@@ -410,6 +418,14 @@ impl Client {
                 .iter()
                 .filter_map(|record| Some((*record.first()?, icons.string(*record.get(1)?))))
                 .collect();
+        }
+        if let Some(sounds) = table("SoundEntries.dbc") {
+            out.sounds = sounds
+                .records
+                .iter()
+                .filter_map(|record| Some((*record.first()?, sounds.string(*record.get(2)?))))
+                .collect();
+            out.sounds.sort_by_key(|(id, _)| *id);
         }
         if let Some(emotes) = table("Emotes.dbc") {
             out.emotes = emotes
@@ -626,7 +642,7 @@ mod tests {
         record.extend((0..17).map(|_| 0));
         record.extend(vec![0u32; 30]);
         let spells = spells_of(&dbc(&[record], b"\0Boule de feu\0"));
-        assert_eq!(spells, [(133, "Boule de feu".to_owned(), String::new(), 7)]);
+        assert_eq!(spells, [(133, "Boule de feu".to_owned(), String::new(), 7, 0)]);
         let named = spells_named(&spells, &[("frFR".to_owned(), spells.clone())]);
         assert_eq!(named[0].name("enUS"), "Boule de feu");
         let shown = items_of(&items);

@@ -229,8 +229,13 @@ impl NpcsModule {
         if !matches!(vfs.state(), vfs::VfsState::Ready { .. }) {
             return;
         }
+        let formats = ctx.service(uniwow_api::formats::SERVICE);
         self.client_job = Some(ctx.spawn("Read the client's factions and models", move |_| {
-            client::Client::read(&vfs)
+            let mut client = client::Client::read(&vfs);
+            if let Some(maps) = formats.and_then(|formats| formats.maps().ok()) {
+                client.maps = maps.iter().map(|map| (map.id, map.name.clone())).collect();
+            }
+            client
         }));
     }
 

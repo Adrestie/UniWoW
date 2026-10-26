@@ -310,11 +310,6 @@ impl NpcsModule {
         Some(world.creatures[at].name().to_owned())
     }
 
-    /// The name of the item `id`, when it is one of the hands.
-    pub(crate) fn item_name(&self, id: u32) -> Option<String> {
-        self.stage.catalog.as_ref()?.get(id).map(|item| item.name.clone())
-    }
-
     /// The icon of the item display `display`, asked when it is not there yet.
     fn icon(&mut self, display: u32) -> Option<egui::TextureHandle> {
         match self.stage.icons.get(&display) {
@@ -453,7 +448,7 @@ impl NpcsModule {
     }
 
     /// What wears the display `display`, said in a line.
-    fn wearers_said(&self, display: u32, limit: usize) -> String {
+    pub(crate) fn wearers_said(&self, display: u32, limit: usize) -> String {
         let Some(world) = &self.stage.world else {
             return String::new();
         };

@@ -31,11 +31,117 @@ pub const LOOTS: [(&str, &str); 3] = [
     ("skinning_loot_template", "skinloot"),
 ];
 
+/// A thing of the database named in every language: its id, its names (the English first).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Named {
+    pub id: u32,
+    pub names: Vec<String>,
+}
+
+impl Named {
+    pub fn name(&self) -> &str {
+        self.names.first().map_or("", String::as_str)
+    }
+}
+
+/// What can be chosen of the database by name: its quests, game objects, items, paths (named by
+/// the creatures walking them and their points) and gossip menus (by their first text).
+#[derive(Clone, Debug, Default)]
+pub struct Lists {
+    pub quests: Vec<Named>,
+    pub objects: Vec<Named>,
+    pub items: Vec<Named>,
+    pub paths: Vec<Named>,
+    pub gossips: Vec<Named>,
+}
+
+/// The things of `rows` (id, name), their names of `locales` (id, name), by id.
+pub fn named_of(rows: &Rows, locales: Option<&Rows>) -> Vec<Named> {
+    let mut out: Vec<Named> = rows
+        .rows
+        .iter()
+        .filter_map(|row| {
+            Some(Named {
+                id: number(row.first())? as u32,
+                names: vec![text(row.get(1))],
+            })
+        })
+        .collect();
+    out.sort_by_key(|named| named.id);
+    out.dedup_by_key(|named| named.id);
+    let places: HashMap<u32, usize> = out.iter().enumerate().map(|(at, named)| (named.id, at)).collect();
+    for row in locales.iter().flat_map(|rows| &rows.rows) {
+        let name = text(row.get(1));
+        if let Some(at) = number(row.first()).and_then(|id| places.get(&(id as u32)))
+            && !name.is_empty()
+            && !out[*at].names.contains(&name)
+        {
+            out[*at].names.push(name);
+        }
+    }
+    out
+}
+
+/// The one of `list` of the id `id`.
+pub fn find(list: &[Named], id: u32) -> Option<&Named> {
+    list.binary_search_by_key(&id, |named| named.id)
+        .ok()
+        .map(|at| &list[at])
+}
+
+/// Those of `list` whose id begins with `search` or one of whose names holds it, `limit` at most.
+pub fn search<'a>(list: &'a [Named], search: &str, limit: usize) -> Vec<&'a Named> {
+    let search = search.trim().to_lowercase();
+    list.iter()
+        .filter(|named| {
+            search.is_empty()
+                || named.id.to_string().starts_with(&search)
+                || named.names.iter().any(|name| name.to_lowercase().contains(&search))
+        })
+        .take(limit)
+        .collect()
+}
+
+impl Lists {
+    /// Reads the lists from the world database, from a job; a table refused left empty.
+    pub fn read(database: &world_db::Handle) -> Lists {
+        let query = |sql: &str| database.query(sql, &[]).ok();
+        let pair = |rows: &str, locales: &str| -> Vec<Named> {
+            query(rows).map_or_else(Vec::new, |rows| named_of(&rows, query(locales).as_ref()))
+        };
+        Lists {
+            quests: pair(
+                "SELECT ID, LogTitle FROM quest_template",
+                "SELECT ID, Title FROM quest_template_locale",
+            ),
+            objects: pair(
+                "SELECT entry, name FROM gameobject_template",
+                "SELECT entry, name FROM gameobject_template_locale",
+            ),
+            items: pair("SELECT entry, name FROM item_template", "SELECT ID, Name FROM item_template_locale"),
+            // the creature of a spawn is `id1`, or `id` (as the spawns read it)
+            paths: ["id1", "id"]
+                .iter()
+                .find_map(|column| {
+                    query(&format!(
+                        "SELECT w.id, CONCAT(COALESCE(MAX(t.name), 'no creature'), ', ', COUNT(DISTINCT w.point), ' points') FROM waypoint_data w LEFT JOIN creature_addon a ON a.path_id = w.id LEFT JOIN creature c ON c.guid = a.guid LEFT JOIN creature_template t ON t.entry = c.{column} GROUP BY w.id"
+                    ))
+                })
+                .map_or_else(Vec::new, |rows| named_of(&rows, None)),
+            gossips: query(
+                "SELECT g.MenuID, LEFT(COALESCE(MAX(n.text0_0), MAX(n.text0_1), ''), 60) FROM gossip_menu g LEFT JOIN npc_text n ON n.ID = g.TextID GROUP BY g.MenuID",
+            )
+            .map_or_else(Vec::new, |rows| named_of(&rows, None)),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct World {
     pub creatures: Vec<Creature>,
     /// The creatures wearing each display, by their place in `creatures`.
     pub wearers: HashMap<u32, Vec<usize>>,
+    pub lists: Lists,
 }
 
 fn number(value: Option<&Value>) -> Option<u64> {
@@ -94,7 +200,11 @@ impl World {
                 }
             }
         }
-        Self { creatures, wearers }
+        Self {
+            creatures,
+            wearers,
+            lists: Lists::default(),
+        }
     }
 
     /// Reads the creatures from the world database, from a job.
@@ -109,7 +219,9 @@ impl World {
         let models = database
             .query("SELECT CreatureID, CreatureDisplayID FROM creature_template_model", &[])
             .ok();
-        Ok(World::of_rows(&templates, locales.as_ref(), models.as_ref()))
+        let mut world = World::of_rows(&templates, locales.as_ref(), models.as_ref());
+        world.lists = Lists::read(database);
+        Ok(world)
     }
 
     /// The creatures whose loot of kind `kind` (0 to 2) is not none and whose entry begins with
@@ -251,5 +363,11 @@ mod tests {
         assert_eq!(world.loot_owners(2, "1527", 10)[0].entry, 15271);
         assert_eq!(world.owners_of(0, 15274).count(), 1);
         assert_eq!(world.creatures[1].name(), "Mana Wyrm");
+        let quests = named_of(
+            &rows(vec![vec![json!(783), json!("A Threat Within")]]),
+            Some(&rows(vec![vec![json!(783), json!("Une menace intérieure")]])),
+        );
+        assert_eq!(search(&quests, "menace", 10)[0].id, 783);
+        assert_eq!(find(&quests, 783).map(Named::name), Some("A Threat Within"));
     }
 }

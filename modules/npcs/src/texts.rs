@@ -267,8 +267,14 @@ impl NpcsModule {
                                 }
                                 ui.label(RichText::new("sound").weak())
                                     .on_hover_text("A sound played with it, of SoundEntries.dbc (creature_text.Sound)");
-                                ui.add(egui::DragValue::new(&mut after_line.sound).range(0..=i64::from(u32::MAX)))
-                                    .on_hover_text("A sound played with it, of SoundEntries.dbc; 0 for none (creature_text.Sound)");
+                                let sound = crate::smart::Param {
+                                    name: "sound",
+                                    hint: "A sound played with it, of SoundEntries.dbc; none for none (creature_text.Sound)",
+                                    kind: crate::smart::Kind::Sound,
+                                };
+                                if let Some(chosen) = self.list_combo(ui, ("npcs text sound", at, line_at), &sound, after_line.sound) {
+                                    after_line.sound = chosen;
+                                }
                                 if after_line != *line {
                                     let mut after = groups.clone();
                                     after[at].lines[line_at] = after_line;

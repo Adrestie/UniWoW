@@ -30,6 +30,22 @@ pub enum Kind {
     Phases,
     Faction,
     Display,
+    /// The roles of `npcflag`, as boxes of named flags.
+    NpcFlags,
+    /// The flags of `unit_flags`, as boxes of named flags.
+    UnitFlags,
+    /// A sound of `SoundEntries.dbc`, by its name.
+    Sound,
+    /// A map of `Map.dbc`, by its name.
+    Map,
+    /// The visual of a spell (`Spell.dbc` SpellVisual), chosen by the spell.
+    Visual,
+    /// One of the timed events its skills create.
+    TimedEvent,
+    /// A path of waypoints of the database (`waypoint_data`).
+    Path,
+    /// A menu of gossip of the database (`gossip_menu`), by its first text.
+    Gossip,
 }
 
 /// A parameter: its name, what it is, how it is chosen.
@@ -83,6 +99,22 @@ const COOLDOWN_MAX: Param = p("to", "Milliseconds before it can happen again, at
 const TIMED: [Param; 4] = [INITIAL_MIN, INITIAL_MAX, REPEAT_MIN, REPEAT_MAX];
 
 const HOSTILITY: &[(i64, &str)] = &[(0, "hostile"), (1, "not hostile"), (2, "anyone")];
+/// How a spell is cast without its usual checks (`TriggerCastFlags`).
+const TRIGGERED: &[(i64, &str)] = &[
+    (0x1, "no global cooldown"),
+    (0x2, "no cooldown"),
+    (0x4, "no cost"),
+    (0x8, "no item used"),
+    (0x20, "even while casting"),
+    (0x80, "cast at once"),
+    (0x200, "without turning"),
+    (0x800, "ignores its state"),
+    (0x10000, "ignores its auras"),
+    (0x40000, "no error said"),
+    (0x80000, "no item equipped needed"),
+];
+/// The slots of the hands sent (`SMART_ACTION_EQUIP`).
+const SLOTS: &[(i64, &str)] = &[(1, "main hand"), (2, "off hand"), (4, "ranged")];
 const SCHOOLS: &[(i64, &str)] = &[
     (1, "Physical"),
     (2, "Holy"),
@@ -180,7 +212,7 @@ pub const EVENTS: &[Spec] = &[
                 "Anywhere, or only on a map or in a zone",
                 Kind::Choice(&[(0, "anywhere"), (1, "on the map"), (2, "in the zone")]),
             ),
-            p("map", "The map, when on a map", N),
+            p("map", "The map, when on a map", Kind::Map),
             p("zone", "The zone, when in a zone", N),
         ],
     ),
@@ -494,7 +526,7 @@ pub const EVENTS: &[Spec] = &[
         "Gossip option chosen",
         "When a player chooses an option of its gossip (SMART_EVENT_GOSSIP_SELECT)",
         &[
-            p("menu", "The gossip menu (gossip_menu.MenuID)", N),
+            p("menu", "The gossip menu", Kind::Gossip),
             p("option", "The option (gossip_menu_option.OptionID)", N),
         ],
     ),
@@ -511,7 +543,11 @@ pub const EVENTS: &[Spec] = &[
         59,
         "Timed event",
         "When a timed event of its own comes (SMART_EVENT_TIMED_EVENT_TRIGGERED)",
-        &[p("event", "The id of the timed event (see Create a timed event)", N)],
+        &[p(
+            "event",
+            "The timed event, one its skills create (Create a timed event)",
+            Kind::TimedEvent,
+        )],
     ),
     s(
         66,
@@ -556,7 +592,7 @@ pub const EVENTS: &[Spec] = &[
         "When it reaches a point of its path (SMART_EVENT_WAYPOINT_REACHED)",
         &[
             p("point", "The point; 0 for any", N),
-            p("path", "The path; 0 for any", N),
+            p("path", "The path; none for any", Kind::Path),
         ],
     ),
     s(
@@ -565,7 +601,7 @@ pub const EVENTS: &[Spec] = &[
         "When it reaches the end of its path (SMART_EVENT_WAYPOINT_ENDED)",
         &[
             p("point", "The point; 0 for any", N),
-            p("path", "The path; 0 for any", N),
+            p("path", "The path; none for any", Kind::Path),
         ],
     ),
     s(
@@ -611,7 +647,11 @@ pub const ACTIONS: &[Spec] = &[
         &[
             p("spell", "The spell", Kind::Spell),
             p("how", "How it casts", Kind::Mask(CAST_FLAGS)),
-            p("trigger flags", "Raw TriggerCastFlags; 0 for none", N),
+            p(
+                "without",
+                "The checks it skips (TriggerCastFlags)",
+                Kind::Mask(TRIGGERED),
+            ),
             p("targets at most", "On so many of the targets at most; 0 for all", N),
         ],
     ),
@@ -622,7 +662,11 @@ pub const ACTIONS: &[Spec] = &[
         &[
             p("spell", "The spell", Kind::Spell),
             p("how", "How it casts", Kind::Mask(CAST_FLAGS)),
-            p("trigger flags", "Raw TriggerCastFlags; 0 for none", N),
+            p(
+                "without",
+                "The checks it skips (TriggerCastFlags)",
+                Kind::Mask(TRIGGERED),
+            ),
             p("targets at most", "On so many of the targets at most; 0 for all", N),
         ],
     ),
@@ -633,7 +677,11 @@ pub const ACTIONS: &[Spec] = &[
         &[
             p("spell", "The spell", Kind::Spell),
             p("how", "How it casts", Kind::Mask(CAST_FLAGS)),
-            p("trigger flags", "Raw TriggerCastFlags; 0 for none", N),
+            p(
+                "without",
+                "The checks it skips (TriggerCastFlags)",
+                Kind::Mask(TRIGGERED),
+            ),
             p("targets at most", "On so many of the targets at most; 0 for all", N),
         ],
     ),
@@ -733,7 +781,7 @@ pub const ACTIONS: &[Spec] = &[
         "Play a sound",
         "A sound (SMART_ACTION_SOUND)",
         &[
-            p("sound", "Its id in SoundEntries.dbc", N),
+            p("sound", "A sound of the client (SoundEntries.dbc)", Kind::Sound),
             p("to the target alone", "Only the target hears it", Kind::Bool),
         ],
     ),
@@ -908,13 +956,13 @@ pub const ACTIONS: &[Spec] = &[
         73,
         "Trigger a timed event",
         "A timed event of its own now (SMART_ACTION_TRIGGER_TIMED_EVENT)",
-        &[p("event", "Its id", N)],
+        &[p("event", "One its skills create", Kind::TimedEvent)],
     ),
     s(
         74,
         "Remove a timed event",
         "A timed event of its own cancelled (SMART_ACTION_REMOVE_TIMED_EVENT)",
-        &[p("event", "Its id", N)],
+        &[p("event", "One its skills create", Kind::TimedEvent)],
     ),
     s(
         2,
@@ -1106,7 +1154,7 @@ pub const ACTIONS: &[Spec] = &[
         "Walk a path",
         "It walks a path of waypoints (SMART_ACTION_WAYPOINT_START)",
         &[
-            p("path", "The path (waypoint_data.id)", N),
+            p("path", "A path of waypoints of the database", Kind::Path),
             p("again and again", "It starts again at its end", Kind::Bool),
         ],
     ),
@@ -1122,31 +1170,31 @@ pub const ACTIONS: &[Spec] = &[
         81,
         "Set its roles",
         "Its npcflag (SMART_ACTION_SET_NPC_FLAG)",
-        &[p("flags", "npcflag", N)],
+        &[p("roles", "Its roles (npcflag)", Kind::NpcFlags)],
     ),
     s(
         82,
         "Add roles",
         "Flags added to its npcflag (SMART_ACTION_ADD_NPC_FLAG)",
-        &[p("flags", "npcflag", N)],
+        &[p("roles", "Its roles (npcflag)", Kind::NpcFlags)],
     ),
     s(
         83,
         "Remove roles",
         "Flags taken from its npcflag (SMART_ACTION_REMOVE_NPC_FLAG)",
-        &[p("flags", "npcflag", N)],
+        &[p("roles", "Its roles (npcflag)", Kind::NpcFlags)],
     ),
     s(
         18,
         "Set unit flags",
         "Flags added to its unit_flags (SMART_ACTION_SET_UNIT_FLAG)",
-        &[p("flags", "unit_flags", N)],
+        &[p("flags", "Its flags (unit_flags)", Kind::UnitFlags)],
     ),
     s(
         19,
         "Remove unit flags",
         "Flags taken from its unit_flags (SMART_ACTION_REMOVE_UNIT_FLAG)",
-        &[p("flags", "unit_flags", N)],
+        &[p("flags", "Its flags (unit_flags)", Kind::UnitFlags)],
     ),
     s(
         71,
@@ -1154,7 +1202,7 @@ pub const ACTIONS: &[Spec] = &[
         "It holds other weapons (SMART_ACTION_EQUIP)",
         &[
             p("equipment", "creature_equip_template.ID; 0 for the items after", N),
-            p("slots", "Raw mask: 1 main, 2 off, 4 ranged; 0 all", N),
+            p("slots", "The slots changed; none for all", Kind::Mask(SLOTS)),
             p("main hand", "An item", Kind::Item),
             p("off hand", "An item", Kind::Item),
             p("ranged", "An item", Kind::Item),
@@ -1245,15 +1293,19 @@ pub const ACTIONS: &[Spec] = &[
         62,
         "Teleport",
         "The target is teleported, to the target's position (SMART_ACTION_TELEPORT)",
-        &[p("map", "The map", N)],
+        &[p("map", "The map", Kind::Map)],
     ),
     s(
         229,
         "Play a spell visual",
         "A visual of a spell, without its effects (SMART_ACTION_PLAY_SPELL_VISUAL)",
         &[
-            p("visual", "SpellVisual.dbc", N),
-            p("on impact", "SpellVisual.dbc of its impact", N),
+            p("visual", "The visual of a spell, chosen by the spell", Kind::Visual),
+            p(
+                "on impact",
+                "The visual of a spell's impact, chosen by the spell",
+                Kind::Visual,
+            ),
         ],
     ),
     s(
@@ -1261,7 +1313,7 @@ pub const ACTIONS: &[Spec] = &[
         "Play music",
         "A music (SMART_ACTION_MUSIC)",
         &[
-            p("sound", "SoundEntries.dbc", N),
+            p("sound", "A music of the client (SoundEntries.dbc)", Kind::Sound),
             p("to the target alone", "Only the target hears it", Kind::Bool),
         ],
     ),
@@ -1285,7 +1337,7 @@ pub const ACTIONS: &[Spec] = &[
         240,
         "Set its gossip",
         "Its gossip menu changed (SMART_ACTION_SET_GOSSIP_MENU)",
-        &[p("menu", "gossip_menu.MenuID", N)],
+        &[p("menu", "A gossip menu of the database", Kind::Gossip)],
     ),
     s(
         72,
@@ -1716,11 +1768,28 @@ pub fn said(param: &Param, value: i64, names: &dyn Names) -> String {
         Kind::Phase if value == 0 => "none".to_owned(),
         Kind::Phase => format!("phase {value}"),
         Kind::Phases => phases_said(value),
+        Kind::NpcFlags => flags_said(&crate::fields::NPC_FLAGS, value),
+        Kind::UnitFlags => flags_said(&crate::fields::UNIT_FLAGS, value),
+        Kind::TimedEvent => format!("timed event {value}"),
         kind if value == 0 => match kind {
             Kind::Spell | Kind::Creature | Kind::GameObject | Kind::Item | Kind::Quest => "any".to_owned(),
             _ => "none".to_owned(),
         },
         kind => names.named(kind, value).unwrap_or_else(|| value.to_string()),
+    }
+}
+
+/// A mask of named flags said.
+pub fn flags_said(flags: &[crate::fields::Flag], value: i64) -> String {
+    let named: Vec<&str> = flags
+        .iter()
+        .filter(|flag| value & i64::from(flag.bit) != 0)
+        .map(|flag| flag.name)
+        .collect();
+    if named.is_empty() {
+        "none".to_owned()
+    } else {
+        named.join(", ")
     }
 }
 
