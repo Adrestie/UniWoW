@@ -768,6 +768,49 @@ impl SpawnsModule {
     }
 
     /// The doodad `arguments` describes made a game object (`spawns.from_doodad`).
+    /// A creature of the template `entry` made at `position`, facing `orientation`, in memory, one
+    /// undo entry, selected; its name and display those given until its template is read.
+    fn create_creature(&mut self, arguments: &Value, ctx: &mut Context) -> Result<Value, String> {
+        if self.read_for.is_none() || self.reading.is_some() {
+            return Err("the spawns of the world database are not read: their guids are not known".to_owned());
+        }
+        let entry = arguments["entry"]
+            .as_u64()
+            .and_then(|entry| u32::try_from(entry).ok())
+            .ok_or("'entry' is the entry of a template")?;
+        let position = arguments["position"]
+            .as_array()
+            .filter(|values| values.len() == 3)
+            .and_then(|values| {
+                let mut out = [0.0f32; 3];
+                for (at, value) in out.iter_mut().zip(values) {
+                    *at = value.as_f64().filter(|value| value.is_finite())? as f32;
+                }
+                Some(out)
+            })
+            .ok_or("'position' is three numbers")?;
+        let mut after = self.changes.clone();
+        let spawn = data::Spawn {
+            kind: Kind::Creature,
+            guid: after.give(Kind::Creature, self.highest[0]),
+            entry,
+            name: arguments["name"].as_str().unwrap_or_default().to_owned(),
+            display: arguments["display"].as_u64().unwrap_or(0) as u32,
+            position,
+            orientation: arguments["orientation"].as_f64().unwrap_or(0.0) as f32,
+            scale: 1.0,
+            rotation: None,
+            event: 0,
+        };
+        let id = spawn.id();
+        after.added.insert(id, spawn);
+        self.change("Place an NPC".to_owned(), after, ctx);
+        if let Some(scene) = &self.scene {
+            scene.select(scene::Select::Set(vec![id]));
+        }
+        Ok(json!({ "id": id.to_string() }))
+    }
+
     fn make_game_object(&mut self, arguments: &Value, ctx: &mut Context) -> Result<Value, String> {
         if self.read_for.is_none() || self.reading.is_some() {
             return Err(
@@ -950,6 +993,12 @@ impl Module for SpawnsModule {
                 json!({ "type": "object", "properties": { "quests": { "type": "array" } } }),
             )
             .command(
+                "spawns.create_creature",
+                "Makes a creature of the template 'entry' at 'position' (in the world), facing 'orientation' (radians), in memory, one undo entry, selected; 'name' and 'display' shown until its template is read. Once the spawns of the world database are read.",
+                json!({ "type": "object", "properties": { "entry": { "type": "integer" }, "position": { "type": "array" }, "orientation": { "type": "number" }, "name": { "type": "string" }, "display": { "type": "integer" } }, "required": ["entry", "position"] }),
+                json!({ "type": "object", "properties": { "id": { "type": "string" } } }),
+            )
+            .command(
                 "spawns.from_doodad",
                 "Makes the doodad of the 'model' at 'position' (in the world), turned by 'rotation' (degrees about the                  axes of its file) and scaled by 'scale', a game object, in memory, one undo entry: a template of its                  size (type 5, 2 once it gives a quest) and a spawn at its place, its rotation and yaw; a row of                  GameObjectDisplayInfo prepared when none names its model. The 'doodad' given by its id deleted with it,                  in the gesture of the call. Once the spawns of the world database are read.",
                 json!({ "type": "object", "properties": { "model": { "type": "string" }, "position": { "type": "array" }, "rotation": { "type": "array" }, "scale": { "type": "number" } }, "required": ["model", "position", "rotation"] }),
@@ -960,6 +1009,9 @@ impl Module for SpawnsModule {
     fn on_command(&mut self, name: &str, arguments: Value, ctx: &mut Context) -> Result<Value, String> {
         if name == "spawns.from_doodad" {
             return self.make_game_object(&arguments, ctx);
+        }
+        if name == "spawns.create_creature" {
+            return self.create_creature(&arguments, ctx);
         }
         if name == "spawns.discard" {
             let keys: Vec<String> = arguments["keys"]

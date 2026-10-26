@@ -38,6 +38,7 @@ pub fn demands(reloads: &[Reload]) -> Vec<(u8, u64)> {
             Reload::Addons => (3, 0),
             Reload::Path(id) => (2, u64::from(id)),
             Reload::Formation(_) => (4, 0),
+            Reload::Template(entry) => (TEMPLATE, u64::from(entry)),
             Reload::Creature(guid) => (5, guid),
             Reload::Home(guid) => (HOME, guid),
             Reload::GameObject(guid) => (6, guid),
@@ -113,6 +114,10 @@ impl Body<'_> {
 /// The demand of a spawn point moved, of the version 2; a bridge of the version 1 asked to spawn the
 /// creature again in its place.
 const HOME: u8 = 8;
+
+/// The demand of a template of creature read again with its tables, its creatures spawned again
+/// (step 18.5); a bridge built before it refuses it.
+const TEMPLATE: u8 = 9;
 
 /// A connection to the bridge on `port` with `token`, the version it speaks and when its server
 /// started (version 3): the version 3 asked, an earlier one once a bridge of it refused it.

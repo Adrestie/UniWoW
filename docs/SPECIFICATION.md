@@ -11000,10 +11000,24 @@ texts they say (`creature_text`). The templates the editor makes take the entrie
   lines (`creature_text`), each line in every language (`creature_text_locale`), said, yelled,
   whispered or an emote, its language, chance, emote and sound. Kept in the prefab; its AI is
   SmartAI once it has a skill.
-- **Step 18.4**: the prefab placed in the world, its spawns moved and copied, its rows given to the
-  server and kept in the packages `.uniwow`.
-- **Step 18.5**: the bridge loads again a template, its weapons, scripts and texts, and spawns its
-  creatures again, live.
+- **Step 18.4, the NPC in the world and given to the server**: a prefab dragged from the panel
+  *Prefabs* into the 3D view is placed on the ground under the pointer, or by *Place in the world*
+  in the middle of the view: given the first free entry of the block the first time (neither the
+  database's nor another prefab's), sent to the server, a creature of its template made there by
+  the module `spawns` (`spawns.create_creature`), moved and copied as any spawn. *Send to the
+  server* sends it without placing it. A prefab sent is kept as it changes until Apply; its line
+  in *Changes for the server* (`npc:<entry>`) is taken away there (`npcs.discard`). Its rows:
+  `creature_template` (its columns, its English name and title, `AIName` SmartAI once it has a
+  skill), and, each taken away then written again for its entry, `creature_template_locale`,
+  `creature_template_model`, `creature_equip_template`, `smart_scripts` (source 0; a skill
+  followed at once linked to the next, whose event is `SMART_EVENT_LINK`), `creature_text` and
+  `creature_text_locale`; these tables are added to those the editor writes. Kept in the project
+  and in the settings until applied.
+- **Step 18.5, live**: `Reload::Template(entry)`, ordered before the creatures, the bridge's
+  demand 9: the template read again from its row as `.reload creature_template` does, made when
+  the server has none; its models from its own rows; the names of the templates, the weapons, the
+  SmartAI and the texts read again; its spawns spawned again from their rows (those just written
+  appear).
 
 ### Milestone 10: Lua modules (outline)
 

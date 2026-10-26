@@ -5,6 +5,8 @@
 #include "Config.h"
 #include "Creature.h"
 #include "CreatureGroups.h"
+#include "CreatureTextMgr.h"
+#include "SmartScriptMgr.h"
 #include "DatabaseEnv.h"
 #include "GameObject.h"
 #include "GitRevision.h"
@@ -219,7 +221,7 @@ namespace UniwowBridge
 
         bool Known(uint8 action)
         {
-            return action >= uint8(Action::Quests) && action <= uint8(Action::Home);
+            return action >= uint8(Action::Quests) && action <= uint8(Action::Template);
         }
 
         // Whether the spawn `spawnId` of `table` (`game_event_creature`, `game_event_gameobject`)
@@ -578,6 +580,8 @@ namespace UniwowBridge
                 return ReloadPath(uint32(demand.value));
             case Action::Home:
                 return MoveHome(demand.value);
+            case Action::Template:
+                return ReloadTemplate(uint32(demand.value));
             case Action::Addons:
                 sObjectMgr->LoadCreatureAddons();
                 return { true, "the addons of the creatures loaded again" };
@@ -705,6 +709,56 @@ namespace UniwowBridge
         Field* fields = row->Fetch();
         return PlaceHome(spawnId, fields[1].Get<float>(), fields[2].Get<float>(), fields[3].Get<float>(),
             fields[4].Get<float>());
+    }
+
+    // The template `entry` read again from its rows, as `.reload creature_template` does, and made when
+    // the server had none: its models (its own rows alone, those of the others kept), the names of
+    // every template, the weapons, the SmartAI and the texts of every creature read again (their
+    // tables hold no more than a few thousand rows); then its creatures running spawned again from
+    // their rows, those of its spawns new to the server spawned.
+    Outcome Bridge::ReloadTemplate(uint32 entry)
+    {
+        WorldDatabasePreparedStatement* stmt = WorldDatabase.GetPreparedStatement(WORLD_SEL_CREATURE_TEMPLATE);
+        stmt->SetData(0, entry);
+        PreparedQueryResult row = WorldDatabase.Query(stmt);
+        if (!row)
+            return { false, Acore::StringFormat("the template {} has no row in creature_template", entry) };
+        sObjectMgr->LoadCreatureTemplate(row->Fetch(), true);
+        CreatureTemplate* cInfo = const_cast<CreatureTemplate*>(sObjectMgr->GetCreatureTemplate(entry));
+        if (!cInfo)
+            return { false, Acore::StringFormat("the template {} is not made", entry) };
+        cInfo->Models.clear();
+        if (QueryResult models = WorldDatabase.Query(
+                "SELECT CreatureDisplayID, DisplayScale, Probability FROM creature_template_model WHERE CreatureID = {} ORDER BY Idx ASC",
+                entry))
+        {
+            do
+            {
+                Field* fields = models->Fetch();
+                uint32 const display = fields[0].Get<uint32>();
+                float const scale = fields[1].Get<float>();
+                if (!sCreatureDisplayInfoStore.LookupEntry(display))
+                    continue;
+                cInfo->Models.emplace_back(display, scale > 0.0f ? scale : 1.0f, fields[2].Get<float>());
+            } while (models->NextRow());
+        }
+        sObjectMgr->CheckCreatureTemplate(cInfo);
+        sObjectMgr->LoadCreatureLocales();
+        sObjectMgr->LoadEquipmentTemplates();
+        sCreatureTextMgr->LoadCreatureTexts();
+        sCreatureTextMgr->LoadCreatureTextLocales();
+        sSmartScriptMgr->LoadSmartAIFromDB();
+        // Its spawns spawned again, as Action::Creature does.
+        std::vector<ObjectGuid::LowType> spawns;
+        for (auto const& [spawnId, data] : sObjectMgr->GetAllCreatureData())
+            if (data.id == entry)
+                spawns.push_back(spawnId);
+        uint32 spawned = 0;
+        for (ObjectGuid::LowType spawnId : spawns)
+            if (MakeOne({ Action::Creature, spawnId }).done)
+                ++spawned;
+        return { true, Acore::StringFormat("the template {} loaded again, {} models, {} of its {} spawns spawned again", entry,
+            cInfo->Models.size(), spawned, spawns.size()) };
     }
 
     // The spawn point of the creature `spawnId` put at `x`, `y`, `z`, facing `orientation`, in the

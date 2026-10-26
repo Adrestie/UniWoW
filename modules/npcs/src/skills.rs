@@ -12,8 +12,12 @@ use crate::texts;
 
 /// What the module names: the client's spells, emotes, factions and models, the database's
 /// creatures, the NPC's own texts.
-struct Named<'a> {
+pub(crate) struct Named<'a> {
     module: &'a NpcsModule,
+}
+
+pub(crate) fn named(module: &NpcsModule) -> Named<'_> {
+    Named { module }
 }
 
 impl Names for Named<'_> {

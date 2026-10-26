@@ -290,6 +290,11 @@ impl NpcsModule {
         }
     }
 
+    /// The creatures read again (written by Apply).
+    pub(crate) fn forget_world(&mut self) {
+        self.stage.read_for = None;
+    }
+
     /// The creatures of the database, once read.
     pub(crate) fn world(&self) -> Option<Arc<World>> {
         self.stage.world.clone()

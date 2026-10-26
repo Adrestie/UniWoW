@@ -273,6 +273,27 @@ impl NpcsModule {
                 self.save_said(true);
             }
             ui.separator();
+            let connected = ctx
+                .service(uniwow_api::world_db::SERVICE)
+                .is_some_and(|database| matches!(database.state(), uniwow_api::world_db::State::Connected(_)));
+            let sent = entry.is_some_and(|entry| self.sent.prefabs.contains_key(&entry));
+            if ui
+                .add_enabled(connected, egui::Button::new("Place in the world"))
+                .on_hover_text("A creature of it on the ground in the middle of the 3D view, moved and copied as any spawn; also: drag it from the panel Prefabs into the view. Its template is sent to the server (written by Apply)")
+                .on_disabled_hover_text("Connect the world database first (panel World database)")
+                .clicked()
+                && let Some(position) = self.middle_of_view(ctx)
+            {
+                self.place(position, ctx);
+            }
+            if ui
+                .add_enabled(connected && !sent, egui::Button::new("Send to the server"))
+                .on_hover_text("Its template, names, models, weapons, skills and texts wait for Apply in Changes for the server; kept as you change it")
+                .on_disabled_hover_text(if sent { "Sent: it waits for Apply, kept as you change it" } else { "Connect the world database first (panel World database)" })
+                .clicked()
+            {
+                self.send(ctx);
+            }
             ui.label(RichText::new(match entry {
                 Some(entry) => format!("Entry {entry}"),
                 None => "No entry yet".to_owned(),

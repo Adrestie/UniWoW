@@ -516,6 +516,7 @@ pub fn resolved(
             Reload::GameObject(guid) => Reload::GameObject(renamed_id(Kind::GameObject, *guid)),
             Reload::Formation(leader) => Reload::Formation(renamed_id(Kind::Creature, *leader)),
             Reload::Path(id) => Reload::Path(renamed_id(Kind::Path, u64::from(*id)) as u32),
+            Reload::Template(entry) => Reload::Template(renamed_id(Kind::CreatureTemplate, u64::from(*entry)) as u32),
             other => other.clone(),
         })
         .collect();

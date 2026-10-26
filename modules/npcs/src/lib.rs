@@ -9,7 +9,9 @@ mod client;
 mod fields;
 mod figure;
 mod gpu;
+mod place;
 mod prefab;
+mod server;
 mod sheet;
 mod skills;
 mod smart;
@@ -100,6 +102,14 @@ struct NpcsModule {
     searches: std::collections::HashMap<String, String>,
     /// The skill edited, by its place.
     skill_chosen: Option<usize>,
+    /// The prefabs sent to the server, waiting for Apply; how many times they changed, and when
+    /// they were given last.
+    sent: server::Sent,
+    sent_generation: u64,
+    given: Option<u64>,
+    /// The prefabs dropped into the 3D view, and the creatures asked of the spawns.
+    drops: place::Drops,
+    placing: Vec<uniwow_api::CallId>,
 }
 
 impl NpcsModule {
@@ -296,11 +306,17 @@ impl NpcsModule {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             for (path, name) in &self.library {
                 let shown = if name.is_empty() { "(no name)" } else { name.as_str() };
-                if ui
-                    .selectable_label(current.as_ref() == Some(path), shown)
-                    .on_hover_text(path.display().to_string())
-                    .clicked()
-                {
+                let id = egui::Id::new(("npcs prefab", path));
+                let response = ui
+                    .dnd_drag_source(id, place::Dragged(path.clone()), |ui| {
+                        ui.selectable_label(current.as_ref() == Some(path), shown)
+                            .on_hover_text(format!(
+                                "{}\nA click opens it; drag it into the 3D view to place it there",
+                                path.display()
+                            ))
+                    })
+                    .inner;
+                if response.clicked() {
                     chosen = Some(path.clone());
                 }
             }
@@ -326,6 +342,13 @@ impl Module for NpcsModule {
             .menu_item("NPC", "Save as…", "save_as")
             .menu_item("NPC", "Show the NPC panels", "focus")
             .menu_item("NPC", "Back to the world", "world");
+        reg.subscribe(uniwow_api::world_db::APPLIED_TOPIC);
+        reg.command(
+            "npcs.discard",
+            "Takes away the NPCs 'keys' sent to the server (as the panel World database lists them), nothing written.",
+            json!({ "type": "object", "properties": { "keys": { "type": "array" } }, "required": ["keys"] }),
+            json!({ "type": "object", "properties": { "discarded": { "type": "integer" } } }),
+        );
         reg.command(
             "npcs.open",
             "Opens the NPC prefab at 'path' in the panel NPC.",
@@ -339,11 +362,53 @@ impl Module for NpcsModule {
         if let Some(path) = std::env::var_os("UNIWOW_NPCS_OPEN") {
             self.open(Some(PathBuf::from(path)), ctx);
         }
+        if let Some(kept) = ctx.setting(place::PENDING) {
+            self.sent = server::Sent::of_section(&kept);
+            self.sent_generation += 1;
+        }
         self.start_stage(ctx);
+        self.start_drops(ctx);
     }
 
     fn windows_ui(&mut self, egui: &egui::Context, ctx: &mut Context) {
         self.tick_stage(egui, ctx);
+        self.take_drops(ctx);
+        self.give_pending(ctx);
+    }
+
+    fn on_reply(
+        &mut self,
+        call: uniwow_api::CallId,
+        result: Result<uniwow_api::serde_json::Value, String>,
+        _ctx: &mut Context,
+    ) {
+        if let Some(at) = self.placing.iter().position(|placing| *placing == call) {
+            self.placing.remove(at);
+            if let Err(reason) = result {
+                self.said = Some(format!("The NPC is not placed: {reason}"));
+            }
+        }
+    }
+
+    fn on_event(&mut self, event: &uniwow_api::Event, _ctx: &mut Context) {
+        let ours = event.payload["owners"]
+            .as_array()
+            .is_some_and(|owners| owners.iter().any(|owner| owner.as_str() == Some("npcs")));
+        if event.topic == uniwow_api::world_db::APPLIED_TOPIC && ours {
+            // Written: the database's now, read again.
+            self.sent = server::Sent::default();
+            self.sent_generation += 1;
+            self.forget_world();
+        }
+    }
+
+    fn project_section(&self) -> Option<uniwow_api::serde_json::Value> {
+        Some(self.sent.section())
+    }
+
+    fn open_project(&mut self, section: Option<uniwow_api::serde_json::Value>, _ctx: &mut Context) {
+        self.sent = server::Sent::of_section(&section.unwrap_or_default());
+        self.sent_generation += 1;
     }
 
     fn panel_ui(&mut self, panel: &str, ui: &mut egui::Ui, ctx: &mut Context) {
@@ -405,6 +470,17 @@ impl Module for NpcsModule {
         ctx: &mut Context,
     ) -> Result<uniwow_api::serde_json::Value, String> {
         match name {
+            "npcs.discard" => {
+                let keys: Vec<String> = arguments["keys"]
+                    .as_array()
+                    .ok_or("'keys' are the keys of the changes")?
+                    .iter()
+                    .filter_map(|key| key.as_str().map(str::to_owned))
+                    .collect();
+                self.sent = self.sent.discarded(&keys);
+                self.sent_generation += 1;
+                Ok(json!({ "discarded": keys.len() }))
+            }
             "npcs.open" => {
                 let path = arguments["path"].as_str().ok_or("'path' is the file of a prefab")?;
                 let prefab = Prefab::read(std::path::Path::new(path))?;

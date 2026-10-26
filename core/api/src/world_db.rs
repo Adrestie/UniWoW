@@ -49,6 +49,10 @@ pub enum Reload {
     Path(u32),
     /// The group of creatures led by the creature of this guid, its members gathered again.
     Formation(u64),
+    /// The template of creature of this entry read again with its names in every language, its
+    /// models, weapons, SmartAI and texts, its creatures running spawned again; before the
+    /// creatures, for those made of a template new to the server.
+    Template(u32),
     /// The creature of this guid spawned again where its row places it, or taken away.
     Creature(u64),
     /// The spawn point of the creature of this guid read again from its row: the creature keeps its
@@ -68,6 +72,7 @@ impl Reload {
             Reload::Addons => json!({ "addons": true }),
             Reload::Path(id) => json!({ "path": id }),
             Reload::Formation(leader) => json!({ "formation": leader }),
+            Reload::Template(entry) => json!({ "template": entry }),
             Reload::Creature(guid) => json!({ "creature": guid }),
             Reload::Home(guid) => json!({ "home": guid }),
             Reload::GameObject(guid) => json!({ "gameobject": guid }),
@@ -90,6 +95,9 @@ impl Reload {
         }
         if let Some(leader) = value["formation"].as_u64() {
             return Some(Reload::Formation(leader));
+        }
+        if let Some(entry) = value["template"].as_u64() {
+            return Some(Reload::Template(entry as u32));
         }
         if let Some(guid) = value["creature"].as_u64() {
             return Some(Reload::Creature(guid));

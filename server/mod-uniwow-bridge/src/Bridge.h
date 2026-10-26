@@ -47,6 +47,10 @@ namespace UniwowBridge
         // The spawn point of the creature of this guid read again from its row: the creatures of it
         // running keep their place and go home there, as they come back to it.
         Home = 8,
+        // The template of creature of this entry read again from its rows: its sheet, its names in
+        // every language, its models, its weapons, its SmartAI and its texts; its creatures running
+        // spawned again. A template new to the server made.
+        Template = 9,
     };
 
     struct Demand
@@ -156,6 +160,7 @@ namespace UniwowBridge
         Outcome MakeSet(Set const& set);
         Outcome ReloadPath(uint32 pathId);
         Outcome MoveHome(uint64 spawnId);
+        Outcome ReloadTemplate(uint32 entry);
         Outcome PlaceHome(uint64 spawnId, float x, float y, float z, float orientation);
         Outcome SetPath(uint32 pathId, std::vector<PathPoint> const& points);
         Outcome SetWalker(uint64 spawnId, uint8 movement, uint32 pathId);
