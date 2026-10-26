@@ -340,6 +340,7 @@ impl NpcsModule {
             );
             self.models_ui(ui, ctx);
             self.weapons_ui(ui, ctx);
+            self.phases_ui(ui, ctx);
             self.skills_ui(ui, ctx);
             self.texts_ui(ui, ctx);
             self.loot_ui(ui, ctx);

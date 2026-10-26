@@ -30,6 +30,10 @@ impl Names for Named<'_> {
                 client?.spell(id).map(|spell| spell.name(&locale))
             }
             Kind::Emote => client?.emote(id),
+            Kind::Phase => {
+                let phases = self.module.phases();
+                Some(crate::phases::names(&phases)[(id as usize).checked_sub(1)?.min(11)].clone())
+            }
             Kind::Faction => {
                 let locale = client?.locale.clone();
                 client?.faction(id).map(|faction| faction.name(&locale))
@@ -86,6 +90,24 @@ enum Part {
 }
 
 impl NpcsModule {
+    pub(crate) fn skills_list(&self) -> Vec<Skill> {
+        self.skills()
+    }
+
+    pub(crate) fn write_skills_pub(&mut self, skills: &[Skill], label: &str, ctx: &mut Context) {
+        self.write_skills(skills, label, ctx);
+    }
+
+    /// The list of the events, the one chosen when another is.
+    pub(crate) fn event_combo(&mut self, ui: &mut egui::Ui, salt: impl egui::AsIdSalt, value: i64) -> Option<i64> {
+        self.spec_combo(ui, salt, smart::EVENTS, value, "The event (smart_scripts.event_type)")
+    }
+
+    /// The parameters of the event `spec`, by their names.
+    pub(crate) fn event_params_ui(&mut self, ui: &mut egui::Ui, salt: usize, spec: &Spec, values: &mut [i64; 6]) {
+        self.params_ui(ui, (10_000 + salt, Part::Event), spec, values);
+    }
+
     fn skills(&self) -> Vec<Skill> {
         self.doc
             .as_ref()
@@ -283,12 +305,20 @@ impl NpcsModule {
                 ui.label(RichText::new("in").weak()).on_hover_text(
                     "The phases of its script it happens in; none ticked: every phase (smart_scripts.event_phase_mask)",
                 );
-                for phase in 1..=12 {
-                    let bit = 1i64 << (phase - 1);
+                let defined = self.phases();
+                if defined.is_empty() {
+                    ui.label(
+                        RichText::new("every phase (no phase defined: see the card Phases)")
+                            .italics()
+                            .weak(),
+                    );
+                }
+                for phase in &defined {
+                    let bit = 1i64 << (phase.phase - 1);
                     let mut on = edited.phases & bit != 0;
                     if ui
-                        .checkbox(&mut on, phase.to_string())
-                        .on_hover_text(format!("In phase {phase} of its script (Set the phase)"))
+                        .checkbox(&mut on, phase.label())
+                        .on_hover_text("It acts in this phase; none ticked: in every phase")
                         .changed()
                     {
                         edited.phases = if on { edited.phases | bit } else { edited.phases & !bit };
@@ -519,8 +549,8 @@ impl NpcsModule {
                     })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut out, 0, "none").on_hover_text("No phase");
-                        for phase in 1..=12 {
-                            ui.selectable_value(&mut out, phase, format!("phase {phase}"))
+                        for phase in self.phases() {
+                            ui.selectable_value(&mut out, phase.phase, phase.label())
                                 .on_hover_text(param.hint);
                         }
                     })
@@ -529,14 +559,10 @@ impl NpcsModule {
             }
             Kind::Phases => {
                 ui.horizontal_wrapped(|ui| {
-                    for phase in 1..=12 {
-                        let bit = 1i64 << (phase - 1);
+                    for phase in self.phases() {
+                        let bit = 1i64 << (phase.phase - 1);
                         let mut on = value & bit != 0;
-                        if ui
-                            .checkbox(&mut on, phase.to_string())
-                            .on_hover_text(param.hint)
-                            .changed()
-                        {
+                        if ui.checkbox(&mut on, phase.label()).on_hover_text(param.hint).changed() {
                             out = if on { out | bit } else { out & !bit };
                         }
                     }

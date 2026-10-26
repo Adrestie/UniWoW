@@ -9,6 +9,7 @@ mod client;
 mod fields;
 mod figure;
 mod gpu;
+mod phases;
 mod place;
 mod prefab;
 mod server;
@@ -536,6 +537,7 @@ mod tests {
             ("stage.rs", include_str!("stage.rs")),
             ("skills.rs", include_str!("skills.rs")),
             ("texts.rs", include_str!("texts.rs")),
+            ("phases.rs", include_str!("phases.rs")),
         ] {
             let lines: Vec<&str> = code.lines().collect();
             let end = lines

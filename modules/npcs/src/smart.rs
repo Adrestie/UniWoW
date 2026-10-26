@@ -1786,8 +1786,10 @@ pub fn said(param: &Param, value: i64, names: &dyn Names) -> String {
             }
         }
         Kind::Phase if value == 0 => "none".to_owned(),
-        Kind::Phase => format!("phase {value}"),
-        Kind::Phases => phases_said(value),
+        Kind::Phase => names
+            .named(Kind::Phase, value)
+            .unwrap_or_else(|| format!("phase {value}")),
+        Kind::Phases => phases_named(value, names),
         Kind::NpcFlags => flags_said(&crate::fields::NPC_FLAGS, value),
         Kind::UnitFlags => flags_said(&crate::fields::UNIT_FLAGS, value),
         Kind::TimedEvent => format!("timed event {value}"),
@@ -1813,16 +1815,16 @@ pub fn flags_said(flags: &[crate::fields::Flag], value: i64) -> String {
     }
 }
 
-/// A mask of phases said: "every phase" for none.
-pub fn phases_said(mask: i64) -> String {
+/// A mask of phases said by their names: "every phase" for none.
+pub fn phases_named(mask: i64, names: &dyn Names) -> String {
     if mask == 0 {
         return "every phase".to_owned();
     }
-    let phases: Vec<String> = (1..=12)
+    let named: Vec<String> = (1..=12)
         .filter(|k| mask & (1 << (k - 1)) != 0)
-        .map(|k| k.to_string())
+        .map(|k| names.named(Kind::Phase, k).unwrap_or_else(|| format!("phase {k}")))
         .collect();
-    format!("phase {}", phases.join(", "))
+    named.join(", ")
 }
 
 /// A skill said in a line: its event, its action, its target, the parameters that are set.
@@ -1852,7 +1854,7 @@ pub fn sentence(skill: &Skill, names: &dyn Names) -> String {
         part(target(skill.target), skill.target, &skill.target_params)
     );
     if skill.phases != 0 {
-        out.push_str(&format!(" [{}]", phases_said(skill.phases)));
+        out.push_str(&format!(" [{}]", phases_named(skill.phases, names)));
     }
     if skill.chance < 100 {
         out.push_str(&format!(" [{} %]", skill.chance));
@@ -2003,7 +2005,7 @@ mod tests {
             "in combat, every… (first after, from 3 s, to 6 s, then every, from 8 s, to 12 s) → cast a spell (spell Fireball) → its target"
         );
         assert_eq!(Skill::of_json(&skill.to_json()), skill);
-        assert_eq!(phases_said(0b101), "phase 1, 3");
+        assert_eq!(phases_named(0b101, &NoNames), "phase 1, phase 3");
         assert!(presets().len() >= 8);
     }
 }

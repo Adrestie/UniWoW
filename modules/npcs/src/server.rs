@@ -29,7 +29,11 @@ pub fn rows(entry: u32, prefab: &Prefab, names: &dyn Names) -> Vec<RowChange> {
     set.insert("subname".to_owned(), json!(prefab.title("enUS")));
     set.insert(
         "AIName".to_owned(),
-        json!(if prefab.skills.is_empty() { "" } else { "SmartAI" }),
+        json!(if prefab.skills.is_empty() && prefab.phases.is_empty() {
+            ""
+        } else {
+            "SmartAI"
+        }),
     );
     out.push(RowChange::Put {
         table: "creature_template".to_owned(),
@@ -95,7 +99,12 @@ pub fn rows(entry: u32, prefab: &Prefab, names: &dyn Names) -> Vec<RowChange> {
         Vec::new()
     };
     replace(&mut out, "creature_equip_template", "CreatureID", weapons);
-    let skills: Vec<Skill> = prefab.skills.iter().map(Skill::of_json).collect();
+    let mut skills: Vec<Skill> = prefab.skills.iter().map(Skill::of_json).collect();
+    // the last skill links to none; those of the phases after
+    if let Some(last) = skills.last_mut() {
+        last.linked = false;
+    }
+    skills.extend(crate::phases::skills(&crate::phases::phases_of(&prefab.phases)));
     let scripts = scripts(entry, &skills, names);
     let key = row([("entryorguid", json!(entry)), ("source_type", json!(0))]);
     out.push(RowChange::Delete {

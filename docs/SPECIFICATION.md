@@ -10999,7 +10999,12 @@ texts they say (`creature_text`). The templates the editor makes take the entrie
   flees, says a text on aggro, death or kill, plays an emote, enrages). The card *Texts*: groups of
   lines (`creature_text`), each line in every language (`creature_text_locale`), said, yelled,
   whispered or an emote, its language, chance, emote and sound. Kept in the prefab; its AI is
-  SmartAI once it has a skill.
+  SmartAI once it has a skill. The card *Phases*: the stages of its fight, each named (kept in the
+  prefab), when it starts by itself (an event, out of every phase, once) and when it ends (an
+  event, in it alone, once), and the phase that follows it, or one of several by chance; the skills
+  changing its phase made by the editor (`SMART_ACTION_SET_EVENT_PHASE`,
+  `SMART_ACTION_RANDOM_PHASE`), its phase set back to none at its evade; each skill ticking by
+  their names the phases it acts in; their course drawn as a frieze.
 - **Step 18.4, the NPC in the world and given to the server**: a prefab dragged from the panel
   *Prefabs* into the 3D view is placed on the ground under the pointer, or by *Place in the world*
   in the middle of the view: given the first free entry of the block the first time (neither the

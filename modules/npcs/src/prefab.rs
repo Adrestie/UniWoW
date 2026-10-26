@@ -99,6 +99,8 @@ pub struct Prefab {
     /// Its skills and the texts they say, as step 18.3 writes them.
     pub skills: Vec<Value>,
     pub texts: Vec<Value>,
+    /// Its phases, named, when each starts and ends (`phases`).
+    pub phases: Vec<Value>,
 }
 
 impl Default for Prefab {
@@ -114,6 +116,7 @@ impl Default for Prefab {
             equipment: [0; 3],
             skills: Vec::new(),
             texts: Vec::new(),
+            phases: Vec::new(),
         }
     }
 }
@@ -189,6 +192,7 @@ impl Prefab {
             "equipment": equipment,
             "skills": self.skills,
             "texts": self.texts,
+            "phases": self.phases,
         })
     }
 
@@ -244,6 +248,7 @@ impl Prefab {
             equipment,
             skills: list("skills"),
             texts: list("texts"),
+            phases: list("phases"),
         })
     }
 
